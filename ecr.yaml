@@ -1,0 +1,53 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: fukuda-nwc-poc - ECR repository for the AgentCore Runtime agent image. Deploy this first, push the image, then deploy main.yaml.
+
+Parameters:
+  NamePrefix:
+    Type: String
+    Default: fukuda-nwc-poc
+    AllowedPattern: "^[a-z][a-z0-9-]{1,29}$"
+    Description: Prefix for resource names and the value of the Project tag. Use the same value in main.yaml.
+  Owner:
+    Type: String
+    Default: fukuda
+    AllowedPattern: "^[A-Za-z0-9._-]{1,64}$"
+    Description: Value of the owner tag. Use the same value in main.yaml.
+
+Resources:
+  AgentRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub ${NamePrefix}-agent
+      # 同じタグの上書きを禁止する。更新はタグを変えて main.yaml の AgentImageUri を差し替える
+      ImageTagMutability: IMMUTABLE
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      EncryptionConfiguration:
+        EncryptionType: AES256
+      # スタック削除時にイメージごと消す（残したい場合は false）
+      EmptyOnDelete: true
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "keep last 5 images",
+                "selection": {
+                  "tagStatus": "any",
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 5
+                },
+                "action": { "type": "expire" }
+              }
+            ]
+          }
+      Tags:
+        - { Key: Name, Value: !Sub "${NamePrefix}-agent" }
+        - { Key: Project, Value: !Ref NamePrefix }
+        - { Key: owner, Value: !Ref Owner }
+
+Outputs:
+  RepositoryUri:
+    Description: Push the arm64 agent image here (tag it, e.g. v1)
+    Value: !GetAtt AgentRepository.RepositoryUri
