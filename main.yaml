@@ -61,8 +61,8 @@ Parameters:
     Description: AgentCore Runtime name (letters, digits and underscore only. Hyphens are not allowed).
   ModelId:
     Type: String
-    Default: jp.anthropic.claude-haiku-4-5-20251001-v1:0
-    Description: Bedrock model or inference profile ID. Model access must be enabled in the account.
+    Default: jp.amazon.nova-2-lite-v1:0
+    Description: Bedrock model or inference profile ID (jp.amazon.nova-2-lite-v1:0 runs in Tokyo and Osaka).
   KbAdminPrincipalArn:
     Type: String
     AllowedPattern: "^arn:aws:iam::[0-9]{12}:(role|user)/.+$"

@@ -26,7 +26,7 @@
 </header>
 
 <p class="mb-lede">
-閉域の既存 VPC にある EC2 のチャット画面から、Bedrock の Claude と会話する構成です。
+閉域の既存 VPC にある EC2 のチャット画面から、Bedrock のモデル（Amazon Nova 2 Lite）と会話する構成です。
 質問を受けると、エージェントが手順書を検索し、見つけた資料と一緒にモデルへ渡し、ガードレールを通した回答を返します。
 </p>
 
@@ -47,7 +47,7 @@
 <div class="mb-summary">
   <ul>
     <li>PC から EC2 へは SSM のポートフォワーディングで入り、EC2 から先は VPC エンドポイントだけで AWS のサービスに届く</li>
-    <li>エージェントは Knowledge Base をハイブリッド検索（ベクトル + キーワード）で候補 20 件を引き、リランクで 5 件に絞って Claude Haiku 4.5 に渡す</li>
+    <li>エージェントは Knowledge Base をハイブリッド検索（ベクトル + キーワード）で候補 20 件を引き、リランクで 5 件に絞って Amazon Nova 2 Lite に渡す</li>
     <li>ガードレールが質問と回答の両方を判定し、止めたときは定型文を返す</li>
     <li>置いておくだけで 1 時間 ≈ $0.52（約 79 円）。<em>OpenSearch Serverless だけで月 ≈ $240</em> かかるので、使わない期間はスタックを消す</li>
   </ul>
@@ -97,7 +97,7 @@
 <rect x="364" y="640" width="200" height="36" rx="6" fill="#FFFFFF" stroke="#111110" stroke-width="1.5"/>
 <text x="376" y="663" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="12" fill="#111110">Guardrail：質問を判定</text>
 <rect x="364" y="694" width="200" height="36" rx="6" fill="#FFFFFF" stroke="#111110" stroke-width="1.5"/>
-<text x="376" y="717" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="12" fill="#111110">Claude Haiku 4.5</text>
+<text x="376" y="717" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="12" fill="#111110">Amazon Nova 2 Lite</text>
 <rect x="364" y="748" width="200" height="36" rx="6" fill="#FFFFFF" stroke="#111110" stroke-width="1.5"/>
 <text x="376" y="771" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="12" fill="#111110">Guardrail：回答を判定</text>
 <path d="M162,84 V218" fill="none" stroke="#111110" stroke-width="1.5" marker-end="url(#ah)"/>
@@ -134,7 +134,7 @@
   <li><strong>PC から EC2 の画面を開く。</strong><code>aws ssm start-session</code> のポートフォワーディングで、PC の <code>localhost:8080</code> を EC2 の <code>127.0.0.1:8080</code> へつなぎます。EC2 のセキュリティグループに受信ルールは要りません。</li>
   <li><strong>EC2 がエージェントを呼ぶ。</strong>チャット Web が質問と会話 ID を <code>InvokeAgentRuntime</code> で送ります。署名は EC2 のインスタンスロールで行い、ブラウザには認証情報を置きません。</li>
   <li><strong>エージェントが資料を検索する。</strong>質問文で Knowledge Base の <code>Retrieve</code> を呼びます。検索は <code>HYBRID</code> 指定で、OpenSearch Serverless がベクトル検索とキーワード検索を合わせた候補 20 件を出し、同じ呼び出しの中で Amazon Rerank 1.0 が質問との関係の深い順に並べ替えて、上位 5 件を返します。</li>
-  <li><strong>エージェントがモデルに尋ねる。</strong>資料と質問をまとめて <code>Converse</code> に渡します。ガードレールがまず質問を判定し、通れば Claude Haiku 4.5 が資料をもとに答え、その回答もガードレールが判定します。</li>
+  <li><strong>エージェントがモデルに尋ねる。</strong>資料と質問をまとめて <code>Converse</code> に渡します。ガードレールがまず質問を判定し、通れば Amazon Nova 2 Lite が資料をもとに答え、その回答もガードレールが判定します。</li>
   <li><strong>回答を返す。</strong>回答の末尾に参照した md のファイル名を付け、EC2 を経由してブラウザに表示します。ガードレールが止めたときは定型文を返し、その往復は会話の履歴に残しません。</li>
 </ol>
 
@@ -164,7 +164,7 @@
   </div>
   <div class="mb-card">
     <div class="mb-card-title">会話しながら</div>
-    <p><strong>1 時間 ≈ $1.05</strong>（約 158 円）</p>
+    <p><strong>1 時間 ≈ $0.81</strong>（約 121 円）</p>
     <p>1 人が 1 分に 1 回話す想定です。上にモデルのトークン、リランク（約 $0.06）、ガードレール、Runtime の実行時間が乗ります。</p>
   </div>
   <div class="mb-card">
