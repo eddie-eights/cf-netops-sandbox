@@ -83,10 +83,10 @@ Parameters:
     Description: Candidate chunks retrieved by the hybrid search per question (before reranking)
   RerankModelId:
     Type: String
-    Default: cohere.rerank-v3-5:0
-    # 空文字でリランクを止める。amazon.rerank-v1:0 は Marketplace を通らない
+    Default: amazon.rerank-v1:0
+    # 空文字でリランクを止める
     AllowedPattern: "^$|^[a-z0-9-]+[.]rerank-v[0-9-]+:[0-9]+$"
-    Description: Reranker model ID (cohere.rerank-v3-5:0 or amazon.rerank-v1:0). Leave empty to disable reranking.
+    Description: Reranker model ID (amazon.rerank-v1:0). Leave empty to disable reranking.
   NumberOfRerankedResults:
     Type: Number
     Default: 5

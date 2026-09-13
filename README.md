@@ -24,7 +24,7 @@ EC2（AL2023 arm64、プライベートサブネット、受信ルールなし�
 AgentCore Runtime（VPC モード）
   │ 1. Retrieve（HYBRID + Rerank）─ bedrock-agent-runtime エンドポイント ─▶ Knowledge Base
   │                                                                 └▶ OpenSearch Serverless（Bedrock がサービス側から検索。候補 20 件）
-  │                                                                 └▶ Cohere Rerank 3.5（候補を並べ替えて上位 5 件）
+  │                                                                 └▶ Amazon Rerank 1.0（候補を並べ替えて上位 5 件）
   │ 2. Converse + ガードレール ─ bedrock-runtime エンドポイント ─▶ Guardrail が質問を判定
   │                                                                 └▶ Claude Haiku 4.5（jp 推論プロファイル）
   │                                                                 └▶ Guardrail が回答を判定
@@ -59,7 +59,7 @@ AgentCore Runtime（VPC モード）
 | ベクトルストアは OpenSearch Serverless | Bedrock のハイブリッド検索に対応するストアのうち、CloudFormation だけでインデックスまで作れる |
 | インデックスは faiss / hnsw、1024 次元、テキストのフィールドを `index: true` | ハイブリッド検索の条件。1024 は Titan Text Embeddings V2 の既定の次元数 |
 | 候補を 20 件取り、リランクで 5 件に絞る（`NumberOfResults` / `NumberOfRerankedResults`） | ハイブリッド検索の順位は、ベクトルとキーワードの点数を合わせたもので、質問への答えになっているかまでは見ていない。リランクモデルが質問と各資料を読み比べて並べ替える。モデルに渡すのは 5 件のままなので、トークンは増えない |
-| リランクは `Retrieve` の `rerankingConfiguration` で行い、既定は Cohere Rerank 3.5 | 別の API を呼ぶ往復が増えない。Cohere Rerank 3.5 は多言語対応をうたうモデルで、日本語の手順書を想定した。止めるときは `RerankModelId` を空にする。Marketplace を通したくなければ `amazon.rerank-v1:0` にする |
+| リランクは `Retrieve` の `rerankingConfiguration` で行い、モデルは Amazon Rerank 1.0 | 別の API を呼ぶ往復が増えない。Amazon のモデルは AWS Marketplace を通さないので、他社モデルの購読・EULA への同意・Marketplace 経由の請求が発生しない。単価も Cohere Rerank 3.5 の半分。止めるときは `RerankModelId` を空にする |
 | リランクの権限はナレッジベースのロールに付ける | `Retrieve` の中のリランクはナレッジベースのサービスロールで動く（文書どおり）。Runtime のロールは `bedrock:Retrieve` のままでよい |
 | Runtime は OpenSearch を直接呼ばず `Retrieve` を呼ぶ | Runtime に要る権限が `bedrock:Retrieve` だけになり、VPC から出るのは bedrock-agent-runtime エンドポイントだけで済む |
 | ガードレールは Standard 階層 | Classic 階層は英語・フランス語・スペイン語だけで、日本語の質問を判定できない |
@@ -121,17 +121,7 @@ OpenSearch Serverless のセキュリティポリシー・アクセスポリシ�
 
 - VPC の `enableDnsSupport` と `enableDnsHostnames` が有効。
 - Bedrock のモデルアクセスが有効（Anthropic のモデルは初回利用フォームの提出が要る）。Amazon Titan Text Embeddings V2 も使う。
-- **既定のリランクモデル Cohere Rerank 3.5 は AWS Marketplace 経由のモデル。**最初に呼ばれたときにアカウントで自動的に購読され（最大 15 分）、
-  そのためには呼ぶ側に `aws-marketplace:Subscribe` / `aws-marketplace:Unsubscribe` / `aws-marketplace:ViewSubscriptions` と、Marketplace の有効な支払い方法が要る。
-  使うことは Cohere の EULA に同意することになる。費用は Bedrock ではなく Marketplace（Cohere）の請求として出る。
-  ナレッジベースのロールには Marketplace の権限を付けていないので、**デプロイの前に、Marketplace の権限を持つ人が一度有効にしておく**（`aws bedrock create-foundation-model-agreement`、または一度呼ぶ）。
-  有効かどうかは次で確かめ、`agreementAvailability.status` が `AVAILABLE` ならよい（2026-09-14 に AWS の文書で確認）。
-
-  ```bash
-  aws bedrock get-foundation-model-availability --region ap-northeast-1 --model-id cohere.rerank-v3-5:0
-  ```
-
-  Marketplace を通せない組織では、`RerankModelId` を `amazon.rerank-v1:0`（Amazon Rerank 1.0）にするか、空にしてリランクを止める。
+- リランクは Amazon Rerank 1.0（`amazon.rerank-v1:0`）を使う。Amazon のモデルは AWS Marketplace を通さないので、購読・EULA への同意・Marketplace の支払い方法は要らない。東京リージョンで使える（2026-09-14 に AWS の文書で確認）。
 - デプロイする人の権限に、IAM ロールの作成（名前付き）と `iam:CreateServiceLinkedRole` が含まれる。VPC モードの初回に `AWSServiceRoleForBedrockAgentCoreNetwork` が自動で作られる。
 - デプロイする人の権限に、OpenSearch Serverless（`aoss:*`。インデックスを作るのに `aoss:APIAccessAll` が要る）と、ガードレールの作成が含まれる。
   Standard 階層のガードレールを作るには、ガードレールそのものに加えて `arn:aws:bedrock:<リージョン>:<アカウント>:guardrail-profile/apac.guardrail.v1:0` への `bedrock:CreateGuardrail` が要る。管理者権限なら足りる。
@@ -368,7 +358,7 @@ PC の 8080 が使用中なら `localPortNumber` を変え、URL のポートも
 | ガードレールの作成が失敗する | 東京以外のリージョンでデプロイした（`GuardrailProfileId` はリージョンで決まる）、デプロイする人に guardrail-profile への権限が無い |
 | 回答に `参照:` が付かない / 「資料に見当たらない」ばかり | 手順 4 の取り込みをしていない、`docs/` の下に置いていない、取り込みジョブが失敗している |
 | 送信すると `502` で、Runtime のログに `retrieve failed` | bedrock-agent-runtime エンドポイントと SG、Runtime のロールの `bedrock:Retrieve` |
-| `retrieve failed` のエラーがリランクの `AccessDeniedException` | リランクモデルが有効になっていない（前提の Marketplace の購読。`get-foundation-model-availability` で確かめる）か、ナレッジベースのロールに `bedrock:Rerank` / リランクモデルへの `bedrock:InvokeModel` が無い。急ぐなら `RerankModelId` を空にして更新すると、リランクなしで動く |
+| `retrieve failed` のエラーがリランクの `AccessDeniedException` | ナレッジベースのロールに `bedrock:Rerank` / リランクモデルへの `bedrock:InvokeModel` が無いか、組織の SCP などでリランクモデルの呼び出しが止められている。急ぐなら `RerankModelId` を空にして更新すると、リランクなしで動く |
 | 普通の質問がガードレールの定型文で返る | 誤検知。Runtime のログの `stop=guardrail_intervened` で確かめ、`main.yaml` の該当フィルタの強さを下げて、ガードレールの版を作り直す（「変更するとき」） |
 
 ## 変更するとき
@@ -399,7 +389,7 @@ aws logs delete-log-group --region ap-northeast-1 --log-group-name "$LOG_GROUP"
 
 ## 1 時間起動したときの試算
 
-**チャットを使いながら 1 時間で約 $1.11（約 167 円）。何もせず置いておくだけで約 $0.52/h（約 79 円）、1 か月で約 $383（約 57,400 円）。**
+**チャットを使いながら 1 時間で約 $1.05（約 158 円）。何もせず置いておくだけで約 $0.52/h（約 79 円）、1 か月で約 $383（約 57,400 円）。**
 置いておくだけの費用の 6 割強は OpenSearch Serverless の最小 OCU。
 
 東京リージョン、単価は 2026-09-14 に AWS Price List API で確認した税抜の値。$1 = 150 円で換算した。
@@ -410,7 +400,7 @@ aws logs delete-log-group --region ap-northeast-1 --log-group-name "$LOG_GROUP"
 | インターフェイスエンドポイント（ナレッジベース用）bedrock-agent-runtime × 2 AZ | 同上 | 2 AZ 時間 | $0.028 |
 | インターフェイスエンドポイント（EC2 用）ssm / ssmmessages / bedrock-agentcore × 1 AZ | 同上 | 3 AZ 時間 | $0.042 |
 | OpenSearch Serverless（スタンバイなし） | インデックス $0.326/OCU 時間、検索 $0.334/OCU 時間 | 最小のインデックス 0.5 OCU + 検索 0.5 OCU。**使わなくてもかかる** | $0.33 |
-| Rerank（Cohere Rerank 3.5、Marketplace） | $0.002/検索ユニット（1 ユニット = 資料 100 件まで。質問を含めて 500 トークンを超える資料は複数件に数える） | 質問 60 回 × 候補 20 件 = 60 ユニット | $0.12 |
+| Rerank（Amazon Rerank 1.0） | $0.001/検索ユニット（1 ユニット = 資料 100 件まで。質問を含めて 500 トークンを超える資料は複数件に数える） | 質問 60 回 × 候補 20 件 = 60 ユニット | $0.06 |
 | Titan Text Embeddings V2 | $0.000029/1,000 トークン | 質問 60 回と md 3 つの取り込みで数千トークン | 約 $0 |
 | Guardrails（コンテンツフィルタ、プロンプト攻撃を含む） | $0.15/1,000 テキストユニット（1 ユニット = 1,000 文字まで） | 60 往復 × 質問 1 + 回答 1 ユニット | $0.018 |
 | S3（手順書） | | 数 KB | 約 $0 |
@@ -421,22 +411,22 @@ aws logs delete-log-group --region ap-northeast-1 --log-group-name "$LOG_GROUP"
 | AgentCore Runtime | $0.0895/vCPU 時間、$0.00945/GB 時間。CPU は実消費、秒課金 | 1 セッション。CPU 実消費 60 秒、メモリ 0.5 GB × 1 時間 | 約 $0.01 |
 | Bedrock Claude Haiku 4.5（jp 推論プロファイル） | 入力 $1.10/100 万、出力 $5.50/100 万トークン | 60 往復 × 入力 4,500（資料の分 1,500 を含む）・出力 400 トークン | $0.43 |
 | CloudWatch Logs | 取り込み $0.76/GB | 数 MB | 約 $0.005 |
-| **合計** | | | **約 $1.11（約 167 円）** |
+| **合計** | | | **約 $1.05（約 158 円）** |
 
 | パターン | 1 時間 | 1 か月（730 時間） |
 |---|---|---|
-| 上の想定（1 人が 1 分に 1 回話す） | 約 $1.11（約 167 円） | 使い方しだい |
+| 上の想定（1 人が 1 分に 1 回話す） | 約 $1.05（約 158 円） | 使い方しだい |
 | 置いておくだけ | 約 $0.52（約 79 円） | **約 $383（約 57,400 円）** |
 | EC2 だけ止めて置いておく | 約 $0.51（約 77 円） | 約 $374（約 56,100 円） |
-| エンドポイントを全部既存で流用 | 約 $0.93（約 140 円） | 置いておくだけなら約 $250 |
+| エンドポイントを全部既存で流用 | 約 $0.87（約 131 円） | 置いておくだけなら約 $250 |
 
 注意すること。
 
 - **置いておくだけの費用の大半は OpenSearch Serverless の最小 OCU（月約 $240）とエンドポイントの時間課金。EC2 を止めてもほとんど減らない。**使わない期間は `fukuda-nwc-poc` スタックを消す（手順書は `kb-docs/` にあるので、作り直して取り込み直せばよい）。
 - OCU は負荷に応じて増える。上は最小のまま収まる前提。
 - **一番ぶれるのはモデルの利用量。**会話が長いほど入力トークンが積み上がる。エージェントは直近 10 往復と、毎回取り直す資料 5 件（候補 20 件をリランクで絞ったもの）だけを送り、応答は 1,024 トークンで打ち切る（`agent/app.py`）。
-- リランクは使った分だけの課金で、置いておくだけならかからない。Amazon Rerank 1.0 にすると $0.001/検索ユニットで半額。候補数（`NumberOfResults`）を 100 件以下に保てば、質問 1 回 = 1 ユニットのまま。
-- OpenSearch Serverless とガードレールとリランクの単価は 2026-09-14 に Price List API で確認した（Cohere は Marketplace の `search_units`）。ガードレールの Standard 階層に別の単価があるかは確認できていない。
+- リランクは使った分だけの課金で、置いておくだけならかからない。候補数（`NumberOfResults`）を 100 件以下に保てば、質問 1 回 = 1 ユニットのまま。
+- OpenSearch Serverless とガードレールとリランクの単価は 2026-09-14 に Price List API で確認した（リランクは `APN1-AmazonRerank-v1-searchunits`）。ガードレールの Standard 階層に別の単価があるかは確認できていない。
 - 消費税、データ転送（DX / VPN 側の料金を含む）、Route 53 Resolver、Support プラン、組織で既に払っているエンドポイントは含めていない。
 
 ## 入っていないもの
@@ -456,7 +446,7 @@ aws logs delete-log-group --region ap-northeast-1 --log-group-name "$LOG_GROUP"
 - `cfn-lint` で `ecr.yaml` / `main.yaml` にエラー・警告なし（ナレッジベース・ガードレール・リランク追加後も）。
 - `agent/app.py` を、boto3 と SDK を差し替えた模擬テスト（`tests/test_app.py`、Python 3.13）で確かめた。19 項目: ハイブリッド検索の指定、リランクの有無で `rerankingConfiguration` を付け外しする、質問だけを `guardContent` に入れる、ガードレールで止めた往復を履歴に残さない、参照元の付け方、検索とモデルの失敗、履歴の長さ。
 - `Retrieve` の `rerankingConfiguration` の形（`type` は `BEDROCK_RERANKING_MODEL` だけ、`numberOfResults` と `numberOfRerankedResults` は 1〜100）と、リランクに要る権限がナレッジベースのサービスロールの `bedrock:Rerank` とモデルへの `bedrock:InvokeModel` であること（https://docs.aws.amazon.com/bedrock/latest/userguide/rerank-prereq.html ）。
-- 東京で `cohere.rerank-v3-5:0` と `amazon.rerank-v1:0` が使えること、Marketplace のモデルは初回の呼び出しで自動購読されること（https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html ）。
+- 東京で `amazon.rerank-v1:0` が使えること（https://docs.aws.amazon.com/bedrock/latest/userguide/rerank-supported.html ）と、Amazon のモデルは AWS Marketplace を通さないこと（https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html ）。
 - 東京に `bedrock-agent-runtime` / `aoss` / `aoss-data` / `bedrock-agent` のエンドポイントサービスがある。
 - ガードレールの APAC プロファイル `apac.guardrail.v1:0` の、東京からの行き先リージョン（https://docs.aws.amazon.com/bedrock/latest/userguide/guardrails-cross-region-support.html ）。
 - Classic 階層が日本語に非対応で、Standard 階層がコンテンツフィルタ・プロンプト攻撃で日本語に対応していること。
@@ -474,8 +464,7 @@ aws logs delete-log-group --region ap-northeast-1 --log-group-name "$LOG_GROUP"
 - ネットワークポリシーを非公開（`SourceServices: bedrock.amazonaws.com` と VPC エンドポイント）にしても、CloudFormation のインデックス作成が通るか。
 - 既定のアナライザで、日本語の質問にキーワード検索がどれだけ効くか。
 - ハイブリッド検索がベクトルとキーワードの結果をどう合わせるか（それぞれ何件取るか、点数の合わせ方）。
-- ナレッジベースのロールでリランクを呼んだとき、Marketplace の自動購読が走るのか、事前に有効にしておく必要があるのか（安全側に倒して事前に有効にする手順にした）。
-- Cohere Rerank 3.5 が日本語の手順書でどれだけ順位を良くするか。候補 20 件 → 5 件が妥当か。
+- Amazon Rerank 1.0 が日本語の手順書でどれだけ順位を良くするか。日本語に対応するかを AWS の文書で確認できていない。候補 20 件 → 5 件が妥当か。
 - Converse の `guardContent` を使ったとき、履歴の過去の質問が判定されないこと（文書の説明どおりか）。
 - 閉域の EC2 から、S3 ゲートウェイ経由で AL2023 のリポジトリに届き `dnf install python3.13` が通るか（バケット名は AWS の文書の例から取った）。
 - VPC モードの Runtime が、イメージの取得に VPC 内の ECR / S3 エンドポイントを使うのか、サービス側で取得するのか。安全側に倒してエンドポイントを作る設定を既定にした。

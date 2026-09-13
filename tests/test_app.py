@@ -39,7 +39,7 @@ class App:
 bac.BedrockAgentCoreApp = App
 sys.modules.update({"boto3": boto3, "botocore": botocore, "botocore.exceptions": exc, "bedrock_agentcore": bac})
 
-RERANK_ARN = "arn:aws:bedrock:ap-northeast-1::foundation-model/cohere.rerank-v3-5:0"
+RERANK_ARN = "arn:aws:bedrock:ap-northeast-1::foundation-model/amazon.rerank-v1:0"
 
 def load(guardrail="gr123", rerank=""):
     os.environ.update({"MODEL_ID": "m", "KNOWLEDGE_BASE_ID": "KB12345678", "NUMBER_OF_RESULTS": "3", "GUARDRAIL_VERSION": "1"})
