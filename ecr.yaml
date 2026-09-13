@@ -5,8 +5,8 @@ Parameters:
   NamePrefix:
     Type: String
     Default: fukuda-nwc-poc
-    AllowedPattern: "^[a-z][a-z0-9-]{1,29}$"
-    Description: Prefix for resource names and the value of the Project tag. Use the same value in main.yaml.
+    AllowedPattern: "^[a-z][a-z0-9-]{1,24}$"
+    Description: Prefix for resource names and the value of the Project tag (up to 25 characters). Use the same value in main.yaml.
   Owner:
     Type: String
     Default: fukuda

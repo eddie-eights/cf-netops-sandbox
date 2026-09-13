@@ -1,7 +1,8 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >-
   fukuda-nwc-poc - NetOps phase 1 for a closed network. Browser on the user's PC -> SSM Session Manager
-  port forwarding -> chat web on EC2 (127.0.0.1 only, no inbound rules) -> AgentCore Runtime (VPC mode) -> Bedrock.
+  port forwarding -> chat web on EC2 (127.0.0.1 only, no inbound rules) -> AgentCore Runtime (VPC mode) ->
+  Bedrock Knowledge Base (OpenSearch Serverless, hybrid search) and Bedrock Converse with a guardrail.
   No NAT gateway, no EIP, no public IP, no load balancer.
 
 Metadata:
@@ -13,17 +14,20 @@ Metadata:
         Parameters: [VpcId, RuntimeSubnetIds, InstanceSubnetId, RouteTableIds, ClientCidr]
       - Label: { default: Agent }
         Parameters: [AgentImageUri, RuntimeName, ModelId]
+      - Label: { default: Knowledge base and guardrail }
+        Parameters: [KbAdminPrincipalArn, GuardrailProfileId, NumberOfResults]
       - Label: { default: Chat web (EC2) }
         Parameters: [InstanceType, ImageId]
       - Label: { default: Existing VPC endpoints }
-        Parameters: [CreateRuntimeEndpoints, CreateSsmEndpoints, CreateAgentCoreEndpoint, CreateS3GatewayEndpoint]
+        Parameters: [CreateRuntimeEndpoints, CreateKbEndpoint, CreateSsmEndpoints, CreateAgentCoreEndpoint, CreateS3GatewayEndpoint]
 
 Parameters:
   NamePrefix:
     Type: String
     Default: fukuda-nwc-poc
-    AllowedPattern: "^[a-z][a-z0-9-]{1,29}$"
-    Description: Prefix for resource names and the value of the Project tag. Same value as ecr.yaml.
+    # OpenSearch Serverless のコレクション名（NamePrefix-kb）が 28 文字までなので 25 文字に抑える
+    AllowedPattern: "^[a-z][a-z0-9-]{1,24}$"
+    Description: Prefix for resource names and the value of the Project tag (up to 25 characters). Same value as ecr.yaml.
   Owner:
     Type: String
     Default: fukuda
@@ -59,6 +63,24 @@ Parameters:
     Type: String
     Default: jp.anthropic.claude-haiku-4-5-20251001-v1:0
     Description: Bedrock model or inference profile ID. Model access must be enabled in the account.
+  KbAdminPrincipalArn:
+    Type: String
+    AllowedPattern: "^arn:aws:iam::[0-9]{12}:(role|user)/.+$"
+    Description: >-
+      IAM role or user ARN whose credentials run this deployment (not an sts assumed-role ARN).
+      It is added to the OpenSearch Serverless data access policy so CloudFormation can create the vector index.
+      Example arn:aws:iam::123456789012:role/Admin
+  GuardrailProfileId:
+    Type: String
+    Default: apac.guardrail.v1:0
+    AllowedPattern: "^[a-z0-9-]+[.]guardrail[.]v[0-9:]+$"
+    Description: System-defined guardrail profile for cross-Region inference (required by the Standard tier). apac.guardrail.v1:0 for Tokyo.
+  NumberOfResults:
+    Type: Number
+    Default: 5
+    MinValue: 1
+    MaxValue: 20
+    Description: Chunks retrieved from the knowledge base per question
   InstanceType:
     Type: String
     Default: t4g.micro
@@ -72,6 +94,11 @@ Parameters:
     Default: "true"
     AllowedValues: ["true", "false"]
     Description: Create ecr.api / ecr.dkr / logs / bedrock-runtime interface endpoints. Set false if the VPC already has them.
+  CreateKbEndpoint:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: Create the bedrock-agent-runtime interface endpoint (the runtime calls Retrieve through it). Set false if the VPC already has it.
   CreateSsmEndpoints:
     Type: String
     Default: "true"
@@ -90,6 +117,7 @@ Parameters:
 
 Conditions:
   CreateRuntimeEndpointsCond: !Equals [!Ref CreateRuntimeEndpoints, "true"]
+  CreateKbEndpointCond: !Equals [!Ref CreateKbEndpoint, "true"]
   CreateSsmEndpointsCond: !Equals [!Ref CreateSsmEndpoints, "true"]
   CreateAgentCoreEndpointCond: !Equals [!Ref CreateAgentCoreEndpoint, "true"]
   CreateS3GatewayEndpointCond: !Equals [!Ref CreateS3GatewayEndpoint, "true"]
@@ -98,6 +126,7 @@ Conditions:
     - !Not [!Equals [!Ref ClientCidr, ""]]
   CreateAnyInterfaceEndpointCond: !Or
     - !Condition CreateRuntimeEndpointsCond
+    - !Condition CreateKbEndpointCond
     - !Condition CreateSsmEndpointsCond
     - !Condition CreateAgentCoreEndpointCond
 
@@ -250,6 +279,21 @@ Resources:
         - { Key: Project, Value: !Ref NamePrefix }
         - { Key: owner, Value: !Ref Owner }
 
+  BedrockAgentRuntimeEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateKbEndpointCond
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.bedrock-agent-runtime
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds: !Ref RuntimeSubnetIds
+      SecurityGroupIds: [!Ref EndpointSecurityGroup]
+      Tags:
+        - { Key: Name, Value: !Sub "${NamePrefix}-bedrock-agent-runtime" }
+        - { Key: Project, Value: !Ref NamePrefix }
+        - { Key: owner, Value: !Ref Owner }
+
   S3GatewayEndpoint:
     Type: AWS::EC2::VPCEndpoint
     Condition: CreateS3GatewayEndpointCond
@@ -330,6 +374,250 @@ Resources:
         - { Key: Project, Value: !Ref NamePrefix }
         - { Key: owner, Value: !Ref Owner }
 
+  # ---------------------------------------------------------------- knowledge base (S3 -> Titan Embeddings v2 -> OpenSearch Serverless)
+  # 取り込み元の md を置くバケット。利用者の PC から aws s3 cp で置き、start-ingestion-job で取り込む（README の手順 4）
+  KbBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub ${NamePrefix}-kb-${AWS::AccountId}
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 }
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      Tags:
+        - { Key: Name, Value: !Sub "${NamePrefix}-kb" }
+        - { Key: Project, Value: !Ref NamePrefix }
+        - { Key: owner, Value: !Ref Owner }
+
+  KbBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref KbBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: s3:*
+            Resource:
+              - !GetAtt KbBucket.Arn
+              - !Sub ${KbBucket.Arn}/*
+            Condition:
+              Bool:
+                aws:SecureTransport: "false"
+
+  KbEncryptionPolicy:
+    Type: AWS::OpenSearchServerless::SecurityPolicy
+    Properties:
+      Name: !Sub ${NamePrefix}-kb
+      Type: encryption
+      Description: AWS owned key for the knowledge base collection
+      Policy: !Sub '{"Rules":[{"ResourceType":"collection","Resource":["collection/${NamePrefix}-kb"]}],"AWSOwnedKey":true}'
+
+  KbNetworkPolicy:
+    Type: AWS::OpenSearchServerless::SecurityPolicy
+    Properties:
+      Name: !Sub ${NamePrefix}-kb
+      Type: network
+      Description: Collection endpoint reachable over the public AWS endpoint, data access limited by the access policy
+      # Runtime はコレクションを直接呼ばない（Retrieve を呼ぶと Bedrock がサービス側から検索する）。
+      # 非公開（SourceVPCEs / SourceServices）にすると CloudFormation のインデックス作成が通るか確認できていないので、公開にしてデータアクセスポリシーで絞る
+      Policy: !Sub '[{"Rules":[{"ResourceType":"collection","Resource":["collection/${NamePrefix}-kb"]}],"AllowFromPublic":true}]'
+
+  KbAccessPolicy:
+    Type: AWS::OpenSearchServerless::AccessPolicy
+    Properties:
+      Name: !Sub ${NamePrefix}-kb
+      Type: data
+      Description: Knowledge base service role and the deployer only
+      Policy: !Sub >-
+        [{"Rules":[
+        {"ResourceType":"collection","Resource":["collection/${NamePrefix}-kb"],
+        "Permission":["aoss:CreateCollectionItems","aoss:DescribeCollectionItems","aoss:UpdateCollectionItems"]},
+        {"ResourceType":"index","Resource":["index/${NamePrefix}-kb/*"],
+        "Permission":["aoss:CreateIndex","aoss:DescribeIndex","aoss:UpdateIndex","aoss:DeleteIndex","aoss:ReadDocument","aoss:WriteDocument"]}],
+        "Principal":["${KbRole.Arn}","${KbAdminPrincipalArn}"]}]
+
+  KbCollection:
+    Type: AWS::OpenSearchServerless::Collection
+    # アクセスポリシーも先に作る。反映に 1 分ほどかかるので、コレクションの作成（数分）の間に効かせてからインデックスを作る
+    DependsOn: [KbEncryptionPolicy, KbNetworkPolicy, KbAccessPolicy]
+    Properties:
+      Name: !Sub ${NamePrefix}-kb
+      Type: VECTORSEARCH
+      Description: fukuda-nwc-poc knowledge base
+      # スタンバイを切ると最小 OCU が半分になる（検証用。可用性は下がる）
+      StandbyReplicas: DISABLED
+      Tags:
+        - { Key: Name, Value: !Sub "${NamePrefix}-kb" }
+        - { Key: Project, Value: !Ref NamePrefix }
+        - { Key: owner, Value: !Ref Owner }
+
+  KbIndex:
+    Type: AWS::OpenSearchServerless::Index
+    Properties:
+      CollectionEndpoint: !GetAtt KbCollection.CollectionEndpoint
+      IndexName: kb-index
+      Settings:
+        Index:
+          Knn: true
+      Mappings:
+        Properties:
+          # ハイブリッド検索は faiss エンジンと、index が true の text フィールドが要る
+          bedrock-kb-vector:
+            Type: knn_vector
+            Dimension: 1024
+            Method:
+              Engine: faiss
+              Name: hnsw
+              SpaceType: l2
+              Parameters:
+                EfConstruction: 128
+                M: 24
+          AMAZON_BEDROCK_TEXT_CHUNK:
+            Type: text
+            Index: true
+          AMAZON_BEDROCK_METADATA:
+            Type: text
+            Index: false
+
+  KbRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${NamePrefix}-kb
+      Description: Service role for the fukuda-nwc-poc Bedrock knowledge base
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: bedrock.amazonaws.com }
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnLike:
+                aws:SourceArn: !Sub arn:${AWS::Partition}:bedrock:${AWS::Region}:${AWS::AccountId}:knowledge-base/*
+      Policies:
+        - PolicyName: kb
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ListModels
+                Effect: Allow
+                Action: [bedrock:ListFoundationModels, bedrock:ListCustomModels]
+                Resource: "*"
+              - Sid: Embedding
+                Effect: Allow
+                Action: bedrock:InvokeModel
+                Resource: !Sub arn:${AWS::Partition}:bedrock:${AWS::Region}::foundation-model/amazon.titan-embed-text-v2:0
+              - Sid: S3List
+                Effect: Allow
+                Action: s3:ListBucket
+                Resource: !GetAtt KbBucket.Arn
+                Condition:
+                  StringEquals:
+                    aws:ResourceAccount: !Ref AWS::AccountId
+              - Sid: S3Read
+                Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub ${KbBucket.Arn}/*
+                Condition:
+                  StringEquals:
+                    aws:ResourceAccount: !Ref AWS::AccountId
+              - Sid: OpenSearch
+                Effect: Allow
+                Action: aoss:APIAccessAll
+                # コレクションの ARN は名前でなく ID で決まり、GetAtt するとアクセスポリシーと循環するのでアカウント内に絞る。
+                # 中身に触れるかはデータアクセスポリシー（KbAccessPolicy）が決める
+                Resource: !Sub arn:${AWS::Partition}:aoss:${AWS::Region}:${AWS::AccountId}:collection/*
+      Tags:
+        - { Key: Name, Value: !Sub "${NamePrefix}-kb" }
+        - { Key: Project, Value: !Ref NamePrefix }
+        - { Key: owner, Value: !Ref Owner }
+
+  KnowledgeBase:
+    Type: AWS::Bedrock::KnowledgeBase
+    DependsOn: KbIndex
+    Properties:
+      Name: !Sub ${NamePrefix}-kb
+      Description: fukuda-nwc-poc runbooks (markdown)
+      RoleArn: !GetAtt KbRole.Arn
+      KnowledgeBaseConfiguration:
+        Type: VECTOR
+        VectorKnowledgeBaseConfiguration:
+          EmbeddingModelArn: !Sub arn:${AWS::Partition}:bedrock:${AWS::Region}::foundation-model/amazon.titan-embed-text-v2:0
+      StorageConfiguration:
+        Type: OPENSEARCH_SERVERLESS
+        OpensearchServerlessConfiguration:
+          CollectionArn: !GetAtt KbCollection.Arn
+          VectorIndexName: kb-index
+          FieldMapping:
+            VectorField: bedrock-kb-vector
+            TextField: AMAZON_BEDROCK_TEXT_CHUNK
+            MetadataField: AMAZON_BEDROCK_METADATA
+      Tags:
+        Name: !Sub ${NamePrefix}-kb
+        Project: !Ref NamePrefix
+        owner: !Ref Owner
+
+  KbDataSource:
+    Type: AWS::Bedrock::DataSource
+    Properties:
+      KnowledgeBaseId: !GetAtt KnowledgeBase.KnowledgeBaseId
+      Name: !Sub ${NamePrefix}-docs
+      Description: Markdown files under s3://<bucket>/docs/
+      # DELETE だとスタック削除時にベクトルの削除が走り、コレクションが先に消えると失敗する。RETAIN にしてコレクションごと消す
+      DataDeletionPolicy: RETAIN
+      DataSourceConfiguration:
+        Type: S3
+        S3Configuration:
+          BucketArn: !GetAtt KbBucket.Arn
+          InclusionPrefixes: [docs/]
+
+  # ---------------------------------------------------------------- guardrail
+  Guardrail:
+    Type: AWS::Bedrock::Guardrail
+    Properties:
+      Name: !Sub ${NamePrefix}-guardrail
+      Description: fukuda-nwc-poc content filters and prompt attack filter
+      BlockedInputMessaging: この質問にはお答えできません。業務に関する内容で聞き直してください。
+      BlockedOutputsMessaging: 回答にガードレールで止める内容が含まれたため、表示しません。聞き方を変えてください。
+      # Classic 階層は英語・フランス語・スペイン語だけ。日本語を判定させるには Standard 階層にする。
+      # Standard 階層はクロスリージョン推論が必須で、判定は APAC の他リージョンで行われることがある
+      CrossRegionConfig:
+        GuardrailProfileArn: !Sub arn:${AWS::Partition}:bedrock:${AWS::Region}:${AWS::AccountId}:guardrail-profile/${GuardrailProfileId}
+      ContentPolicyConfig:
+        ContentFiltersTierConfig:
+          TierName: STANDARD
+        FiltersConfig:
+          # ネットワーク運用の語（攻撃・遮断・kill など）で誤検知しにくいよう MEDIUM にする
+          - { Type: HATE, InputStrength: MEDIUM, OutputStrength: MEDIUM }
+          - { Type: INSULTS, InputStrength: MEDIUM, OutputStrength: MEDIUM }
+          - { Type: SEXUAL, InputStrength: MEDIUM, OutputStrength: MEDIUM }
+          - { Type: VIOLENCE, InputStrength: MEDIUM, OutputStrength: MEDIUM }
+          - { Type: MISCONDUCT, InputStrength: MEDIUM, OutputStrength: MEDIUM }
+          # プロンプト攻撃は入力だけに効く。出力側は NONE にする決まり
+          - { Type: PROMPT_ATTACK, InputStrength: HIGH, OutputStrength: NONE }
+      Tags:
+        - { Key: Name, Value: !Sub "${NamePrefix}-guardrail" }
+        - { Key: Project, Value: !Ref NamePrefix }
+        - { Key: owner, Value: !Ref Owner }
+
+  # 版は作成時点のガードレールを固定する。ガードレールを変えたら Description の r1 を r2 に上げて、版を作り直させる
+  GuardrailVersion:
+    Type: AWS::Bedrock::GuardrailVersion
+    Properties:
+      GuardrailIdentifier: !GetAtt Guardrail.GuardrailId
+      Description: fukuda-nwc-poc r1
+
   # ---------------------------------------------------------------- AgentCore Runtime
   RuntimeRole:
     Type: AWS::IAM::Role
@@ -396,6 +684,17 @@ Resources:
                   # jp.* の推論プロファイルは東京と大阪のモデルへ振り分けるので、リージョンは * にする
                   - !Sub arn:${AWS::Partition}:bedrock:*::foundation-model/*
                   - !Sub arn:${AWS::Partition}:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/*
+              - Sid: KbRetrieve
+                Effect: Allow
+                Action: bedrock:Retrieve
+                Resource: !GetAtt KnowledgeBase.KnowledgeBaseArn
+              - Sid: ApplyGuardrail
+                Effect: Allow
+                Action: bedrock:ApplyGuardrail
+                Resource:
+                  - !GetAtt Guardrail.GuardrailArn
+                  # Standard 階層の判定はプロファイルの行き先リージョンで行われるので、リージョンは * にする
+                  - !Sub arn:${AWS::Partition}:bedrock:*:${AWS::AccountId}:guardrail-profile/${GuardrailProfileId}
       Tags:
         - { Key: Name, Value: !Sub "${NamePrefix}-runtime" }
         - { Key: Project, Value: !Ref NamePrefix }
@@ -423,6 +722,10 @@ Resources:
       EnvironmentVariables:
         MODEL_ID: !Ref ModelId
         BEDROCK_REGION: !Ref AWS::Region
+        KNOWLEDGE_BASE_ID: !GetAtt KnowledgeBase.KnowledgeBaseId
+        NUMBER_OF_RESULTS: !Ref NumberOfResults
+        GUARDRAIL_ID: !GetAtt Guardrail.GuardrailId
+        GUARDRAIL_VERSION: !GetAtt GuardrailVersion.Version
       Tags:
         Name: !Sub ${NamePrefix}-agent
         Project: !Ref NamePrefix
@@ -430,6 +733,7 @@ Resources:
         # 参照を置いて、VPC endpoints ができてから Runtime を作らせる（条件付きリソースに DependsOn は書けない）
         RuntimeEndpoints: !If [CreateRuntimeEndpointsCond, !Join ["/", [!Ref EcrApiEndpoint, !Ref EcrDkrEndpoint, !Ref LogsEndpoint, !Ref BedrockRuntimeEndpoint]], existing]
         S3GatewayEndpoint: !If [CreateS3GatewayEndpointCond, !Ref S3GatewayEndpoint, existing]
+        KbEndpoint: !If [CreateKbEndpointCond, !Ref BedrockAgentRuntimeEndpoint, existing]
 
   # ---------------------------------------------------------------- chat web EC2
   InstanceRole:
@@ -791,5 +1095,23 @@ Outputs:
     Description: Allow 443 from this SG on existing ssm / ssmmessages / bedrock-agentcore endpoints
     Value: !Ref InstanceSecurityGroup
   RuntimeSecurityGroupId:
-    Description: Allow 443 from this SG on existing ecr / logs / bedrock-runtime endpoints
+    Description: Allow 443 from this SG on existing ecr / logs / bedrock-runtime / bedrock-agent-runtime endpoints
     Value: !Ref RuntimeSecurityGroup
+  KbBucketName:
+    Value: !Ref KbBucket
+  UploadDocsCommand:
+    Description: Run in this repository to upload the sample markdown files
+    Value: !Sub aws s3 cp kb-docs/ s3://${KbBucket}/docs/ --recursive --exclude "*" --include "*.md"
+  StartIngestionCommand:
+    Description: Run after uploading or changing the files. The knowledge base does not sync by itself.
+    Value: !Sub aws bedrock-agent start-ingestion-job --region ${AWS::Region} --knowledge-base-id ${KnowledgeBase.KnowledgeBaseId} --data-source-id ${KbDataSource.DataSourceId}
+  KnowledgeBaseId:
+    Value: !GetAtt KnowledgeBase.KnowledgeBaseId
+  DataSourceId:
+    Value: !GetAtt KbDataSource.DataSourceId
+  CollectionEndpoint:
+    Value: !GetAtt KbCollection.CollectionEndpoint
+  GuardrailId:
+    Value: !GetAtt Guardrail.GuardrailId
+  GuardrailVersion:
+    Value: !GetAtt GuardrailVersion.Version
