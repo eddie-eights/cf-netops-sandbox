@@ -8,6 +8,8 @@ EC2 のセキュリティグループに**受信ルールは 1 つも無い**。
 
 ## 構成
 
+図解（構成図・通信の順番・作るリソース・費用）は [`docs/20260914-fukuda-nwc-poc-architecture.html`](docs/20260914-fukuda-nwc-poc-architecture.html)。GitHub ではソースが表示されるので、clone してブラウザで開く（`docs/design-system/` を同じ場所に置いたまま）。
+
 ```
 利用者の PC
   │ aws ssm start-session（AWS-StartPortForwardingSession）
