@@ -1,7 +1,8 @@
 """AgentCore Runtime に載せるチャットエージェント（フェーズ 1 相当 + ナレッジベース + ガードレール）。
 
 1 回の質問でやること:
-  1. Bedrock Knowledge Base の Retrieve をハイブリッド検索（ベクトル + キーワード）で呼び、関連する資料を取る
+  1. Bedrock Knowledge Base の Retrieve をハイブリッド検索（ベクトル + キーワード）で呼び、候補を取る。
+     RERANK_MODEL_ARN があれば、同じ Retrieve の中でリランクモデルが候補を並べ替えて上位だけを返す
   2. 資料と質問を Converse に渡す。ガードレールは質問（guardContent）と回答を判定する
   3. 回答の末尾に参照した資料のファイル名を付けて返す
 
@@ -24,6 +25,9 @@ MODEL_ID = os.environ["MODEL_ID"]
 KNOWLEDGE_BASE_ID = os.environ["KNOWLEDGE_BASE_ID"]
 BEDROCK_REGION = os.environ.get("BEDROCK_REGION", "ap-northeast-1")
 NUMBER_OF_RESULTS = int(os.environ.get("NUMBER_OF_RESULTS", "5"))
+# 空ならリランクしない（ハイブリッド検索の上位 NUMBER_OF_RESULTS 件をそのまま使う）
+RERANK_MODEL_ARN = os.environ.get("RERANK_MODEL_ARN", "")
+NUMBER_OF_RERANKED_RESULTS = int(os.environ.get("NUMBER_OF_RERANKED_RESULTS", "5"))
 # 空ならガードレールを付けずに呼ぶ（手元での確認用）
 GUARDRAIL_ID = os.environ.get("GUARDRAIL_ID", "")
 GUARDRAIL_VERSION = os.environ.get("GUARDRAIL_VERSION", "DRAFT")
@@ -47,15 +51,19 @@ history: list[dict] = []
 
 
 def retrieve(prompt: str) -> list[dict]:
+    search = {"numberOfResults": NUMBER_OF_RESULTS, "overrideSearchType": "HYBRID"}
+    if RERANK_MODEL_ARN:
+        search["rerankingConfiguration"] = {
+            "type": "BEDROCK_RERANKING_MODEL",
+            "bedrockRerankingConfiguration": {
+                "modelConfiguration": {"modelArn": RERANK_MODEL_ARN},
+                "numberOfRerankedResults": NUMBER_OF_RERANKED_RESULTS,
+            },
+        }
     res = agent_runtime.retrieve(
         knowledgeBaseId=KNOWLEDGE_BASE_ID,
         retrievalQuery={"text": prompt},
-        retrievalConfiguration={
-            "vectorSearchConfiguration": {
-                "numberOfResults": NUMBER_OF_RESULTS,
-                "overrideSearchType": "HYBRID",
-            }
-        },
+        retrievalConfiguration={"vectorSearchConfiguration": search},
     )
     chunks = []
     for r in res.get("retrievalResults", []):

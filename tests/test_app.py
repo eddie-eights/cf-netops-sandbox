@@ -39,9 +39,16 @@ class App:
 bac.BedrockAgentCoreApp = App
 sys.modules.update({"boto3": boto3, "botocore": botocore, "botocore.exceptions": exc, "bedrock_agentcore": bac})
 
-def load(guardrail="gr123"):
+RERANK_ARN = "arn:aws:bedrock:ap-northeast-1::foundation-model/cohere.rerank-v3-5:0"
+
+def load(guardrail="gr123", rerank=""):
     os.environ.update({"MODEL_ID": "m", "KNOWLEDGE_BASE_ID": "KB12345678", "NUMBER_OF_RESULTS": "3", "GUARDRAIL_VERSION": "1"})
     os.environ["GUARDRAIL_ID"] = guardrail
+    os.environ.pop("NUMBER_OF_RERANKED_RESULTS", None)
+    if rerank:
+        os.environ.update({"RERANK_MODEL_ARN": rerank, "NUMBER_OF_RERANKED_RESULTS": "2"})
+    else:
+        os.environ.pop("RERANK_MODEL_ARN", None)
     spec = importlib.util.spec_from_file_location("app", APP_PATH)
     m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m); return m
 
@@ -67,7 +74,7 @@ check("dict 以外は error", app.invoke("x")["status"] == "error")
 state.update(retrieve=RET, converse=ok_converse("clear ip bgp * は避けます"), calls=[])
 r = app.invoke({"prompt": "%BGP-5-ADJCHANGE が出た"})
 rk = state["calls"][0][1]; ck = state["calls"][1][1]
-check("Retrieve は HYBRID で件数を渡す", rk["retrievalConfiguration"]["vectorSearchConfiguration"] == {"numberOfResults": 3, "overrideSearchType": "HYBRID"} and rk["knowledgeBaseId"] == "KB12345678")
+check("RERANK_MODEL_ARN が無ければリランクなしで HYBRID と件数だけ渡す", rk["retrievalConfiguration"]["vectorSearchConfiguration"] == {"numberOfResults": 3, "overrideSearchType": "HYBRID"} and rk["knowledgeBaseId"] == "KB12345678")
 check("Converse に guardrailConfig", ck["guardrailConfig"] == {"guardrailIdentifier": "gr123", "guardrailVersion": "1"})
 last = ck["messages"][-1]
 check("質問は guardContent、資料は text", last["content"][1] == {"guardContent": {"text": {"text": "%BGP-5-ADJCHANGE が出た"}}} and "<documents>" in last["content"][0]["text"] and 'source="interface-errors.md"' in last["content"][0]["text"])
@@ -109,4 +116,10 @@ state.update(retrieve=RET, converse=ok_converse("a"), calls=[])
 app2.invoke({"prompt": "q"})
 ck = state["calls"][1][1]
 check("GUARDRAIL_ID が空なら guardrailConfig なしで質問は text", "guardrailConfig" not in ck and ck["messages"][-1]["content"][1] == {"text": "q"})
+app3 = load(rerank=RERANK_ARN)
+state.update(retrieve=RET, converse=ok_converse("a"), calls=[])
+r = app3.invoke({"prompt": "q"})
+rk = state["calls"][0][1]["retrievalConfiguration"]["vectorSearchConfiguration"]
+check("RERANK_MODEL_ARN があれば候補数とリランク設定を渡す", rk == {"numberOfResults": 3, "overrideSearchType": "HYBRID", "rerankingConfiguration": {"type": "BEDROCK_RERANKING_MODEL", "bedrockRerankingConfiguration": {"modelConfiguration": {"modelArn": RERANK_ARN}, "numberOfRerankedResults": 2}}})
+check("リランクありでも参照元の組み立ては同じ", r["sources"] == ["bgp-neighbor-down.md", "interface-errors.md"] and r["status"] == "success")
 print(f"通過 {passed} / 失敗 0")

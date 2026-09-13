@@ -15,7 +15,7 @@ Metadata:
       - Label: { default: Agent }
         Parameters: [AgentImageUri, RuntimeName, ModelId]
       - Label: { default: Knowledge base and guardrail }
-        Parameters: [KbAdminPrincipalArn, GuardrailProfileId, NumberOfResults]
+        Parameters: [KbAdminPrincipalArn, GuardrailProfileId, NumberOfResults, RerankModelId, NumberOfRerankedResults]
       - Label: { default: Chat web (EC2) }
         Parameters: [InstanceType, ImageId]
       - Label: { default: Existing VPC endpoints }
@@ -77,10 +77,22 @@ Parameters:
     Description: System-defined guardrail profile for cross-Region inference (required by the Standard tier). apac.guardrail.v1:0 for Tokyo.
   NumberOfResults:
     Type: Number
+    Default: 20
+    MinValue: 1
+    MaxValue: 100
+    Description: Candidate chunks retrieved by the hybrid search per question (before reranking)
+  RerankModelId:
+    Type: String
+    Default: cohere.rerank-v3-5:0
+    # 空文字でリランクを止める。amazon.rerank-v1:0 は Marketplace を通らない
+    AllowedPattern: "^$|^[a-z0-9-]+[.]rerank-v[0-9-]+:[0-9]+$"
+    Description: Reranker model ID (cohere.rerank-v3-5:0 or amazon.rerank-v1:0). Leave empty to disable reranking.
+  NumberOfRerankedResults:
+    Type: Number
     Default: 5
     MinValue: 1
-    MaxValue: 20
-    Description: Chunks retrieved from the knowledge base per question
+    MaxValue: 100
+    Description: Chunks kept after reranking and passed to the model (ignored when RerankModelId is empty)
   InstanceType:
     Type: String
     Default: t4g.micro
@@ -121,6 +133,7 @@ Conditions:
   CreateSsmEndpointsCond: !Equals [!Ref CreateSsmEndpoints, "true"]
   CreateAgentCoreEndpointCond: !Equals [!Ref CreateAgentCoreEndpoint, "true"]
   CreateS3GatewayEndpointCond: !Equals [!Ref CreateS3GatewayEndpoint, "true"]
+  RerankCond: !Not [!Equals [!Ref RerankModelId, ""]]
   AllowClientCond: !And
     - !Condition CreateSsmEndpointsCond
     - !Not [!Equals [!Ref ClientCidr, ""]]
@@ -518,6 +531,21 @@ Resources:
                 Effect: Allow
                 Action: bedrock:InvokeModel
                 Resource: !Sub arn:${AWS::Partition}:bedrock:${AWS::Region}::foundation-model/amazon.titan-embed-text-v2:0
+              # Retrieve のリランクは呼び出し側ではなく KB のサービスロールの権限で動く
+              - !If
+                - RerankCond
+                - Sid: Rerank
+                  Effect: Allow
+                  Action: bedrock:Rerank
+                  Resource: "*"
+                - !Ref AWS::NoValue
+              - !If
+                - RerankCond
+                - Sid: RerankModel
+                  Effect: Allow
+                  Action: bedrock:InvokeModel
+                  Resource: !Sub arn:${AWS::Partition}:bedrock:${AWS::Region}::foundation-model/${RerankModelId}
+                - !Ref AWS::NoValue
               - Sid: S3List
                 Effect: Allow
                 Action: s3:ListBucket
@@ -724,6 +752,11 @@ Resources:
         BEDROCK_REGION: !Ref AWS::Region
         KNOWLEDGE_BASE_ID: !GetAtt KnowledgeBase.KnowledgeBaseId
         NUMBER_OF_RESULTS: !Ref NumberOfResults
+        RERANK_MODEL_ARN: !If
+          - RerankCond
+          - !Sub arn:${AWS::Partition}:bedrock:${AWS::Region}::foundation-model/${RerankModelId}
+          - !Ref AWS::NoValue
+        NUMBER_OF_RERANKED_RESULTS: !Ref NumberOfRerankedResults
         GUARDRAIL_ID: !GetAtt Guardrail.GuardrailId
         GUARDRAIL_VERSION: !GetAtt GuardrailVersion.Version
       Tags:

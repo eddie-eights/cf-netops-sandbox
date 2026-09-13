@@ -47,7 +47,7 @@
 <div class="mb-summary">
   <ul>
     <li>PC から EC2 へは SSM のポートフォワーディングで入り、EC2 から先は VPC エンドポイントだけで AWS のサービスに届く</li>
-    <li>エージェントは Knowledge Base をハイブリッド検索（ベクトル + キーワード）で引き、資料を添えて Claude Haiku 4.5 に渡す</li>
+    <li>エージェントは Knowledge Base をハイブリッド検索（ベクトル + キーワード）で候補 20 件を引き、リランクで 5 件に絞って Claude Haiku 4.5 に渡す</li>
     <li>ガードレールが質問と回答の両方を判定し、止めたときは定型文を返す</li>
     <li>置いておくだけで 1 時間 ≈ $0.52（約 79 円）。<em>OpenSearch Serverless だけで月 ≈ $240</em> かかるので、使わない期間はスタックを消す</li>
   </ul>
@@ -86,8 +86,8 @@
 <text x="52" y="496" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="12" fill="#111110">質問と資料をモデルに渡す</text>
 <rect x="348" y="400" width="232" height="72" rx="8" fill="#FFFFFF" stroke="#111110" stroke-width="1.5"/>
 <text x="360" y="422" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="13" fill="#111110" font-weight="700">Knowledge Base</text>
-<text x="360" y="442" font-family="Ubuntu Mono, monospace" font-size="11" fill="#111110">Retrieve（HYBRID）</text>
-<text x="360" y="460" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="11" fill="#595959">上位 5 件の本文を返す</text>
+<text x="360" y="442" font-family="Ubuntu Mono, monospace" font-size="11" fill="#111110">Retrieve（HYBRID + Rerank）</text>
+<text x="360" y="460" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="11" fill="#595959">候補 20 件 → Rerank で 5 件</text>
 <rect x="348" y="500" width="232" height="72" rx="8" fill="#FFFFFF" stroke="#111110" stroke-width="1.5"/>
 <text x="360" y="522" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="13" fill="#111110" font-weight="700">OpenSearch Serverless</text>
 <text x="360" y="542" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="11" fill="#595959">ベクトル検索 + キーワード検索</text>
@@ -133,7 +133,7 @@
 <ol>
   <li><strong>PC から EC2 の画面を開く。</strong><code>aws ssm start-session</code> のポートフォワーディングで、PC の <code>localhost:8080</code> を EC2 の <code>127.0.0.1:8080</code> へつなぎます。EC2 のセキュリティグループに受信ルールは要りません。</li>
   <li><strong>EC2 がエージェントを呼ぶ。</strong>チャット Web が質問と会話 ID を <code>InvokeAgentRuntime</code> で送ります。署名は EC2 のインスタンスロールで行い、ブラウザには認証情報を置きません。</li>
-  <li><strong>エージェントが資料を検索する。</strong>質問文で Knowledge Base の <code>Retrieve</code> を呼びます。検索は <code>HYBRID</code> 指定で、OpenSearch Serverless がベクトル検索とキーワード検索を合わせた上位 5 件を返します。</li>
+  <li><strong>エージェントが資料を検索する。</strong>質問文で Knowledge Base の <code>Retrieve</code> を呼びます。検索は <code>HYBRID</code> 指定で、OpenSearch Serverless がベクトル検索とキーワード検索を合わせた候補 20 件を出し、同じ呼び出しの中で Cohere Rerank 3.5 が質問との関係の深い順に並べ替えて、上位 5 件を返します。</li>
   <li><strong>エージェントがモデルに尋ねる。</strong>資料と質問をまとめて <code>Converse</code> に渡します。ガードレールがまず質問を判定し、通れば Claude Haiku 4.5 が資料をもとに答え、その回答もガードレールが判定します。</li>
   <li><strong>回答を返す。</strong>回答の末尾に参照した md のファイル名を付け、EC2 を経由してブラウザに表示します。ガードレールが止めたときは定型文を返し、その往復は会話の履歴に残しません。</li>
 </ol>
@@ -147,6 +147,7 @@
 <table>
   <tr><th class="mb-rowlabel">決めたこと</th><th>理由</th></tr>
   <tr><td class="mb-rowlabel">検索はハイブリッド</td><td><code>%BGP-5-ADJCHANGE</code> のようなログの文字列やコマンド名は、意味の近さより文字の一致で当たるため</td></tr>
+  <tr><td class="mb-rowlabel">候補 20 件をリランクで 5 件に絞る</td><td>ハイブリッド検索の順位は点数の合算で、答えになっているかまでは見ないため。モデルに渡すのは 5 件のままなので、トークンは増えない</td></tr>
   <tr><td class="mb-rowlabel">OpenSearch は Bedrock が呼ぶ</td><td>エージェントに要る権限が <code>bedrock:Retrieve</code> だけになり、VPC から出る先も bedrock-agent-runtime エンドポイントだけで済むため</td></tr>
   <tr><td class="mb-rowlabel">判定するのは質問と回答だけ</td><td>資料まで判定すると、手順書の「攻撃」「遮断」のような語で止まりやすく、判定の課金も増えるため</td></tr>
   <tr><td class="mb-rowlabel">ガードレールは Standard 階層</td><td>Classic 階層は日本語を判定できないため。判定は東京以外の APAC リージョンで行われることがある</td></tr>
@@ -163,8 +164,8 @@
   </div>
   <div class="mb-card">
     <div class="mb-card-title">会話しながら</div>
-    <p><strong>1 時間 ≈ $0.99</strong>（約 148 円）</p>
-    <p>1 人が 1 分に 1 回話す想定です。上にモデルのトークン、ガードレール、Runtime の実行時間が乗ります。</p>
+    <p><strong>1 時間 ≈ $1.11</strong>（約 167 円）</p>
+    <p>1 人が 1 分に 1 回話す想定です。上にモデルのトークン、リランク（約 $0.12）、ガードレール、Runtime の実行時間が乗ります。</p>
   </div>
   <div class="mb-card">
     <div class="mb-card-title">1 か月置いたまま</div>
@@ -175,6 +176,7 @@
 
 <p>
 東京リージョンの税抜単価で、2026-09-14 に AWS Price List API で確認しました。$1 = 150 円で換算しています。
+リランクの Cohere Rerank 3.5 は AWS Marketplace 経由の課金で、初回に購読と EULA への同意が伴います。
 ガードレールの Standard 階層に別の単価があるかは確認できていません。
 </p>
 
@@ -201,13 +203,14 @@
 <h2 id="limits">確認できていないこと</h2>
 
 <p>
-テンプレートは <code>cfn-lint</code> を通し、エージェントは boto3 を差し替えた模擬テスト（17 項目）を通しました。
+テンプレートは <code>cfn-lint</code> を通し、エージェントは boto3 を差し替えた模擬テスト（19 項目）を通しました。
 ただし、AWS 上にはまだデプロイしていません。次の点は実環境で確かめる必要があります。
 </p>
 
 <ul>
   <li>OpenSearch Serverless のアクセスポリシーの反映待ちで、インデックスの作成が 403 にならないか</li>
   <li>既定のアナライザで、日本語の質問にキーワード検索がどれだけ効くか</li>
+  <li>Cohere Rerank 3.5 が日本語の手順書で順位をどれだけ良くするか。候補 20 件 → 5 件が妥当か</li>
   <li>閉域の EC2 から、S3 ゲートウェイ経由で <code>dnf install python3.13</code> が通るか</li>
   <li>VPC モードの Runtime が、イメージの取得に VPC 内の ECR / S3 エンドポイントを使うか</li>
 </ul>
@@ -225,6 +228,7 @@
     <tr><td>Knowledge Base</td><td>文書を取り込んで検索できるようにする Bedrock の機能。検索結果をモデルに渡す材料にする。</td></tr>
     <tr><td>OpenSearch Serverless</td><td>サーバーを管理しない OpenSearch。ここでは Knowledge Base のベクトルと本文の置き場。</td></tr>
     <tr><td>ハイブリッド検索</td><td>意味の近さで探すベクトル検索と、文字の一致で探すキーワード検索を合わせる方式。</td></tr>
+    <tr><td>リランク</td><td>検索で集めた候補を、別のモデルが質問と読み比べて関係の深い順に並べ替えること。</td></tr>
     <tr><td>OCU</td><td>OpenSearch Compute Unit。OpenSearch Serverless の処理能力と課金の単位。</td></tr>
     <tr><td>ガードレール</td><td>Bedrock Guardrails。モデルへの入力と出力を判定し、有害な内容やプロンプト攻撃を止める。</td></tr>
     <tr><td>推論プロファイル</td><td>モデル呼び出しを複数リージョンへ振り分ける設定。<code>jp.</code> は東京と大阪。</td></tr>
