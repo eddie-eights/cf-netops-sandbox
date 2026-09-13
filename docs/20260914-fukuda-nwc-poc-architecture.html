@@ -4,8 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>fukuda-nwc-poc 構成図</title>
-<meta name="description" content="閉域の既存 VPC で、SSM ポートフォワーディング越しに EC2 のチャット Web から AgentCore Runtime と Bedrock を呼ぶ CloudFormation 構成の図解。通信の順番、作るリソース、1 時間あたりの費用をまとめる。">
-<meta name="mb-tags" content="aws cloudformation agentcore bedrock ssm vpc-endpoint architecture">
+<meta name="description" content="閉域の既存 VPC で、EC2 のチャット Web から AgentCore Runtime、Knowledge Base（OpenSearch Serverless のハイブリッド検索）、ガードレール付きの Bedrock へ会話が流れる構成の図解。">
+<meta name="mb-tags" content="aws cloudformation agentcore bedrock knowledge-base opensearch-serverless guardrails architecture">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Ubuntu+Sans:wght@400;500;700&family=Noto+Sans+JP:wght@400;500;700&family=Ubuntu+Mono:wght@400;700&display=swap" rel="stylesheet">
@@ -26,8 +26,8 @@
 </header>
 
 <p class="mb-lede">
-インターネットへの出口を持たない既存の VPC で、利用者の PC から AgentCore Runtime 経由で Bedrock の Claude と会話する構成です。
-PC からは Session Manager のポートフォワーディングだけで入り、AWS のサービスへは VPC エンドポイントだけで届きます。
+閉域の既存 VPC にある EC2 のチャット画面から、Bedrock の Claude と会話する構成です。
+質問を受けると、エージェントが手順書を検索し、見つけた資料と一緒にモデルへ渡し、ガードレールを通した回答を返します。
 </p>
 
 <div class="mb-wrap">
@@ -35,239 +35,147 @@ PC からは Session Manager のポートフォワーディングだけで入り
 
 <nav class="mb-toc">
   <ol>
-    <li><a href="#background">背景と前提</a></li>
     <li><a href="#diagram">構成図</a></li>
-    <li><a href="#flow">通信の順番</a></li>
-    <li><a href="#resources">作るリソース</a></li>
-    <li><a href="#cost">費用とタグ</a></li>
+    <li><a href="#flow">会話 1 往復の流れ</a></li>
+    <li><a href="#points">検索とガードレールの決めごと</a></li>
+    <li><a href="#cost">費用</a></li>
     <li><a href="#deploy">デプロイから会話まで</a></li>
-    <li><a href="#limits">補足と確認できていないこと</a></li>
+    <li><a href="#limits">確認できていないこと</a></li>
   </ol>
 </nav>
 
 <div class="mb-summary">
   <ul>
-    <li>既存の閉域 VPC にチャット用の EC2 と AgentCore Runtime を置き、Bedrock の Claude Haiku 4.5 と会話する（NetOps フェーズ 1）</li>
-    <li>IGW・NAT・パブリック IP を使わず、AWS のサービスへは Interface エンドポイント 7 種と S3 ゲートウェイで届く</li>
-    <li>PC からは Session Manager のポートフォワーディングで入るので、EC2 のセキュリティグループは<em>受信ルールを持たない</em></li>
-    <li>置いておくだけで 1 時間 ≈ $0.17（約 25 円）。ほぼ全部がエンドポイントの時間課金</li>
+    <li>PC から EC2 へは SSM のポートフォワーディングで入り、EC2 から先は VPC エンドポイントだけで AWS のサービスに届く</li>
+    <li>エージェントは Knowledge Base をハイブリッド検索（ベクトル + キーワード）で引き、資料を添えて Claude Haiku 4.5 に渡す</li>
+    <li>ガードレールが質問と回答の両方を判定し、止めたときは定型文を返す</li>
+    <li>置いておくだけで 1 時間 ≈ $0.52（約 79 円）。<em>OpenSearch Serverless だけで月 ≈ $240</em> かかるので、使わない期間はスタックを消す</li>
   </ul>
 </div>
-
-<h2 id="background">背景と前提</h2>
-
-<p>
-NetOps PoC のフェーズ 1 は「画面から AgentCore のエージェントと会話する」ところまでです。
-社内の検証環境はインターネットへの出口を持たない閉域の VPC なので、同じことをその中で動かせるように CloudFormation で組みました。
-</p>
-
-<ul>
-  <li>VPC とサブネットは既存のものを使い、テンプレートでは作らない</li>
-  <li>インターネットゲートウェイ、NAT ゲートウェイ、EIP、パブリック IP を使わない</li>
-  <li>利用者の PC は社内ネットワーク（Direct Connect か VPN）で VPC に届く</li>
-</ul>
-
-<p>
-テンプレートは 2 つです。<code>ecr.yaml</code> がエージェントのイメージ置き場を作り、<code>main.yaml</code> がそれ以外の全部を作ります。
-どちらも <a href="https://github.com/eddie-eights/cf-netops-sandbox" target="_blank" rel="noopener">eddie-eights/cf-netops-sandbox</a> にあります。
-</p>
 
 <h2 id="diagram">構成図</h2>
 
 <p>
-左の列が自分で置く計算資源、中央が VPC エンドポイント、右が AWS のサービスです。
-計算資源からサービスへの通信は、必ず同じ高さのエンドポイントを通ります。
+左が VPC の中に置くもの、右が AWS のサービスです。VPC からサービスへの通信は、矢印に書いたエンドポイントを通ります。
 </p>
 
 <figure class="mb-figure">
   <div class="mb-figure-frame">
-<svg viewBox="0 0 604 996" width="604" role="img" aria-label="fukuda-nwc-poc の構成図" xmlns="http://www.w3.org/2000/svg">
+<svg viewBox="0 0 604 824" width="604" role="img" aria-label="EC2 のチャット Web から LLM と会話するときの流れ" xmlns="http://www.w3.org/2000/svg">
 <defs><marker id="ah" viewBox="0 0 8 8" refX="8" refY="4" markerWidth="8" markerHeight="8" markerUnits="userSpaceOnUse" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#111110"/></marker></defs>
-<line x1="446" y1="34" x2="486" y2="34" stroke="#111110" stroke-width="1.5"/>
-<text x="494" y="38" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="11" fill="#595959">会話・ログ</text>
-<line x1="446" y1="58" x2="486" y2="58" stroke="#111110" stroke-width="1.5" stroke-dasharray="5 4"/>
-<text x="494" y="62" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="11" fill="#595959">起動時だけ</text>
-<text x="446" y="86" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="11" fill="#595959">矢印は接続を張る向き</text>
-<rect x="210" y="12" width="204" height="84" rx="8" fill="#FFFFFF" stroke="#111110" stroke-width="1.5"/>
-<text x="222" y="36" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="14" fill="#111110" font-weight="700">利用者の PC</text>
-<text x="222" y="58" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="12.5" fill="#111110">ブラウザ</text><text x="274" y="58" font-family="Ubuntu Mono, monospace" font-size="12" fill="#111110">localhost:8080</text>
-<text x="222" y="80" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="11" fill="#595959">AWS CLI + SSM プラグイン</text>
-<rect x="2" y="140" width="598" height="850" rx="12" fill="none" stroke="#111110" stroke-width="1.5"/>
-<text x="14" y="162" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="12.5" fill="#111110" font-weight="700">東京リージョン ap-northeast-1</text>
-<rect x="12" y="176" width="390" height="796" rx="10" fill="none" stroke="#595959" stroke-width="1.2"/>
-<text x="24" y="196" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="12.5" fill="#111110" font-weight="700">既存 VPC</text>
-<text x="432" y="196" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="12.5" fill="#111110" font-weight="700">AWS のサービス</text>
-<rect x="36" y="212" width="356" height="274" rx="8" fill="none" stroke="#A5A5A5" stroke-width="1"/>
-<text x="48" y="232" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="11" fill="#595959">InstanceSubnetId（1 AZ）</text>
-<rect x="36" y="532" width="356" height="352" rx="8" fill="none" stroke="#A5A5A5" stroke-width="1"/>
-<text x="384" y="552" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="11" fill="#595959" text-anchor="end">RuntimeSubnetIds（2 AZ）</text>
-<rect x="44" y="250" width="152" height="218" rx="8" fill="#FFFFFF" stroke="#111110" stroke-width="1.5"/>
-<text x="54" y="274" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="14" fill="#111110" font-weight="700">EC2 t4g.micro</text>
-<text x="54" y="292" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="11" fill="#595959">AL2023 arm64</text>
-<text x="54" y="308" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="11" fill="#595959">パブリック IP なし</text>
-<line x1="54" y1="320" x2="186" y2="320" stroke="#A5A5A5" stroke-width="1"/>
-<text x="54" y="342" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="12.5" fill="#111110">SSM Agent</text>
-<text x="54" y="362" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="12.5" fill="#111110">チャット Web</text>
-<text x="54" y="380" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="11" fill="#595959">Python 3.13</text>
-<text x="54" y="398" font-family="Ubuntu Mono, monospace" font-size="11" fill="#595959">127.0.0.1:8080</text>
-<line x1="54" y1="412" x2="186" y2="412" stroke="#A5A5A5" stroke-width="1"/>
-<text x="54" y="434" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="11" fill="#595959">SG：受信ルールなし</text>
-<text x="54" y="452" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="11" fill="#595959">送信は 443 のみ</text>
-<rect x="240" y="262" width="144" height="48" rx="8" fill="#FFFFFF" stroke="#111110" stroke-width="1.5"/>
-<text x="250" y="284" font-family="Ubuntu Mono, monospace" font-size="12" fill="#111110">ssm / ssmmessages</text>
-<text x="250" y="302" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="10.5" fill="#595959">Interface・1 AZ</text>
-<rect x="240" y="392" width="144" height="48" rx="8" fill="#FFFFFF" stroke="#111110" stroke-width="1.5"/>
-<text x="250" y="414" font-family="Ubuntu Mono, monospace" font-size="12" fill="#111110">bedrock-agentcore</text>
-<text x="250" y="432" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="10.5" fill="#595959">Interface・1 AZ</text>
-<rect x="432" y="254" width="156" height="64" rx="8" fill="#FFFFFF" stroke="#111110" stroke-width="1.5"/>
-<text x="442" y="278" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="13" fill="#111110" font-weight="700">Systems Manager</text>
-<text x="442" y="298" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="11" fill="#595959">Session Manager</text>
-<rect x="432" y="384" width="156" height="64" rx="8" fill="#FFFFFF" stroke="#111110" stroke-width="1.5"/>
-<text x="442" y="408" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="13" fill="#111110" font-weight="700">Bedrock AgentCore</text>
-<text x="442" y="428" font-family="Ubuntu Mono, monospace" font-size="11" fill="#595959">InvokeAgentRuntime</text>
-<rect x="44" y="574" width="152" height="246" rx="8" fill="#FFFFFF" stroke="#111110" stroke-width="1.5"/>
-<text x="54" y="598" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="13" fill="#111110" font-weight="700">AgentCore Runtime</text>
-<text x="54" y="616" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="11" fill="#595959">VPC モード</text>
-<line x1="54" y1="628" x2="186" y2="628" stroke="#A5A5A5" stroke-width="1"/>
-<text x="54" y="650" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="12.5" fill="#111110">agent コンテナ</text>
-<text x="54" y="668" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="11" fill="#595959">Python 3.13・arm64</text>
-<text x="54" y="686" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="11" fill="#595959">bedrock-agentcore SDK</text>
-<text x="54" y="708" font-family="Ubuntu Mono, monospace" font-size="11" fill="#111110">fukuda_nwc_poc_agent</text>
-<line x1="54" y1="722" x2="186" y2="722" stroke="#A5A5A5" stroke-width="1"/>
-<text x="54" y="744" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="11" fill="#595959">アイドル 300 秒で停止</text>
-<text x="54" y="762" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="11" fill="#595959">SG：送信 443 のみ</text>
-<rect x="240" y="582" width="144" height="44" rx="8" fill="#FFFFFF" stroke="#111110" stroke-width="1.5"/>
-<text x="250" y="608" font-family="Ubuntu Mono, monospace" font-size="12" fill="#111110">ecr.api</text>
-<text x="374" y="608" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="10.5" fill="#595959" text-anchor="end">×2 AZ</text>
-<rect x="240" y="638" width="144" height="44" rx="8" fill="#FFFFFF" stroke="#111110" stroke-width="1.5"/>
-<text x="250" y="664" font-family="Ubuntu Mono, monospace" font-size="12" fill="#111110">ecr.dkr</text>
-<text x="374" y="664" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="10.5" fill="#595959" text-anchor="end">×2 AZ</text>
-<rect x="240" y="694" width="144" height="44" rx="8" fill="#FFFFFF" stroke="#111110" stroke-width="1.5"/>
-<text x="250" y="720" font-family="Ubuntu Mono, monospace" font-size="12" fill="#111110">logs</text>
-<text x="374" y="720" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="10.5" fill="#595959" text-anchor="end">×2 AZ</text>
-<rect x="240" y="750" width="144" height="44" rx="8" fill="#FFFFFF" stroke="#111110" stroke-width="1.5"/>
-<text x="250" y="776" font-family="Ubuntu Mono, monospace" font-size="12" fill="#111110">bedrock-runtime</text>
-<text x="374" y="776" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="10.5" fill="#595959" text-anchor="end">×2 AZ</text>
-<rect x="432" y="582" width="156" height="100" rx="8" fill="#FFFFFF" stroke="#111110" stroke-width="1.5"/>
-<text x="442" y="606" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="13" fill="#111110" font-weight="700">Amazon ECR</text>
-<text x="442" y="626" font-family="Ubuntu Mono, monospace" font-size="11" fill="#111110">fukuda-nwc-poc-agent</text>
-<text x="442" y="644" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="11" fill="#595959">ecr.yaml で作成</text>
-<rect x="432" y="694" width="156" height="48" rx="8" fill="#FFFFFF" stroke="#111110" stroke-width="1.5"/>
-<text x="442" y="714" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="13" fill="#111110" font-weight="700">CloudWatch Logs</text>
-<text x="442" y="732" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="11" fill="#595959">保持 7 日</text>
-<rect x="432" y="754" width="156" height="56" rx="8" fill="#FFFFFF" stroke="#111110" stroke-width="1.5"/>
-<text x="442" y="776" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="13" fill="#111110" font-weight="700">Amazon Bedrock</text>
-<text x="442" y="796" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="11" fill="#595959">Claude Haiku 4.5</text>
-<rect x="240" y="898" width="144" height="48" rx="8" fill="#FFFFFF" stroke="#111110" stroke-width="1.5"/>
-<text x="250" y="920" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="12.5" fill="#111110">S3 ゲートウェイ</text>
-<text x="250" y="938" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="10.5" fill="#595959">ルートテーブル・無料</text>
-<rect x="432" y="890" width="156" height="70" rx="8" fill="#FFFFFF" stroke="#111110" stroke-width="1.5"/>
-<text x="442" y="914" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="13" fill="#111110" font-weight="700">Amazon S3</text>
-<text x="442" y="934" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="11" fill="#595959">ECR のレイヤー</text>
-<text x="442" y="952" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="11" fill="#595959">AL2023 リポジトリ</text>
-<path d="M312,96 V260" fill="none" stroke="#111110" stroke-width="1.5" marker-end="url(#ah)"/>
-<text x="328" y="122" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="11" fill="#595959">社内ネットワーク経由</text>
-<path d="M196,286 H238" fill="none" stroke="#111110" stroke-width="1.5" marker-end="url(#ah)"/>
-<path d="M384,286 H430" fill="none" stroke="#111110" stroke-width="1.5" marker-end="url(#ah)"/>
-<path d="M196,416 H238" fill="none" stroke="#111110" stroke-width="1.5" marker-end="url(#ah)"/>
-<path d="M384,416 H430" fill="none" stroke="#111110" stroke-width="1.5" marker-end="url(#ah)"/>
-<path d="M510,448 V512 H120 V572" fill="none" stroke="#111110" stroke-width="1.5" marker-end="url(#ah)"/>
-<path d="M196,604 H238" fill="none" stroke="#111110" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#ah)"/>
-<path d="M196,660 H238" fill="none" stroke="#111110" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#ah)"/>
-<path d="M196,716 H238" fill="none" stroke="#111110" stroke-width="1.5" marker-end="url(#ah)"/>
-<path d="M196,772 H238" fill="none" stroke="#111110" stroke-width="1.5" marker-end="url(#ah)"/>
-<path d="M384,604 H430" fill="none" stroke="#111110" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#ah)"/>
-<path d="M384,660 H430" fill="none" stroke="#111110" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#ah)"/>
-<path d="M384,716 H430" fill="none" stroke="#111110" stroke-width="1.5" marker-end="url(#ah)"/>
-<path d="M384,772 H430" fill="none" stroke="#111110" stroke-width="1.5" marker-end="url(#ah)"/>
-<path d="M120,820 V912 H238" fill="none" stroke="#111110" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#ah)"/>
-<path d="M44,440 H24 V934 H238" fill="none" stroke="#111110" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#ah)"/>
-<path d="M384,922 H430" fill="none" stroke="#111110" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#ah)"/>
-<circle cx="312" cy="118" r="9" fill="#FFFFFF" stroke="#111110" stroke-width="1.5"/><text x="312" y="122" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="11" fill="#111110" font-weight="700" text-anchor="middle">1</text>
-<circle cx="218" cy="286" r="9" fill="#FFFFFF" stroke="#111110" stroke-width="1.5"/><text x="218" y="290" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="11" fill="#111110" font-weight="700" text-anchor="middle">2</text>
-<circle cx="218" cy="416" r="9" fill="#FFFFFF" stroke="#111110" stroke-width="1.5"/><text x="218" y="420" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="11" fill="#111110" font-weight="700" text-anchor="middle">3</text>
-<circle cx="218" cy="772" r="9" fill="#FFFFFF" stroke="#111110" stroke-width="1.5"/><text x="218" y="776" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="11" fill="#111110" font-weight="700" text-anchor="middle">4</text>
-<circle cx="218" cy="604" r="9" fill="#FFFFFF" stroke="#111110" stroke-width="1.5"/><text x="218" y="608" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="11" fill="#111110" font-weight="700" text-anchor="middle">5</text>
-<circle cx="24" cy="700" r="9" fill="#FFFFFF" stroke="#111110" stroke-width="1.5"/><text x="24" y="704" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="11" fill="#111110" font-weight="700" text-anchor="middle">6</text>
+<text x="320" y="44" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="11" fill="#595959">矢印は接続を張る向き</text>
+<text x="320" y="62" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="11" fill="#595959">応答は同じ接続を戻る</text>
+<rect x="40" y="16" width="244" height="68" rx="8" fill="#FFFFFF" stroke="#111110" stroke-width="1.5"/>
+<text x="52" y="42" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="14" fill="#111110" font-weight="700">利用者の PC</text>
+<text x="52" y="64" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="12.5" fill="#111110">ブラウザ</text><text x="106" y="64" font-family="Ubuntu Mono, monospace" font-size="12" fill="#111110">localhost:8080</text>
+<rect x="2" y="150" width="598" height="666" rx="12" fill="none" stroke="#111110" stroke-width="1.5"/>
+<text x="588" y="172" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="12.5" fill="#111110" font-weight="700" text-anchor="end">東京リージョン ap-northeast-1</text>
+<rect x="12" y="184" width="300" height="344" rx="10" fill="none" stroke="#595959" stroke-width="1.2"/>
+<text x="24" y="204" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="12.5" fill="#111110" font-weight="700">既存 VPC（インターネットへの出口なし）</text>
+<text x="348" y="204" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="12.5" fill="#111110" font-weight="700">AWS のサービス</text>
+<rect x="40" y="220" width="244" height="92" rx="8" fill="#FFFFFF" stroke="#111110" stroke-width="1.5"/>
+<text x="52" y="244" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="14" fill="#111110" font-weight="700">EC2 チャット Web</text>
+<text x="52" y="264" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="11" fill="#595959">t4g.micro・パブリック IP なし</text>
+<text x="52" y="282" font-family="Ubuntu Mono, monospace" font-size="11" fill="#595959">127.0.0.1:8080</text>
+<text x="52" y="300" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="11" fill="#595959">インスタンスロールで署名</text>
+<rect x="40" y="400" width="244" height="108" rx="8" fill="#FFFFFF" stroke="#111110" stroke-width="1.5"/>
+<text x="52" y="424" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="14" fill="#111110" font-weight="700">AgentCore Runtime</text>
+<text x="52" y="444" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="11" fill="#595959">VPC モード・agent コンテナ</text>
+<line x1="52" y1="456" x2="272" y2="456" stroke="#A5A5A5" stroke-width="1"/>
+<text x="52" y="478" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="12" fill="#111110">資料を検索してから</text>
+<text x="52" y="496" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="12" fill="#111110">質問と資料をモデルに渡す</text>
+<rect x="348" y="400" width="232" height="72" rx="8" fill="#FFFFFF" stroke="#111110" stroke-width="1.5"/>
+<text x="360" y="422" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="13" fill="#111110" font-weight="700">Knowledge Base</text>
+<text x="360" y="442" font-family="Ubuntu Mono, monospace" font-size="11" fill="#111110">Retrieve（HYBRID）</text>
+<text x="360" y="460" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="11" fill="#595959">上位 5 件の本文を返す</text>
+<rect x="348" y="500" width="232" height="72" rx="8" fill="#FFFFFF" stroke="#111110" stroke-width="1.5"/>
+<text x="360" y="522" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="13" fill="#111110" font-weight="700">OpenSearch Serverless</text>
+<text x="360" y="542" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="11" fill="#595959">ベクトル検索 + キーワード検索</text>
+<text x="360" y="560" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="11" fill="#595959">手順書の md（S3 から取り込み）</text>
+<rect x="348" y="604" width="232" height="196" rx="8" fill="#FFFFFF" stroke="#111110" stroke-width="1.5"/>
+<text x="360" y="626" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="13" fill="#111110" font-weight="700">Amazon Bedrock</text>
+<rect x="364" y="640" width="200" height="36" rx="6" fill="#FFFFFF" stroke="#111110" stroke-width="1.5"/>
+<text x="376" y="663" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="12" fill="#111110">Guardrail：質問を判定</text>
+<rect x="364" y="694" width="200" height="36" rx="6" fill="#FFFFFF" stroke="#111110" stroke-width="1.5"/>
+<text x="376" y="717" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="12" fill="#111110">Claude Haiku 4.5</text>
+<rect x="364" y="748" width="200" height="36" rx="6" fill="#FFFFFF" stroke="#111110" stroke-width="1.5"/>
+<text x="376" y="771" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="12" fill="#111110">Guardrail：回答を判定</text>
+<path d="M162,84 V218" fill="none" stroke="#111110" stroke-width="1.5" marker-end="url(#ah)"/>
+<path d="M162,312 V398" fill="none" stroke="#111110" stroke-width="1.5" marker-end="url(#ah)"/>
+<path d="M284,436 H346" fill="none" stroke="#111110" stroke-width="1.5" marker-end="url(#ah)"/>
+<path d="M464,472 V498" fill="none" stroke="#111110" stroke-width="1.5" marker-end="url(#ah)"/>
+<path d="M162,508 V658 H362" fill="none" stroke="#111110" stroke-width="1.5" marker-end="url(#ah)"/>
+<path d="M464,676 V692" fill="none" stroke="#111110" stroke-width="1.5" marker-end="url(#ah)"/>
+<path d="M464,730 V746" fill="none" stroke="#111110" stroke-width="1.5" marker-end="url(#ah)"/>
+<text x="182" y="114" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="12" fill="#111110">SSM ポートフォワーディング</text>
+<text x="182" y="131" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="11" fill="#595959">ssm / ssmmessages エンドポイント</text>
+<text x="182" y="346" font-family="Ubuntu Mono, monospace" font-size="11.5" fill="#111110">InvokeAgentRuntime</text>
+<text x="182" y="362" font-family="Ubuntu Mono, monospace" font-size="11" fill="#595959">bedrock-agentcore</text>
+<text x="182" y="377" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="11" fill="#595959">エンドポイント経由</text>
+<text x="182" y="580" font-family="Ubuntu Mono, monospace" font-size="11.5" fill="#111110">Converse</text>
+<text x="182" y="596" font-family="Ubuntu Mono, monospace" font-size="11" fill="#595959">bedrock-runtime</text>
+<text x="182" y="611" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="11" fill="#595959">エンドポイント経由</text>
+<text x="40" y="724" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="11" fill="#595959">止められたら定型文を返す</text>
+<text x="66" y="766" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="12" fill="#111110">回答に「参照: ファイル名」を付けて</text>
+<text x="66" y="784" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="12" fill="#111110">EC2 から PC へ返す</text>
+<circle cx="162" cy="118" r="9" fill="#FFFFFF" stroke="#111110" stroke-width="1.5"/><text x="162" y="122" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="11" fill="#111110" font-weight="700" text-anchor="middle">1</text>
+<circle cx="162" cy="352" r="9" fill="#FFFFFF" stroke="#111110" stroke-width="1.5"/><text x="162" y="356" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="11" fill="#111110" font-weight="700" text-anchor="middle">2</text>
+<circle cx="330" cy="436" r="9" fill="#FFFFFF" stroke="#111110" stroke-width="1.5"/><text x="330" y="440" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="11" fill="#111110" font-weight="700" text-anchor="middle">3</text>
+<circle cx="162" cy="584" r="9" fill="#FFFFFF" stroke="#111110" stroke-width="1.5"/><text x="162" y="588" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="11" fill="#111110" font-weight="700" text-anchor="middle">4</text>
+<circle cx="50" cy="771" r="9" fill="#FFFFFF" stroke="#111110" stroke-width="1.5"/><text x="50" y="775" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="11" fill="#111110" font-weight="700" text-anchor="middle">5</text>
 </svg>
   </div>
-  <figcaption>fig.1 fukuda-nwc-poc の構成。通信はすべて TLS 443。番号は「通信の順番」に対応する</figcaption>
+  <figcaption>fig.1 EC2 のチャット Web から LLM と会話するときの流れ。通信はすべて TLS 443。番号は「会話 1 往復の流れ」に対応する</figcaption>
 </figure>
 
-<h2 id="flow">通信の順番</h2>
+<h2 id="flow">会話 1 往復の流れ</h2>
 
 <ol>
-  <li><strong>PC がセッションを張る。</strong><code>aws ssm start-session</code>（<code>AWS-StartPortForwardingSession</code>）が、社内ネットワーク経由で ssm / ssmmessages エンドポイントへつなぎます。入れるかどうかは IAM の <code>ssm:StartSession</code> で決まり、CloudTrail に残ります。</li>
-  <li><strong>EC2 は内側からつなぎに行く。</strong>SSM Agent が ssmmessages へ接続し、PC の <code>localhost:8080</code> を EC2 の <code>127.0.0.1:8080</code> へ転送します。EC2 のセキュリティグループに受信ルールは要りません。</li>
-  <li><strong>チャット Web が Runtime を呼ぶ。</strong>AWS CLI の <code>invoke-agent-runtime</code> を bedrock-agentcore エンドポイントへ送ります。署名はインスタンスロールで行い、ブラウザには認証情報を置きません。AgentCore が VPC 内の Runtime にリクエストを渡します。</li>
-  <li><strong>Runtime が Bedrock を呼ぶ。</strong>bedrock-runtime エンドポイント経由で Converse を呼びます。モデルは <code>jp.anthropic.claude-haiku-4-5-20251001-v1:0</code>（パラメータ <code>ModelId</code>）です。ログは logs エンドポイントへ送ります。</li>
-  <li><strong>Runtime の起動時。</strong>ecr.api / ecr.dkr でイメージの情報を取り、レイヤーの実体は S3 ゲートウェイから取ります。</li>
-  <li><strong>EC2 の起動時。</strong>dnf が S3 ゲートウェイ経由で AL2023 のリポジトリから <code>python3.13</code> を入れます（<code>/usr/bin/python3</code> は 3.9 のため）。S3 ゲートウェイのポリシーは、ECR のレイヤーと AL2023 リポジトリの 2 つのバケットの読み取りだけを許します。</li>
+  <li><strong>PC から EC2 の画面を開く。</strong><code>aws ssm start-session</code> のポートフォワーディングで、PC の <code>localhost:8080</code> を EC2 の <code>127.0.0.1:8080</code> へつなぎます。EC2 のセキュリティグループに受信ルールは要りません。</li>
+  <li><strong>EC2 がエージェントを呼ぶ。</strong>チャット Web が質問と会話 ID を <code>InvokeAgentRuntime</code> で送ります。署名は EC2 のインスタンスロールで行い、ブラウザには認証情報を置きません。</li>
+  <li><strong>エージェントが資料を検索する。</strong>質問文で Knowledge Base の <code>Retrieve</code> を呼びます。検索は <code>HYBRID</code> 指定で、OpenSearch Serverless がベクトル検索とキーワード検索を合わせた上位 5 件を返します。</li>
+  <li><strong>エージェントがモデルに尋ねる。</strong>資料と質問をまとめて <code>Converse</code> に渡します。ガードレールがまず質問を判定し、通れば Claude Haiku 4.5 が資料をもとに答え、その回答もガードレールが判定します。</li>
+  <li><strong>回答を返す。</strong>回答の末尾に参照した md のファイル名を付け、EC2 を経由してブラウザに表示します。ガードレールが止めたときは定型文を返し、その往復は会話の履歴に残しません。</li>
 </ol>
 
-<h2 id="resources">作るリソース</h2>
-
-<h3>ecr.yaml（先にデプロイする）</h3>
-
-<table>
-  <tr><th class="mb-rowlabel">リソース</th><th>中身</th><th class="mb-rowlabel">作る条件</th></tr>
-  <tr><td class="mb-rowlabel">ECR リポジトリ</td><td><code>fukuda-nwc-poc-agent</code>、タグの上書き禁止、最新 5 個を残す</td><td class="mb-rowlabel">常に</td></tr>
-</table>
-
-<h3>main.yaml</h3>
-
-<table>
-  <tr><th class="mb-rowlabel">リソース</th><th>中身</th><th class="mb-rowlabel">作る条件</th></tr>
-  <tr><td class="mb-rowlabel">Interface エンドポイント</td><td>ecr.api / ecr.dkr / logs / bedrock-runtime（2 AZ）</td><td class="mb-rowlabel"><code>CreateRuntimeEndpoints</code></td></tr>
-  <tr><td class="mb-rowlabel">Interface エンドポイント</td><td>ssm / ssmmessages（1 AZ）</td><td class="mb-rowlabel"><code>CreateSsmEndpoints</code></td></tr>
-  <tr><td class="mb-rowlabel">Interface エンドポイント</td><td>bedrock-agentcore（1 AZ）</td><td class="mb-rowlabel"><code>CreateAgentCoreEndpoint</code></td></tr>
-  <tr><td class="mb-rowlabel">S3 ゲートウェイ</td><td>ECR のレイヤーと AL2023 リポジトリの読み取りだけ</td><td class="mb-rowlabel"><code>CreateS3GatewayEndpoint</code></td></tr>
-  <tr><td class="mb-rowlabel">セキュリティグループ</td><td><code>-web</code>（送信 443 のみ）、<code>-runtime</code>（送信 443 のみ）、<code>-endpoints</code>（web と runtime から 443）</td><td class="mb-rowlabel">常に</td></tr>
-  <tr><td class="mb-rowlabel">セキュリティグループ</td><td><code>-client</code>（社内から ssm 系エンドポイントへ 443）</td><td class="mb-rowlabel"><code>ClientCidr</code> 指定時</td></tr>
-  <tr><td class="mb-rowlabel">AgentCore Runtime</td><td><code>fukuda_nwc_poc_agent</code>、VPC モード、アイドル 300 秒で停止</td><td class="mb-rowlabel">常に</td></tr>
-  <tr><td class="mb-rowlabel">IAM ロール</td><td><code>-runtime</code>（ECR の取得、ログ、Bedrock の呼び出し）</td><td class="mb-rowlabel">常に</td></tr>
-  <tr><td class="mb-rowlabel">IAM ロール</td><td><code>-web</code>（SSM の管理と、この Runtime の呼び出しだけ）</td><td class="mb-rowlabel">常に</td></tr>
-  <tr><td class="mb-rowlabel">EC2</td><td><code>fukuda-nwc-poc-web</code>、t4g.micro、gp3 8 GB 暗号化、IMDSv2 必須</td><td class="mb-rowlabel">常に</td></tr>
-</table>
-
 <p>
-組織で既にエンドポイントを持っている場合は、<code>Create*</code> を <code>false</code> にして既存のものを使えます。
+手順書の md は、会話とは別に利用者が S3 に置き、取り込みジョブを流して OpenSearch Serverless に入れます。Knowledge Base は S3 を自動では見に行きません。
 </p>
 
-<h2 id="cost">費用とタグ</h2>
+<h2 id="points">検索とガードレールの決めごと</h2>
+
+<table>
+  <tr><th class="mb-rowlabel">決めたこと</th><th>理由</th></tr>
+  <tr><td class="mb-rowlabel">検索はハイブリッド</td><td><code>%BGP-5-ADJCHANGE</code> のようなログの文字列やコマンド名は、意味の近さより文字の一致で当たるため</td></tr>
+  <tr><td class="mb-rowlabel">OpenSearch は Bedrock が呼ぶ</td><td>エージェントに要る権限が <code>bedrock:Retrieve</code> だけになり、VPC から出る先も bedrock-agent-runtime エンドポイントだけで済むため</td></tr>
+  <tr><td class="mb-rowlabel">判定するのは質問と回答だけ</td><td>資料まで判定すると、手順書の「攻撃」「遮断」のような語で止まりやすく、判定の課金も増えるため</td></tr>
+  <tr><td class="mb-rowlabel">ガードレールは Standard 階層</td><td>Classic 階層は日本語を判定できないため。判定は東京以外の APAC リージョンで行われることがある</td></tr>
+  <tr><td class="mb-rowlabel">個人情報フィルタは入れない</td><td>IP アドレスやホスト名を伏せてしまい、運用の回答が壊れるため</td></tr>
+</table>
+
+<h2 id="cost">費用</h2>
 
 <div class="mb-grid-3">
   <div class="mb-card">
     <div class="mb-card-title">置いておくだけ</div>
-    <p><strong>1 時間 ≈ $0.17</strong>（約 25 円）</p>
-    <p>Interface エンドポイント 11 本分（AZ ごとに数える）× $0.014 がほぼ全部です。EC2 と EBS は約 $0.012 です。</p>
+    <p><strong>1 時間 ≈ $0.52</strong>（約 79 円）</p>
+    <p>OpenSearch Serverless の最小 1 OCU 分が $0.33、エンドポイントが約 $0.18 です。</p>
   </div>
   <div class="mb-card">
     <div class="mb-card-title">会話しながら</div>
-    <p><strong>1 時間 ≈ $0.51</strong>（約 77 円）</p>
-    <p>1 人が 1 分に 1 回話す想定です。上に Haiku 4.5 のトークン、Runtime の CPU とメモリ、ログが乗ります。</p>
+    <p><strong>1 時間 ≈ $0.99</strong>（約 148 円）</p>
+    <p>1 人が 1 分に 1 回話す想定です。上にモデルのトークン、ガードレール、Runtime の実行時間が乗ります。</p>
   </div>
   <div class="mb-card">
     <div class="mb-card-title">1 か月置いたまま</div>
-    <p><strong>≈ $121</strong>（約 18,200 円）</p>
+    <p><strong>≈ $383</strong>（約 57,400 円）</p>
     <p>EC2 を止めてもほとんど減りません。使わない期間はスタックごと消します。</p>
   </div>
 </div>
 
 <p>
 東京リージョンの税抜単価で、2026-09-14 に AWS Price List API で確認しました。$1 = 150 円で換算しています。
-エンドポイントを全部既存のもので賄う場合、置いておくだけの費用は月 $9 程度になります。
-</p>
-
-<p>
-タグを付けられるリソースには、全部に次の 3 つを付けます。
-</p>
-
-<p><span class="mb-chip">Project=fukuda-nwc-poc</span> <span class="mb-chip">owner=fukuda</span> <span class="mb-chip">Name</span></p>
-
-<p>
-IAM インスタンスプロファイル、EC2 の ENI、AgentCore が作るロググループと ENI にはタグが付きません。
-ロググループだけは、デプロイ後に保持期間と一緒に手で付けます。
+ガードレールの Standard 階層に別の単価があるかは確認できていません。
 </p>
 
 <h2 id="deploy">デプロイから会話まで</h2>
@@ -275,15 +183,11 @@ IAM インスタンスプロファイル、EC2 の ENI、AgentCore が作るロ�
 <ol>
   <li><code>ecr.yaml</code> をデプロイして ECR リポジトリを作る</li>
   <li>arm64 のエージェントイメージをビルドして push する</li>
-  <li><code>main.yaml</code> をデプロイする（VPC、サブネット、ルートテーブル、イメージの URI を渡す）</li>
-  <li>Runtime のロググループに保持期間とタグを付ける</li>
-  <li>利用者に <code>ssm:StartSession</code> の権限を渡す</li>
+  <li><code>main.yaml</code> をデプロイする。<code>KbAdminPrincipalArn</code> にデプロイする人の IAM ロールの ARN を渡す</li>
+  <li><code>kb-docs/</code> の md を S3 に置き、取り込みジョブを流す</li>
+  <li>Runtime のロググループに保持期間とタグを付け、利用者に <code>ssm:StartSession</code> の権限を渡す</li>
   <li>PC でポートフォワーディングを始め、ブラウザで <code>http://localhost:8080/</code> を開く</li>
 </ol>
-
-<p>
-6 の手順で PC から打つコマンドは次のとおりです。インスタンス ID はスタックの出力から取ります。
-</p>
 
 <pre><code class="language-bash">aws ssm start-session --region ap-northeast-1 \
   --target i-0123456789abcdef0 \
@@ -291,30 +195,21 @@ IAM インスタンスプロファイル、EC2 の ENI、AgentCore が作るロ�
   --parameters '{"portNumber":["8080"],"localPortNumber":["8080"]}'</code></pre>
 
 <p>
-各手順のコマンドは、リポジトリの README にあります。
+各手順のコマンドは、<a href="https://github.com/eddie-eights/cf-netops-sandbox" target="_blank" rel="noopener">リポジトリの README</a> にあります。
 </p>
 
-<h2 id="limits">補足と確認できていないこと</h2>
+<h2 id="limits">確認できていないこと</h2>
 
 <p>
-テンプレートは <code>cfn-lint</code> を通し、EC2 のチャット Web は Python 3.13 で模擬テストしました。
+テンプレートは <code>cfn-lint</code> を通し、エージェントは boto3 を差し替えた模擬テスト（17 項目）を通しました。
 ただし、AWS 上にはまだデプロイしていません。次の点は実環境で確かめる必要があります。
 </p>
 
 <ul>
-  <li>閉域の EC2 から、S3 ゲートウェイ経由で AL2023 のリポジトリに届き、<code>dnf install python3.13</code> が通るか</li>
-  <li>VPC モードの Runtime が、イメージの取得に VPC 内の ECR / S3 エンドポイントを使うのか、サービス側で取得するのか（安全側に倒してエンドポイントを作る設定を既定にした）</li>
-  <li>SSM Agent のポートフォワーディングが <code>localhost</code> を IPv6 で先に試すか（Web は <code>127.0.0.1</code> だけで待つ）</li>
-  <li>Session Manager plugin が社内プロキシの環境変数に従うか</li>
-  <li>Runtime のロググループが作られるタイミング</li>
-</ul>
-
-<p>この構成に入っていないものもあります。</p>
-
-<ul>
-  <li>会話の永続化。履歴は Runtime のセッションの中にだけあり、アイドル 5 分か画面の再読み込みで消える</li>
-  <li>チャット Web のログの CloudWatch Logs 転送</li>
-  <li>多人数の同時利用。t4g.micro で数人程度まで</li>
+  <li>OpenSearch Serverless のアクセスポリシーの反映待ちで、インデックスの作成が 403 にならないか</li>
+  <li>既定のアナライザで、日本語の質問にキーワード検索がどれだけ効くか</li>
+  <li>閉域の EC2 から、S3 ゲートウェイ経由で <code>dnf install python3.13</code> が通るか</li>
+  <li>VPC モードの Runtime が、イメージの取得に VPC 内の ECR / S3 エンドポイントを使うか</li>
 </ul>
 
 </div><!-- /.mb-main -->
@@ -324,16 +219,15 @@ IAM インスタンスプロファイル、EC2 の ENI、AgentCore が作るロ�
   <table>
     <tr><th>用語</th><th>定義</th></tr>
     <tr><td>閉域</td><td>インターネットへの出入口を持たないネットワーク。ここでは IGW と NAT の無い VPC を指す。</td></tr>
-    <tr><td>Interface エンドポイント</td><td>VPC のサブネットに ENI を置き、AWS のサービスへプライベート IP で届くようにする仕組み。AZ ごとに時間課金がある。</td></tr>
-    <tr><td>ゲートウェイエンドポイント</td><td>ルートテーブルに経路を足して S3 などへ届くようにする仕組み。無料。</td></tr>
-    <tr><td>ENI</td><td>Elastic Network Interface。サブネットに置く仮想のネットワークカード。</td></tr>
-    <tr><td>Session Manager</td><td>Systems Manager の機能。受信ポートを開けずに、インスタンスへのシェルやポート転送を張る。</td></tr>
-    <tr><td>ポートフォワーディング</td><td>PC のポートへの接続を、別のマシンのポートへ中継すること。</td></tr>
-    <tr><td>AgentCore Runtime</td><td>Bedrock AgentCore の実行基盤。エージェントのコンテナをセッション単位で起動する。</td></tr>
-    <tr><td>VPC モード</td><td>Runtime のネットワーク設定の一つ。指定したサブネットに ENI を置き、VPC の中から通信させる。</td></tr>
-    <tr><td>推論プロファイル</td><td>Bedrock のモデル呼び出しを複数リージョンへ振り分ける設定。<code>jp.</code> は東京と大阪。</td></tr>
-    <tr><td>IMDSv2</td><td>EC2 のメタデータをトークン付きでだけ読めるようにする方式。</td></tr>
-    <tr><td>セキュリティグループ</td><td>ENI ごとに受信と送信を許可するファイアウォール。</td></tr>
+    <tr><td>VPC エンドポイント</td><td>VPC の中から AWS のサービスへプライベート IP で届くようにする仕組み。Interface 型は AZ ごとに時間課金がある。</td></tr>
+    <tr><td>ポートフォワーディング</td><td>PC のポートへの接続を、別のマシンのポートへ中継すること。ここでは Session Manager が行う。</td></tr>
+    <tr><td>AgentCore Runtime</td><td>Bedrock AgentCore の実行基盤。エージェントのコンテナを会話ごとに起動する。</td></tr>
+    <tr><td>Knowledge Base</td><td>文書を取り込んで検索できるようにする Bedrock の機能。検索結果をモデルに渡す材料にする。</td></tr>
+    <tr><td>OpenSearch Serverless</td><td>サーバーを管理しない OpenSearch。ここでは Knowledge Base のベクトルと本文の置き場。</td></tr>
+    <tr><td>ハイブリッド検索</td><td>意味の近さで探すベクトル検索と、文字の一致で探すキーワード検索を合わせる方式。</td></tr>
+    <tr><td>OCU</td><td>OpenSearch Compute Unit。OpenSearch Serverless の処理能力と課金の単位。</td></tr>
+    <tr><td>ガードレール</td><td>Bedrock Guardrails。モデルへの入力と出力を判定し、有害な内容やプロンプト攻撃を止める。</td></tr>
+    <tr><td>推論プロファイル</td><td>モデル呼び出しを複数リージョンへ振り分ける設定。<code>jp.</code> は東京と大阪。</td></tr>
   </table>
 </aside>
 
