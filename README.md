@@ -15,7 +15,7 @@ EC2 のセキュリティグループに**受信ルールは 1 つも無い**。
   │   ─ TLS（WebSocket）─▶ ssmmessages エンドポイント
   ▼
 EC2（AL2023 arm64、プライベートサブネット、受信ルールなし）
-  │ SSM Agent → 127.0.0.1:8080 のチャット Web（Python 3.12 標準ライブラリ）
+  │ SSM Agent → 127.0.0.1:8080 のチャット Web（Python 3.13 標準ライブラリ）
   │ aws bedrock-agentcore invoke-agent-runtime（インスタンスロールで署名）
   ▼ bedrock-agentcore エンドポイント
 AgentCore Runtime（VPC モード）
@@ -27,7 +27,7 @@ Bedrock Converse（jp 推論プロファイル）
 |---|---|
 | `ecr.yaml` | エージェントイメージの ECR リポジトリ。先にデプロイする |
 | `main.yaml` | VPC エンドポイント / AgentCore Runtime / EC2（チャット Web は UserData に埋め込み）/ IAM |
-| `agent/` | Runtime に載せるコンテナ（Python 3.12、`bedrock-agentcore` SDK、arm64） |
+| `agent/` | Runtime に載せるコンテナ（Python 3.13、`bedrock-agentcore` SDK、arm64） |
 
 ## なぜこの形にしたか
 
@@ -136,7 +136,7 @@ ENI にタグが付かず上で何も出ないときは、`aws ec2 describe-vpc-
 このテンプレートは ECR のレイヤー置き場（`prod-ap-northeast-1-starport-layer-bucket`）と AL2023 の dnf リポジトリ（`al2023-repos-ap-northeast-1-de612dc2`）の読み取りだけを許すので、
 他のシステムと共有のルートテーブルに付けると、そのシステムの S3 アクセスが止まる。専用サブネットか、既存のゲートウェイを使う。
 
-**EC2 も S3 ゲートウェイを通る。**AL2023 の `/usr/bin/python3` は 3.9 のままなので、起動時に `dnf install python3.12` で 3.12 を入れる。dnf のリポジトリは S3 にあるため、`RouteTableIds` には `InstanceSubnetId` のルートテーブルも入れる（Runtime と同じなら 1 つでよい）。既存のゲートウェイを使う（`CreateS3GatewayEndpoint=false`）ときは、そのポリシーが `arn:aws:s3:::al2023-repos-ap-northeast-1-de612dc2/*` の `s3:GetObject` を許しているか確かめる。
+**EC2 も S3 ゲートウェイを通る。**AL2023 の `/usr/bin/python3` は 3.9 のままなので、起動時に `dnf install python3.13` で 3.13 を入れる。dnf のリポジトリは S3 にあるため、`RouteTableIds` には `InstanceSubnetId` のルートテーブルも入れる（Runtime と同じなら 1 つでよい）。既存のゲートウェイを使う（`CreateS3GatewayEndpoint=false`）ときは、そのポリシーが `arn:aws:s3:::al2023-repos-ap-northeast-1-de612dc2/*` の `s3:GetObject` を許しているか確かめる。
 
 ## 手順
 
@@ -277,7 +277,7 @@ PC の 8080 が使用中なら `localPortNumber` を変え、URL のポートも
 | `start-session` がタイムアウトする / 名前が解決できない | PC から ssm / ssmmessages に届いていない（前提の「利用者の PC 側」） |
 | `TargetNotConnected` | インスタンスが登録されていない。ssm / ssmmessages エンドポイントとその SG、インスタンスロール、手順 6 の `PingStatus`。起動直後は数分待つ。SSM Agent が 3.3.40.0 より古いと `ec2messages` エンドポイントも要る |
 | `AccessDeniedException`（start-session） | 手順 5 の権限。インスタンスに `Project` タグがあるか |
-| ブラウザが「接続できない」 | Web が落ちている。管理者がシェルで入り `sudo systemctl status fukuda-nwc-poc-web` と `sudo journalctl -u fukuda-nwc-poc-web -n 100`。起動時の失敗は `/var/log/cloud-init-output.log`。`python3.12` のインストールで止まっていたら S3 ゲートウェイ（前提の「既存の VPC エンドポイントがある場合」） |
+| ブラウザが「接続できない」 | Web が落ちている。管理者がシェルで入り `sudo systemctl status fukuda-nwc-poc-web` と `sudo journalctl -u fukuda-nwc-poc-web -n 100`。起動時の失敗は `/var/log/cloud-init-output.log`。`python3.13` のインストールで止まっていたら S3 ゲートウェイ（前提の「既存の VPC エンドポイントがある場合」） |
 | `403` の JSON | `localhost` 以外の名前で開いている。`http://localhost:<ポート>/` で開く |
 | 送信すると `502` | journald の `invoke failed:` の行。`AccessDenied` は Runtime の ARN とインスタンスロール、`Could not connect to the endpoint URL` は bedrock-agentcore エンドポイントと SG、`invalid choice` は AMI の CLI が古い。その先は Runtime のログ |
 | 送信すると `504` | Runtime が 120 秒で返らなかった。初回のセッション起動が遅い場合は再送する |
@@ -348,16 +348,16 @@ aws logs delete-log-group --region ap-northeast-1 --log-group-name "$LOG_GROUP"
 確認したこと（2026-09-14）。
 
 - `cfn-lint` で `ecr.yaml` / `main.yaml` にエラー・警告なし。
-- UserData を展開したシェルが `bash -n` を通る。Web サーバは Python 3.12 で、偽の `aws` コマンドを使って、画面の配信・チャット・Host の拒否・入力検証・失敗時の 502 を確かめた。
+- UserData を展開したシェルが `bash -n` を通る。Web サーバは Python 3.13 で、偽の `aws` コマンドを使って、画面の配信・チャット・Host の拒否・入力検証・失敗時の 502 を確かめた。
 - 東京で ssm / ssmmessages / bedrock-agentcore のエンドポイントサービスが 1a / 1c / 1d にあり、プライベート DNS に対応している。
 - AL2023（2023.12.20260817）の AWS CLI は 2.33.15 で、`bedrock-agentcore invoke-agent-runtime` を持つ。
-- AL2023 のパッケージ一覧に `python3.12` がある。`/usr/bin/python3` は 3.9 のまま（https://docs.aws.amazon.com/linux/al2023/ug/python.html ）。
-- `bedrock-agentcore` 1.23.0 は Python 3.10 以上（PyPI の `requires_python`）。
+- AL2023 のパッケージ一覧に `python3.13` がある。`/usr/bin/python3` は 3.9 のまま（https://docs.aws.amazon.com/linux/al2023/ug/python.html ）。
+- `bedrock-agentcore` 1.23.0 は Python 3.10 以上で、3.13 を対応版に挙げている（PyPI の `requires_python` と classifiers）。
 
 確認できていないこと。
 
 - **実環境へのデプロイ。**上はすべて手元の静的検査と模擬テストで、AWS 上では動かしていない。
-- 閉域の EC2 から、S3 ゲートウェイ経由で AL2023 のリポジトリに届き `dnf install python3.12` が通るか（バケット名は AWS の文書の例から取った）。
+- 閉域の EC2 から、S3 ゲートウェイ経由で AL2023 のリポジトリに届き `dnf install python3.13` が通るか（バケット名は AWS の文書の例から取った）。
 - VPC モードの Runtime が、イメージの取得に VPC 内の ECR / S3 エンドポイントを使うのか、サービス側で取得するのか。安全側に倒してエンドポイントを作る設定を既定にした。
 - SSM Agent のポートフォワーディングが `localhost` を IPv6（`::1`）で先に試すか。Web は `127.0.0.1` だけで待つ。つながらない場合は journald とセッションのエラーを見る。
 - Session Manager plugin が社内プロキシの環境変数に従うか。

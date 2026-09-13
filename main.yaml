@@ -258,7 +258,7 @@ Resources:
       ServiceName: !Sub com.amazonaws.${AWS::Region}.s3
       VpcEndpointType: Gateway
       RouteTableIds: !Ref RouteTableIds
-      # ECR のレイヤー置き場（Runtime のイメージ取得）と AL2023 の dnf リポジトリ（EC2 に python3.12 を入れる）だけを許す。
+      # ECR のレイヤー置き場（Runtime のイメージ取得）と AL2023 の dnf リポジトリ（EC2 に python3.13 を入れる）だけを許す。
       # 同じルートテーブルを使う他のワークロードの S3 アクセスもこの制限を受けるので、専用サブネットを推奨
       PolicyDocument:
         Version: "2012-10-17"
@@ -516,8 +516,8 @@ Resources:
 
           #!/bin/bash
           set -euo pipefail
-          # /usr/bin/python3 は 3.9 のまま（AL2023 の仕様）。3.12 を別に入れる。取得経路は S3 ゲートウェイエンドポイント
-          command -v python3.12 >/dev/null || dnf install -y python3.12
+          # /usr/bin/python3 は 3.9 のまま（AL2023 の仕様）。3.13 を別に入れる。取得経路は S3 ゲートウェイエンドポイント
+          command -v python3.13 >/dev/null || dnf install -y python3.13
           install -d -m 0755 /opt/${NamePrefix}-web
 
           cat > /etc/${NamePrefix}-web.env <<'__ENV__'
@@ -534,7 +534,7 @@ Resources:
 
           [Service]
           EnvironmentFile=/etc/${NamePrefix}-web.env
-          ExecStart=/usr/bin/python3.12 /opt/${NamePrefix}-web/server.py
+          ExecStart=/usr/bin/python3.13 /opt/${NamePrefix}-web/server.py
           DynamicUser=yes
           StateDirectory=${NamePrefix}-web
           Environment=HOME=/var/lib/${NamePrefix}-web
@@ -634,7 +634,7 @@ Resources:
           cat > /opt/${NamePrefix}-web/server.py <<'__SERVER_PY__'
           """Chat web. Listens on 127.0.0.1 only; users reach it through SSM port forwarding.
 
-          Python 3.12, standard library only (no internet here, so no pip). The runtime is invoked with the
+          Python 3.13, standard library only (no internet here, so no pip). The runtime is invoked with the
           preinstalled AWS CLI v2, which signs the request with the instance role.
           """
           import json
