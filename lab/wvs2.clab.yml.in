@@ -1,0 +1,180 @@
+# キャリアの閉域網（WVS2 相当）を模した多拠点 L3 ネットワーク（すべて架空のアドレス）
+#
+# これはテンプレート。__FRR_IMAGE__ などは lab.sh render が ECR の URI に置き換えて wvs2.clab.yml を作る。
+# EC2 は閉域で quay.io / ghcr.io に届かないため、イメージは ECR から取る（ecr.yaml）。
+#
+#   hq-ce-01 ─ 主回線 ─ carrier-pe-01 ┐
+#          └─ 副回線 ─ carrier-pe-02 ┤  AS 65000（キャリア網の代役）
+#   br1-ce-01 ───────── carrier-pe-01 ┤
+#   dc-ce-01  ───────── carrier-pe-02 ┤
+#   br2-ce-01 ───────── carrier-pe-02 ┘
+#
+# 機器名は <site>-<role>-<連番2桁>。snmpd の sysName も同じ値なので、
+# collector は SNMP 側の sysName で devices テーブルと突き合わせられる。
+name: wvs2
+
+mgmt:
+  # 名前と subnet を固定する（EC2 の中だけの docker network。VPC には出ない）
+  network: netops-lab
+  ipv4-subnet: 203.0.113.0/24
+
+topology:
+  defaults:
+    env:
+      TZ: Asia/Tokyo
+
+  kinds:
+    linux:
+      sysctls:
+        net.ipv4.ip_forward: 1
+
+  nodes:
+    # ---------- キャリア網（AS 65000）----------
+    carrier-pe-01:
+      kind: linux
+      image: __FRR_IMAGE__
+      group: carrier
+      mgmt-ipv4: 203.0.113.101
+      binds:
+        - frr/daemons:/etc/frr/daemons
+        - frr/vtysh.conf:/etc/frr/vtysh.conf
+        - frr/carrier-pe-01.conf:/etc/frr/frr.conf
+
+    carrier-pe-02:
+      kind: linux
+      image: __FRR_IMAGE__
+      group: carrier
+      mgmt-ipv4: 203.0.113.102
+      binds:
+        - frr/daemons:/etc/frr/daemons
+        - frr/vtysh.conf:/etc/frr/vtysh.conf
+        - frr/carrier-pe-02.conf:/etc/frr/frr.conf
+
+    # ---------- 本社（2 回線）----------
+    hq-ce-01:
+      kind: linux
+      image: __FRR_IMAGE__
+      group: hq
+      mgmt-ipv4: 203.0.113.11
+      binds:
+        - frr/daemons:/etc/frr/daemons
+        - frr/vtysh.conf:/etc/frr/vtysh.conf
+        - frr/hq-ce-01.conf:/etc/frr/frr.conf
+
+    hq-snmp-01:
+      # CE の netns に相乗りするので、CE の実インタフェースがそのまま ifTable に出る。
+      # 回線を落とすと ifOperStatus が本当に down になる（模擬値ではない）
+      kind: linux
+      image: __SNMPD_IMAGE__
+      group: hq
+      network-mode: container:hq-ce-01
+      binds:
+        - snmpd/hq-ce-01.conf:/etc/snmp/snmpd.conf:ro
+
+    hq-host-01:
+      kind: linux
+      image: __MULTITOOL_IMAGE__
+      group: hq
+      mgmt-ipv4: 203.0.113.21
+      exec:
+        - ip addr add 10.1.0.10/24 dev eth1
+        - ip route add 10.0.0.0/8 via 10.1.0.1 dev eth1
+
+    # ---------- データセンタ ----------
+    dc-ce-01:
+      kind: linux
+      image: __FRR_IMAGE__
+      group: dc
+      mgmt-ipv4: 203.0.113.12
+      binds:
+        - frr/daemons:/etc/frr/daemons
+        - frr/vtysh.conf:/etc/frr/vtysh.conf
+        - frr/dc-ce-01.conf:/etc/frr/frr.conf
+
+    dc-snmp-01:
+      kind: linux
+      image: __SNMPD_IMAGE__
+      group: dc
+      network-mode: container:dc-ce-01
+      binds:
+        - snmpd/dc-ce-01.conf:/etc/snmp/snmpd.conf:ro
+
+    dc-host-01:
+      kind: linux
+      image: __MULTITOOL_IMAGE__
+      group: dc
+      mgmt-ipv4: 203.0.113.22
+      exec:
+        - ip addr add 10.2.0.10/24 dev eth1
+        - ip route add 10.0.0.0/8 via 10.2.0.1 dev eth1
+
+    # ---------- 支店 1 ----------
+    br1-ce-01:
+      kind: linux
+      image: __FRR_IMAGE__
+      group: br1
+      mgmt-ipv4: 203.0.113.13
+      binds:
+        - frr/daemons:/etc/frr/daemons
+        - frr/vtysh.conf:/etc/frr/vtysh.conf
+        - frr/br1-ce-01.conf:/etc/frr/frr.conf
+
+    br1-snmp-01:
+      kind: linux
+      image: __SNMPD_IMAGE__
+      group: br1
+      network-mode: container:br1-ce-01
+      binds:
+        - snmpd/br1-ce-01.conf:/etc/snmp/snmpd.conf:ro
+
+    br1-host-01:
+      kind: linux
+      image: __MULTITOOL_IMAGE__
+      group: br1
+      mgmt-ipv4: 203.0.113.23
+      exec:
+        - ip addr add 10.3.0.10/24 dev eth1
+        - ip route add 10.0.0.0/8 via 10.3.0.1 dev eth1
+
+    # ---------- 支店 2 ----------
+    br2-ce-01:
+      kind: linux
+      image: __FRR_IMAGE__
+      group: br2
+      mgmt-ipv4: 203.0.113.14
+      binds:
+        - frr/daemons:/etc/frr/daemons
+        - frr/vtysh.conf:/etc/frr/vtysh.conf
+        - frr/br2-ce-01.conf:/etc/frr/frr.conf
+
+    br2-snmp-01:
+      kind: linux
+      image: __SNMPD_IMAGE__
+      group: br2
+      network-mode: container:br2-ce-01
+      binds:
+        - snmpd/br2-ce-01.conf:/etc/snmp/snmpd.conf:ro
+
+    br2-host-01:
+      kind: linux
+      image: __MULTITOOL_IMAGE__
+      group: br2
+      mgmt-ipv4: 203.0.113.24
+      exec:
+        - ip addr add 10.4.0.10/24 dev eth1
+        - ip route add 10.0.0.0/8 via 10.4.0.1 dev eth1
+
+  links:
+    # WAN（アクセス回線）
+    - endpoints: ["hq-ce-01:eth1", "carrier-pe-01:eth1"]      # 172.16.1.0/30  本社 主
+    - endpoints: ["hq-ce-01:eth2", "carrier-pe-02:eth1"]      # 172.16.2.0/30  本社 副
+    - endpoints: ["dc-ce-01:eth1", "carrier-pe-02:eth2"]      # 172.16.3.0/30
+    - endpoints: ["br1-ce-01:eth1", "carrier-pe-01:eth2"]     # 172.16.4.0/30
+    - endpoints: ["br2-ce-01:eth1", "carrier-pe-02:eth3"]     # 172.16.5.0/30
+    # キャリア網のコア
+    - endpoints: ["carrier-pe-01:eth5", "carrier-pe-02:eth5"] # 172.16.255.0/30
+    # 拠点 LAN
+    - endpoints: ["hq-ce-01:eth3", "hq-host-01:eth1"]         # 10.1.0.0/24
+    - endpoints: ["dc-ce-01:eth2", "dc-host-01:eth1"]         # 10.2.0.0/24
+    - endpoints: ["br1-ce-01:eth2", "br1-host-01:eth1"]       # 10.3.0.0/24
+    - endpoints: ["br2-ce-01:eth2", "br2-host-01:eth1"]       # 10.4.0.0/24

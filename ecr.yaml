@@ -1,5 +1,7 @@
 AWSTemplateFormatVersion: "2010-09-09"
-Description: fukuda-nwc-poc - ECR repository for the AgentCore Runtime agent image. Deploy this first, push the image, then deploy main.yaml.
+Description: >-
+  fukuda-nwc-poc - ECR repositories for the AgentCore Runtime agent image and (optionally) the three lab images
+  used by lab.yaml (FRR, snmpd, network-multitool). Deploy this first, push the images, then deploy main.yaml / lab.yaml.
 
 Parameters:
   NamePrefix:
@@ -12,6 +14,14 @@ Parameters:
     Default: fukuda
     AllowedPattern: "^[A-Za-z0-9._-]{1,64}$"
     Description: Value of the owner tag. Use the same value in main.yaml.
+  CreateLabRepositories:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: Also create the three repositories for the lab images pulled by lab.yaml (frr, snmpd, multitool). Set false if you do not deploy lab.yaml.
+
+Conditions:
+  LabCond: !Equals [!Ref CreateLabRepositories, "true"]
 
 Resources:
   AgentRepository:
@@ -47,7 +57,69 @@ Resources:
         - { Key: Project, Value: !Ref NamePrefix }
         - { Key: owner, Value: !Ref Owner }
 
+  # ---------------------------------------------------------------- lab images (lab.yaml)
+  # 閉域なので EC2 は quay.io / ghcr.io に届かない。手元で arm64 のイメージを pull（snmpd は build）して、ここへ push する（README の lab の手順）
+  FrrRepository:
+    Type: AWS::ECR::Repository
+    Condition: LabCond
+    Properties:
+      RepositoryName: !Sub ${NamePrefix}-lab-frr
+      ImageTagMutability: IMMUTABLE
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      EncryptionConfiguration:
+        EncryptionType: AES256
+      EmptyOnDelete: true
+      Tags:
+        - { Key: Name, Value: !Sub "${NamePrefix}-lab-frr" }
+        - { Key: Project, Value: !Ref NamePrefix }
+        - { Key: owner, Value: !Ref Owner }
+
+  SnmpdRepository:
+    Type: AWS::ECR::Repository
+    Condition: LabCond
+    Properties:
+      RepositoryName: !Sub ${NamePrefix}-lab-snmpd
+      ImageTagMutability: IMMUTABLE
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      EncryptionConfiguration:
+        EncryptionType: AES256
+      EmptyOnDelete: true
+      Tags:
+        - { Key: Name, Value: !Sub "${NamePrefix}-lab-snmpd" }
+        - { Key: Project, Value: !Ref NamePrefix }
+        - { Key: owner, Value: !Ref Owner }
+
+  MultitoolRepository:
+    Type: AWS::ECR::Repository
+    Condition: LabCond
+    Properties:
+      RepositoryName: !Sub ${NamePrefix}-lab-multitool
+      ImageTagMutability: IMMUTABLE
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      EncryptionConfiguration:
+        EncryptionType: AES256
+      EmptyOnDelete: true
+      Tags:
+        - { Key: Name, Value: !Sub "${NamePrefix}-lab-multitool" }
+        - { Key: Project, Value: !Ref NamePrefix }
+        - { Key: owner, Value: !Ref Owner }
+
 Outputs:
   RepositoryUri:
     Description: Push the arm64 agent image here (tag it, e.g. v1)
     Value: !GetAtt AgentRepository.RepositoryUri
+  FrrRepositoryUri:
+    Condition: LabCond
+    Description: Push quay.io/frrouting/frr:10.2.1 (arm64) here with tag 10.2.1
+    Value: !GetAtt FrrRepository.RepositoryUri
+  SnmpdRepositoryUri:
+    Condition: LabCond
+    Description: Build lab/snmpd/ for linux/arm64 and push here with tag v1
+    Value: !GetAtt SnmpdRepository.RepositoryUri
+  MultitoolRepositoryUri:
+    Condition: LabCond
+    Description: Push ghcr.io/srl-labs/network-multitool:v0.10.0 (arm64) here with tag v0.10.0
+    Value: !GetAtt MultitoolRepository.RepositoryUri
