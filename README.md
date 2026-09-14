@@ -386,6 +386,34 @@ Windows ではクォートの扱いが違うので、パラメータをファイ
 `carrier-pe-02 が落ちたら影響はどこまで` と聞いて、機器名を挙げた答えが返れば、トポロジのツールが動いている（Runtime のログに `tools=1` のように出る）。「トポロジ」タブには同じデータの図と表がある。
 PC の 8080 が使用中なら `localPortNumber` を変え、URL のポートも合わせる。
 
+## コンソールからデプロイするとき
+
+CLI が使えない端末では、上の手順 1・3・lab-3 の `aws cloudformation deploy` を AWS コンソールで置き換えられる。**S3 への配置（手順 4・lab-2）と ECR への push（手順 2・lab-1）はコンソールでは代わりにならない**（S3 はコンソールのアップロードでも置けるが、wheel 58 個と `lab/` の階層をそのまま置くので CLI の方が確実。push は docker が要る）。
+
+コンソールは **東京（ap-northeast-1）** に切り替えてから始める。3 つのスタックとも同じ操作で、違うのはテンプレートとパラメータだけ。
+
+| 順 | 操作 |
+|---|---|
+| 1 | CloudFormation → **スタックの作成** → **新しいリソースを使用（標準）** |
+| 2 | 「テンプレートの準備」は **テンプレートファイルのアップロード** を選び、`ecr.yaml` / `main.yaml` / `lab.yaml` を選んで **次へ**（コンソールが自分の S3 バケットに置く。43 KB の `main.yaml` もそのまま通る） |
+| 3 | **スタック名** を入れ（下の表）、パラメータを埋めて **次へ** |
+| 4 | **タグ** に `Project` = `fukuda-nwc-poc` と `owner` = `fukuda` を足す（`ops` の残骸探しと請求の内訳がこのタグで分かれる） |
+| 5 | 一番下の **「AWS CloudFormation によって IAM リソースがカスタム名で作成される場合があることを承認します」** にチェック（`main.yaml` と `lab.yaml`。`ecr.yaml` には出ない）→ **次へ** → 内容を確認して **送信** |
+| 6 | **イベント** タブで進み方を見る。`CREATE_COMPLETE` になったら **出力** タブを開く。失敗したら `ROLLBACK_IN_PROGRESS` になる前に、イベントを **失敗したイベントを検出** で絞って最初の `CREATE_FAILED` の「状況の理由」を読む |
+
+| テンプレート | スタック名 | 必ず入れるパラメータ | 出力で控えるもの |
+|---|---|---|---|
+| `ecr.yaml` | `fukuda-nwc-poc-ecr` | なし（既定のまま） | `RepositoryUri`（手順 2 の push 先） |
+| `main.yaml` | `fukuda-nwc-poc` | `VpcId` / `RuntimeSubnetIds`（2 つ選ぶ）/ `InstanceSubnetId` / `RouteTableIds` / `KbAdminPrincipalArn` / `AgentImageUri`（手順 2 で push したタグ）。社内から DX / VPN で入るなら `ClientCidr` | `KbBucketName` `InstanceId` `KnowledgeBaseId` `DataSourceId` `EndpointSecurityGroupId` と `StartSessionCommand` |
+| `lab.yaml` | `fukuda-nwc-poc-lab` | `VpcId` / `SubnetId` / `AssetBucketName`（上の `KbBucketName`）。`EndpointSecurityGroupId` は上の出力を入れる | `LabInstanceId` と `StartSessionCommand` |
+
+- VPC / サブネット / ルートテーブルはドロップダウンで選べる（`VpcId` `SubnetId` 型のパラメータ）。`RouteTableIds` と `KbAdminPrincipalArn` と `AgentImageUri` は文字列なので手で貼る。
+- `ImageId` は SSM パラメータ名が既定で入っている。触らない（作成時に最新の AL2023 arm64 AMI に解決される）。
+- `main.yaml` の `Create*Endpoints` は、VPC に同じエンドポイントが既にあるときだけ `false` にする（前提の「既存の VPC エンドポイントがある場合」）。
+- 出力の `StartSessionCommand` などは CLI の形で出るので、手順 7 と lab-4 はそのまま PC の CLI で打つ。
+- **更新するとき**は、スタックを選んで **更新** → **既存テンプレートを置き換える** → 同じ手順。パラメータは前回の値が入った状態で出る。`AgentImageUri` のタグを変えるだけなら **現在のテンプレートを使用** でパラメータだけ直す。
+- **消すとき**は、スタックを選んで **削除**。順番は `fukuda-nwc-poc-lab` → `fukuda-nwc-poc` → `fukuda-nwc-poc-ecr`。バケットに中身が残っていると `DELETE_FAILED` になるので、先に S3 コンソールで **空にする** を押す（ECR はイメージごと消える）。Runtime の ENI が残って SG が消せないときは 8 時間待って **削除** をもう一度（下の「片付け」）。
+
 ## lab（任意）: containerlab + FRR を EC2 で動かす
 
 ローカル PoC の `wvs2` lab（本社・DC・支店 2 か所の CE、キャリア PE 2 台、snmpd、ホスト。すべて架空のアドレス）を、同じ VPC の EC2 1 台で動かす。
