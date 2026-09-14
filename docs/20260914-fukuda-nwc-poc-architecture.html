@@ -74,16 +74,16 @@
 <text x="24" y="204" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="12.5" fill="#111110" font-weight="700">既存 VPC（インターネットへの出口なし）</text>
 <text x="348" y="204" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="12.5" fill="#111110" font-weight="700">AWS のサービス</text>
 <rect x="40" y="220" width="244" height="92" rx="8" fill="#FFFFFF" stroke="#111110" stroke-width="1.5"/>
-<text x="52" y="244" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="14" fill="#111110" font-weight="700">EC2 チャット Web</text>
-<text x="52" y="264" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="11" fill="#595959">t4g.micro・パブリック IP なし</text>
+<text x="52" y="244" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="14" fill="#111110" font-weight="700">EC2 Web（Gradio）</text>
+<text x="52" y="264" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="11" fill="#595959">t4g.small・パブリック IP なし・チャット + トポロジ図</text>
 <text x="52" y="282" font-family="Ubuntu Mono, monospace" font-size="11" fill="#595959">127.0.0.1:8080</text>
 <text x="52" y="300" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="11" fill="#595959">インスタンスロールで署名</text>
 <rect x="40" y="400" width="244" height="108" rx="8" fill="#FFFFFF" stroke="#111110" stroke-width="1.5"/>
 <text x="52" y="424" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="14" fill="#111110" font-weight="700">AgentCore Runtime</text>
 <text x="52" y="444" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="11" fill="#595959">VPC モード・agent コンテナ</text>
 <line x1="52" y1="456" x2="272" y2="456" stroke="#A5A5A5" stroke-width="1"/>
-<text x="52" y="478" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="12" fill="#111110">資料を検索してから</text>
-<text x="52" y="496" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="12" fill="#111110">質問と資料をモデルに渡す</text>
+<text x="52" y="476" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="12" fill="#111110">資料を検索してから質問と資料をモデルに渡す</text>
+<text x="52" y="494" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="11" fill="#595959">機器の質問は同梱の静的トポロジをツールで引く</text>
 <rect x="348" y="400" width="232" height="72" rx="8" fill="#FFFFFF" stroke="#111110" stroke-width="1.5"/>
 <text x="360" y="422" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="13" fill="#111110" font-weight="700">Knowledge Base</text>
 <text x="360" y="442" font-family="Ubuntu Mono, monospace" font-size="11" fill="#111110">Retrieve（HYBRID + Rerank）</text>
@@ -125,7 +125,7 @@
 <circle cx="50" cy="771" r="9" fill="#FFFFFF" stroke="#111110" stroke-width="1.5"/><text x="50" y="775" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="11" fill="#111110" font-weight="700" text-anchor="middle">5</text>
 </svg>
   </div>
-  <figcaption>fig.1 EC2 のチャット Web から LLM と会話するときの流れ。通信はすべて TLS 443。番号は「会話 1 往復の流れ」に対応する</figcaption>
+  <figcaption>fig.1 EC2 の Web から LLM と会話するときの流れ。通信はすべて TLS 443。番号は「会話 1 往復の流れ」に対応する。任意の lab（<code>lab.yaml</code>、containerlab + FRR の EC2 1 台）は同じ VPC に置くが、この流れにはつながらない</figcaption>
 </figure>
 
 <h2 id="flow">会話 1 往復の流れ</h2>
@@ -170,7 +170,7 @@
   <div class="mb-card">
     <div class="mb-card-title">1 か月置いたまま</div>
     <p><strong>≈ $383</strong>（約 57,400 円）</p>
-    <p>EC2 を止めてもほとんど減りません。使わない期間はスタックごと消します。</p>
+    <p>EC2 を止めてもほとんど減りません。使わない期間はスタックごと消します。lab の EC2（t4g.large）は起動中だけ約 13 円/h。使ったら止めます。</p>
   </div>
 </div>
 
@@ -183,11 +183,12 @@
 
 <ol>
   <li><code>ecr.yaml</code> をデプロイして ECR リポジトリを作る</li>
-  <li>arm64 のエージェントイメージをビルドして push する</li>
+  <li>arm64 のエージェントイメージ（トポロジのツールと静的データ入り）をビルドして push する</li>
   <li><code>main.yaml</code> をデプロイする。<code>KbAdminPrincipalArn</code> にデプロイする人の IAM ロールの ARN を渡す</li>
-  <li><code>kb-docs/</code> の md を S3 に置き、取り込みジョブを流す</li>
+  <li>Gradio の画面と wheel（arm64 / cp313）を S3 の <code>web/</code> に置いて EC2 を再起動し、<code>kb-docs/</code> の md を S3 に置いて取り込みジョブを流す</li>
   <li>Runtime のロググループに保持期間とタグを付け、利用者に <code>ssm:StartSession</code> の権限を渡す</li>
   <li>PC でポートフォワーディングを始め、ブラウザで <code>http://localhost:8080/</code> を開く</li>
+  <li>（任意）lab のイメージを ECR に、設定と containerlab の rpm を S3 に置き、<code>lab.yaml</code> をデプロイする。SSM セッションで入って <code>sudo lab check</code></li>
 </ol>
 
 <pre><code class="language-bash">aws ssm start-session --region ap-northeast-1 \
@@ -202,7 +203,7 @@
 <h2 id="limits">確認できていないこと</h2>
 
 <p>
-テンプレートは <code>cfn-lint</code> を通し、エージェントは boto3 を差し替えた模擬テスト（19 項目）を通しました。
+テンプレート 3 つは <code>cfn-lint</code> を通し、エージェントは boto3 を差し替えた模擬テスト（36 項目）を、Gradio の画面は手元での起動を通しました。
 ただし、AWS 上にはまだデプロイしていません。次の点は実環境で確かめる必要があります。
 </p>
 
@@ -210,7 +211,8 @@
   <li>OpenSearch Serverless のアクセスポリシーの反映待ちで、インデックスの作成が 403 にならないか</li>
   <li>既定のアナライザで、日本語の質問にキーワード検索がどれだけ効くか</li>
   <li>Amazon Rerank 1.0 が日本語の手順書で順位をどれだけ良くするか（日本語対応は AWS の文書で確認できていない）。候補 20 件 → 5 件が妥当か</li>
-  <li>閉域の EC2 から、S3 ゲートウェイ経由で <code>dnf install python3.13</code> が通るか</li>
+  <li>閉域の EC2 から、S3 ゲートウェイ経由で <code>dnf install python3.13</code> / <code>docker</code> が通るか。t4g.small で Gradio が安定して動くか</li>
+  <li>containerlab の rpm が AL2023 で入り、lab の 14 コンテナが t4g.large で動くか。t4g.small / t4g.large の単価（Price List API 未確認）</li>
   <li>VPC モードの Runtime が、イメージの取得に VPC 内の ECR / S3 エンドポイントを使うか</li>
 </ul>
 
