@@ -1,0 +1,127 @@
+# SNMP を投げる対象の初期値。**正本は backend の devices テーブル**で、これはその初期化用。
+# 中身はローカル lab（app/wvs2-lab。containerlab + FRR）の 10 台そのもの（2026-09-12 に既定シードを lab へ切替）。
+# 項目名はローカルネットワーク担当と 2026-09-11 に合意した形（変えるときは両方で合わせる）。
+# wvs2.clab.yml を変えたらここも直す（ここが唯一のシード。lab 側にコピーは置かない）。
+#
+# - mgmt_ip は containerlab の mgmt ネットワーク netops-lab（203.0.113.0/24）上のアドレス。
+#   collector を同じ docker network に載せればこの IP で 161/udp に届く。
+# - snmp_community は lab 固定の public。実機の値は書かない（CLAUDE.md「書かないもの」）。
+# - device_id は snmpd の sysName と同じ値。SNMP 側からも突き合わせられる。
+# - PE は拠点を持たないキャリア網側の機器なので site: carrier。
+#   1 台が複数拠点を収容するため <拠点名>-pe-NN にはできない（app/wvs2-lab/README.md「命名」参照）。
+# - links は device_id への外部キーなので、topology.json に出る機器は全部ここに要る。
+#   ポーリングしない PE と LAN 端末も enabled: false で行として置く。
+devices:
+  - device_id: hq-ce-01
+    hostname: hq-ce-01
+    site: hq
+    role: ce
+    mgmt_ip: 203.0.113.11
+    snmp_version: v2c
+    snmp_community: public
+    snmp_port: 161
+    poll_interval_seconds: 30
+    enabled: true
+
+  - device_id: dc-ce-01
+    hostname: dc-ce-01
+    site: dc
+    role: ce
+    mgmt_ip: 203.0.113.12
+    snmp_version: v2c
+    snmp_community: public
+    snmp_port: 161
+    poll_interval_seconds: 30
+    enabled: true
+
+  - device_id: br1-ce-01
+    hostname: br1-ce-01
+    site: br1
+    role: ce
+    mgmt_ip: 203.0.113.13
+    snmp_version: v2c
+    snmp_community: public
+    snmp_port: 161
+    poll_interval_seconds: 30
+    enabled: true
+
+  - device_id: br2-ce-01
+    hostname: br2-ce-01
+    site: br2
+    role: ce
+    mgmt_ip: 203.0.113.14
+    snmp_version: v2c
+    snmp_community: public
+    snmp_port: 161
+    poll_interval_seconds: 30
+    enabled: true
+
+  # PE には snmpd サイドカーを置いていない（キャリア網は本来ポーリングできない前提に揃えた）。
+  # トポロジ上は topology.json に出るが、collector は見ないので enabled: false
+  - device_id: carrier-pe-01
+    hostname: carrier-pe-01
+    site: carrier
+    role: pe
+    mgmt_ip: 203.0.113.101
+    snmp_version: v2c
+    snmp_community: public
+    snmp_port: 161
+    poll_interval_seconds: 30
+    enabled: false
+
+  - device_id: carrier-pe-02
+    hostname: carrier-pe-02
+    site: carrier
+    role: pe
+    mgmt_ip: 203.0.113.102
+    snmp_version: v2c
+    snmp_community: public
+    snmp_port: 161
+    poll_interval_seconds: 30
+    enabled: false
+
+  # LAN 端末。SNMP は返さないので enabled: false だが、
+  # topology.json の l2 リンクが device_id を参照するので行としては必要
+  - device_id: hq-host-01
+    hostname: hq-host-01
+    site: hq
+    role: host
+    mgmt_ip: 203.0.113.21
+    snmp_version: v2c
+    snmp_community: public
+    snmp_port: 161
+    poll_interval_seconds: 30
+    enabled: false
+
+  - device_id: dc-host-01
+    hostname: dc-host-01
+    site: dc
+    role: host
+    mgmt_ip: 203.0.113.22
+    snmp_version: v2c
+    snmp_community: public
+    snmp_port: 161
+    poll_interval_seconds: 30
+    enabled: false
+
+  - device_id: br1-host-01
+    hostname: br1-host-01
+    site: br1
+    role: host
+    mgmt_ip: 203.0.113.23
+    snmp_version: v2c
+    snmp_community: public
+    snmp_port: 161
+    poll_interval_seconds: 30
+    enabled: false
+
+  - device_id: br2-host-01
+    hostname: br2-host-01
+    site: br2
+    role: host
+    mgmt_ip: 203.0.113.24
+    snmp_version: v2c
+    snmp_community: public
+    snmp_port: 161
+    poll_interval_seconds: 30
+    enabled: false

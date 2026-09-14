@@ -1,0 +1,27 @@
+{
+  "_comment": "トポロジの初期値。中身はローカル lab（app/wvs2-lab/wvs2.clab.yml）と 1 対 1（2026-09-12 に既定シードを lab へ切替。ここが唯一のシードで lab 側にコピーは置かない）。すべて架空のアドレスと帯域。nodes/links の形はローカルネットワーク担当と 2026-09-11 に合意した。links は a < b で正規化する（無向リンクを 1 行で持つため）。a_if / b_if は ifTable の ifDescr と同じ文字列（ifIndex は veth のグローバル採番で再 deploy のたびに変わるので使わない）。kind は ebgp/ibgp/l2/mgmt、role は ebgp のときだけ primary/secondary（他は null。seed 側で空文字に丸める）。**階層を決めるのは node.role だけで、layer は持たない**（2026-09-11 決定。二重に持つと必ずズレる。段の順は frontend の ROLE_ORDER = core / pe / distribution / aggregation / access / ce / host）。",
+  "nodes": [
+    { "device_id": "carrier-pe-01", "site": "carrier", "role": "pe", "asn": 65000 },
+    { "device_id": "carrier-pe-02", "site": "carrier", "role": "pe", "asn": 65000 },
+    { "device_id": "hq-ce-01", "site": "hq", "role": "ce", "asn": 65001 },
+    { "device_id": "dc-ce-01", "site": "dc", "role": "ce", "asn": 65002 },
+    { "device_id": "br1-ce-01", "site": "br1", "role": "ce", "asn": 65003 },
+    { "device_id": "br2-ce-01", "site": "br2", "role": "ce", "asn": 65004 },
+    { "device_id": "hq-host-01", "site": "hq", "role": "host", "asn": null },
+    { "device_id": "dc-host-01", "site": "dc", "role": "host", "asn": null },
+    { "device_id": "br1-host-01", "site": "br1", "role": "host", "asn": null },
+    { "device_id": "br2-host-01", "site": "br2", "role": "host", "asn": null }
+  ],
+  "links": [
+    { "a": "carrier-pe-01", "a_if": "eth1", "b": "hq-ce-01", "b_if": "eth1", "kind": "ebgp", "role": "primary", "bandwidth_mbps": 1000 },
+    { "a": "carrier-pe-02", "a_if": "eth1", "b": "hq-ce-01", "b_if": "eth2", "kind": "ebgp", "role": "secondary", "bandwidth_mbps": 100 },
+    { "a": "carrier-pe-02", "a_if": "eth2", "b": "dc-ce-01", "b_if": "eth1", "kind": "ebgp", "role": "primary", "bandwidth_mbps": 1000 },
+    { "a": "br1-ce-01", "a_if": "eth1", "b": "carrier-pe-01", "b_if": "eth2", "kind": "ebgp", "role": "primary", "bandwidth_mbps": 100 },
+    { "a": "br2-ce-01", "a_if": "eth1", "b": "carrier-pe-02", "b_if": "eth3", "kind": "ebgp", "role": "primary", "bandwidth_mbps": 100 },
+    { "a": "carrier-pe-01", "a_if": "eth5", "b": "carrier-pe-02", "b_if": "eth5", "kind": "ibgp", "role": null, "bandwidth_mbps": 10000 },
+    { "a": "hq-ce-01", "a_if": "eth3", "b": "hq-host-01", "b_if": "eth1", "kind": "l2", "role": null, "bandwidth_mbps": 1000 },
+    { "a": "dc-ce-01", "a_if": "eth2", "b": "dc-host-01", "b_if": "eth1", "kind": "l2", "role": null, "bandwidth_mbps": 1000 },
+    { "a": "br1-ce-01", "a_if": "eth2", "b": "br1-host-01", "b_if": "eth1", "kind": "l2", "role": null, "bandwidth_mbps": 1000 },
+    { "a": "br2-ce-01", "a_if": "eth2", "b": "br2-host-01", "b_if": "eth1", "kind": "l2", "role": null, "bandwidth_mbps": 1000 }
+  ]
+}

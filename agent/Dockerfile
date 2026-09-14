@@ -11,7 +11,8 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install -r requirements.txt
 
-COPY app.py .
+COPY app.py topology.py .
+COPY data/ data/
 
 # root で動かさない
 RUN useradd --create-home --uid 10001 agent && chown -R agent:agent /app

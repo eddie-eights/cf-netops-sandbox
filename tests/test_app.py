@@ -3,6 +3,8 @@ import importlib.util, os, sys, types
 
 # 引数が無ければリポジトリの agent/app.py を読む。実行は python3.13 tests/test_app.py
 APP_PATH = sys.argv[1] if len(sys.argv) > 1 else os.path.join(os.path.dirname(__file__), "..", "agent", "app.py")
+# app.py は同じディレクトリの topology.py を import する（PyYAML が要る: pip install pyyaml）
+sys.path.insert(0, os.path.dirname(os.path.abspath(APP_PATH)))
 
 class ClientError(Exception):
     pass
@@ -21,8 +23,11 @@ class FakeClient:
             raise r
         return r
     def converse(self, **kw):
-        state["calls"].append(("converse", kw))
+        # messages は app 側で複製されるので、呼び出し時点の中身を残す
+        state["calls"].append(("converse", {**kw, "messages": list(kw["messages"])}))
         r = state["converse"]
+        if isinstance(r, list):
+            r = r.pop(0)
         if isinstance(r, Exception):
             raise r
         return r
@@ -55,6 +60,9 @@ def load(guardrail="gr123", rerank=""):
 def ok_converse(text, stop="end_turn"):
     return {"output": {"message": {"role": "assistant", "content": [{"text": text}]}}, "stopReason": stop, "usage": {"inputTokens": 1, "outputTokens": 1}}
 
+def tool_converse(name, args, use_id="tu1"):
+    return {"output": {"message": {"role": "assistant", "content": [{"toolUse": {"toolUseId": use_id, "name": name, "input": args}}]}}, "stopReason": "tool_use", "usage": {"inputTokens": 1, "outputTokens": 1}}
+
 RET = {"retrievalResults": [
     {"content": {"text": "clear ip bgp * を打たない"}, "location": {"s3Location": {"uri": "s3://b/docs/bgp-neighbor-down.md"}}, "score": 0.9},
     {"content": {"text": "hold time expired"}, "location": {"s3Location": {"uri": "s3://b/docs/bgp-neighbor-down.md"}}, "score": 0.8},
@@ -76,6 +84,7 @@ r = app.invoke({"prompt": "%BGP-5-ADJCHANGE が出た"})
 rk = state["calls"][0][1]; ck = state["calls"][1][1]
 check("RERANK_MODEL_ARN が無ければリランクなしで HYBRID と件数だけ渡す", rk["retrievalConfiguration"]["vectorSearchConfiguration"] == {"numberOfResults": 3, "overrideSearchType": "HYBRID"} and rk["knowledgeBaseId"] == "KB12345678")
 check("Converse に guardrailConfig", ck["guardrailConfig"] == {"guardrailIdentifier": "gr123", "guardrailVersion": "1"})
+check("Converse にトポロジの 4 ツール", [t["toolSpec"]["name"] for t in ck["toolConfig"]["tools"]] == ["list_devices", "neighbors", "blast_radius", "topology_graph"])
 last = ck["messages"][-1]
 check("質問は guardContent、資料は text", last["content"][1] == {"guardContent": {"text": {"text": "%BGP-5-ADJCHANGE が出た"}}} and "<documents>" in last["content"][0]["text"] and 'source="interface-errors.md"' in last["content"][0]["text"])
 check("初回は messages 1 件", len(ck["messages"]) == 1)
@@ -122,4 +131,43 @@ r = app3.invoke({"prompt": "q"})
 rk = state["calls"][0][1]["retrievalConfiguration"]["vectorSearchConfiguration"]
 check("RERANK_MODEL_ARN があれば候補数とリランク設定を渡す", rk == {"numberOfResults": 3, "overrideSearchType": "HYBRID", "rerankingConfiguration": {"type": "BEDROCK_RERANKING_MODEL", "bedrockRerankingConfiguration": {"modelConfiguration": {"modelArn": RERANK_ARN}, "numberOfRerankedResults": 2}}})
 check("リランクありでも参照元の組み立ては同じ", r["sources"] == ["bgp-neighbor-down.md", "interface-errors.md"] and r["status"] == "success")
+
+# ---- トポロジのツール
+t = app.topology
+check("機器は 10 台で community を出さない", t.list_devices()["count"] == 10 and "snmp_community" not in t.list_devices()["devices"][0])
+check("site で絞れる", [d["device_id"] for d in t.list_devices(site="hq")["devices"]] == ["hq-ce-01", "hq-host-01"])
+nb = t.neighbors("hq-ce-01")["neighbors"]
+check("hq-ce-01 の隣接は PE 2 台と LAN 端末", sorted(n["device_id"] for n in nb) == ["carrier-pe-01", "carrier-pe-02", "hq-host-01"])
+check("隣接に両端の IF と主副が付く", {(n["device_id"], n["local_if"], n["remote_if"], n["role"]) for n in nb} >= {("carrier-pe-01", "eth1", "eth1", "primary"), ("carrier-pe-02", "eth2", "eth1", "secondary")})
+br = t.blast_radius("carrier-pe-02", 1)
+check("PE-02 が落ちると 1 ホップで hq/dc/br2 の CE と PE-01", sorted(a["device_id"] for a in br["affected"]) == ["br2-ce-01", "carrier-pe-01", "dc-ce-01", "hq-ce-01"])
+check("2 ホップなら端末まで届く", any(a["device_id"] == "dc-host-01" and a["hops"] == 2 for a in t.blast_radius("carrier-pe-02")["affected"]))
+check("知らない機器は error と候補", "error" in t.neighbors("nope") and "hq-ce-01" in t.neighbors("nope")["known"])
+check("run_tool は余計な引数を捨てる", t.run_tool("list_devices", {"site": "dc", "x": 1})["count"] == 2)
+check("全体図はノード 10 リンク 10", len(t.topology_graph()["nodes"]) == 10 and len(t.topology_graph()["links"]) == 10)
+
+# ---- ツールの往復
+app.history.clear()
+state.update(retrieve=RET, converse=[tool_converse("neighbors", {"device_id": "hq-ce-01"}), ok_converse("hq-ce-01 は PE 2 台につながる")], calls=[])
+r = app.invoke({"prompt": "hq-ce-01 の隣は"})
+convs = [c[1] for c in state["calls"] if c[0] == "converse"]
+check("tool_use なら結果を返して 2 回目を呼ぶ", len(convs) == 2 and r["response"].startswith("hq-ce-01 は PE 2 台につながる"))
+tr = convs[1]["messages"][-1]
+check("2 回目の末尾は toolResult（success、json）", tr["role"] == "user" and tr["content"][0]["toolResult"]["toolUseId"] == "tu1" and tr["content"][0]["toolResult"]["status"] == "success" and "neighbors" in tr["content"][0]["toolResult"]["content"][0]["json"])
+check("2 回目の直前は assistant の toolUse", convs[1]["messages"][-2]["content"][0]["toolUse"]["name"] == "neighbors")
+check("履歴には質問と最終回答だけ", app.history == [{"role": "user", "content": [{"text": "hq-ce-01 の隣は"}]}, {"role": "assistant", "content": [{"text": "hq-ce-01 は PE 2 台につながる"}]}])
+
+state.update(converse=[tool_converse("neighbors", {"device_id": "zzz"}), ok_converse("そんな機器は無い")], calls=[])
+r = app.invoke({"prompt": "zzz の隣は"})
+tr = [c[1] for c in state["calls"] if c[0] == "converse"][1]["messages"][-1]["content"][0]["toolResult"]
+check("知らない機器は status=error で返す", tr["status"] == "error" and r["status"] == "success")
+
+state.update(converse=[tool_converse("topology_graph", {}, f"tu{i}") for i in range(7)] + [ok_converse("x")], calls=[])
+r = app.invoke({"prompt": "全体は"})
+check("ツールの往復は MAX_TOOL_ROUNDS(5) で打ち切る（Converse は 6 回）", len([c for c in state["calls"] if c[0] == "converse"]) == 6 and r["status"] == "success")
+
+state.update(converse=[tool_converse("neighbors", {"device_id": "hq-ce-01"}), BotoCoreError("x")], calls=[])
+n = len(app.history)
+r = app.invoke({"prompt": "q"})
+check("2 回目の Converse 失敗も error で履歴に残らない", r["status"] == "error" and len(app.history) == n)
 print(f"通過 {passed} / 失敗 0")
