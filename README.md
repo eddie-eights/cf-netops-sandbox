@@ -172,6 +172,17 @@ aws ec2 describe-network-interfaces --region ap-northeast-1 \
 ENI にタグが付かず上で何も出ないときは、`aws ec2 describe-vpc-endpoints --filters Name=tag:Project,Values=fukuda-nwc-poc` で `NetworkInterfaceIds` を見て、その ID で引く。
 **Route 53 Resolver のインバウンドエンドポイントは別料金**で、下の試算に含めていない。
 
+### WSL から行うとき
+
+この README のコマンドは全部 bash 用なので、Windows でも **WSL2 の中で打てば下の手順 7 の PowerShell の注意（クォートの違い）は関係ない**。Terraform はこのリポジトリでは使わない（CloudFormation だけ）。WSL で足りているか、次を見る。
+
+| 見るもの | 確認 |
+|---|---|
+| AWS CLI v2 と Session Manager plugin が **WSL 側**に入っている | `aws --version` と `session-manager-plugin` を WSL のシェルで打つ。Windows 側にだけ入れても WSL の `aws ssm start-session` からは見えない（Linux 版の deb / rpm を WSL に入れる） |
+| docker で arm64 のビルドができる | `docker buildx ls` の `Platforms` に `linux/arm64` があること。Docker Desktop（WSL2 backend）なら最初からある。WSL に直接 Docker Engine を入れた場合は `docker run --privileged --rm tonistiigi/binfmt --install arm64` で QEMU を登録する |
+| 改行が LF のまま | `lab/lab.sh` と `web/app.py` は EC2 の Linux で動くので、CRLF になっていると `set -euo pipefail\r` で落ちる。リポジトリは **WSL の中で clone** し（`/mnt/c` 配下でなく `~` 配下）、`git config core.autocrlf` が `true` なら `false` にする。`file lab/lab.sh` に `CRLF` が出なければよい |
+| python3 と pip がある | `python3 -m pip --version`。手順 4 の wheel 取得に使う（Ubuntu なら `sudo apt install python3-pip`） |
+
 ### 既存の VPC エンドポイントがある場合
 
 社内の VPC には、エンドポイントが既にあることが多い。**同じサービスのプライベート DNS 付きエンドポイントは 1 VPC に 1 つしか作れない**ので、次のパラメータで作らないようにする。
