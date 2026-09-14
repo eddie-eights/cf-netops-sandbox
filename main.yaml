@@ -761,6 +761,7 @@ Resources:
         NUMBER_OF_RERANKED_RESULTS: !Ref NumberOfRerankedResults
         GUARDRAIL_ID: !GetAtt Guardrail.GuardrailId
         GUARDRAIL_VERSION: !GetAtt GuardrailVersion.Version
+        PARAM_PREFIX: !Sub /${NamePrefix}  # stream.yaml / graph.yaml が書く SSM（anomaly-table / neptune-endpoint）の接頭辞。無ければ静的データで動く
       Tags:
         Name: !Sub ${NamePrefix}-agent
         Project: !Ref NamePrefix
@@ -890,6 +891,7 @@ Resources:
           PORT=8080
           TITLE=NWC PoC
           DATA_DIR=$APP/src/data
+          PARAM_PREFIX=/${NamePrefix}
           PYTHONPATH=$APP/lib
           GRADIO_TEMP_DIR=/var/lib/${NamePrefix}-web/tmp
           GRADIO_ANALYTICS_ENABLED=False
@@ -955,8 +957,8 @@ Outputs:
   KbBucketName:
     Value: !Ref KbBucket
   UploadWebCommand:
-    Description: Run in this repository after "pip download" into wheels/ (README step 4). The instance pulls web/ on every boot.
-    Value: !Sub aws s3 cp web/app.py s3://${KbBucket}/web/app.py && aws s3 cp web/requirements.txt s3://${KbBucket}/web/requirements.txt && aws s3 cp agent/data/ s3://${KbBucket}/web/data/ --recursive && aws s3 sync wheels/ s3://${KbBucket}/web/wheels/
+    Description: Run in this repository after "pip download" into wheels/ (README step 4). Also copies the agent modules the web UI shares (topology / anomalies / graph). The instance pulls web/ on every boot.
+    Value: !Sub aws s3 cp web/app.py s3://${KbBucket}/web/app.py && aws s3 cp web/requirements.txt s3://${KbBucket}/web/requirements.txt && for f in topology anomalies graph; do aws s3 cp agent/$f.py s3://${KbBucket}/web/$f.py; done && aws s3 cp agent/data/ s3://${KbBucket}/web/data/ --recursive && aws s3 sync wheels/ s3://${KbBucket}/web/wheels/
   EndpointSecurityGroupId:
     Condition: CreateAnyInterfaceEndpointCond
     Description: Pass to lab.yaml (EndpointSecurityGroupId) so the lab EC2 can reach the ecr / ssm endpoints created here

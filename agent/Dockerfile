@@ -11,7 +11,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install -r requirements.txt
 
-COPY app.py topology.py .
+COPY app.py topology.py anomalies.py graph.py .
 COPY data/ data/
 
 # root で動かさない

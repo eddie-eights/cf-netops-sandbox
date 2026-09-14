@@ -84,7 +84,7 @@ r = app.invoke({"prompt": "%BGP-5-ADJCHANGE が出た"})
 rk = state["calls"][0][1]; ck = state["calls"][1][1]
 check("RERANK_MODEL_ARN が無ければリランクなしで HYBRID と件数だけ渡す", rk["retrievalConfiguration"]["vectorSearchConfiguration"] == {"numberOfResults": 3, "overrideSearchType": "HYBRID"} and rk["knowledgeBaseId"] == "KB12345678")
 check("Converse に guardrailConfig", ck["guardrailConfig"] == {"guardrailIdentifier": "gr123", "guardrailVersion": "1"})
-check("Converse にトポロジの 4 ツール", [t["toolSpec"]["name"] for t in ck["toolConfig"]["tools"]] == ["list_devices", "neighbors", "blast_radius", "topology_graph"])
+check("Converse にトポロジの 4 ツール + 異常一覧", [t["toolSpec"]["name"] for t in ck["toolConfig"]["tools"]] == ["list_devices", "neighbors", "blast_radius", "topology_graph", "list_anomalies"])
 last = ck["messages"][-1]
 check("質問は guardContent、資料は text", last["content"][1] == {"guardContent": {"text": {"text": "%BGP-5-ADJCHANGE が出た"}}} and "<documents>" in last["content"][0]["text"] and 'source="interface-errors.md"' in last["content"][0]["text"])
 check("初回は messages 1 件", len(ck["messages"]) == 1)
@@ -145,6 +145,12 @@ check("2 ホップなら端末まで届く", any(a["device_id"] == "dc-host-01" 
 check("知らない機器は error と候補", "error" in t.neighbors("nope") and "hq-ce-01" in t.neighbors("nope")["known"])
 check("run_tool は余計な引数を捨てる", t.run_tool("list_devices", {"site": "dc", "x": 1})["count"] == 2)
 check("全体図はノード 10 リンク 10", len(t.topology_graph()["nodes"]) == 10 and len(t.topology_graph()["links"]) == 10)
+check("Neptune が無ければ元データは static", t.SOURCE == "static" and t.topology_graph()["source"] == "static" and not app.graph.configured())
+check("load_static は asn を機器に足す", any(d.get("asn") for d in t.load_static()[0]))
+a = app.anomalies
+check("異常一覧はテーブル未設定なら error と空リスト", a.list_anomalies()["anomalies"] == [] and "stream.yaml" in a.list_anomalies()["error"])
+check("app.run_tool は list_anomalies を anomalies に振る", "error" in app.run_tool("list_anomalies", {"status": "open"}) and app.run_tool("list_devices", {})["count"] == 10)
+check("anomalies.run_tool の未知ツール", "unknown" in a.run_tool("nope", {})["error"])
 
 # ---- ツールの往復
 app.history.clear()

@@ -1,0 +1,91 @@
+# Telegraf の設定テンプレート（フェーズ 2）。lab.sh telegraf-render が __KAFKA_BROKERS__ / __AWS_REGION__ を埋めて
+# /etc/telegraf/telegraf.conf に書く。ブローカーは SSM パラメータ /<NamePrefix>/msk-bootstrap（stream.yaml が書く）から取る。
+#
+# 流れ: CE の snmpd を 10 秒ごとにポーリング（ifTable）+ snmpd からの trap を udp 162 で受ける → MSK（IAM 認証、TLS）
+#   metrics トピック: interface（ifDescr / ifOperStatus / ifInErrors ...）と system（sysName / sysUpTime）
+#   traps   トピック: snmp_trap（linkDown / linkUp）
+# MIB は入れないので OID は数値で書き、名前を明示する（translator が無くても動く）。trap の varbind 名は数値 OID のまま
+# Kafka に載る（detector 側で ifDescr の OID を引く）。
+
+[agent]
+  interval = "10s"
+  flush_interval = "10s"
+  round_interval = true
+  metric_batch_size = 500
+  metric_buffer_limit = 10000
+  omit_hostname = true
+  snmp_translator = "gosmi"
+
+# ---- ポーリング。agents は CE の管理 IP（snmpd は CE の netns に相乗り）
+[[inputs.snmp]]
+  agents = ["udp://203.0.113.11:161", "udp://203.0.113.12:161", "udp://203.0.113.13:161", "udp://203.0.113.14:161"]
+  version = 2
+  community = "public"
+  timeout = "5s"
+  retries = 2
+  name = "system"
+
+  [[inputs.snmp.field]]
+    name = "sysName"
+    oid = ".1.3.6.1.2.1.1.5.0"
+    is_tag = true
+  [[inputs.snmp.field]]
+    name = "sysUpTime"
+    oid = ".1.3.6.1.2.1.1.3.0"
+
+  [[inputs.snmp.table]]
+    name = "interface"
+    inherit_tags = ["sysName"]
+    [[inputs.snmp.table.field]]
+      name = "ifDescr"
+      oid = ".1.3.6.1.2.1.2.2.1.2"
+      is_tag = true
+    [[inputs.snmp.table.field]]
+      name = "ifAdminStatus"
+      oid = ".1.3.6.1.2.1.2.2.1.7"
+    [[inputs.snmp.table.field]]
+      name = "ifOperStatus"
+      oid = ".1.3.6.1.2.1.2.2.1.8"
+    [[inputs.snmp.table.field]]
+      name = "ifInOctets"
+      oid = ".1.3.6.1.2.1.2.2.1.10"
+    [[inputs.snmp.table.field]]
+      name = "ifInErrors"
+      oid = ".1.3.6.1.2.1.2.2.1.14"
+    [[inputs.snmp.table.field]]
+      name = "ifOutOctets"
+      oid = ".1.3.6.1.2.1.2.2.1.16"
+    [[inputs.snmp.table.field]]
+      name = "ifOutErrors"
+      oid = ".1.3.6.1.2.1.2.2.1.20"
+
+# ---- trap 受信。162 は特権ポートなので unit は root で動かす（setcap でもよい）
+[[inputs.snmp_trap]]
+  service_address = "udp://:162"
+  version = "2c"
+  timeout = "5s"
+
+# ---- MSK へ。トピックは metric 名で分ける（snmp_trap → traps、それ以外 → metrics）
+[[outputs.kafka]]
+  brokers = [__KAFKA_BROKERS__]
+  topic = "metrics"
+  enable_tls = true
+  sasl_mechanism = "AWS-MSK-IAM"
+  sasl_aws_msk_iam_region = "__AWS_REGION__"
+  data_format = "json"
+  json_timestamp_units = "1s"
+  required_acks = 1
+  max_retry = 3
+  namepass = ["system", "interface"]
+
+[[outputs.kafka]]
+  brokers = [__KAFKA_BROKERS__]
+  topic = "traps"
+  enable_tls = true
+  sasl_mechanism = "AWS-MSK-IAM"
+  sasl_aws_msk_iam_region = "__AWS_REGION__"
+  data_format = "json"
+  json_timestamp_units = "1s"
+  required_acks = 1
+  max_retry = 3
+  namepass = ["snmp_trap"]

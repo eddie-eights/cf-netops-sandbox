@@ -40,6 +40,7 @@
     <li><a href="#points">検索とガードレールの決めごと</a></li>
     <li><a href="#cost">費用</a></li>
     <li><a href="#deploy">デプロイから会話まで</a></li>
+    <li><a href="#phase2">フェーズ 2: lab の SNMP を異常一覧に、トポロジを Neptune に</a></li>
     <li><a href="#limits">確認できていないこと</a></li>
   </ol>
 </nav>
@@ -200,11 +201,35 @@
 各手順のコマンドは、<a href="https://github.com/eddie-eights/cf-netops-sandbox" target="_blank" rel="noopener">リポジトリの README</a> にあります。
 </p>
 
+<h2 id="phase2">フェーズ 2: lab の SNMP を異常一覧に、トポロジを Neptune に</h2>
+
+<p>
+フェーズ 1 では lab と Web はつながっておらず、トポロジもコンテナに焼いた静的データでした。
+フェーズ 2 は 2 つの別スタック（<code>stream.yaml</code> / <code>graph.yaml</code>）を足して、これをつなぎます。
+どちらも時間課金なので、<strong>使う日に作って当日中に消す</strong>前提です。
+</p>
+
+<pre><code>lab EC2 の Telegraf ── SNMP ポーリング（10 秒）+ SNMP trap（linkUp / linkDown）
+      │ Kafka（IAM 認証）
+      ▼
+MSK（2 ブローカー）──┬─▶ detector Lambda ──▶ DynamoDB の異常テーブル ──▶ Web「異常一覧」/ エージェントの list_anomalies
+                     └─▶ MSK Connect（S3 sink）──▶ S3 の stream/（生データ）
+
+Neptune ── Gremlin ──▶ エージェントのトポロジツール / Web「トポロジ」タブ（図・表・リンクの追加削除）</code></pre>
+
+<ul>
+  <li><strong>異常の定義は「インタフェースが down」だけ。</strong>ポーリングで <code>ifOperStatus</code> が 2 になるか、snmpd が送る linkDown trap を受けたら <code>open</code>、up に戻れば <code>resolved</code>。BGP の隣接や経路の変化は見ません。</li>
+  <li><strong>trap とポーリングの両方を持つのは、速さと確実さのため。</strong>trap は 5 秒以内に届きますが取りこぼすことがあり、ポーリングは 10 秒周期ですが必ず追いつきます。detector は同じ機器・同じインタフェースを 1 件にまとめます。</li>
+  <li><strong>Web とエージェントは、同じ 3 つのモジュールでトポロジと異常を読みます。</strong>Neptune と DynamoDB の場所は SSM のパラメータから引き、無ければ静的データに戻る（60 秒キャッシュ）ので、フェーズ 2 のスタックを消してもフェーズ 1 のまま動きます。</li>
+  <li><strong>Neptune の中身は Web から手で編集します。</strong>「静的データを投入」で 10 台と 10 本を入れ、以後リンクの追加・削除ができます。lab の実配線とは同期しません。</li>
+  <li><strong>費用は stream + graph で 1 時間 ≈ $0.35（約 52 円）。</strong>MSK kafka.t3.small × 2 が $0.09、MSK Connect 1 MCU が $0.11、Neptune db.t4g.medium が $0.11、lambda / sts のエンドポイントが $0.03。1 か月置くと ≈ $255（約 38,000 円）。単価は公開の料金表の値で、Price List API では未検証（2026-09-15）。</li>
+</ul>
+
 <h2 id="limits">確認できていないこと</h2>
 
 <p>
-テンプレート 3 つは <code>cfn-lint</code> を通し、エージェントは boto3 を差し替えた模擬テスト（36 項目）を、Gradio の画面は手元での起動を通しました。
-ただし、AWS 上にはまだデプロイしていません。次の点は実環境で確かめる必要があります。
+テンプレート 5 つは <code>cfn-lint</code> を通し、エージェントと detector と Neptune の読み書きは boto3 を差し替えた模擬テスト（41 / 21 / 18 項目）を通しました。
+Gradio の画面はフェーズ 1 の版は手元で起動し、フェーズ 2 の 3 タブ版は構文検査までです。AWS 上にはまだデプロイしていません。次の点は実環境で確かめる必要があります。
 </p>
 
 <ul>
@@ -214,6 +239,8 @@
   <li>閉域の EC2 から、S3 ゲートウェイ経由で <code>dnf install python3.13</code> / <code>docker</code> が通るか。t4g.small で Gradio が安定して動くか</li>
   <li>containerlab の rpm が AL2023 で入り、lab の 14 コンテナが t4g.large で動くか。t4g.small / t4g.large の単価（Price List API 未確認）</li>
   <li>VPC モードの Runtime が、イメージの取得に VPC 内の ECR / S3 エンドポイントを使うか</li>
+  <li>（フェーズ 2）Telegraf 1.40.0 の <code>outputs.kafka</code> が、インスタンスロールの資格情報で MSK の IAM 認証を通るか。MSK Connect の <code>KafkaConnectVersion</code> に <code>2.7.1</code> が入るか。Confluent の S3 sink 12.1.11 をプラグインとして登録できるか</li>
+  <li>（フェーズ 2）VPC モードの Runtime から Neptune のクラスター名が引けるか（プライベート DNS）。MSK / MSK Connect / Neptune の東京の単価</li>
 </ul>
 
 </div><!-- /.mb-main -->

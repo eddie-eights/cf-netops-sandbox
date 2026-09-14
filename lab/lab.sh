@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # lab EC2（lab.yaml）の上で containerlab を動かす。UserData が /usr/local/bin/lab に置くので、SSM セッションから `sudo lab check` で使う。
 #   lab.sh render | pull | up | down | status | check | snmp <node> | fail-main | heal-main | failover | clab <args...>
+#   lab.sh telegraf-render | telegraf-status     （フェーズ 2: Telegraf → MSK。stream.yaml を立ててから）
 # 元はローカル PoC の app/wvs2-lab/lab.sh。違いは 3 つ: containerlab を直接呼ぶ（root）、イメージは ECR から取る（pull）、
 # wvs2.clab.yml はテンプレート（.in）からイメージ URI を埋めて作る（render）。
 set -euo pipefail
@@ -95,6 +96,26 @@ case "${1:-}" in
       sleep 1
     done
     echo "$w"
+    if systemctl is-active -q "*-telegraf.service" 2>/dev/null; then
+      echo "== Telegraf（フェーズ 2）=="
+      echo "  ポーリング（10 秒周期）と snmpd の linkDown トラップ（5 秒周期の monitor）が MSK に流れ、detector が DynamoDB に書く。"
+      echo "  GUI の「異常一覧」か、エージェントに「今の異常は？」と聞くと hq-ce-01 eth1 の link_down が出る。戻すのは 'lab heal-main'"
+    fi
     ;;
-  *) sed -n '2,3p' "$SELF"; exit 1 ;;
+  telegraf-render)
+    # stream.yaml の bootstrap Lambda が SSM に書いたブローカーを埋めて /etc/telegraf/telegraf.conf を作る。
+    # stream スタックが無いときは失敗して終わる（unit は Restart=on-failure で 60 秒ごとに試し直す）
+    : "${AWS_REGION:?}" "${PARAM_PREFIX:?}"
+    b=$(aws ssm get-parameter --region "$AWS_REGION" --name "$PARAM_PREFIX/msk-bootstrap" --query Parameter.Value --output text) || {
+      echo "SSM $PARAM_PREFIX/msk-bootstrap が読めない。stream.yaml はまだ？" >&2; exit 1; }
+    q=$(printf '"%s"' "${b//,/\",\"}")
+    install -d -m 0755 /etc/telegraf
+    sed -e "s#__KAFKA_BROKERS__#$q#" -e "s#__AWS_REGION__#$AWS_REGION#" telegraf.conf.in > /etc/telegraf/telegraf.conf
+    echo "/etc/telegraf/telegraf.conf を作った（brokers: $b）"
+    ;;
+  telegraf-status)
+    systemctl --no-pager status "*-telegraf.service" || true
+    echo "== 直近のログ =="; journalctl -u "*-telegraf.service" -n 20 --no-pager
+    ;;
+  *) sed -n '2,4p' "$SELF"; exit 1 ;;
 esac

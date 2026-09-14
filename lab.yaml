@@ -3,6 +3,7 @@ Description: >-
   fukuda-nwc-poc - optional lab stack. One EC2 (Amazon Linux 2023 arm64) runs Docker + containerlab with the wvs2 topology
   (6 FRR routers with BGP, 4 snmpd sidecars, 4 hosts, all fictional addresses). Reached with SSM Session Manager.
   Images come from ECR (ecr.yaml), the containerlab rpm and configs from the S3 bucket of main.yaml. Stop the instance when not in use.
+  Phase 2: if the Telegraf rpm is also in lab/, Telegraf polls the CE routers over SNMP, receives their traps and writes to MSK (stream.yaml).
 
 Metadata:
   AWS::CloudFormation::Interface:
@@ -14,7 +15,7 @@ Metadata:
       - Label: { default: Lab EC2 }
         Parameters: [InstanceType, ImageId, VolumeSize, AutoStartLab]
       - Label: { default: Assets }
-        Parameters: [AssetBucketName, ContainerlabVersion, FrrImageTag, SnmpdImageTag, MultitoolImageTag]
+        Parameters: [AssetBucketName, ContainerlabVersion, TelegrafVersion, FrrImageTag, SnmpdImageTag, MultitoolImageTag]
 
 Parameters:
   NamePrefix:
@@ -69,6 +70,11 @@ Parameters:
     Default: 0.79.0
     AllowedPattern: "^[0-9]+[.][0-9]+[.][0-9]+$"
     Description: containerlab_<version>_linux_arm64.rpm must be uploaded to s3://<AssetBucketName>/lab/
+  TelegrafVersion:
+    Type: String
+    Default: 1.40.0
+    AllowedPattern: "^[0-9]+[.][0-9]+[.][0-9]+$"
+    Description: Phase 2. telegraf-<version>-1.aarch64.rpm in s3://<AssetBucketName>/lab/ is installed when present (README stream step 1). Nothing happens without it.
   FrrImageTag:
     Type: String
     Default: 10.2.1
@@ -100,6 +106,11 @@ Resources:
           ToPort: 443
           CidrIp: 0.0.0.0/0
           Description: HTTPS to VPC endpoints and S3 gateway endpoint
+        - IpProtocol: tcp
+          FromPort: 9098
+          ToPort: 9098
+          CidrIp: 0.0.0.0/0
+          Description: Phase 2 - Kafka with IAM auth to the MSK brokers of stream.yaml (private IPs in this VPC, no NAT)
       Tags:
         - { Key: Name, Value: !Sub "${NamePrefix}-lab" }
         - { Key: Project, Value: !Ref NamePrefix }
@@ -228,6 +239,12 @@ Resources:
           command -v containerlab >/dev/null || dnf install -y $LAB/src/containerlab_${ContainerlabVersion}_linux_arm64.rpm
           chmod 0755 $LAB/src/lab.sh
           ln -sfn $LAB/src/lab.sh /usr/local/bin/lab
+          # フェーズ 2: Telegraf の rpm が lab/ にあれば入れる（無ければ何もしない。stream.yaml が無くてもここは通る）
+          TELEGRAF_RPM=$LAB/src/telegraf-${TelegrafVersion}-1.aarch64.rpm
+          if [ -f $TELEGRAF_RPM ] && ! rpm -q telegraf-${TelegrafVersion} >/dev/null 2>&1; then
+            dnf install -y $TELEGRAF_RPM
+            systemctl disable --now telegraf.service 2>/dev/null || true
+          fi
 
           cat > /etc/${NamePrefix}-lab.env <<__ENV__
           AWS_REGION=${AWS::Region}
@@ -235,6 +252,7 @@ Resources:
           FRR_IMAGE=$REGISTRY/${NamePrefix}-lab-frr:${FrrImageTag}
           SNMPD_IMAGE=$REGISTRY/${NamePrefix}-lab-snmpd:${SnmpdImageTag}
           MULTITOOL_IMAGE=$REGISTRY/${NamePrefix}-lab-multitool:${MultitoolImageTag}
+          PARAM_PREFIX=/${NamePrefix}
           __ENV__
 
           cat > /etc/systemd/system/${NamePrefix}-lab.service <<__UNIT__
@@ -254,6 +272,28 @@ Resources:
           WantedBy=multi-user.target
           __UNIT__
 
+          # フェーズ 2: Telegraf。ExecStartPre で SSM の /<NamePrefix>/msk-bootstrap を読んで設定を作る。stream.yaml が無い間は
+          # 失敗して 60 秒ごとに試し直す（トポロジには影響しない）。162/udp で trap を受けるので root で動かす
+          if [ -f $TELEGRAF_RPM ]; then
+            cat > /etc/systemd/system/${NamePrefix}-telegraf.service <<__UNIT__
+          [Unit]
+          Description=${NamePrefix} Telegraf - SNMP poll + trap from the lab to MSK (phase 2)
+          After=docker.service network-online.target ${NamePrefix}-lab.service
+          Wants=${NamePrefix}-lab.service
+
+          [Service]
+          EnvironmentFile=/etc/${NamePrefix}-lab.env
+          WorkingDirectory=$LAB/src
+          ExecStartPre=$LAB/src/lab.sh telegraf-render
+          ExecStart=/usr/bin/telegraf --config /etc/telegraf/telegraf.conf
+          Restart=on-failure
+          RestartSec=60
+
+          [Install]
+          WantedBy=multi-user.target
+          __UNIT__
+          fi
+
           systemctl daemon-reload
           $LAB/src/lab.sh render
           $LAB/src/lab.sh pull
@@ -262,6 +302,10 @@ Resources:
             systemctl restart ${NamePrefix}-lab.service
           else
             systemctl disable ${NamePrefix}-lab.service || true
+          fi
+          if [ -f $TELEGRAF_RPM ]; then
+            systemctl enable ${NamePrefix}-telegraf.service
+            systemctl restart ${NamePrefix}-telegraf.service || true
           fi
           --==BOUNDARY==--
 
@@ -278,8 +322,11 @@ Outputs:
     Description: Start it again. The topology is deployed at boot when AutoStartLab is true.
     Value: !Sub aws ec2 start-instances --region ${AWS::Region} --instance-ids ${LabInstance}
   UploadLabCommand:
-    Description: Run in this repository after downloading the containerlab rpm (README lab step 2). Re-run and reboot to change configs.
+    Description: Run in this repository after downloading the containerlab rpm (README lab step 2). Re-run and reboot to change configs. Phase 2 adds the Telegraf rpm (README stream step 1).
     Value: !Sub aws s3 sync lab/ s3://${AssetBucketName}/lab/ --exclude "wvs2.clab.yml" && aws s3 cp containerlab_${ContainerlabVersion}_linux_arm64.rpm s3://${AssetBucketName}/lab/
+  UploadTelegrafCommand:
+    Description: Phase 2. Run after downloading https://dl.influxdata.com/telegraf/releases/telegraf-<TelegrafVersion>-1.aarch64.rpm, then reboot the instance
+    Value: !Sub aws s3 cp telegraf-${TelegrafVersion}-1.aarch64.rpm s3://${AssetBucketName}/lab/
   LabSecurityGroupId:
     Description: If EndpointSecurityGroupId was left empty, allow 443 from this SG on the ssm / ssmmessages / ecr endpoints by hand
     Value: !Ref LabSecurityGroup

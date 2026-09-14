@@ -18,7 +18,7 @@ EC2 のセキュリティグループに**受信ルールは 1 つも無い**。
   │   ─ TLS（WebSocket）─▶ ssmmessages エンドポイント
   ▼
 EC2（AL2023 arm64、プライベートサブネット、受信ルールなし）
-  │ SSM Agent → 127.0.0.1:8080 の Web（Gradio。タブは「チャット」と「トポロジ」= 静的データの図と機器表）
+  │ SSM Agent → 127.0.0.1:8080 の Web（Gradio。タブは「チャット」「トポロジ」「異常一覧」）
   │ boto3 invoke_agent_runtime（インスタンスロールで署名）
   ▼ bedrock-agentcore エンドポイント
 AgentCore Runtime（VPC モード）
@@ -27,7 +27,8 @@ AgentCore Runtime（VPC モード）
   │                                                                 └▶ Amazon Rerank 1.0（候補を並べ替えて上位 5 件）
   │ 2. Converse + ガードレール + ツール ─ bedrock-runtime エンドポイント ─▶ Guardrail が質問を判定
   │      ↑ モデルが list_devices / neighbors / blast_radius を呼んだら        └▶ Amazon Nova 2 Lite（jp 推論プロファイル）
-  │        コンテナ内の静的トポロジ（agent/data/）で答えて往復（最大 5 回）   └▶ Guardrail が回答を判定
+  │        トポロジ（Neptune があればそこから、無ければ agent/data/）で答えて往復（最大 5 回）  └▶ Guardrail が回答を判定
+  │        list_anomalies を呼んだら DynamoDB の異常一覧（stream.yaml）を返す
   ▼ 回答の末尾に参照した md のファイル名を付けて返す
 
 取り込み（利用者が手で行う）: kb-docs/*.md ─ aws s3 cp ─▶ S3 ─ start-ingestion-job ─▶ Titan Embeddings V2 ─▶ OpenSearch Serverless
@@ -35,19 +36,27 @@ Web の部品（利用者が手で行う）: web/app.py + agent/data/ + wheels/ 
 
 lab（任意、lab.yaml、別スタック）: 同じ VPC の EC2 1 台で containerlab + FRR × 6 + snmpd × 4 + ホスト × 4 を動かす。
   SSM セッションで入って `sudo lab check` / `sudo lab failover`。イメージは ECR（ecr.yaml）、設定と rpm は S3 の lab/。
-  Web やエージェントとはつながっていない（トポロジは静的データ。lab は BGP の切替と SNMP を手で見るためのもの）。
+
+フェーズ 2（stream.yaml / graph.yaml、別スタック。使う日だけ作って当日中に消す）:
+  lab EC2 の Telegraf ─ SNMP ポーリング（10 秒、CE 4 台）+ SNMP trap（linkUp/linkDown、snmpd → 203.0.113.1:162）
+    ─ Kafka（IAM 認証、9098）─▶ MSK（2 ブローカー）─┬▶ detector Lambda ─▶ DynamoDB の異常テーブル ─▶ Web の「異常一覧」/ エージェントの list_anomalies
+                                                └▶ MSK Connect（S3 sink）─▶ S3 の stream/（生データの保管）
+  Neptune（graph.yaml）─ Gremlin（boto3 neptunedata、IAM 認証）─▶ エージェントの topology.py と Web の「トポロジ」タブ（図・表・リンクの追加削除）
 ```
 
 | ファイル | 中身 |
 |---|---|
 | `ecr.yaml` | エージェントイメージの ECR リポジトリ。先にデプロイする |
 | `main.yaml` | VPC エンドポイント / ナレッジベース（S3・OpenSearch Serverless）/ ガードレール / AgentCore Runtime / EC2（Web は起動時に S3 から取って入れる）/ IAM |
-| `lab.yaml` | 任意。containerlab + FRR の lab を動かす EC2 1 台（`main.yaml` の VPC とバケットを使う） |
-| `agent/` | Runtime に載せるコンテナ（Python 3.13、`bedrock-agentcore` SDK、arm64）。`topology.py` がトポロジのツール、`data/` が静的トポロジ（`devices.yaml` / `topology.json`、架空の 10 台） |
-| `web/` | EC2 で動かす Gradio の画面（`app.py`）と依存（`requirements.txt`）。S3 に置く |
-| `lab/` | lab の材料。`wvs2.clab.yml.in`（containerlab の定義。イメージ名は起動時に埋める）、`frr/`、`snmpd/`（Dockerfile と設定）、`lab.sh` |
+| `lab.yaml` | 任意。containerlab + FRR の lab を動かす EC2 1 台（`main.yaml` の VPC とバケットを使う）。フェーズ 2 では Telegraf も入れる |
+| `stream.yaml` | フェーズ 2。MSK（2 ブローカー、IAM 認証）/ detector Lambda / DynamoDB の異常テーブル / MSK Connect の S3 sink / lambda・sts・dynamodb エンドポイント / `main.yaml` のロールへの読み取り権限 |
+| `graph.yaml` | フェーズ 2。Neptune（db.t4g.medium × 1、IAM 認証）と、`main.yaml` のロールへの Gremlin 権限。無ければ静的データで動く |
+| `stream/detector.py` | detector Lambda の本体（`stream.yaml` の ZipFile と同じ。`tests/test_stream.py` が一致を確かめる） |
+| `agent/` | Runtime に載せるコンテナ（Python 3.13、`bedrock-agentcore` SDK、arm64）。`topology.py` がトポロジのツール（Neptune → 静的の順）、`graph.py` が Neptune の読み書き、`anomalies.py` が異常一覧のツール、`data/` が静的トポロジ（`devices.yaml` / `topology.json`、架空の 10 台） |
+| `web/` | EC2 で動かす Gradio の画面（`app.py`）と依存（`requirements.txt`）。`agent/` の 3 モジュールと一緒に S3 に置く（出力 `UploadWebCommand`） |
+| `lab/` | lab の材料。`wvs2.clab.yml.in`（containerlab の定義。イメージ名は起動時に埋める）、`frr/`、`snmpd/`（Dockerfile と設定。trap の送信も）、`telegraf.conf.in`（ポーリングと trap 受信 → MSK）、`lab.sh` |
 | `kb-docs/` | ナレッジベースに入れる手順書の例（架空の md 3 つ） |
-| `tests/test_app.py` | `agent/app.py` と `agent/topology.py` の模擬テスト（AWS に触れない） |
+| `tests/` | 模擬テスト（AWS に触れない）。`test_app.py`（エージェント）、`test_graph.py`（Neptune の読み書きと静的への切り戻し）、`test_stream.py`（detector） |
 
 ## なぜこの形にしたか
 
@@ -518,6 +527,93 @@ aws cloudformation delete-stack --region ap-northeast-1 --stack-name fukuda-nwc-
 
 lab の設定（`lab/frr/` など）を変えたら lab-2 を置き直して再起動する。イメージを変えたら新しいタグで push し、`FrrImageTag` などを変えて再デプロイする。
 
+## フェーズ 2（任意）: lab → MSK → DynamoDB と、Neptune のトポロジ
+
+lab の SNMP（ポーリングと trap）を MSK に流し、detector Lambda が `link_down` を DynamoDB に書く。Web の「異常一覧」とエージェントの `list_anomalies` がそれを読む。
+トポロジは Neptune に置き、Web から編集できる。**どちらも時間課金なので、使う日に作って当日中に消す**（下の試算）。
+`main.yaml` と `lab.yaml` はそのまま使う（`main.yaml` は `PARAM_PREFIX` を渡すよう変えたので、古いものは一度 deploy し直す）。
+
+順番: `stream.yaml` → lab EC2 の Telegraf を起動（lab-3 の再デプロイか再起動）→ `graph.yaml` → Web の再起動と投入。
+
+### s-1. Telegraf の rpm と S3 sink のプラグインを S3 に置く
+
+```bash
+curl -LO https://dl.influxdata.com/telegraf/releases/telegraf-1.40.0-1.aarch64.rpm
+aws s3 cp telegraf-1.40.0-1.aarch64.rpm s3://fukuda-nwc-poc-kb-123456789012/lab/
+curl -LO https://hub-downloads.confluent.io/api/plugins/confluentinc/kafka-connect-s3/versions/12.1.11/confluentinc-kafka-connect-s3-12.1.11.zip
+aws s3 cp confluentinc-kafka-connect-s3-12.1.11.zip s3://fukuda-nwc-poc-kb-123456789012/stream/
+```
+
+プラグインの URL は Confluent Hub の形で、ダウンロードには利用条件への同意が要ることがある。取れなければブラウザで取って同じキーに置く。S3 sink が要らなければ `CreateS3Sink=false` にして飛ばす。
+
+### s-2. stream.yaml をデプロイする
+
+`SubnetIds` は AZ の違う 2 つ（`main.yaml` の Runtime のサブネットでよい）。`RouteTableIds` は `main.yaml` に渡したものと同じ。`EndpointSecurityGroupId` / `LabSecurityGroupId` / `LabRoleName` は `main.yaml` / `lab.yaml` の出力。
+
+```bash
+aws cloudformation deploy \
+  --region ap-northeast-1 \
+  --stack-name fukuda-nwc-poc-stream \
+  --template-file stream.yaml \
+  --capabilities CAPABILITY_NAMED_IAM \
+  --tags Project=fukuda-nwc-poc owner=fukuda \
+  --parameter-overrides \
+    VpcId=vpc-0123456789abcdef0 \
+    SubnetIds=subnet-0aaaaaaaaaaaaaaaa,subnet-0bbbbbbbbbbbbbbbb \
+    RouteTableIds=rtb-0cccccccccccccccc \
+    EndpointSecurityGroupId=sg-0ddddddddddddddd0 \
+    LabSecurityGroupId=sg-0eeeeeeeeeeeeeee0 \
+    LabRoleName=fukuda-nwc-poc-lab \
+    AssetBucketName=fukuda-nwc-poc-kb-123456789012
+```
+
+MSK の作成に 20〜30 分かかる。出来上がると SSM の `/fukuda-nwc-poc/msk-bootstrap`（ブローカー）と `/fukuda-nwc-poc/anomaly-table` が書かれ、lab の Telegraf と Web / エージェントはそこから読む。
+
+### s-3. lab の Telegraf を動かす
+
+`lab.yaml` を `TelegrafVersion=1.40.0`（既定）で lab-3 と同じコマンドでデプロイし直す（起動時に rpm を入れ、`fukuda-nwc-poc-telegraf` サービスを作る）。すでに動いている lab は再起動でもよい。
+Telegraf は起動のたびに `lab telegraf-render` で SSM のブローカーを設定に埋める。`stream.yaml` より先に上げた場合は失敗して 60 秒ごとにやり直すので、そのまま待てばつながる。
+
+```bash
+sudo lab telegraf-status       # サービスの状態と直近のログ
+sudo lab failover              # 主回線を落とす → 5 秒以内に trap、10 秒以内にポーリングで link_down
+sudo lab heal-main             # 戻す → resolved
+```
+
+Web の「異常一覧」タブか、チャットで「今の異常は？」と聞く。detector のログは出力 `DetectorLogs`。S3 sink は 1 分ごとに `stream/topics/<トピック>/dt=.../hour=.../` に JSON を置く。
+
+### g-1. graph.yaml をデプロイする
+
+```bash
+aws cloudformation deploy \
+  --region ap-northeast-1 \
+  --stack-name fukuda-nwc-poc-graph \
+  --template-file graph.yaml \
+  --capabilities CAPABILITY_NAMED_IAM \
+  --tags Project=fukuda-nwc-poc owner=fukuda \
+  --parameter-overrides \
+    VpcId=vpc-0123456789abcdef0 \
+    SubnetIds=subnet-0aaaaaaaaaaaaaaaa,subnet-0bbbbbbbbbbbbbbbb \
+    RuntimeSecurityGroupId=sg-0fffffffffffffff0 \
+    InstanceSecurityGroupId=sg-0aaaaaaaaaaaaaaa0
+```
+
+10〜15 分。出来上がると SSM の `/fukuda-nwc-poc/neptune-endpoint` が書かれる。
+
+### g-2. Web を再起動して静的データを投入する
+
+Web は起動時に SSM を読むので、管理者のシェルで `sudo systemctl restart fukuda-nwc-poc-web`（`s-2` の後にも一度）。エージェントは呼び出しのたびに読む（60 秒キャッシュ）。
+「トポロジ」タブの「Neptune で編集」を開き、「静的データを投入」で 10 台と 10 本を入れる。以後はリンクの追加・削除がそこでできて、エージェントの答えにも反映される（次の質問から）。Neptune を消すと静的データに戻る。
+
+### 消す
+
+```bash
+aws cloudformation delete-stack --region ap-northeast-1 --stack-name fukuda-nwc-poc-graph
+aws cloudformation delete-stack --region ap-northeast-1 --stack-name fukuda-nwc-poc-stream
+```
+
+`stream` は MSK Connect → MSK の順に消えるので 15 分ほど。S3 の `stream/` に置いた生データとプラグインは残る（要らなければ `aws s3 rm --recursive`）。DynamoDB のテーブルはスタックと一緒に消える。
+
 ## うまくいかないとき
 
 | 症状 | 見るところ |
@@ -556,6 +652,8 @@ lab の設定（`lab/frr/` など）を変えたら lab-2 を置き直して再�
 **先にナレッジベースのバケットを空にする。**中身が残っているとバケットが消せず、スタック削除が `DELETE_FAILED` になる。
 
 ```bash
+aws cloudformation delete-stack --region ap-northeast-1 --stack-name fukuda-nwc-poc-graph   # フェーズ 2 を作っていれば先に
+aws cloudformation delete-stack --region ap-northeast-1 --stack-name fukuda-nwc-poc-stream
 aws cloudformation delete-stack --region ap-northeast-1 --stack-name fukuda-nwc-poc-lab   # lab を作っていれば先に
 aws s3 rm s3://fukuda-nwc-poc-kb-123456789012 --recursive
 aws cloudformation delete-stack --region ap-northeast-1 --stack-name fukuda-nwc-poc
@@ -597,6 +695,21 @@ aws logs delete-log-group --region ap-northeast-1 --log-group-name "$LOG_GROUP"
 lab（`lab.yaml`）は上に含めていない。**起動している間だけ**、t4g.large（$0.0864/h、約 13 円）と gp3 16 GB（月 $1.5）がかかる。
 止めれば EBS の月 $1.5 だけ。**1 か月起動したままだと約 $65（約 9,700 円）**なので、使ったら止める。t4g.large の単価は 2026-09-14 時点で Price List API を引けておらず、公開の料金表の値（未検証）。
 
+フェーズ 2 は上に含めていない。**stream と graph を両方立てると約 $0.35/h（約 52 円）、1 か月置くと約 $255（約 38,000 円）**なので、使う日に作って当日中に消す。単価は公開の料金表の値で、Price List API では未検証（2026-09-15）。
+
+| フェーズ 2 の項目 | 単価 | 1 時間 |
+|---|---|---|
+| MSK kafka.t3.small × 2 | 約 $0.0456/h/ブローカー | $0.091 |
+| MSK ストレージ 10 GB × 2 | $0.114/GB 月 | $0.003 |
+| MSK Connect 1 MCU | 約 $0.11/MCU 時間 | $0.11 |
+| インターフェイスエンドポイント lambda / sts × 1 AZ | $0.014/h/AZ | $0.028 |
+| Lambda / DynamoDB（オンデマンド）/ SSM / S3 | 数百万リクエストまでほぼ無料枠 | 約 $0 |
+| Neptune db.t4g.medium × 1 | 約 $0.113/h | $0.113 |
+| Neptune ストレージ・I/O | $0.12/GB 月、$0.24/100 万 I/O | 約 $0 |
+| **合計** | | **約 $0.35（約 52 円）** |
+
+MSK Connect を作らなければ（`CreateS3Sink=false`）$0.24/h。
+
 | パターン | 1 時間 | 1 か月（730 時間） |
 |---|---|---|
 | 上の想定（1 人が 1 分に 1 回話す） | 約 $0.81（約 121 円） | 使い方しだい |
@@ -619,7 +732,9 @@ lab（`lab.yaml`）は上に含めていない。**起動している間だけ**
 - 会話の永続化。履歴は Runtime のセッション（microVM）の中にだけあり、アイドル 5 分か 1 時間、または画面の再読み込みで消える。
 - チャット Web のログの CloudWatch Logs 転送（CloudWatch エージェント）。必要なら AL2023 の `amazon-cloudwatch-agent` を入れる。logs エンドポイントは Runtime 用に作ったものが VPC 全体で使える。
 - 複数人の同時利用を想定した作り。t4g.small で数人程度まで（Gradio の同時実行は 4）。
-- 機器からの実データ。トポロジは `agent/data/` の静的データで、lab の SNMP や BGP の状態は Web にもエージェントにも入らない（フェーズ 2 以降）。
+- BGP の状態の監視。フェーズ 2 で入るのはインタフェースの up/down（ポーリングと trap）だけで、BGP の隣接や経路の変化は異常にならない。
+- 異常からの修復（承認して直す流れ。フェーズ 5）と、Grafana などの可視化（保留）。異常一覧は DynamoDB の表をそのまま出す。
+- Neptune のトポロジと lab の実配線の同期。Neptune は手で編集するもので、lab を変えても追随しない。
 - 手順書の自動取り込み。S3 のイベントで取り込みジョブを流す仕組みは入れていない。
 - 日本語向けの形態素解析（kuromoji など）。キーワード検索は OpenSearch の既定のアナライザで、日本語は細かく切られる。ログの文字列やコマンド名のような英数字の一致には効く。
 - ガードレールの機微情報フィルタ（PII）、拒否トピック、単語フィルタ、コンテキストグラウンディング。PII は IP アドレスやホスト名を伏せて運用の回答を壊すので入れていない。単語フィルタとグラウンディングは日本語に対応していない。
@@ -627,9 +742,12 @@ lab（`lab.yaml`）は上に含めていない。**起動している間だけ**
 
 ## 確認したこと・確認できていないこと
 
-確認したこと（2026-09-14）。
+確認したこと（2026-09-14、フェーズ 2 は 2026-09-15）。
 
-- `cfn-lint` で `ecr.yaml` / `main.yaml` / `lab.yaml` にエラー・警告なし。
+- `cfn-lint` で `ecr.yaml` / `main.yaml` / `lab.yaml` / `stream.yaml` / `graph.yaml` にエラー・警告なし。
+- フェーズ 2 の模擬テスト。`tests/test_stream.py`（21 項目: ZipFile と `stream/detector.py` の一致、機器名の引き方、ポーリングの open / resolved、`first_seen` を保つ、解消済みへの up を数えない、MIB 無しの trap から ifDescr を取る、linkUp で resolved、壊れたレコードを飛ばす）、`tests/test_graph.py`（18 項目: SSM 未設定なら静的、GraphSON の読み替え、Neptune からの組み立て、失敗時と空のときの静的への切り戻し、`add_link` の正規化と重複拒否、`remove_link` / `add_device` / `seed` の Gremlin）。`tests/test_app.py` は 41 項目になった（ツールが 5 つ、`list_anomalies` が未配備で error を返す、振り分け）。
+- Telegraf の `inputs.snmp` は数値 OID とフィールド名を明示すれば MIB 無しで動き、`inputs.snmp_trap` は v2c を MIB 無しで受ける（varbind の名前は数値 OID）。`agent_host` タグは `source` に替わっている。net-snmp の `monitor` には `iquerySecName` と内部ユーザーが要る。
+- MSK の推奨バージョンが 3.9.x、Neptune の最新が 1.4.8.0、Neptune の IAM アクションが `neptune-db:*DataViaQuery`、`AWS::MSK::Configuration` の GetAtt が `LatestRevision.Revision`、Lambda の MSK イベントソースが NAT 無しの VPC では lambda と sts のエンドポイントを要ること、MSK Connect の信頼先が `kafkaconnect.amazonaws.com` であること。
 - `agent/app.py` と `agent/topology.py` を、boto3 と SDK を差し替えた模擬テスト（`tests/test_app.py`）で確かめた。36 項目: ハイブリッド検索の指定、リランクの有無で `rerankingConfiguration` を付け外しする、質問だけを `guardContent` に入れる、ガードレールで止めた往復を履歴に残さない、参照元の付け方、検索とモデルの失敗、履歴の長さ、ツールの仕様が `toolConfig` に載ること、`toolUse` → `toolResult` の往復、往復の上限（5 回）、無い機器の扱い、トポロジ関数の結果。
 - `web/app.py` を手元（Python 3.14、gradio 5.50.0）で起動し、画面が出ることと、Runtime の呼び出しが `AccessDenied` のときにエラー表示になることを確かめた。
 - `web/requirements.txt` の依存が arm64 / cp313 の wheel で全部取れること（`pip download`、58 個、132 MB。numpy は manylinux_2_28 で、AL2023 の glibc 2.34 で動く）。
@@ -648,7 +766,13 @@ lab（`lab.yaml`）は上に含めていない。**起動している間だけ**
 
 確認できていないこと。
 
-- **実環境へのデプロイ。**上はすべて手元の静的検査と模擬テストで、AWS 上では動かしていない。
+- **実環境へのデプロイ。**上はすべて手元の静的検査と模擬テストで、AWS 上では動かしていない。フェーズ 2 も同じで、Telegraf → MSK の IAM 認証、detector の受信、MSK Connect、Neptune への Gremlin は実環境で通していない。
+- `AWS::KafkaConnect::Connector` の `KafkaConnectVersion` に `2.7.1` が入るか（許される値の一覧を文書で確認できていない）。MSK Connect が S3 とログに届くのに、S3 ゲートウェイと logs エンドポイント以外の経路が要るか。
+- Telegraf 1.40.0 の `outputs.kafka` の `AWS-MSK-IAM` が、インスタンスロール（IMDS）の資格情報で動くか。もっと古い版で使えるかも未確認。
+- Confluent の S3 sink 12.1.11 の zip を CustomPlugin として登録できるか（Confluent Community License。ダウンロードの URL と同意の要否）。
+- Neptune の `db.t4g.medium` と MSK の `kafka.t3.small`、MSK Connect の MCU の東京の単価（Price List API を引けていない。上は公開の料金表の値）。
+- `web/app.py` の 3 タブ版は手元で起動していない（gradio 未導入の環境で構文検査のみ）。Neptune の編集 UI の動きは `tests/test_graph.py` の Gremlin までしか見ていない。
+- boto3 の `neptunedata` クライアントが VPC モードの Runtime からクラスターの DNS 名で届くか（プライベート DNS。エンドポイントは要らない想定）。
 - OpenSearch Serverless のアクセスポリシーの反映待ちで、`KbIndex` の作成が 403 になることがあるか（コレクションより先にポリシーを作って間を空けている）。
 - Identity Center のロール（パス付き）を `KbAdminPrincipalArn` に入れて、データアクセスポリシーが効くか。
 - ネットワークポリシーを非公開（`SourceServices: bedrock.amazonaws.com` と VPC エンドポイント）にしても、CloudFormation のインデックス作成が通るか。
