@@ -186,6 +186,29 @@ ENI にタグが付かず上で何も出ないときは、`aws ec2 describe-vpc-
 | （同）arm64 の QEMU を登録する | `docker run --privileged --rm tonistiigi/binfmt --install arm64` を 1 回打つ（WSL を再起動すると消えるので、`docker buildx ls` に `linux/arm64` が無ければ打ち直す）。エージェントのイメージは AgentCore Runtime の要件で arm64 必須なので、これが無いと手順 2 が通らない |
 | python3 と pip がある | `python3 -m pip --version`。手順 4 の wheel 取得に使う（Ubuntu なら `sudo apt install python3-pip`） |
 
+**WSL に Docker Engine を入れて push するまでの一連の流れ**（Ubuntu の WSL2。Docker Desktop は使わない。2026-09-15 時点の docker.com の手順）。
+
+```bash
+sudo apt-get update && sudo apt-get install -y ca-certificates curl
+sudo install -m 0755 -d /etc/apt/keyrings
+sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | sudo tee /etc/apt/sources.list.d/docker.list
+sudo apt-get update && sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin
+sudo usermod -aG docker "$USER"
+printf '[boot]\nsystemd=true\n' | sudo tee /etc/wsl.conf
+```
+
+ここで PowerShell から `wsl --shutdown` して WSL を開き直す（docker グループと systemd を効かせるため）。開き直したら次を打つ。
+
+```bash
+sudo systemctl enable --now docker
+docker run --privileged --rm tonistiigi/binfmt --install arm64
+docker buildx ls          # Platforms に linux/arm64 があれば準備完了
+```
+
+あとは手順 2（エージェント）と lab-1（lab のイメージ）のコマンドをそのまま打つ。QEMU で翻訳実行するので、エージェントのビルドはネイティブより数倍かかる（目安は数分から十数分）。
+WSL を再起動すると QEMU の登録は消えるので、`docker buildx ls` に `linux/arm64` が無くなっていたら `binfmt --install arm64` だけ打ち直す。
+
 ### 既存の VPC エンドポイントがある場合
 
 社内の VPC には、エンドポイントが既にあることが多い。**同じサービスのプライベート DNS 付きエンドポイントは 1 VPC に 1 つしか作れない**ので、次のパラメータで作らないようにする。
