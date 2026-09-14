@@ -179,8 +179,11 @@ ENI にタグが付かず上で何も出ないときは、`aws ec2 describe-vpc-
 | 見るもの | 確認 |
 |---|---|
 | AWS CLI v2 と Session Manager plugin が **WSL 側**に入っている | `aws --version` と `session-manager-plugin` を WSL のシェルで打つ。Windows 側にだけ入れても WSL の `aws ssm start-session` からは見えない（Linux 版の deb / rpm を WSL に入れる） |
-| docker で arm64 のビルドができる | `docker buildx ls` の `Platforms` に `linux/arm64` があること。Docker Desktop（WSL2 backend）なら最初からある。WSL に直接 Docker Engine を入れた場合は `docker run --privileged --rm tonistiigi/binfmt --install arm64` で QEMU を登録する |
+| docker で arm64 のビルドができる | `docker buildx ls` の `Platforms` に `linux/arm64` があること。Docker Desktop（WSL2 backend）なら最初からある。**WSL に直接 Docker Engine を入れる場合**は下の 3 点 |
 | 改行が LF のまま | `lab/lab.sh` と `web/app.py` は EC2 の Linux で動くので、CRLF になっていると `set -euo pipefail\r` で落ちる。リポジトリは **WSL の中で clone** し（`/mnt/c` 配下でなく `~` 配下）、`git config core.autocrlf` が `true` なら `false` にする。`file lab/lab.sh` に `CRLF` が出なければよい |
+| （Docker Engine を WSL に直接入れるとき）docker.com の apt リポジトリから入れる | Ubuntu 標準の `docker.io` には buildx が無い。`docker-ce docker-ce-cli containerd.io docker-buildx-plugin` を入れ、`sudo usermod -aG docker $USER` の後にシェルを開き直す |
+| （同）dockerd が起動している | `/etc/wsl.conf` に `[boot]` `systemd=true` を書いて `wsl --shutdown` で入り直すと `systemctl enable --now docker` が使える。systemd を使わないなら毎回 `sudo service docker start` |
+| （同）arm64 の QEMU を登録する | `docker run --privileged --rm tonistiigi/binfmt --install arm64` を 1 回打つ（WSL を再起動すると消えるので、`docker buildx ls` に `linux/arm64` が無ければ打ち直す）。エージェントのイメージは AgentCore Runtime の要件で arm64 必須なので、これが無いと手順 2 が通らない |
 | python3 と pip がある | `python3 -m pip --version`。手順 4 の wheel 取得に使う（Ubuntu なら `sudo apt install python3-pip`） |
 
 ### 既存の VPC エンドポイントがある場合
