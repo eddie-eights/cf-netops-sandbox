@@ -3,3 +3,7 @@ __pycache__/
 .DS_Store
 .env
 .env.*
+# pip download の置き場（README の手順 4）
+wheels/
+lab/wvs2.clab.yml
+*.rpm

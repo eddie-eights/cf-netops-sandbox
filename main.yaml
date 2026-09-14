@@ -1,9 +1,10 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >-
   fukuda-nwc-poc - NetOps phase 1 for a closed network. Browser on the user's PC -> SSM Session Manager
-  port forwarding -> chat web on EC2 (127.0.0.1 only, no inbound rules) -> AgentCore Runtime (VPC mode) ->
-  Bedrock Knowledge Base (OpenSearch Serverless, hybrid search) and Bedrock Converse with a guardrail.
-  No NAT gateway, no EIP, no public IP, no load balancer.
+  port forwarding -> Gradio web on EC2 (chat + topology figure + device table, 127.0.0.1 only, no inbound rules) ->
+  AgentCore Runtime (VPC mode) -> Bedrock Knowledge Base (OpenSearch Serverless, hybrid search), static topology
+  tools (list_devices / neighbors / blast_radius) and Bedrock Converse with a guardrail.
+  No NAT gateway, no EIP, no public IP, no load balancer. The optional lab (containerlab + FRR) is lab.yaml.
 
 Metadata:
   AWS::CloudFormation::Interface:
@@ -95,8 +96,9 @@ Parameters:
     Description: Chunks kept after reranking and passed to the model (ignored when RerankModelId is empty)
   InstanceType:
     Type: String
-    Default: t4g.micro
-    AllowedValues: [t4g.nano, t4g.micro, t4g.small]
+    Default: t4g.small
+    AllowedValues: [t4g.micro, t4g.small, t4g.medium]
+    Description: Chat web EC2. Gradio with numpy and pandas needs about 400 MB of memory, so t4g.small (2 GB) is the default.
   ImageId:
     Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
     Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64
@@ -792,6 +794,20 @@ Resources:
                 Resource:
                   - !GetAtt AgentRuntime.AgentRuntimeArn
                   - !Sub ${AgentRuntime.AgentRuntimeArn}/*
+        # 画面のコード・静的データ・wheel は同じバケットの web/ に置く（README の手順 4）。docs/ は読ませない
+        - PolicyName: web-assets
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub ${KbBucket.Arn}/web/*
+              - Effect: Allow
+                Action: s3:ListBucket
+                Resource: !GetAtt KbBucket.Arn
+                Condition:
+                  StringLike:
+                    s3:prefix: web/*
       Tags:
         - { Key: Name, Value: !Sub "${NamePrefix}-web" }
         - { Key: Project, Value: !Ref NamePrefix }
@@ -831,8 +847,8 @@ Resources:
         - { Key: Project, Value: !Ref NamePrefix }
         - { Key: owner, Value: !Ref Owner }
       # UserData を変えると CloudFormation はインスタンスを停止・起動する。
-      # 先頭の cloud-config で起動のたびにスクリプトを流すので、変更はその再起動で反映される。
-      # 本文は Fn::Sub を通るので、画面とサーバのコードに「ドル記号 + 波かっこ」を書かない
+      # 先頭の cloud-config で起動のたびにスクリプトを流すので、S3 の web/ を置き直して再起動すれば画面も更新される。
+      # 本文は Fn::Sub を通るので「ドル記号 + 波かっこ」を書かない（$APP のような素の変数は通る）
       UserData:
         Fn::Base64: !Sub |
           Content-Type: multipart/mixed; boundary="==BOUNDARY=="
@@ -853,25 +869,43 @@ Resources:
 
           #!/bin/bash
           set -euo pipefail
-          # /usr/bin/python3 は 3.9 のまま（AL2023 の仕様）。3.13 を別に入れる。取得経路は S3 ゲートウェイエンドポイント
-          command -v python3.13 >/dev/null || dnf install -y python3.13
-          install -d -m 0755 /opt/${NamePrefix}-web
+          APP=/opt/${NamePrefix}-web
+          # /usr/bin/python3 は 3.9 のまま（AL2023 の仕様）。3.13 と pip を別に入れる。取得経路は S3 ゲートウェイエンドポイント
+          command -v python3.13 >/dev/null || dnf install -y python3.13 python3.13-pip
+          install -d -m 0755 $APP
+          # 画面のコード（app.py）・静的データ（data/）・依存の wheel（wheels/）を S3 から取る（README の手順 4）
+          aws s3 sync --delete --region ${AWS::Region} s3://${KbBucket}/web/ $APP/src/
+          # バケットはこのスタックが作るので、初回のデプロイ時点では web/ が空。置いてから reboot-instances すれば、この UserData がもう一度走る
+          if [ ! -f $APP/src/requirements.txt ]; then
+            echo "web/ is not in s3://${KbBucket} yet. Upload it (output UploadWebCommand) and reboot the instance." >&2
+            exit 0
+          fi
+          # インターネットに出ないので PyPI は見ない。wheel は arm64 / cp313 で揃えてある。--target で $APP/lib に入れる
+          python3.13 -m pip install --quiet --no-index --find-links $APP/src/wheels --target $APP/lib --upgrade \
+            -r $APP/src/requirements.txt
 
-          cat > /etc/${NamePrefix}-web.env <<'__ENV__'
+          cat > /etc/${NamePrefix}-web.env <<__ENV__
           RUNTIME_ARN=${AgentRuntime.AgentRuntimeArn}
           AWS_REGION=${AWS::Region}
           PORT=8080
+          TITLE=NWC PoC
+          DATA_DIR=$APP/src/data
+          PYTHONPATH=$APP/lib
+          GRADIO_TEMP_DIR=/var/lib/${NamePrefix}-web/tmp
+          GRADIO_ANALYTICS_ENABLED=False
+          HF_HUB_OFFLINE=1
+          HF_HUB_DISABLE_TELEMETRY=1
           __ENV__
 
-          cat > /etc/systemd/system/${NamePrefix}-web.service <<'__UNIT__'
+          cat > /etc/systemd/system/${NamePrefix}-web.service <<__UNIT__
           [Unit]
-          Description=${NamePrefix} chat web (127.0.0.1:8080, reached via SSM port forwarding)
+          Description=${NamePrefix} chat web (Gradio, 127.0.0.1:8080, reached via SSM port forwarding)
           After=network-online.target
           Wants=network-online.target
 
           [Service]
           EnvironmentFile=/etc/${NamePrefix}-web.env
-          ExecStart=/usr/bin/python3.13 /opt/${NamePrefix}-web/server.py
+          ExecStart=/usr/bin/python3.13 $APP/src/app.py
           DynamicUser=yes
           StateDirectory=${NamePrefix}-web
           Environment=HOME=/var/lib/${NamePrefix}-web
@@ -887,218 +921,6 @@ Resources:
           WantedBy=multi-user.target
           __UNIT__
 
-          cat > /opt/${NamePrefix}-web/index.html <<'__INDEX_HTML__'
-          <!doctype html>
-          <html lang="ja">
-          <head>
-          <meta charset="utf-8">
-          <meta name="viewport" content="width=device-width, initial-scale=1">
-          <title>NWC PoC チャット</title>
-          <style>
-            body { font-family: system-ui, -apple-system, "Hiragino Sans", "Yu Gothic UI", sans-serif; margin: 0; background: #f6f7f9; color: #1b1f24; }
-            main { max-width: 760px; margin: 0 auto; padding: 16px; display: flex; flex-direction: column; height: 100vh; box-sizing: border-box; }
-            h1 { font-size: 18px; margin: 0 0 8px; }
-            #log { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; padding: 8px 0; }
-            .msg { padding: 10px 12px; border-radius: 8px; white-space: pre-wrap; line-height: 1.6; max-width: 85%; }
-            .user { align-self: flex-end; background: #dbeafe; }
-            .agent { align-self: flex-start; background: #fff; border: 1px solid #d0d7de; }
-            .error { align-self: flex-start; background: #fee2e2; }
-            form { display: flex; gap: 8px; }
-            textarea { flex: 1; resize: vertical; min-height: 52px; padding: 8px; font: inherit; }
-            button { padding: 0 18px; font: inherit; }
-          </style>
-          </head>
-          <body>
-          <main>
-            <h1>NWC PoC チャット</h1>
-            <div id="log" aria-live="polite"></div>
-            <form id="form">
-              <textarea id="prompt" placeholder="質問を入力（Ctrl+Enter で送信）" maxlength="4000" required></textarea>
-              <button id="send">送信</button>
-            </form>
-          </main>
-          <script>
-          (() => {
-            const log = document.getElementById("log");
-            const form = document.getElementById("form");
-            const input = document.getElementById("prompt");
-            const send = document.getElementById("send");
-            // 36 文字。runtimeSessionId は 33 文字以上。localhost は安全なコンテキストなので randomUUID が使える
-            const sessionId = crypto.randomUUID();
-            // 応答は textContent で入れる（HTML として解釈しない）
-            const add = (cls, text) => {
-              const div = document.createElement("div");
-              div.className = "msg " + cls;
-              div.textContent = text;
-              log.appendChild(div);
-              log.scrollTop = log.scrollHeight;
-              return div;
-            };
-            input.addEventListener("keydown", (e) => {
-              if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) form.requestSubmit();
-            });
-            form.addEventListener("submit", async (e) => {
-              e.preventDefault();
-              const prompt = input.value.trim();
-              if (!prompt) return;
-              add("user", prompt);
-              input.value = "";
-              send.disabled = true;
-              const pending = add("agent", "…");
-              try {
-                const res = await fetch("/chat", {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({ prompt, session_id: sessionId }),
-                });
-                const data = await res.json().catch(() => ({}));
-                if (!res.ok) throw new Error(data.message || "HTTP " + res.status);
-                pending.textContent = data.response;
-              } catch (err) {
-                pending.className = "msg error";
-                pending.textContent = "エラー: " + err.message;
-              } finally {
-                send.disabled = false;
-                input.focus();
-              }
-            });
-          })();
-          </script>
-          </body>
-          </html>
-          __INDEX_HTML__
-
-          cat > /opt/${NamePrefix}-web/server.py <<'__SERVER_PY__'
-          """Chat web. Listens on 127.0.0.1 only; users reach it through SSM port forwarding.
-
-          Python 3.13, standard library only (no internet here, so no pip). The runtime is invoked with the
-          preinstalled AWS CLI v2, which signs the request with the instance role.
-          """
-          import json
-          import logging
-          import os
-          import re
-          import subprocess
-          import tempfile
-          from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-
-          ARN = os.environ["RUNTIME_ARN"]
-          REGION = os.environ["AWS_REGION"]
-          PORT = int(os.environ.get("PORT", "8080"))
-          with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "index.html"), "rb") as f:
-              INDEX = f.read()
-          SESSION_RE = re.compile(r"^[A-Za-z0-9-]{33,100}$")
-          # DNS rebinding 対策。ポートフォワード経由の localhost 以外の Host は断る
-          HOST_RE = re.compile(r"^(localhost|127\.0\.0\.1|\[::1\])(:[0-9]{1,5})?$")
-          CSP = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'"
-          logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
-          log = logging.getLogger("web")
-
-
-          def invoke(prompt, session_id):
-              with tempfile.TemporaryDirectory() as tmp:
-                  src = os.path.join(tmp, "in.json")
-                  dst = os.path.join(tmp, "out.json")
-                  with open(src, "w", encoding="utf-8") as f:
-                      json.dump({"prompt": prompt}, f, ensure_ascii=False)
-                  cmd = [
-                      "aws", "bedrock-agentcore", "invoke-agent-runtime",
-                      "--region", REGION,
-                      "--agent-runtime-arn", ARN,
-                      "--runtime-session-id", session_id,
-                      "--qualifier", "DEFAULT",
-                      "--content-type", "application/json",
-                      "--accept", "application/json",
-                      "--payload", "fileb://" + src,
-                      "--cli-read-timeout", "120",
-                      "--output", "json",
-                      dst,
-                  ]
-                  try:
-                      proc = subprocess.run(cmd, capture_output=True, text=True, timeout=150)
-                  except subprocess.TimeoutExpired:
-                      log.error("invoke timed out")
-                      return 504, {"message": "エージェントの応答が時間内に返りませんでした"}
-                  if proc.returncode != 0:
-                      log.error("invoke failed: %s", proc.stderr.strip()[-2000:])
-                      return 502, {"message": "エージェントの呼び出しに失敗しました"}
-                  try:
-                      with open(dst, encoding="utf-8") as f:
-                          data = json.load(f)
-                  except (OSError, ValueError):
-                      log.exception("unreadable agent response")
-                      return 502, {"message": "エージェントの応答を読めませんでした"}
-              if not isinstance(data, dict) or data.get("status") != "success":
-                  log.error("agent error: %s", str(data)[:500])
-                  return 502, {"message": "エージェントがエラーを返しました"}
-              return 200, {"response": data.get("response", "")}
-
-
-          class Handler(BaseHTTPRequestHandler):
-              server_version = "chat"
-              sys_version = ""
-
-              def reply(self, code, body, ctype="application/json; charset=utf-8"):
-                  if not isinstance(body, bytes):
-                      body = json.dumps(body, ensure_ascii=False).encode("utf-8")
-                  self.send_response(code)
-                  self.send_header("Content-Type", ctype)
-                  self.send_header("Content-Length", str(len(body)))
-                  self.send_header("Cache-Control", "no-store")
-                  self.send_header("X-Content-Type-Options", "nosniff")
-                  self.send_header("X-Frame-Options", "DENY")
-                  self.send_header("Content-Security-Policy", CSP)
-                  self.end_headers()
-                  self.wfile.write(body)
-
-              def host_ok(self):
-                  if HOST_RE.match(self.headers.get("Host", "")):
-                      return True
-                  self.reply(403, {"message": "http://localhost:<ポート>/ で開いてください"})
-                  return False
-
-              def do_GET(self):
-                  if not self.host_ok():
-                      return
-                  if self.path in ("/", "/index.html"):
-                      self.reply(200, INDEX, "text/html; charset=utf-8")
-                  else:
-                      self.reply(404, {"message": "not found"})
-
-              def do_POST(self):
-                  if not self.host_ok():
-                      return
-                  if self.path != "/chat":
-                      return self.reply(404, {"message": "not found"})
-                  # 別サイトからの単純な POST（text/plain など）を通さない。application/json はプリフライトが要る
-                  if not self.headers.get("Content-Type", "").startswith("application/json"):
-                      return self.reply(415, {"message": "application/json で送ってください"})
-                  try:
-                      length = int(self.headers.get("Content-Length") or 0)
-                  except ValueError:
-                      length = 0
-                  if not 0 < length <= 20000:
-                      return self.reply(413, {"message": "本文が空か大きすぎます"})
-                  try:
-                      body = json.loads(self.rfile.read(length))
-                  except ValueError:
-                      return self.reply(400, {"message": "JSON が不正です"})
-                  if not isinstance(body, dict):
-                      return self.reply(400, {"message": "JSON オブジェクトで送ってください"})
-                  prompt = body.get("prompt")
-                  session_id = body.get("session_id")
-                  if not isinstance(prompt, str) or not prompt.strip() or len(prompt) > 4000:
-                      return self.reply(400, {"message": "prompt は 1〜4000 文字"})
-                  if not isinstance(session_id, str) or not SESSION_RE.match(session_id):
-                      return self.reply(400, {"message": "session_id が不正です"})
-                  code, result = invoke(prompt, session_id)
-                  self.reply(code, result)
-
-
-          if __name__ == "__main__":
-              ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
-          __SERVER_PY__
-
           systemctl daemon-reload
           systemctl enable ${NamePrefix}-web.service
           systemctl restart ${NamePrefix}-web.service
@@ -1109,7 +931,7 @@ Outputs:
     Description: Target of the SSM port forwarding session
     Value: !Ref WebInstance
   StartSessionCommand:
-    Description: Run on the user's PC (AWS CLI v2 + Session Manager plugin, macOS / Linux quoting), keep it running, then open ChatUrl
+    Description: Run on the user's PC (AWS CLI v2 + Session Manager plugin, macOS / Linux quoting), keep it running, then open ChatUrl (Gradio - chat tab and topology tab)
     Value: !Sub >-
       aws ssm start-session --region ${AWS::Region} --target ${WebInstance}
       --document-name AWS-StartPortForwardingSession
@@ -1132,6 +954,13 @@ Outputs:
     Value: !Ref RuntimeSecurityGroup
   KbBucketName:
     Value: !Ref KbBucket
+  UploadWebCommand:
+    Description: Run in this repository after "pip download" into wheels/ (README step 4). The instance pulls web/ on every boot.
+    Value: !Sub aws s3 cp web/app.py s3://${KbBucket}/web/app.py && aws s3 cp web/requirements.txt s3://${KbBucket}/web/requirements.txt && aws s3 cp agent/data/ s3://${KbBucket}/web/data/ --recursive && aws s3 sync wheels/ s3://${KbBucket}/web/wheels/
+  EndpointSecurityGroupId:
+    Condition: CreateAnyInterfaceEndpointCond
+    Description: Pass to lab.yaml (EndpointSecurityGroupId) so the lab EC2 can reach the ecr / ssm endpoints created here
+    Value: !Ref EndpointSecurityGroup
   UploadDocsCommand:
     Description: Run in this repository to upload the sample markdown files
     Value: !Sub aws s3 cp kb-docs/ s3://${KbBucket}/docs/ --recursive --exclude "*" --include "*.md"
