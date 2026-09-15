@@ -370,11 +370,20 @@ Resources:
       ServiceName: !Sub com.amazonaws.${AWS::Region}.s3
       VpcEndpointType: Gateway
       RouteTableIds: [!Ref RouteTable]
-      # ECR のレイヤー置き場（Runtime のイメージ取得）と AL2023 の dnf リポジトリ（EC2 に python3.13 を入れる）だけを許す。
+      # VPC の中から S3 に出る経路はこれだけ。許すのは 3 つ: このスタックのバケット（EC2 が web/ を取る、lab が lab/ を取る、
+      # MSK Connect が stream/ に書く）、ECR のレイヤー置き場（Runtime のイメージ取得）、AL2023 の dnf リポジトリ（EC2 に python3.13 を入れる）。
+      # バケットへの操作の絞り込みは各ロールの IAM ポリシーで行う（ここで絞ると 2026-09-15 のように ListBucket が落ちて web/ の取得が失敗する）。
       # VPC ごとこのスタックのものなので、他のワークロードには影響しない
       PolicyDocument:
         Version: "2012-10-17"
         Statement:
+          - Sid: AllowThisStackBucket
+            Effect: Allow
+            Principal: "*"
+            Action: s3:*
+            Resource:
+              - !GetAtt KbBucket.Arn
+              - !Sub ${KbBucket.Arn}/*
           - Sid: AllowECRLayerAccess
             Effect: Allow
             Principal: "*"

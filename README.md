@@ -214,7 +214,9 @@ WSL を再起動すると QEMU の登録は消えるので、`docker buildx ls` 
 `main.yaml` は VPC を自分で作るので、エンドポイントは全部このスタックが作る。`Create*Endpoints` の 5 つは**既定の `true` のまま**にする
 （`false` は、このテンプレートを既存の VPC に載せ替えたときのための名残）。
 
-**EC2 も S3 ゲートウェイを通る。**AL2023 の `/usr/bin/python3` は 3.9 のままなので、起動時に `dnf install python3.13` で 3.13 を入れる。dnf のリポジトリは S3 にあるため、S3 ゲートウェイのポリシーは ECR のレイヤー置き場と AL2023 のリポジトリの読み取りを許している。
+**VPC の中から S3 に出る経路は S3 ゲートウェイだけ**で、そのポリシーが許す先は 3 つ。このスタックのバケット `fukuda-nwc-poc-kb-…`（EC2 が `web/` を取る、lab が `lab/` を取る、MSK Connect が `stream/` に書く）、
+ECR のレイヤー置き場（Runtime のイメージ取得）、AL2023 の dnf リポジトリ（`/usr/bin/python3` は 3.9 のままなので、起動時に `dnf install python3.13` で 3.13 を入れる）。
+バケットに対する操作の絞り込みはゲートウェイではなく各ロールの IAM ポリシーで行う（2026-09-15 にゲートウェイ側で絞っていて `s3:ListBucket` が落ち、EC2 が `web/` を取れなかった。同日に直した）。
 
 ## 手順
 
@@ -862,7 +864,7 @@ aws s3 rm s3://fukuda-nwc-poc-kb-$ACCOUNT_ID/stream/ --recursive
 | `start-session` がタイムアウトする / 名前が解決できない | PC から ssm / ssmmessages に届いていない（前提の「利用者の PC 側」） |
 | `TargetNotConnected` | インスタンスが登録されていない。ssm / ssmmessages エンドポイントとその SG、インスタンスロール、手順 7 の `PingStatus`。起動直後は数分待つ。SSM Agent が 3.3.40.0 より古いと `ec2messages` エンドポイントも要る |
 | `AccessDeniedException`（start-session） | 手順 6 の権限。インスタンスに `Project` タグがあるか |
-| ブラウザが「接続できない」 | Web が落ちている。管理者がシェルで入り `sudo systemctl status fukuda-nwc-poc-web` と `sudo journalctl -u fukuda-nwc-poc-web -n 100`。起動時の失敗は `/var/log/cloud-init-output.log`。`python3.13` のインストールで止まっていたら S3 ゲートウェイ（前提の「`Create*Endpoints` パラメータ」） |
+| ブラウザが「接続できない」 | Web が落ちている。管理者がシェルで入り `sudo systemctl status fukuda-nwc-poc-web` と `sudo journalctl -u fukuda-nwc-poc-web -n 100`。起動時の失敗は `/var/log/cloud-init-output.log`。`python3.13` のインストールや `aws s3 sync` が `AccessDenied` で止まっていたら S3 ゲートウェイのポリシー（前提の「`Create*Endpoints` パラメータ」。2026-09-15 より前の `main.yaml` はバケットを許していない。`git pull` して手順 3 を打ち直し、再起動） |
 | ブラウザが「接続できない」が、journald に `web/ is not in s3://` | 手順 4 の Web の部品を置いていない。置いてインスタンスを再起動する |
 | journald に `ModuleNotFoundError: No module named 'topology'`（`anomalies` / `graph` も同じ） | 手順 4 の `agent/` の 3 モジュールを `web/` に置いていない。`for f in …` の行を打ってから再起動する |
 | 手順 3 の `cloudformation deploy` が認証エラー（`AccessDenied` / `InvalidClientTokenId` / `not authorized to perform: iam:CreateRole`）で落ちる。読み取りは通る | aws-vault の一時セッション（`get-session-token`）で打っている。手順 0-1 のとおり `aws-vault exec <プロファイル> --no-session` のサブシェルの中で打つ |
