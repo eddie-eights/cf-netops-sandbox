@@ -47,6 +47,7 @@ lab（任意、lab.yaml、別スタック）: 同じ VPC の EC2 1 台で contai
 | ファイル | 中身 |
 |---|---|
 | `ecr.yaml` | エージェントイメージの ECR リポジトリ。先にデプロイする。リポジトリ URI を Export し、`main.yaml` が取る |
+| `build.yaml` | 任意。PC でイメージをビルドできないとき、CodeBuild（arm64）でビルドして ECR に push する（手順 2-b）。待機中 0 円 |
 | `main.yaml` | VPC エンドポイント / ナレッジベース（S3・OpenSearch Serverless）/ ガードレール / AgentCore Runtime / EC2（Web は起動時に S3 から取って入れる）/ IAM |
 | `lab.yaml` | 任意。containerlab + FRR の lab を動かす EC2 1 台（VPC / サブネット / SG / バケットは `main.yaml` の Export から取る）。フェーズ 2 では Telegraf も入れる |
 | `stream.yaml` | フェーズ 2。MSK（2 ブローカー、IAM 認証）/ detector Lambda / DynamoDB の異常テーブル / MSK Connect の S3 sink / lambda・sts・dynamodb エンドポイント / `main.yaml` のロールへの読み取り権限 |
@@ -315,6 +316,36 @@ PC（Windows と WSL）にはその証明書が入っていて通るのに、コ
    証明書が複数あるなら全部置く（`.crt` と `.pem` を読む。Windows の DER 形式の `.cer` は読めないので Base64 で書き出す）。
    証明書がどうしても手に入らないときだけ `--build-arg PIP_TRUSTED_HOSTS="pypi.org files.pythonhosted.org"`（検証を外す）。
 
+### 2-b. PC でビルドできないとき: AWS の中でビルドする（`build.yaml`）
+
+会社の PC に Docker が入れられない、プロキシや証明書でどうしても通らない、コンソールだけで進めたい、というときは
+CodeBuild にビルドさせる。`build.yaml` は CodeBuild のプロジェクト 1 つで、**arm64 のビルド環境**でこのリポジトリ（公開）を
+`git clone` して `docker build` と push をする。ネイティブ arm64 なので QEMU も buildx も要らず、社内のプロキシと証明書も関係ない。
+**待機中は 0 円**、ビルド中だけ分課金（`arm1.small` は $0.00425/分。東京。2026-09-15 に Price List API で検証。
+エージェントのビルドは 3〜5 分なので 1 回 2〜3 円。加えて月 100 分の無料枠がある）。
+
+コンソールで作る（手順は「コンソールからデプロイするとき」と同じ。パラメータは既定のまま）:
+
+| 順 | 操作 |
+|---|---|
+| 1 | CloudFormation → スタックの作成 → `build.yaml` をアップロード → スタック名 `fukuda-nwc-poc-build` → IAM の承認にチェック → 作成。`ecr.yaml` の後ならいつでもよい |
+| 2 | CodeBuild → ビルドプロジェクト → `fukuda-nwc-poc-build` → **ビルドの開始（上書きあり）** → 環境変数の上書きで `TARGET` = `agent`、`IMAGE_TAG` = 手順 3 の `AgentImageTag` と同じ値（初回は `v1`）→ **ビルドの開始** |
+| 3 | ログの末尾が `pushed TARGET=agent IMAGE_TAG=v1 …` になれば ECR に入っている。ECR → `fukuda-nwc-poc-agent` にタグが見える |
+| 4 | lab を使うなら `TARGET` = `lab` でもう 1 回（frr / multitool を取り直して push し、snmpd をビルドする。lab-1 の代わり） |
+
+CLI なら `build.yaml` の出力 `StartAgentBuildCommand` / `StartLabBuildCommand` をそのまま打つ。
+
+```bash
+aws cloudformation deploy --region ap-northeast-1 --stack-name fukuda-nwc-poc-build --template-file build.yaml --capabilities CAPABILITY_NAMED_IAM --tags Project=fukuda-nwc-poc owner=fukuda
+aws codebuild start-build --region ap-northeast-1 --project-name fukuda-nwc-poc-build --environment-variables-override name=TARGET,value=agent name=IMAGE_TAG,value=v1
+```
+
+- タグは上書きできない（`ecr.yaml` の `IMMUTABLE`）ので、`agent/` を変えたら `IMAGE_TAG` を変えて打ち直し、手順 3 の `AgentImageTag` も合わせる。
+- ビルドするのは **GitHub に push 済みの内容**（`GitRef` 既定 `main`）。手元だけの変更は入らない。ブランチを試すなら環境変数の上書きで `GIT_REF` を変える。
+- `TARGET=lab` の `docker pull` は Docker Hub / quay.io の匿名取得なので、`toomanyrequests` で落ちたら時間を置いて打ち直す。
+- CloudShell でもビルドできそうに見えるが、CloudShell の環境は x86_64（1 vCPU / 2 GiB / 保存領域 1 GB）で、arm64 を作るには QEMU の登録（`--privileged` のコンテナ）が要る。CloudShell でそれが通るかは確認できていないので、この README では CodeBuild にしている。
+- 消すときは `fukuda-nwc-poc-build` をいつ消してもよい（他のスタックは参照していない。残しても 0 円）。
+
 ### 3. 本体をデプロイする
 
 名前付きの IAM ロールを作るので `CAPABILITY_NAMED_IAM` が要る。
@@ -489,6 +520,7 @@ CLI が使えない端末では、手順 1・3・lab-3・s-2・g-1 の `aws clou
 | テンプレート | スタック名 | 必ず入れるパラメータ | 出力で控えるもの |
 |---|---|---|---|
 | `ecr.yaml` | `fukuda-nwc-poc-ecr` | なし（既定のまま） | `RepositoryUri`（手順 2 の push 先） |
+| `build.yaml` | `fukuda-nwc-poc-build` | なし（既定のまま）。ecr の後ならいつでも | `ProjectName`（手順 2-b で「ビルドの開始」を押すプロジェクト） |
 | `main.yaml` | `fukuda-nwc-poc` | `VpcId` / `RuntimeSubnetIds`（2 つ選ぶ）/ `InstanceSubnetId` / `RouteTableIds` / `KbAdminPrincipalArn` / `AgentImageTag`（手順 2 で push したタグ）。社内から DX / VPN で入るなら `ClientCidr` | `KbBucketName` `InstanceId` `KnowledgeBaseId` `DataSourceId` `EndpointSecurityGroupId` と `StartSessionCommand` |
 | `lab.yaml` | `fukuda-nwc-poc-lab` | なし（VPC / サブネット / SG / バケットは `main.yaml` の Export から取る） | `LabInstanceId` と `StartSessionCommand` |
 | `stream.yaml` | `fukuda-nwc-poc-stream` | なし（`main.yaml` と `lab.yaml` の Export から取る。lab を先に作る） | `UploadPluginCommand` / `SinkPrefix`（s-1・s-3 で使う） |
@@ -699,6 +731,7 @@ aws s3 rm s3://fukuda-nwc-poc-kb-123456789012 --recursive
 aws cloudformation delete-stack --region ap-northeast-1 --stack-name fukuda-nwc-poc
 aws cloudformation wait stack-delete-complete --region ap-northeast-1 --stack-name fukuda-nwc-poc
 aws cloudformation delete-stack --region ap-northeast-1 --stack-name fukuda-nwc-poc-ecr
+aws cloudformation delete-stack --region ap-northeast-1 --stack-name fukuda-nwc-poc-build   # 手順 2-b で作っていれば（順番は問わない）
 aws logs delete-log-group --region ap-northeast-1 --log-group-name "$LOG_GROUP"
 ```
 
@@ -789,7 +822,7 @@ uv sync --group dev
 ```
 
 ```bash
-uv run cfn-lint ecr.yaml main.yaml lab.yaml stream.yaml graph.yaml
+uv run cfn-lint ecr.yaml build.yaml main.yaml lab.yaml stream.yaml graph.yaml
 ```
 
 ```bash
