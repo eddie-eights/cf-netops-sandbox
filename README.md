@@ -144,14 +144,7 @@ OpenSearch Serverless のセキュリティポリシー・アクセスポリシ�
 - デプロイする人の権限に、OpenSearch Serverless（`aoss:*`。インデックスを作るのに `aoss:APIAccessAll` が要る）と、ガードレールの作成が含まれる。
   Standard 階層のガードレールを作るには、ガードレールそのものに加えて `arn:aws:bedrock:<リージョン>:<アカウント>:guardrail-profile/apac.guardrail.v1:0` への `bedrock:CreateGuardrail` が要る。管理者権限なら足りる。
 - **パラメータ `KbAdminPrincipalArn` に、デプロイする人の IAM ロール（またはユーザー）の ARN を入れる。**CloudFormation はその認証情報で OpenSearch のインデックスを作るので、データアクセスポリシーに入れておく必要がある。
-  `sts` の `assumed-role` の ARN ではなく、`iam` のロールの ARN にする。ロールにパスがあるとき（Identity Center の `aws-reserved/sso.amazonaws.com/...` など）はパスごと入れる。
-
-  ```bash
-  aws sts get-caller-identity --query Arn --output text
-  # arn:aws:sts::123456789012:assumed-role/Admin/taro のときは、ロール名 Admin で引く
-  aws iam get-role --role-name Admin --query Role.Arn --output text
-  ```
-
+  `sts` の `assumed-role` の ARN ではなく、`iam` のロールの ARN にする。調べ方は手順 0 の (b)。
 - **ガードレールの判定は、東京以外の APAC のリージョンで行われることがある**（Standard 階層はクロスリージョン推論が必須）。行き先は ap-northeast-1 / ap-northeast-2 / ap-northeast-3 / ap-south-1 / ap-southeast-1 / ap-southeast-2（2026-09-14 に AWS の文書で確認）。データを国内に留める決まりがある場合は使えない。
 - イメージのビルドは、インターネットに出られる端末で行う（Docker と buildx）。
 - **Session Manager の設定（アカウント単位）で KMS 暗号化を必須にしている場合**は、`kms` エンドポイントとインスタンスロールへの `kms:Decrypt` が別に要る。このテンプレートには入れていない。
@@ -226,15 +219,51 @@ WSL を再起動すると QEMU の登録は消えるので、`docker buildx ls` 
 
 以下はすべて**人が実行する**。AWS にリソースが作られ、課金が始まる。
 
-**コマンドはそのまま打てる形だが、次の 3 つだけは例の値なので自分のものに置き換える**（このリポジトリは公開なので、実際の値は書いていない）。
-それ以外（`fukuda-nwc-poc`、`owner=fukuda`、`ap-northeast-1`、タグ `v1`）は実際の値で、置き換えない。
+コマンドの中の値は 3 種類ある。**書き方で見分けられるようにしてある。**
 
-| 例の値 | 置き換えるもの | 調べ方 |
+| 書き方 | 意味 | 例 |
 |---|---|---|
-| `123456789012` | 自分の AWS アカウント ID（12 桁） | `aws sts get-caller-identity --query Account --output text`。コンソールなら右上のアカウント名 |
-| `arn:aws:iam::123456789012:role/Admin` | デプロイする自分の IAM ロール（かユーザー）の ARN | 「前提」の AWS 側の `get-caller-identity` → `get-role` |
-| `192.0.2.0/24`（`ClientCidr`。DX / VPN のときだけ） | 社内 PC の CIDR | ネットワーク担当に聞く。使わないなら付けない |
+| そのままの文字 | **実際の値。置き換えない** | `fukuda-nwc-poc`、`owner=fukuda`、`ap-northeast-1`、`v1`、スタック名、バケット名の前半 |
+| `$ACCOUNT_ID` `$ADMIN_ARN` `$LOG_GROUP` のように `$` で始まる | **あなたの環境の値。**手順 0 で 1 回シェル変数に入れると、後のコマンドはコピーしてそのまま打てる | `$ACCOUNT_ID` → `123456789012` のような 12 桁 |
+| `<日本語>` の山括弧 | 手で書き換える場所（少ない） | `<ロール名>` |
 
+### 0. 自分の環境の値を控える
+
+**ターミナルを開くたびに、この 3 つを打ち直す**（シェル変数はそのターミナルの中でしか生きない）。
+値そのものは公開リポジトリに書けないので、ここで自分の環境から取る。
+
+**(a) アカウント ID。** ECR とバケットの名前に入る。
+
+```bash
+export ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text); echo "$ACCOUNT_ID"
+```
+
+12 桁の数字が出ればよい。コンソールの右上（アカウント名の横）に出る数字と同じ。空や `Unable to locate credentials` なら `aws configure` / SSO のログインができていない。
+
+**(b) 自分の IAM ロールの ARN。** 手順 3 の `KbAdminPrincipalArn` に入れる。CloudFormation はこの認証情報で OpenSearch Serverless のインデックスを作るので、データアクセスポリシーにこの ARN が要る。
+
+```bash
+aws sts get-caller-identity --query Arn --output text
+```
+
+出た値で分かれる。
+
+| 出た値の形 | 意味 | 次に打つもの |
+|---|---|---|
+| `arn:aws:sts::123456789012:assumed-role/<ロール名>/<セッション名>` | ロールを assume して使っている（Identity Center・スイッチロール） | 下の `get-role` を `<ロール名>` で打つ。Identity Center のロール名は `AWSReservedSSO_AdministratorAccess_0123abcd…` のように長い |
+| `arn:aws:iam::123456789012:user/<ユーザー名>` | IAM ユーザーを直接使っている | この値をそのまま `ADMIN_ARN` に入れる（`get-role` は要らない） |
+
+```bash
+export ADMIN_ARN=$(aws iam get-role --role-name <ロール名> --query Role.Arn --output text); echo "$ADMIN_ARN"
+```
+
+`arn:aws:iam::123456789012:role/…` の形で出ればよい（`sts` ではなく `iam`、`assumed-role` ではなく `role`）。
+Identity Center のロールは `role/aws-reserved/sso.amazonaws.com/ap-northeast-1/AWSReservedSSO_…` のようにパスが付くが、**出た値をパスごとそのまま使う**。
+`NoSuchEntity` なら `<ロール名>` の綴りが違う（`aws iam list-roles --query 'Roles[].RoleName' --output text` で探す）。
+
+**(c) リージョン。** すべて `ap-northeast-1`（東京）。コマンドには `--region ap-northeast-1` を書いてあるので、変数は要らない。
+
+コンソールで進めるときは、(a) をバケット名（`fukuda-nwc-poc-kb-<アカウント ID>`）に、(b) をパラメータ `KbAdminPrincipalArn` に貼る。
 
 ### 1. ECR リポジトリを作る
 
@@ -256,7 +285,7 @@ aws cloudformation describe-stacks --region ap-northeast-1 --stack-name fukuda-n
 インターネットに出られる端末で行う。**必ず arm64 でビルドする。**タグは上書きできない設定なので、更新のたびに変える。
 
 ```bash
-REPO=123456789012.dkr.ecr.ap-northeast-1.amazonaws.com/fukuda-nwc-poc-agent
+REPO="$ACCOUNT_ID.dkr.ecr.ap-northeast-1.amazonaws.com/fukuda-nwc-poc-agent"   # 手順 1 の出力 RepositoryUri と同じ値になる
 aws ecr get-login-password --region ap-northeast-1 | docker login --username AWS --password-stdin "${REPO%%/*}"
 docker buildx build --platform linux/arm64 -t "$REPO:v1" --push agent/
 ```
@@ -284,7 +313,7 @@ GitHub には繋がない（zip は手元のファイルから作る）。
 |---|---|
 | 1 | CloudFormation → スタックの作成 → `build.yaml` をアップロード → スタック名 `fukuda-nwc-poc-build` → IAM の承認にチェック → 作成。`ecr.yaml` の後ならいつでもよい |
 | 2 | 手元でこのリポジトリのフォルダを zip にする。Windows ならフォルダを右クリック → 送る → 圧縮 (zip 形式) フォルダー。zip の中に `agent/` と `lab/snmpd/` が入っていればよく、1 段フォルダが挟まっていてもよい |
-| 3 | S3 → `fukuda-nwc-poc-build-123456789012`（出力 `SourceBucketName`）→ アップロード → 名前を **`src.zip`** にして置く |
+| 3 | S3 → `fukuda-nwc-poc-build-<アカウント ID>`（出力 `SourceBucketName` に実名が出る）→ アップロード → 名前を **`src.zip`** にして置く |
 | 4 | CodeBuild → ビルドプロジェクト → `fukuda-nwc-poc-build` → **ビルドの開始（上書きあり）** → 環境変数の上書きで `TARGET` = `agent`、`IMAGE_TAG` = 手順 3 の `AgentImageTag` と同じ値（初回は `v1`）→ **ビルドの開始** |
 | 5 | ログの末尾が `pushed TARGET=agent IMAGE_TAG=v1 …` になれば ECR に入っている。ECR → `fukuda-nwc-poc-agent` にタグが見える |
 | 6 | lab を使うなら `TARGET` = `lab` でもう 1 回（frr / multitool を取り直して push し、snmpd をビルドする。lab-1 の代わり） |
@@ -294,7 +323,7 @@ CLI なら次。ビルドの開始は `build.yaml` の出力 `StartAgentBuildCom
 ```bash
 aws cloudformation deploy --region ap-northeast-1 --stack-name fukuda-nwc-poc-build --template-file build.yaml --capabilities CAPABILITY_NAMED_IAM --tags Project=fukuda-nwc-poc owner=fukuda
 zip -r src.zip agent lab/snmpd -x 'lab/snmpd/certs/*.crt' 'lab/snmpd/certs/*.pem'
-aws s3 cp src.zip s3://fukuda-nwc-poc-build-123456789012/src.zip
+aws s3 cp src.zip s3://fukuda-nwc-poc-build-$ACCOUNT_ID/src.zip
 aws codebuild start-build --region ap-northeast-1 --project-name fukuda-nwc-poc-build --environment-variables-override name=TARGET,value=agent name=IMAGE_TAG,value=v1
 ```
 
@@ -316,11 +345,11 @@ aws cloudformation deploy \
   --tags Project=fukuda-nwc-poc owner=fukuda \
   --parameter-overrides \
     Owner=fukuda \
-    KbAdminPrincipalArn=arn:aws:iam::123456789012:role/Admin \
+    KbAdminPrincipalArn="$ADMIN_ARN" \
     AgentImageTag=v1
 ```
 
-手で入れるのは 2 つだけ。`KbAdminPrincipalArn` は「前提」の AWS 側の `get-role` で出た自分のロールの ARN、`AgentImageTag` は手順 2 で push したタグ。
+手で決めるのは 2 つだけ。`KbAdminPrincipalArn` は手順 0 の (b) で入れた `$ADMIN_ARN`（コンソールなら `arn:aws:iam::<アカウント ID>:role/…` を貼る）、`AgentImageTag` は手順 2 で push したタグ。
 VPC / サブネット / ルートテーブルは `main.yaml` が作る（`10.0.0.0/16`。社内と重なるなら `VpcCidr=10.123.0.0/16` のように足す）。
 
 イメージの URI は `ecr.yaml` の Export（`fukuda-nwc-poc-agent-repository-uri`）から取り、`AgentImageTag` のタグを付ける。
@@ -328,7 +357,7 @@ VPC / サブネット / ルートテーブルは `main.yaml` が作る（`10.0.0
 **Export を参照されているスタックは消せず、Export の値も変えられない。**消す順番は `graph` → `stream` → `lab` → `main` → `ecr`（「片付け」）。
 別のリポジトリのイメージを使うときだけ `AgentImageUri=<URI:タグ>` を足す（その場合も `ecr.yaml` は先に要る。`Fn::ImportValue` は使わない側の分岐でも解決されるため）。
 
-DX / VPN 経由でこのスタックの ssm エンドポイントを使うなら `ClientCidr=192.0.2.0/24` を足す。
+DX / VPN 経由でこのスタックの ssm エンドポイントを使うなら `ClientCidr=<社内 PC の CIDR>`（例 `192.0.2.0/24`。ネットワーク担当に聞く）を足す。AWS の API に直接出られるなら付けない。
 OpenSearch Serverless のコレクションと Runtime の作成で、全体で 10〜20 分ほどかかる。
 **ナレッジベース対応の前のイメージ（`v1`）では動かない。**手順 2 で新しいタグ（例 `v2`）を push してから `AgentImageTag` に指定する。
 
@@ -352,10 +381,10 @@ uv run --python 3.13 --with pip python -m pip download --only-binary=:all: \
 uv には `pip download` に当たるものが無いので、使い捨ての環境に pip を入れて打つ（`--with pip`）。uv を使わない端末なら先頭を `python3 -m pip download` に替える（python3 と pip が要る）。
 
 ```bash
-aws s3 cp web/app.py s3://fukuda-nwc-poc-kb-123456789012/web/app.py
-aws s3 cp web/requirements.txt s3://fukuda-nwc-poc-kb-123456789012/web/requirements.txt
-aws s3 cp agent/data/ s3://fukuda-nwc-poc-kb-123456789012/web/data/ --recursive
-aws s3 sync wheels/ s3://fukuda-nwc-poc-kb-123456789012/web/wheels/
+aws s3 cp web/app.py s3://fukuda-nwc-poc-kb-$ACCOUNT_ID/web/app.py
+aws s3 cp web/requirements.txt s3://fukuda-nwc-poc-kb-$ACCOUNT_ID/web/requirements.txt
+aws s3 cp agent/data/ s3://fukuda-nwc-poc-kb-$ACCOUNT_ID/web/data/ --recursive
+aws s3 sync wheels/ s3://fukuda-nwc-poc-kb-$ACCOUNT_ID/web/wheels/
 aws ec2 reboot-instances --region ap-northeast-1 --instance-ids i-0123456789abcdef0
 ```
 
@@ -365,7 +394,7 @@ aws ec2 reboot-instances --region ap-northeast-1 --instance-ids i-0123456789abcd
 S3 と Bedrock の API を呼ぶので、インターネットか AWS の API に届く端末で行う。コマンドは出力 `UploadDocsCommand` と `StartIngestionCommand` にもある。
 
 ```bash
-aws s3 cp kb-docs/ s3://fukuda-nwc-poc-kb-123456789012/docs/ --recursive --exclude "*" --include "*.md"
+aws s3 cp kb-docs/ s3://fukuda-nwc-poc-kb-$ACCOUNT_ID/docs/ --recursive --exclude "*" --include "*.md"
 aws bedrock-agent start-ingestion-job --region ap-northeast-1 \
   --knowledge-base-id KB12345678 --data-source-id DS12345678
 ```
@@ -383,19 +412,20 @@ aws bedrock-agent get-ingestion-job --region ap-northeast-1 \
 ### 5. Runtime のロググループに保持期間とタグを付ける
 
 Runtime のロググループは AgentCore が作るので、スタックの管理外になる。既定は無期限保持。
-名前は出力 `RuntimeLogGroupName`。**まだ無ければ、手順 7 で 1 回チャットした後に行う。**
+名前は出力 `RuntimeLogGroupName`（`/aws/bedrock-agentcore/runtimes/fukuda_nwc_poc_agent-<英数字 10 桁>-DEFAULT` の形。下の 1 行目が出力から取る）。**まだ無ければ、手順 7 で 1 回チャットした後に行う**（`ResourceNotFoundException` が出たらまだ無い）。
 
 ```bash
-LOG_GROUP=/aws/bedrock-agentcore/runtimes/fukuda_nwc_poc_agent-AbCdEf1234-DEFAULT
+LOG_GROUP=$(aws cloudformation describe-stacks --region ap-northeast-1 --stack-name fukuda-nwc-poc \
+  --query "Stacks[0].Outputs[?OutputKey=='RuntimeLogGroupName'].OutputValue" --output text); echo "$LOG_GROUP"
 aws logs put-retention-policy --region ap-northeast-1 --log-group-name "$LOG_GROUP" --retention-in-days 7
 aws logs tag-resource --region ap-northeast-1 \
-  --resource-arn "arn:aws:logs:ap-northeast-1:123456789012:log-group:$LOG_GROUP" \
+  --resource-arn "arn:aws:logs:ap-northeast-1:$ACCOUNT_ID:log-group:$LOG_GROUP" \
   --tags Project=fukuda-nwc-poc,owner=fukuda
 ```
 
 ### 6. 利用者に権限を渡す
 
-利用者の IAM ロール（または Identity Center の許可セット）に次を付ける。`Project` タグの付いたインスタンスへのポートフォワーディングだけを許す。
+利用者の IAM ロール（または Identity Center の許可セット）に次を付ける。`Project` タグの付いたインスタンスへのポートフォワーディングだけを許す。JSON の `<アカウント ID>` は手順 0 の (a) の 12 桁に書き換える（JSON の中ではシェル変数は使えない）。
 
 ```json
 {
@@ -405,7 +435,7 @@ aws logs tag-resource --region ap-northeast-1 \
       "Sid": "PortForwardToChatWeb",
       "Effect": "Allow",
       "Action": "ssm:StartSession",
-      "Resource": "arn:aws:ec2:ap-northeast-1:123456789012:instance/*",
+      "Resource": "arn:aws:ec2:ap-northeast-1:<アカウント ID>:instance/*",
       "Condition": {
         "StringEquals": { "ssm:resourceTag/Project": "fukuda-nwc-poc" },
         "BoolIfExists": { "ssm:SessionDocumentAccessCheck": "true" }
@@ -500,7 +530,7 @@ BGP の主副切替と SNMP の見え方を手で確かめるためのもので�
 インターネットに出られる端末で、**arm64 のイメージ**を取って push する。snmpd だけはビルドする。
 
 ```bash
-REG=123456789012.dkr.ecr.ap-northeast-1.amazonaws.com
+REG="$ACCOUNT_ID.dkr.ecr.ap-northeast-1.amazonaws.com"
 aws ecr get-login-password --region ap-northeast-1 | docker login --username AWS --password-stdin "$REG"
 docker pull --platform linux/arm64 quay.io/frrouting/frr:10.2.1
 docker tag quay.io/frrouting/frr:10.2.1 "$REG/fukuda-nwc-poc-lab-frr:10.2.1" && docker push "$REG/fukuda-nwc-poc-lab-frr:10.2.1"
@@ -515,8 +545,8 @@ snmpd のビルドは apk なので `--trusted-host` に当たるものが無い
 
 ```bash
 curl -LO https://github.com/srl-labs/containerlab/releases/download/v0.79.0/containerlab_0.79.0_linux_arm64.rpm
-aws s3 sync lab/ s3://fukuda-nwc-poc-kb-123456789012/lab/ --exclude "wvs2.clab.yml"
-aws s3 cp containerlab_0.79.0_linux_arm64.rpm s3://fukuda-nwc-poc-kb-123456789012/lab/
+aws s3 sync lab/ s3://fukuda-nwc-poc-kb-$ACCOUNT_ID/lab/ --exclude "wvs2.clab.yml"
+aws s3 cp containerlab_0.79.0_linux_arm64.rpm s3://fukuda-nwc-poc-kb-$ACCOUNT_ID/lab/
 ```
 
 バケットは `main.yaml` のもの（出力 `KbBucketName`）。ナレッジベースは `docs/` しか読まないので混ざらない。
@@ -577,9 +607,9 @@ lab の SNMP（ポーリングと trap）を MSK に流し、detector Lambda が
 
 ```bash
 curl -LO https://dl.influxdata.com/telegraf/releases/telegraf-1.40.0-1.aarch64.rpm
-aws s3 cp telegraf-1.40.0-1.aarch64.rpm s3://fukuda-nwc-poc-kb-123456789012/lab/
+aws s3 cp telegraf-1.40.0-1.aarch64.rpm s3://fukuda-nwc-poc-kb-$ACCOUNT_ID/lab/
 curl -LO https://hub-downloads.confluent.io/api/plugins/confluentinc/kafka-connect-s3/versions/12.1.11/confluentinc-kafka-connect-s3-12.1.11.zip
-aws s3 cp confluentinc-kafka-connect-s3-12.1.11.zip s3://fukuda-nwc-poc-kb-123456789012/stream/
+aws s3 cp confluentinc-kafka-connect-s3-12.1.11.zip s3://fukuda-nwc-poc-kb-$ACCOUNT_ID/stream/
 ```
 
 プラグインの URL は Confluent Hub の形で、ダウンロードには利用条件への同意が要ることがある。取れなければブラウザで取って同じキーに置く。S3 sink が要らなければ `CreateS3Sink=false` にして飛ばす。
@@ -682,10 +712,11 @@ aws cloudformation delete-stack --region ap-northeast-1 --stack-name fukuda-nwc-
 **順番はこのとおりに。**後のスタックが前のスタックの Export を参照しているので、参照されている間は消せない（`Export ... is in use` で `DELETE_FAILED`）。
 
 ```bash
+# 先に手順 0 の (a) を打って $ACCOUNT_ID を入れる。$LOG_GROUP は手順 5 の 1 行目
 aws cloudformation delete-stack --region ap-northeast-1 --stack-name fukuda-nwc-poc-graph   # フェーズ 2 を作っていれば先に
 aws cloudformation delete-stack --region ap-northeast-1 --stack-name fukuda-nwc-poc-stream
 aws cloudformation delete-stack --region ap-northeast-1 --stack-name fukuda-nwc-poc-lab   # lab を作っていれば先に
-aws s3 rm s3://fukuda-nwc-poc-kb-123456789012 --recursive
+aws s3 rm s3://fukuda-nwc-poc-kb-$ACCOUNT_ID --recursive
 aws cloudformation delete-stack --region ap-northeast-1 --stack-name fukuda-nwc-poc
 aws cloudformation wait stack-delete-complete --region ap-northeast-1 --stack-name fukuda-nwc-poc
 aws cloudformation delete-stack --region ap-northeast-1 --stack-name fukuda-nwc-poc-ecr
