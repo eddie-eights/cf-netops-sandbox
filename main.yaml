@@ -12,7 +12,7 @@ Metadata:
       - Label: { default: Naming }
         Parameters: [NamePrefix, Owner]
       - Label: { default: Network }
-        Parameters: [VpcId, RuntimeSubnetIds, InstanceSubnetId, RouteTableIds, ClientCidr]
+        Parameters: [VpcCidr, AzIdA, AzIdB, ClientCidr]
       - Label: { default: Agent }
         Parameters: [AgentImageTag, AgentImageUri, RuntimeName, ModelId]
       - Label: { default: Knowledge base and guardrail }
@@ -34,18 +34,21 @@ Parameters:
     Default: fukuda
     AllowedPattern: "^[A-Za-z0-9._-]{1,64}$"
     Description: Value of the owner tag. Same value as ecr.yaml.
-  VpcId:
-    Type: AWS::EC2::VPC::Id
-    Description: Target VPC. enableDnsSupport and enableDnsHostnames must be true.
-  RuntimeSubnetIds:
-    Type: List<AWS::EC2::Subnet::Id>
-    Description: Two or more private subnets for AgentCore Runtime, in supported AZ IDs (Tokyo apne1-az1 / apne1-az2 / apne1-az4).
-  InstanceSubnetId:
-    Type: AWS::EC2::Subnet::Id
-    Description: Private subnet for the chat web EC2 instance. The ssm / ssmmessages / bedrock-agentcore endpoints are placed here (1 AZ).
-  RouteTableIds:
-    Type: CommaDelimitedList
-    Description: Route tables of RuntimeSubnetIds and InstanceSubnetId, each listed once. Used when CreateS3GatewayEndpoint is true.
+  VpcCidr:
+    Type: String
+    Default: 10.0.0.0/16
+    AllowedPattern: "^([0-9]{1,3}\\.){3}[0-9]{1,3}/(1[6-9]|2[0-4])$"
+    Description: CIDR of the VPC this stack creates (/16 to /24). Two /(n+8) private subnets are cut from it. No internet gateway, no NAT.
+  AzIdA:
+    Type: String
+    Default: apne1-az1
+    AllowedValues: [apne1-az1, apne1-az2, apne1-az4]
+    Description: AZ ID of subnet A (chat web EC2, endpoints, Runtime). AZ IDs supported by AgentCore Runtime in Tokyo.
+  AzIdB:
+    Type: String
+    Default: apne1-az4
+    AllowedValues: [apne1-az1, apne1-az2, apne1-az4]
+    Description: AZ ID of subnet B (Runtime needs two AZs). Must differ from AzIdA.
   ClientCidr:
     Type: String
     Default: ""
@@ -147,13 +150,62 @@ Conditions:
     - !Not [!Equals [!Ref ClientCidr, ""]]
 
 Resources:
+  # ---------------------------------------------------------------- VPC
+  # このスタックが VPC ごと作り、消すと VPC ごと消える（消し忘れを残さない）。IGW も NAT も無い閉域で、外へはエンドポイントだけ
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - { Key: Name, Value: !Sub "${NamePrefix}-vpc" }
+        - { Key: Project, Value: !Ref NamePrefix }
+        - { Key: owner, Value: !Ref Owner }
+  SubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZoneId: !Ref AzIdA
+      CidrBlock: !Select [0, !Cidr [!Ref VpcCidr, 2, 8]]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - { Key: Name, Value: !Sub "${NamePrefix}-private-a" }
+        - { Key: Project, Value: !Ref NamePrefix }
+        - { Key: owner, Value: !Ref Owner }
+  SubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZoneId: !Ref AzIdB
+      CidrBlock: !Select [1, !Cidr [!Ref VpcCidr, 2, 8]]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - { Key: Name, Value: !Sub "${NamePrefix}-private-b" }
+        - { Key: Project, Value: !Ref NamePrefix }
+        - { Key: owner, Value: !Ref Owner }
+  RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - { Key: Name, Value: !Sub "${NamePrefix}-private" }
+        - { Key: Project, Value: !Ref NamePrefix }
+        - { Key: owner, Value: !Ref Owner }
+  SubnetARouteTable:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: { SubnetId: !Ref SubnetA, RouteTableId: !Ref RouteTable }
+  SubnetBRouteTable:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: { SubnetId: !Ref SubnetB, RouteTableId: !Ref RouteTable }
+
   # ---------------------------------------------------------------- security groups
   InstanceSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupName: !Sub ${NamePrefix}-web
       GroupDescription: Chat web EC2 - no inbound, outbound HTTPS only
-      VpcId: !Ref VpcId
+      VpcId: !Ref Vpc
       # 受信ルールは置かない。ブラウザは SSM のポートフォワーディングで来る（SSM Agent が内側から ssmmessages へつなぎに行く）
       SecurityGroupEgress:
         - IpProtocol: tcp
@@ -171,7 +223,7 @@ Resources:
     Properties:
       GroupName: !Sub ${NamePrefix}-runtime
       GroupDescription: AgentCore Runtime ENIs - outbound HTTPS only
-      VpcId: !Ref VpcId
+      VpcId: !Ref Vpc
       SecurityGroupEgress:
         # VPC endpoints と S3 gateway（S3 のパブリック IP 帯）へ出る。NAT が無いのでインターネットには出られない
         - IpProtocol: tcp
@@ -190,7 +242,7 @@ Resources:
     Properties:
       GroupName: !Sub ${NamePrefix}-endpoints
       GroupDescription: Interface endpoints created by this stack - HTTPS from the chat web and the runtime
-      VpcId: !Ref VpcId
+      VpcId: !Ref Vpc
       SecurityGroupIngress:
         - IpProtocol: tcp
           FromPort: 443
@@ -217,7 +269,7 @@ Resources:
     Properties:
       GroupName: !Sub ${NamePrefix}-client
       GroupDescription: ssm and ssmmessages endpoints - HTTPS from corporate PCs
-      VpcId: !Ref VpcId
+      VpcId: !Ref Vpc
       # 付けるのは ssm / ssmmessages だけ。利用者の PC から bedrock-agentcore や ecr のエンドポイントは見せない
       SecurityGroupIngress:
         - IpProtocol: tcp
@@ -239,11 +291,11 @@ Resources:
     Type: AWS::EC2::VPCEndpoint
     Condition: CreateRuntimeEndpointsCond
     Properties:
-      VpcId: !Ref VpcId
+      VpcId: !Ref Vpc
       ServiceName: !Sub com.amazonaws.${AWS::Region}.ecr.api
       VpcEndpointType: Interface
       PrivateDnsEnabled: true
-      SubnetIds: !Ref RuntimeSubnetIds
+      SubnetIds: [!Ref SubnetA, !Ref SubnetB]
       SecurityGroupIds: [!Ref EndpointSecurityGroup]
       Tags:
         - { Key: Name, Value: !Sub "${NamePrefix}-ecr-api" }
@@ -254,11 +306,11 @@ Resources:
     Type: AWS::EC2::VPCEndpoint
     Condition: CreateRuntimeEndpointsCond
     Properties:
-      VpcId: !Ref VpcId
+      VpcId: !Ref Vpc
       ServiceName: !Sub com.amazonaws.${AWS::Region}.ecr.dkr
       VpcEndpointType: Interface
       PrivateDnsEnabled: true
-      SubnetIds: !Ref RuntimeSubnetIds
+      SubnetIds: [!Ref SubnetA, !Ref SubnetB]
       SecurityGroupIds: [!Ref EndpointSecurityGroup]
       Tags:
         - { Key: Name, Value: !Sub "${NamePrefix}-ecr-dkr" }
@@ -269,11 +321,11 @@ Resources:
     Type: AWS::EC2::VPCEndpoint
     Condition: CreateRuntimeEndpointsCond
     Properties:
-      VpcId: !Ref VpcId
+      VpcId: !Ref Vpc
       ServiceName: !Sub com.amazonaws.${AWS::Region}.logs
       VpcEndpointType: Interface
       PrivateDnsEnabled: true
-      SubnetIds: !Ref RuntimeSubnetIds
+      SubnetIds: [!Ref SubnetA, !Ref SubnetB]
       SecurityGroupIds: [!Ref EndpointSecurityGroup]
       Tags:
         - { Key: Name, Value: !Sub "${NamePrefix}-logs" }
@@ -284,11 +336,11 @@ Resources:
     Type: AWS::EC2::VPCEndpoint
     Condition: CreateRuntimeEndpointsCond
     Properties:
-      VpcId: !Ref VpcId
+      VpcId: !Ref Vpc
       ServiceName: !Sub com.amazonaws.${AWS::Region}.bedrock-runtime
       VpcEndpointType: Interface
       PrivateDnsEnabled: true
-      SubnetIds: !Ref RuntimeSubnetIds
+      SubnetIds: [!Ref SubnetA, !Ref SubnetB]
       SecurityGroupIds: [!Ref EndpointSecurityGroup]
       Tags:
         - { Key: Name, Value: !Sub "${NamePrefix}-bedrock-runtime" }
@@ -299,11 +351,11 @@ Resources:
     Type: AWS::EC2::VPCEndpoint
     Condition: CreateKbEndpointCond
     Properties:
-      VpcId: !Ref VpcId
+      VpcId: !Ref Vpc
       ServiceName: !Sub com.amazonaws.${AWS::Region}.bedrock-agent-runtime
       VpcEndpointType: Interface
       PrivateDnsEnabled: true
-      SubnetIds: !Ref RuntimeSubnetIds
+      SubnetIds: [!Ref SubnetA, !Ref SubnetB]
       SecurityGroupIds: [!Ref EndpointSecurityGroup]
       Tags:
         - { Key: Name, Value: !Sub "${NamePrefix}-bedrock-agent-runtime" }
@@ -314,12 +366,12 @@ Resources:
     Type: AWS::EC2::VPCEndpoint
     Condition: CreateS3GatewayEndpointCond
     Properties:
-      VpcId: !Ref VpcId
+      VpcId: !Ref Vpc
       ServiceName: !Sub com.amazonaws.${AWS::Region}.s3
       VpcEndpointType: Gateway
-      RouteTableIds: !Ref RouteTableIds
+      RouteTableIds: [!Ref RouteTable]
       # ECR のレイヤー置き場（Runtime のイメージ取得）と AL2023 の dnf リポジトリ（EC2 に python3.13 を入れる）だけを許す。
-      # 同じルートテーブルを使う他のワークロードの S3 アクセスもこの制限を受けるので、専用サブネットを推奨
+      # VPC ごとこのスタックのものなので、他のワークロードには影響しない
       PolicyDocument:
         Version: "2012-10-17"
         Statement:
@@ -343,11 +395,11 @@ Resources:
     Type: AWS::EC2::VPCEndpoint
     Condition: CreateSsmEndpointsCond
     Properties:
-      VpcId: !Ref VpcId
+      VpcId: !Ref Vpc
       ServiceName: !Sub com.amazonaws.${AWS::Region}.ssm
       VpcEndpointType: Interface
       PrivateDnsEnabled: true
-      SubnetIds: [!Ref InstanceSubnetId]
+      SubnetIds: [!Ref SubnetA]
       SecurityGroupIds: !If
         - AllowClientCond
         - [!Ref EndpointSecurityGroup, !Ref ClientEndpointSecurityGroup]
@@ -361,11 +413,11 @@ Resources:
     Type: AWS::EC2::VPCEndpoint
     Condition: CreateSsmEndpointsCond
     Properties:
-      VpcId: !Ref VpcId
+      VpcId: !Ref Vpc
       ServiceName: !Sub com.amazonaws.${AWS::Region}.ssmmessages
       VpcEndpointType: Interface
       PrivateDnsEnabled: true
-      SubnetIds: [!Ref InstanceSubnetId]
+      SubnetIds: [!Ref SubnetA]
       SecurityGroupIds: !If
         - AllowClientCond
         - [!Ref EndpointSecurityGroup, !Ref ClientEndpointSecurityGroup]
@@ -379,11 +431,11 @@ Resources:
     Type: AWS::EC2::VPCEndpoint
     Condition: CreateAgentCoreEndpointCond
     Properties:
-      VpcId: !Ref VpcId
+      VpcId: !Ref Vpc
       ServiceName: !Sub com.amazonaws.${AWS::Region}.bedrock-agentcore
       VpcEndpointType: Interface
       PrivateDnsEnabled: true
-      SubnetIds: [!Ref InstanceSubnetId]
+      SubnetIds: [!Ref SubnetA]
       SecurityGroupIds: [!Ref EndpointSecurityGroup]
       Tags:
         - { Key: Name, Value: !Sub "${NamePrefix}-bedrock-agentcore" }
@@ -746,7 +798,7 @@ Resources:
       NetworkConfiguration:
         NetworkMode: VPC
         NetworkModeConfig:
-          Subnets: !Ref RuntimeSubnetIds
+          Subnets: [!Ref SubnetA, !Ref SubnetB]
           SecurityGroups: [!Ref RuntimeSecurityGroup]
       ProtocolConfiguration: HTTP
       LifecycleConfiguration:
@@ -832,7 +884,7 @@ Resources:
       IamInstanceProfile: !Ref InstanceProfile
       NetworkInterfaces:
         - DeviceIndex: "0"
-          SubnetId: !Ref InstanceSubnetId
+          SubnetId: !Ref SubnetA
           GroupSet: [!Ref InstanceSecurityGroup]
           AssociatePublicIpAddress: false
       MetadataOptions:
@@ -954,19 +1006,19 @@ Outputs:
     Value: !Sub /aws/bedrock-agentcore/runtimes/${AgentRuntime.AgentRuntimeId}-DEFAULT
   VpcId:
     Description: Imported by lab.yaml / stream.yaml / graph.yaml
-    Value: !Ref VpcId
+    Value: !Ref Vpc
     Export: { Name: !Sub "${NamePrefix}-vpc-id" }
   RuntimeSubnetIds:
     Description: Imported by stream.yaml (MSK brokers, first two) and graph.yaml (Neptune subnet group)
-    Value: !Join [",", !Ref RuntimeSubnetIds]
+    Value: !Join [",", [!Ref SubnetA, !Ref SubnetB]]
     Export: { Name: !Sub "${NamePrefix}-runtime-subnet-ids" }
   InstanceSubnetId:
     Description: Imported by lab.yaml (the lab EC2 sits next to the chat web)
-    Value: !Ref InstanceSubnetId
+    Value: !Ref SubnetA
     Export: { Name: !Sub "${NamePrefix}-instance-subnet-id" }
   RouteTableIds:
     Description: Imported by stream.yaml (DynamoDB gateway endpoint)
-    Value: !Join [",", !Ref RouteTableIds]
+    Value: !Ref RouteTable
     Export: { Name: !Sub "${NamePrefix}-route-table-ids" }
   InstanceSecurityGroupId:
     Description: Allow 443 from this SG on existing ssm / ssmmessages / bedrock-agentcore endpoints

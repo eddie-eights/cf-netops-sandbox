@@ -48,7 +48,7 @@ lab（任意、lab.yaml、別スタック）: 同じ VPC の EC2 1 台で contai
 |---|---|
 | `ecr.yaml` | エージェントイメージの ECR リポジトリ。先にデプロイする。リポジトリ URI を Export し、`main.yaml` が取る |
 | `build.yaml` | 任意。PC でイメージをビルドできないとき、S3 に置いた zip から CodeBuild（arm64）でビルドして ECR に push する（手順 2-b）。待機中 0 円 |
-| `main.yaml` | VPC エンドポイント / ナレッジベース（S3・OpenSearch Serverless）/ ガードレール / AgentCore Runtime / EC2（Web は起動時に S3 から取って入れる）/ IAM |
+| `main.yaml` | VPC（閉域。サブネット 2 つ）/ VPC エンドポイント / ナレッジベース（S3・OpenSearch Serverless）/ ガードレール / AgentCore Runtime / EC2（Web は起動時に S3 から取って入れる）/ IAM |
 | `lab.yaml` | 任意。containerlab + FRR の lab を動かす EC2 1 台（VPC / サブネット / SG / バケットは `main.yaml` の Export から取る）。フェーズ 2 では Telegraf も入れる |
 | `stream.yaml` | フェーズ 2。MSK（2 ブローカー、IAM 認証）/ detector Lambda / DynamoDB の異常テーブル / MSK Connect の S3 sink / lambda・sts・dynamodb エンドポイント / `main.yaml` のロールへの読み取り権限 |
 | `graph.yaml` | フェーズ 2。Neptune（db.t4g.medium × 1、IAM 認証）と、`main.yaml` のロールへの Gremlin 権限。無ければ静的データで動く |
@@ -134,14 +134,10 @@ OpenSearch Serverless のセキュリティポリシー・アクセスポリシ�
 ### AWS 側
 
 - リージョンは `ap-northeast-1`。
-- **Runtime のサブネットは AgentCore が対応する AZ に置く。**東京は AZ ID `apne1-az1` / `apne1-az2` / `apne1-az4`。
-  AZ 名と AZ ID の対応はアカウントごとに違うので、次で確かめる。
-
-  ```bash
-  aws ec2 describe-subnets --region ap-northeast-1 --query 'Subnets[].[SubnetId,AvailabilityZoneId,CidrBlock]' --output table
-  ```
-
-- VPC の `enableDnsSupport` と `enableDnsHostnames` が有効。
+- **VPC は `main.yaml` が作る**（既存の VPC は使わない。スタックを消せば VPC ごと消えるので、消し忘れが残らない）。
+  既定は `10.0.0.0/16` に `/24` のプライベートサブネット 2 つ（AZ ID `apne1-az1` と `apne1-az4`）。IGW も NAT も無く、外へはエンドポイントだけ。
+  社内のネットワークと CIDR が重なると DX / VPN でつなぐときに困るので、重なるなら `VpcCidr` を変える（`/16`〜`/24`）。
+  AZ ID は AgentCore Runtime が東京で対応する `apne1-az1` / `apne1-az2` / `apne1-az4` から選ぶ（`AzIdA` / `AzIdB`。既定のままでよい）。
 - チャットのモデルは Amazon Nova 2 Lite（`jp.amazon.nova-2-lite-v1:0`）、埋め込みは Amazon Titan Text Embeddings V2。どちらも Amazon のモデルなので、AWS Marketplace の購読も初回利用フォームも要らない。組織の SCP や IAM で Bedrock のモデルを絞っているなら、この 2 つとリランクのモデルを許可する。
 - リランクは Amazon Rerank 1.0（`amazon.rerank-v1:0`）を使う。Amazon のモデルは AWS Marketplace を通さないので、購読・EULA への同意・Marketplace の支払い方法は要らない。東京リージョンで使える（2026-09-14 に AWS の文書で確認）。
 - デプロイする人の権限に、IAM ロールの作成（名前付き）と `iam:CreateServiceLinkedRole` が含まれる。VPC モードの初回に `AWSServiceRoleForBedrockAgentCoreNetwork` が自動で作られる。
@@ -219,28 +215,12 @@ docker buildx ls          # Platforms に linux/arm64 があれば準備完了
 あとは手順 2（エージェント）と lab-1（lab のイメージ）のコマンドをそのまま打つ。QEMU で翻訳実行するので、エージェントのビルドはネイティブより数倍かかる（目安は数分から十数分）。
 WSL を再起動すると QEMU の登録は消えるので、`docker buildx ls` に `linux/arm64` が無くなっていたら `binfmt --install arm64` だけ打ち直す。
 
-### 既存の VPC エンドポイントがある場合
+### `Create*Endpoints` パラメータ
 
-社内の VPC には、エンドポイントが既にあることが多い。**同じサービスのプライベート DNS 付きエンドポイントは 1 VPC に 1 つしか作れない**ので、次のパラメータで作らないようにする。
+`main.yaml` は VPC を自分で作るので、エンドポイントは全部このスタックが作る。`Create*Endpoints` の 5 つは**既定の `true` のまま**にする
+（`false` は、このテンプレートを既存の VPC に載せ替えたときのための名残）。
 
-| パラメータ | 既にあるもの | 設定 |
-|---|---|---|
-| `CreateRuntimeEndpoints` | ecr.api / ecr.dkr / logs / bedrock-runtime | `false`。足りないものは別途用意する |
-| `CreateKbEndpoint` | bedrock-agent-runtime | `false` |
-| `CreateSsmEndpoints` | ssm / ssmmessages | `false` |
-| `CreateAgentCoreEndpoint` | bedrock-agentcore | `false` |
-| `CreateS3GatewayEndpoint` | 対象ルートテーブルの S3 ゲートウェイエンドポイント | `false` |
-
-既存のエンドポイントを使うときは、その SG に次を足す。**既存のエンドポイントポリシーで拒否されていると、Runtime の作成やチャットが失敗する。**
-
-- ecr / logs / bedrock-runtime / bedrock-agent-runtime の SG に、出力 `RuntimeSecurityGroupId` からの 443
-- ssm / ssmmessages / bedrock-agentcore の SG に、出力 `InstanceSecurityGroupId` からの 443
-
-**S3 ゲートウェイエンドポイントのポリシーは、同じルートテーブルを使う全ワークロードに効く。**
-このテンプレートは ECR のレイヤー置き場（`prod-ap-northeast-1-starport-layer-bucket`）と AL2023 の dnf リポジトリ（`al2023-repos-ap-northeast-1-de612dc2`）の読み取りだけを許すので、
-他のシステムと共有のルートテーブルに付けると、そのシステムの S3 アクセスが止まる。専用サブネットか、既存のゲートウェイを使う。
-
-**EC2 も S3 ゲートウェイを通る。**AL2023 の `/usr/bin/python3` は 3.9 のままなので、起動時に `dnf install python3.13` で 3.13 を入れる。dnf のリポジトリは S3 にあるため、`RouteTableIds` には `InstanceSubnetId` のルートテーブルも入れる（Runtime と同じなら 1 つでよい）。既存のゲートウェイを使う（`CreateS3GatewayEndpoint=false`）ときは、そのポリシーが `arn:aws:s3:::al2023-repos-ap-northeast-1-de612dc2/*` の `s3:GetObject` を許しているか確かめる。
+**EC2 も S3 ゲートウェイを通る。**AL2023 の `/usr/bin/python3` は 3.9 のままなので、起動時に `dnf install python3.13` で 3.13 を入れる。dnf のリポジトリは S3 にあるため、S3 ゲートウェイのポリシーは ECR のレイヤー置き場と AL2023 のリポジトリの読み取りを許している。
 
 ## 手順
 
@@ -325,46 +305,15 @@ aws cloudformation deploy \
   --capabilities CAPABILITY_NAMED_IAM \
   --tags Project=fukuda-nwc-poc owner=fukuda \
   --parameter-overrides \
-    VpcId=vpc-0123456789abcdef0 \
-    RuntimeSubnetIds=subnet-0aaaaaaaaaaaaaaaa,subnet-0bbbbbbbbbbbbbbbb \
-    InstanceSubnetId=subnet-0aaaaaaaaaaaaaaaa \
-    RouteTableIds=rtb-0cccccccccccccccc \
     Owner=fukuda \
     KbAdminPrincipalArn=arn:aws:iam::123456789012:role/Admin \
-    AgentImageTag=v2
+    AgentImageTag=v1
 ```
 
-上の `vpc-0123…` などは例で、**自分のアカウントに既にある VPC の ID に置き換える**（このテンプレートは VPC を作らない。「前提」の AWS 側のとおり、DNS 設定が有効な VPC が先に要る）。
-何を入れるかと調べ方:
+手で入れるのは 2 つだけ。`KbAdminPrincipalArn` は「前提」の AWS 側の `get-role` で出た自分のロールの ARN、`AgentImageTag` は手順 2 で push したタグ。
+VPC / サブネット / ルートテーブルは `main.yaml` が作る（`10.0.0.0/16`。社内と重なるなら `VpcCidr=10.123.0.0/16` のように足す）。
 
-| パラメータ | 入れるもの | 調べ方 |
-|---|---|---|
-| `VpcId` | 置き先の VPC の ID（`vpc-` で始まる） | コンソール VPC → お使いの VPC。CLI は下の 1 本目 |
-| `RuntimeSubnetIds` | その VPC の**プライベート**サブネットを **2 つ以上**、カンマ区切り。AZ ID が `apne1-az1` / `apne1-az2` / `apne1-az4` のもの（AgentCore の制約。AZ 名 `ap-northeast-1a` と AZ ID の対応はアカウントごとに違う） | コンソール VPC → サブネット（列「アベイラビリティーゾーン ID」）。CLI は下の 2 本目 |
-| `InstanceSubnetId` | チャット画面の EC2 を置くプライベートサブネット 1 つ。`RuntimeSubnetIds` のどれかと同じでよい | 同上 |
-| `RouteTableIds` | 上のサブネットが使っているルートテーブルの ID を、重複なくカンマ区切り（S3 のゲートウェイエンドポイントを付ける先） | コンソール VPC → サブネット → 各サブネットの「ルートテーブル」タブ。CLI は下の 3 本目 |
-| `KbAdminPrincipalArn` | デプロイする自分の IAM ロール（かユーザー）の ARN | 「前提」の AWS 側の `get-caller-identity` → `get-role` |
-| `AgentImageTag` | 手順 2 で push したタグ（`v1` など） | ECR → `fukuda-nwc-poc-agent` |
-
-```bash
-aws ec2 describe-vpcs --region ap-northeast-1 --query 'Vpcs[].[VpcId,CidrBlock,Tags[?Key==`Name`].Value|[0]]' --output table
-```
-
-```bash
-aws ec2 describe-subnets --region ap-northeast-1 --filters Name=vpc-id,Values=vpc-0123456789abcdef0 \
-  --query 'Subnets[].[SubnetId,AvailabilityZoneId,CidrBlock,MapPublicIpOnLaunch,Tags[?Key==`Name`].Value|[0]]' --output table
-```
-
-```bash
-aws ec2 describe-route-tables --region ap-northeast-1 --filters Name=vpc-id,Values=vpc-0123456789abcdef0 \
-  --query 'RouteTables[].[RouteTableId,Associations[].SubnetId|join(`,`,@),Routes[?GatewayId!=`local`].GatewayId|[0]]' --output table
-```
-
-サブネットが「プライベート」かは、そのルートテーブルに `igw-` へのルートが**無い**ことで見る（`MapPublicIpOnLaunch` が `False` でも判断できる）。
-サブネットがルートテーブルに明示的に関連付いていないときは、VPC のメインルートテーブル（`describe-route-tables` で `Associations[].Main` が `true` のもの）の ID を入れる。
-VPC が無いアカウントなら、先に VPC ウィザードで「VPC など」→ パブリック 0 / プライベート 2 / NAT なし で作る（無料。AZ は上の 3 つのどれかにする）。
-
-**VPC / サブネット / ルートテーブルを手で入れるのはここだけ。**イメージの URI は `ecr.yaml` の Export（`fukuda-nwc-poc-agent-repository-uri`）から取り、`AgentImageTag` のタグを付ける。
+イメージの URI は `ecr.yaml` の Export（`fukuda-nwc-poc-agent-repository-uri`）から取り、`AgentImageTag` のタグを付ける。
 `main.yaml` は VPC ID・サブネット・SG・バケット名を Export し、`lab.yaml` / `stream.yaml` / `graph.yaml` は `Fn::ImportValue` で受け取るので、以降のスタックにネットワークの値は入れない。
 **Export を参照されているスタックは消せず、Export の値も変えられない。**消す順番は `graph` → `stream` → `lab` → `main` → `ecr`（「片付け」）。
 別のリポジトリのイメージを使うときだけ `AgentImageUri=<URI:タグ>` を足す（その場合も `ecr.yaml` は先に要る。`Fn::ImportValue` は使わない側の分岐でも解決されるため）。
@@ -518,14 +467,14 @@ CLI が使えない端末では、手順 1・3・lab-3・s-2・g-1 の `aws clou
 |---|---|---|---|
 | `ecr.yaml` | `fukuda-nwc-poc-ecr` | なし（既定のまま） | `RepositoryUri`（手順 2 の push 先） |
 | `build.yaml` | `fukuda-nwc-poc-build` | なし（既定のまま）。ecr の後ならいつでも | `SourceBucketName`（zip を置く先）と `ProjectName`（手順 2-b で「ビルドの開始」を押すプロジェクト） |
-| `main.yaml` | `fukuda-nwc-poc` | `VpcId` / `RuntimeSubnetIds`（2 つ選ぶ）/ `InstanceSubnetId` / `RouteTableIds` / `KbAdminPrincipalArn` / `AgentImageTag`（手順 2 で push したタグ）。社内から DX / VPN で入るなら `ClientCidr` | `KbBucketName` `InstanceId` `KnowledgeBaseId` `DataSourceId` `EndpointSecurityGroupId` と `StartSessionCommand` |
+| `main.yaml` | `fukuda-nwc-poc` | `KbAdminPrincipalArn` / `AgentImageTag`（手順 2 で push したタグ）。VPC はスタックが作る（社内と重なるなら `VpcCidr`）。社内から DX / VPN で入るなら `ClientCidr` | `KbBucketName` `InstanceId` `KnowledgeBaseId` `DataSourceId` `EndpointSecurityGroupId` と `StartSessionCommand` |
 | `lab.yaml` | `fukuda-nwc-poc-lab` | なし（VPC / サブネット / SG / バケットは `main.yaml` の Export から取る） | `LabInstanceId` と `StartSessionCommand` |
 | `stream.yaml` | `fukuda-nwc-poc-stream` | なし（`main.yaml` と `lab.yaml` の Export から取る。lab を先に作る） | `UploadPluginCommand` / `SinkPrefix`（s-1・s-3 で使う） |
 | `graph.yaml` | `fukuda-nwc-poc-graph` | なし（`main.yaml` の Export から取る） | Neptune のエンドポイント（g-2 で使う） |
 
-- VPC / サブネット / ルートテーブルはドロップダウンで選べる（`VpcId` `SubnetId` 型のパラメータ）。`RouteTableIds` と `KbAdminPrincipalArn` は文字列なので手で貼る。`main.yaml` 以外のスタックにはネットワークのパラメータが無い（Export で受け渡す）。
+- ネットワークのパラメータは無い（`main.yaml` が VPC を作り、他のスタックは Export で受け取る）。`KbAdminPrincipalArn` は文字列なので手で貼る。
 - `ImageId` は SSM パラメータ名が既定で入っている。触らない（作成時に最新の AL2023 arm64 AMI に解決される）。
-- `main.yaml` の `Create*Endpoints` は、VPC に同じエンドポイントが既にあるときだけ `false` にする（前提の「既存の VPC エンドポイントがある場合」）。
+- `main.yaml` の `Create*Endpoints` は既定の `true` のまま。
 - 出力の `StartSessionCommand` などは CLI の形で出るので、手順 7 と lab-4 はそのまま PC の CLI で打つ。
 - **更新するとき**は、スタックを選んで **更新** → **既存テンプレートを置き換える** → 同じ手順。パラメータは前回の値が入った状態で出る。`AgentImageTag` を変えるだけなら **現在のテンプレートを使用** でパラメータだけ直す。
 - **消すとき**は、スタックを選んで **削除**。順番は `fukuda-nwc-poc-graph` → `fukuda-nwc-poc-stream` → `fukuda-nwc-poc-lab` → `fukuda-nwc-poc` → `fukuda-nwc-poc-ecr`（Export を使っているスタックが残っていると `Export … is in use` で消せない）。バケットに中身が残っていると `DELETE_FAILED` になるので、先に S3 コンソールで **空にする** を押す（ECR はイメージごと消える）。Runtime の ENI が残って SG が消せないときは 8 時間待って **削除** をもう一度（下の「片付け」）。
@@ -564,7 +513,7 @@ aws s3 cp containerlab_0.79.0_linux_arm64.rpm s3://fukuda-nwc-poc-kb-12345678901
 
 ### lab-3. デプロイする
 
-VPC / サブネット（`main.yaml` の `InstanceSubnetId`）/ エンドポイントの SG / バケットは `main.yaml` の Export から取るので、パラメータは要らない。
+VPC / サブネット / エンドポイントの SG / バケットは `main.yaml` の Export から取るので、パラメータは要らない。
 エンドポイントの SG には lab の EC2 から ssm / ssmmessages / ecr へ 443 を許すルールが足される。
 
 ```bash
@@ -690,7 +639,7 @@ aws cloudformation delete-stack --region ap-northeast-1 --stack-name fukuda-nwc-
 | `start-session` がタイムアウトする / 名前が解決できない | PC から ssm / ssmmessages に届いていない（前提の「利用者の PC 側」） |
 | `TargetNotConnected` | インスタンスが登録されていない。ssm / ssmmessages エンドポイントとその SG、インスタンスロール、手順 7 の `PingStatus`。起動直後は数分待つ。SSM Agent が 3.3.40.0 より古いと `ec2messages` エンドポイントも要る |
 | `AccessDeniedException`（start-session） | 手順 6 の権限。インスタンスに `Project` タグがあるか |
-| ブラウザが「接続できない」 | Web が落ちている。管理者がシェルで入り `sudo systemctl status fukuda-nwc-poc-web` と `sudo journalctl -u fukuda-nwc-poc-web -n 100`。起動時の失敗は `/var/log/cloud-init-output.log`。`python3.13` のインストールで止まっていたら S3 ゲートウェイ（前提の「既存の VPC エンドポイントがある場合」） |
+| ブラウザが「接続できない」 | Web が落ちている。管理者がシェルで入り `sudo systemctl status fukuda-nwc-poc-web` と `sudo journalctl -u fukuda-nwc-poc-web -n 100`。起動時の失敗は `/var/log/cloud-init-output.log`。`python3.13` のインストールで止まっていたら S3 ゲートウェイ（前提の「`Create*Endpoints` パラメータ」） |
 | ブラウザが「接続できない」が、journald に `web/ is not in s3://` | 手順 4 の Web の部品を置いていない。置いてインスタンスを再起動する |
 | 手順 2 のビルドで `pip install` が `Retrying (Retry(total=4 …))` を繰り返して落ちる | 行末が `CERTIFICATE_VERIFY_FAILED` なら社内 CA の差し替え（手順 2 の「社内ネットワークで打つとき」）。`agent/Dockerfile` の `--trusted-host` が残っているか見る。`ReadTimeoutError` は QEMU が遅いだけなので打ち直す |
 | `docker login` / `docker push` / `aws` が `x509: certificate signed by unknown authority` や `SSL validation failed` | WSL 側に社内 CA が無い。Windows の `certmgr.msc` から社内のルート証明書を Base64 でエクスポートし、`/usr/local/share/ca-certificates/corp-root.crt` に置いて `sudo update-ca-certificates` → `sudo systemctl restart docker` |
@@ -735,6 +684,7 @@ aws logs delete-log-group --region ap-northeast-1 --log-group-name "$LOG_GROUP"
 ```
 
 - **Runtime の ENI は削除後も最大 8 時間残る。**その間は Runtime の SG が消せず、スタック削除が `DELETE_FAILED` になることがある。時間をおいて削除し直す。
+- `fukuda-nwc-poc` を消すと VPC・サブネット・エンドポイント・SG も一緒に消える。VPC が `DELETE_FAILED` で残るのは、上の Runtime の ENI か、手で足した ENI / SG が残っているとき。
 - ECR スタックはイメージごと消える（`EmptyOnDelete`）。残すなら消さなくてよい（保管料は月数円）。
 - 消し残しは「名前とタグ」の `get-resources` で確かめる。
 
