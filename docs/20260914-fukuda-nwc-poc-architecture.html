@@ -222,7 +222,7 @@ Neptune ── Gremlin ──▶ エージェントのトポロジツール / We
   <li><strong>trap とポーリングの両方を持つのは、速さと確実さのため。</strong>trap は 5 秒以内に届きますが取りこぼすことがあり、ポーリングは 10 秒周期ですが必ず追いつきます。detector は同じ機器・同じインタフェースを 1 件にまとめます。</li>
   <li><strong>Web とエージェントは、同じ 3 つのモジュールでトポロジと異常を読みます。</strong>Neptune と DynamoDB の場所は SSM のパラメータから引き、無ければ静的データに戻る（60 秒キャッシュ）ので、フェーズ 2 のスタックを消してもフェーズ 1 のまま動きます。</li>
   <li><strong>Neptune の中身は Web から手で編集します。</strong>「静的データを投入」で 10 台と 10 本を入れ、以後リンクの追加・削除ができます。lab の実配線とは同期しません。</li>
-  <li><strong>費用は stream + graph で 1 時間 ≈ $0.35（約 52 円）。</strong>MSK kafka.t3.small × 2 が $0.09、MSK Connect 1 MCU が $0.11、Neptune db.t4g.medium が $0.11、lambda / sts のエンドポイントが $0.03。1 か月置くと ≈ $255（約 38,000 円）。単価は公開の料金表の値で、Price List API では未検証（2026-09-15）。</li>
+  <li><strong>費用は stream + graph で 1 時間 ≈ $0.43（約 65 円）。</strong>MSK kafka.t3.small × 2 が $0.12、MSK Connect 1 MCU が $0.14、Neptune db.t4g.medium が $0.14、lambda / sts のエンドポイントが $0.03。1 か月置くと ≈ $317（約 47,600 円）。東京の税抜単価で、2026-09-15 に AWS Price List API で確認。</li>
 </ul>
 
 <h2 id="limits">確認できていないこと</h2>
@@ -237,10 +237,10 @@ Gradio の画面はフェーズ 1 の版は手元で起動し、フェーズ 2 �
   <li>既定のアナライザで、日本語の質問にキーワード検索がどれだけ効くか</li>
   <li>Amazon Rerank 1.0 が日本語の手順書で順位をどれだけ良くするか（日本語対応は AWS の文書で確認できていない）。候補 20 件 → 5 件が妥当か</li>
   <li>閉域の EC2 から、S3 ゲートウェイ経由で <code>dnf install python3.13</code> / <code>docker</code> が通るか。t4g.small で Gradio が安定して動くか</li>
-  <li>containerlab の rpm が AL2023 で入り、lab の 14 コンテナが t4g.large で動くか。t4g.small / t4g.large の単価（Price List API 未確認）</li>
+  <li>containerlab の rpm が AL2023 で入り、lab の 14 コンテナが t4g.large で動くか。t4g.small $0.0216/h・t4g.large $0.0864/h は 2026-09-15 に Price List API で確認</li>
   <li>VPC モードの Runtime が、イメージの取得に VPC 内の ECR / S3 エンドポイントを使うか</li>
   <li>（フェーズ 2）Telegraf 1.40.0 の <code>outputs.kafka</code> が、インスタンスロールの資格情報で MSK の IAM 認証を通るか。MSK Connect の <code>KafkaConnectVersion</code> に <code>2.7.1</code> が入るか。Confluent の S3 sink 12.1.11 をプラグインとして登録できるか</li>
-  <li>（フェーズ 2）VPC モードの Runtime から Neptune のクラスター名が引けるか（プライベート DNS）。MSK / MSK Connect / Neptune の東京の単価</li>
+  <li>（フェーズ 2）VPC モードの Runtime から Neptune のクラスター名が引けるか（プライベート DNS）</li>
 </ul>
 
 </div><!-- /.mb-main -->

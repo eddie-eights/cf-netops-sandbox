@@ -695,20 +695,20 @@ aws logs delete-log-group --region ap-northeast-1 --log-group-name "$LOG_GROUP"
 lab（`lab.yaml`）は上に含めていない。**起動している間だけ**、t4g.large（$0.0864/h、約 13 円）と gp3 16 GB（月 $1.5）がかかる。
 止めれば EBS の月 $1.5 だけ。**1 か月起動したままだと約 $65（約 9,700 円）**なので、使ったら止める。t4g.large の単価は 2026-09-14 時点で Price List API を引けておらず、公開の料金表の値（未検証）。
 
-フェーズ 2 は上に含めていない。**stream と graph を両方立てると約 $0.35/h（約 52 円）、1 か月置くと約 $255（約 38,000 円）**なので、使う日に作って当日中に消す。単価は公開の料金表の値で、Price List API では未検証（2026-09-15）。
+フェーズ 2 は上に含めていない。**stream と graph を両方立てると約 $0.43/h（約 65 円）、1 か月置くと約 $317（約 47,600 円）**なので、使う日に作って当日中に消す。単価は東京リージョンの税抜で、2026-09-15 に AWS Price List API で確認した。
 
 | フェーズ 2 の項目 | 単価 | 1 時間 |
 |---|---|---|
-| MSK kafka.t3.small × 2 | 約 $0.0456/h/ブローカー | $0.091 |
+| MSK kafka.t3.small × 2 | $0.0596/h/ブローカー | $0.119 |
 | MSK ストレージ 10 GB × 2 | $0.114/GB 月 | $0.003 |
-| MSK Connect 1 MCU | 約 $0.11/MCU 時間 | $0.11 |
+| MSK Connect 1 MCU | $0.142/MCU 時間 | $0.142 |
 | インターフェイスエンドポイント lambda / sts × 1 AZ | $0.014/h/AZ | $0.028 |
 | Lambda / DynamoDB（オンデマンド）/ SSM / S3 | 数百万リクエストまでほぼ無料枠 | 約 $0 |
-| Neptune db.t4g.medium × 1 | 約 $0.113/h | $0.113 |
+| Neptune db.t4g.medium × 1 | $0.1424/h（Standard。I/O 最適化は $0.192） | $0.142 |
 | Neptune ストレージ・I/O | $0.12/GB 月、$0.24/100 万 I/O | 約 $0 |
-| **合計** | | **約 $0.35（約 52 円）** |
+| **合計** | | **約 $0.43（約 65 円）** |
 
-MSK Connect を作らなければ（`CreateS3Sink=false`）$0.24/h。
+MSK Connect を作らなければ（`CreateS3Sink=false`）約 $0.29/h（約 44 円）。
 
 | パターン | 1 時間 | 1 か月（730 時間） |
 |---|---|---|
@@ -770,7 +770,6 @@ MSK Connect を作らなければ（`CreateS3Sink=false`）$0.24/h。
 - `AWS::KafkaConnect::Connector` の `KafkaConnectVersion` に `2.7.1` が入るか（許される値の一覧を文書で確認できていない）。MSK Connect が S3 とログに届くのに、S3 ゲートウェイと logs エンドポイント以外の経路が要るか。
 - Telegraf 1.40.0 の `outputs.kafka` の `AWS-MSK-IAM` が、インスタンスロール（IMDS）の資格情報で動くか。もっと古い版で使えるかも未確認。
 - Confluent の S3 sink 12.1.11 の zip を CustomPlugin として登録できるか（Confluent Community License。ダウンロードの URL と同意の要否）。
-- Neptune の `db.t4g.medium` と MSK の `kafka.t3.small`、MSK Connect の MCU の東京の単価（Price List API を引けていない。上は公開の料金表の値）。
 - `web/app.py` の 3 タブ版は手元で起動していない（gradio 未導入の環境で構文検査のみ）。Neptune の編集 UI の動きは `tests/test_graph.py` の Gremlin までしか見ていない。
 - boto3 の `neptunedata` クライアントが VPC モードの Runtime からクラスターの DNS 名で届くか（プライベート DNS。エンドポイントは要らない想定）。
 - OpenSearch Serverless のアクセスポリシーの反映待ちで、`KbIndex` の作成が 403 になることがあるか（コレクションより先にポリシーを作って間を空けている）。
