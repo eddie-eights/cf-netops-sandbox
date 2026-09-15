@@ -1,9 +1,9 @@
 """agent/app.py の模擬テスト。boto3 と bedrock_agentcore を差し替えて、AWS に触れずに流れを確かめる。"""
 import importlib.util, os, sys, types
 
-# 引数が無ければリポジトリの agent/app.py を読む。実行は python3.13 tests/test_app.py
+# 引数が無ければリポジトリの agent/app.py を読む。実行は uv run python tests/test_app.py（README「手元で確かめる」）
 APP_PATH = sys.argv[1] if len(sys.argv) > 1 else os.path.join(os.path.dirname(__file__), "..", "agent", "app.py")
-# app.py は同じディレクトリの topology.py を import する（PyYAML が要る: pip install pyyaml）
+# app.py は同じディレクトリの topology.py を import する（PyYAML が要る: uv sync --group dev）
 sys.path.insert(0, os.path.dirname(os.path.abspath(APP_PATH)))
 
 class ClientError(Exception):

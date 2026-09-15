@@ -1,0 +1,16 @@
+# 手元の確認（cfn-lint と tests/）のためだけの設定。AWS に置くものは agent/requirements.txt と web/requirements.txt。
+# 使い方: uv sync --group dev → uv run cfn-lint *.yaml / uv run python tests/test_app.py
+[project]
+name = "fukuda-nwc-poc"
+version = "0.0.0"
+description = "NetOps PoC CloudFormation templates and local mock tests"
+requires-python = ">=3.13,<3.14"
+
+[dependency-groups]
+dev = [
+  "cfn-lint>=1.0",
+  "pyyaml>=6.0",
+]
+
+[tool.uv]
+package = false

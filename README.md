@@ -56,7 +56,7 @@ lab（任意、lab.yaml、別スタック）: 同じ VPC の EC2 1 台で contai
 | `web/` | EC2 で動かす Gradio の画面（`app.py`）と依存（`requirements.txt`）。`agent/` の 3 モジュールと一緒に S3 に置く（出力 `UploadWebCommand`） |
 | `lab/` | lab の材料。`wvs2.clab.yml.in`（containerlab の定義。イメージ名は起動時に埋める）、`frr/`、`snmpd/`（Dockerfile と設定。trap の送信も）、`telegraf.conf.in`（ポーリングと trap 受信 → MSK）、`lab.sh` |
 | `kb-docs/` | ナレッジベースに入れる手順書の例（架空の md 3 つ） |
-| `tests/` | 模擬テスト（AWS に触れない）。`test_app.py`（エージェント）、`test_graph.py`（Neptune の読み書きと静的への切り戻し）、`test_stream.py`（detector） |
+| `tests/` | 模擬テスト（AWS に触れない。打ち方は「手元で確かめる」）。`test_app.py`（エージェント）、`test_graph.py`（Neptune の読み書きと静的への切り戻し）、`test_stream.py`（detector） |
 
 ## なぜこの形にしたか
 
@@ -193,7 +193,7 @@ ENI にタグが付かず上で何も出ないときは、`aws ec2 describe-vpc-
 | （Docker Engine を WSL に直接入れるとき）docker.com の apt リポジトリから入れる | Ubuntu 標準の `docker.io` には buildx が無い。`docker-ce docker-ce-cli containerd.io docker-buildx-plugin` を入れ、`sudo usermod -aG docker $USER` の後にシェルを開き直す |
 | （同）dockerd が起動している | `/etc/wsl.conf` に `[boot]` `systemd=true` を書いて `wsl --shutdown` で入り直すと `systemctl enable --now docker` が使える。systemd を使わないなら毎回 `sudo service docker start` |
 | （同）arm64 の QEMU を登録する | `docker run --privileged --rm tonistiigi/binfmt --install arm64` を 1 回打つ（WSL を再起動すると消えるので、`docker buildx ls` に `linux/arm64` が無ければ打ち直す）。エージェントのイメージは AgentCore Runtime の要件で arm64 必須なので、これが無いと手順 2 が通らない |
-| python3 と pip がある | `python3 -m pip --version`。手順 4 の wheel 取得に使う（Ubuntu なら `sudo apt install python3-pip`） |
+| uv がある | `uv --version`。手順 4 の wheel 取得と、手元の cfn-lint / テスト（「手元で確かめる」）に使う。Python 3.13 は `.python-version` を見て uv が自分で取ってくるので、apt の python3 や pip は要らない |
 
 **WSL に Docker Engine を入れて push するまでの一連の流れ**（Ubuntu の WSL2。Docker Desktop は使わない。2026-09-15 時点の docker.com の手順）。
 
@@ -313,11 +313,13 @@ aws cloudformation describe-stacks --region ap-northeast-1 --stack-name fukuda-n
 wheel はインターネットに出られる端末で、**arm64 / Python 3.13 用を指定して**取る（PC が x86 でも Mac でもこのコマンドでよい。58 個、約 130 MB）。
 
 ```bash
-python3 -m pip download --only-binary=:all: \
+uv run --python 3.13 --with pip python -m pip download --only-binary=:all: \
   --platform manylinux2014_aarch64 --platform manylinux_2_17_aarch64 --platform manylinux_2_28_aarch64 \
   --python-version 3.13 --implementation cp --abi cp313 --abi none \
   -d wheels -r web/requirements.txt
 ```
+
+uv には `pip download` に当たるものが無いので、使い捨ての環境に pip を入れて打つ（`--with pip`）。uv を使わない端末なら先頭を `python3 -m pip download` に替える（python3 と pip が要る）。
 
 ```bash
 aws s3 cp web/app.py s3://fukuda-nwc-poc-kb-123456789012/web/app.py
@@ -731,11 +733,30 @@ MSK Connect を作らなければ（`CreateS3Sink=false`）約 $0.29/h（約 44 
 - ガードレールの機微情報フィルタ（PII）、拒否トピック、単語フィルタ、コンテキストグラウンディング。PII は IP アドレスやホスト名を伏せて運用の回答を壊すので入れていない。単語フィルタとグラウンディングは日本語に対応していない。
 - OpenSearch Serverless の閉域化。ネットワークポリシーは公開で、中身に触れるのはデータアクセスポリシーの 2 つ（ナレッジベースのロールとデプロイした人）だけ。
 
+## 手元で確かめる
+
+AWS に触らずに、テンプレートの lint と模擬テストを打てる。会社の PC（WSL2 + uv）でも Mac でも同じ。Python 3.13 は `.python-version` に書いてあり、無ければ uv が取ってくる。
+
+```bash
+uv sync --group dev
+```
+
+```bash
+uv run cfn-lint ecr.yaml main.yaml lab.yaml stream.yaml graph.yaml
+```
+
+```bash
+uv run python tests/test_app.py && uv run python tests/test_graph.py && uv run python tests/test_stream.py
+```
+
+健全なら lint は何も出さず、テストはそれぞれ最後の行が `通過 41 / 失敗 0`、`通過 18 / 失敗 0`、`通過 21 / 失敗 0` になる。
+`pyproject.toml` と `uv.lock` はこの確認のためだけのもので、AWS に置く依存は `agent/requirements.txt` と `web/requirements.txt`。`.venv/` は gitignore してある。
+
 ## 確認したこと・確認できていないこと
 
 確認したこと（2026-09-14、フェーズ 2 は 2026-09-15）。
 
-- `cfn-lint` で `ecr.yaml` / `main.yaml` / `lab.yaml` / `stream.yaml` / `graph.yaml` にエラー・警告なし。
+- `cfn-lint` で `ecr.yaml` / `main.yaml` / `lab.yaml` / `stream.yaml` / `graph.yaml` にエラー・警告なし（2026-09-15 に uv + Python 3.13.11 で打ち直した。「手元で確かめる」）。
 - フェーズ 2 の模擬テスト。`tests/test_stream.py`（21 項目: ZipFile と `stream/detector.py` の一致、機器名の引き方、ポーリングの open / resolved、`first_seen` を保つ、解消済みへの up を数えない、MIB 無しの trap から ifDescr を取る、linkUp で resolved、壊れたレコードを飛ばす）、`tests/test_graph.py`（18 項目: SSM 未設定なら静的、GraphSON の読み替え、Neptune からの組み立て、失敗時と空のときの静的への切り戻し、`add_link` の正規化と重複拒否、`remove_link` / `add_device` / `seed` の Gremlin）。`tests/test_app.py` は 41 項目になった（ツールが 5 つ、`list_anomalies` が未配備で error を返す、振り分け）。
 - Telegraf の `inputs.snmp` は数値 OID とフィールド名を明示すれば MIB 無しで動き、`inputs.snmp_trap` は v2c を MIB 無しで受ける（varbind の名前は数値 OID）。`agent_host` タグは `source` に替わっている。net-snmp の `monitor` には `iquerySecName` と内部ユーザーが要る。
 - MSK の推奨バージョンが 3.9.x、Neptune の最新が 1.4.8.0、Neptune の IAM アクションが `neptune-db:*DataViaQuery`、`AWS::MSK::Configuration` の GetAtt が `LatestRevision.Revision`、Lambda の MSK イベントソースが NAT 無しの VPC では lambda と sts のエンドポイントを要ること、MSK Connect の信頼先が `kafkaconnect.amazonaws.com` であること。
