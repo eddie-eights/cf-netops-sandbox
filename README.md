@@ -265,6 +265,24 @@ Identity Center のロールは `role/aws-reserved/sso.amazonaws.com/ap-northeas
 
 コンソールで進めるときは、(a) をバケット名（`fukuda-nwc-poc-kb-<アカウント ID>`）に、(b) をパラメータ `KbAdminPrincipalArn` に貼る。
 
+**(d) aws-vault を使っているとき。** `aws-vault exec <プロファイル>` は既定で `sts get-session-token` の一時セッションを渡す。
+この一時セッションでは IAM の API が呼べず、名前付きの IAM ロールを作る手順 3 の `cloudformation deploy` が認証エラーで落ちる
+（2026-09-15 に会社 PC で確認）。**`--no-session` を付けて、IAM ユーザーの長期キーをそのまま渡す。**
+
+```bash
+aws-vault exec <プロファイル> --no-session -- aws cloudformation deploy --region ap-northeast-1 --stack-name fukuda-nwc-poc --template-file main.yaml --capabilities CAPABILITY_NAMED_IAM --tags Project=fukuda-nwc-poc owner=fukuda --parameter-overrides Owner=fukuda KbAdminPrincipalArn="$ADMIN_ARN" AgentImageTag=v1
+```
+
+コマンドごとに付けるのが面倒なら、サブシェルを開いて手順 0〜7 をその中で打つ（`exit` で抜けるまで有効）。
+
+```bash
+aws-vault exec <プロファイル> --no-session
+```
+
+手順 1 / lab / stream / graph の `deploy` も IAM ロールを作るので同じ。`aws-vault` の一時セッションで動くのは読み取り（`describe-*`）と S3 / ECR の操作だけ。
+`--no-session` のとき手順 0 の (b) は `arn:aws:iam::<アカウント ID>:user/<ユーザー名>` の形で出るので、それをそのまま `ADMIN_ARN` に入れる。
+
+
 ### 1. ECR リポジトリを作る
 
 ```bash
@@ -681,6 +699,7 @@ aws cloudformation delete-stack --region ap-northeast-1 --stack-name fukuda-nwc-
 | `AccessDeniedException`（start-session） | 手順 6 の権限。インスタンスに `Project` タグがあるか |
 | ブラウザが「接続できない」 | Web が落ちている。管理者がシェルで入り `sudo systemctl status fukuda-nwc-poc-web` と `sudo journalctl -u fukuda-nwc-poc-web -n 100`。起動時の失敗は `/var/log/cloud-init-output.log`。`python3.13` のインストールで止まっていたら S3 ゲートウェイ（前提の「`Create*Endpoints` パラメータ」） |
 | ブラウザが「接続できない」が、journald に `web/ is not in s3://` | 手順 4 の Web の部品を置いていない。置いてインスタンスを再起動する |
+| 手順 3 の `cloudformation deploy` が認証エラー（`AccessDenied` / `InvalidClientTokenId` / `not authorized to perform: iam:CreateRole`）で落ちる。読み取りは通る | aws-vault の一時セッション（`get-session-token`）で打っている。手順 0 の (d) のとおり `aws-vault exec <プロファイル> --no-session -- …` にする |
 | 手順 2 のビルドで `pip install` が `Retrying (Retry(total=4 …))` を繰り返して落ちる | 行末が `CERTIFICATE_VERIFY_FAILED` なら社内 CA の差し替え（手順 2 の「社内ネットワークで打つとき」）。`agent/Dockerfile` の `--trusted-host` が残っているか見る。`ReadTimeoutError` は QEMU が遅いだけなので打ち直す |
 | `docker login` / `docker push` / `aws` が `x509: certificate signed by unknown authority` や `SSL validation failed` | WSL 側に社内 CA が無い。Windows の `certmgr.msc` から社内のルート証明書を Base64 でエクスポートし、`/usr/local/share/ca-certificates/corp-root.crt` に置いて `sudo update-ca-certificates` → `sudo systemctl restart docker` |
 | `pip install` で `No matching distribution` | wheel が arm64 / cp313 でない。手順 4 の `pip download` の `--platform` と `--abi` を確かめ、`wheels/` を置き直して再起動する |
