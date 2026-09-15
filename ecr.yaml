@@ -109,8 +109,9 @@ Resources:
 
 Outputs:
   RepositoryUri:
-    Description: Push the arm64 agent image here (tag it, e.g. v1)
+    Description: Push the arm64 agent image here (tag it, e.g. v1). main.yaml imports it (AgentImageTag), so this stack stays until main.yaml is deleted.
     Value: !GetAtt AgentRepository.RepositoryUri
+    Export: { Name: !Sub "${NamePrefix}-agent-repository-uri" }
   FrrRepositoryUri:
     Condition: LabCond
     Description: Push quay.io/frrouting/frr:10.2.1 (arm64) here with tag 10.2.1

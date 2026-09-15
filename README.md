@@ -46,9 +46,9 @@ lab（任意、lab.yaml、別スタック）: 同じ VPC の EC2 1 台で contai
 
 | ファイル | 中身 |
 |---|---|
-| `ecr.yaml` | エージェントイメージの ECR リポジトリ。先にデプロイする |
+| `ecr.yaml` | エージェントイメージの ECR リポジトリ。先にデプロイする。リポジトリ URI を Export し、`main.yaml` が取る |
 | `main.yaml` | VPC エンドポイント / ナレッジベース（S3・OpenSearch Serverless）/ ガードレール / AgentCore Runtime / EC2（Web は起動時に S3 から取って入れる）/ IAM |
-| `lab.yaml` | 任意。containerlab + FRR の lab を動かす EC2 1 台（`main.yaml` の VPC とバケットを使う）。フェーズ 2 では Telegraf も入れる |
+| `lab.yaml` | 任意。containerlab + FRR の lab を動かす EC2 1 台（VPC / サブネット / SG / バケットは `main.yaml` の Export から取る）。フェーズ 2 では Telegraf も入れる |
 | `stream.yaml` | フェーズ 2。MSK（2 ブローカー、IAM 認証）/ detector Lambda / DynamoDB の異常テーブル / MSK Connect の S3 sink / lambda・sts・dynamodb エンドポイント / `main.yaml` のロールへの読み取り権限 |
 | `graph.yaml` | フェーズ 2。Neptune（db.t4g.medium × 1、IAM 認証）と、`main.yaml` のロールへの Gremlin 権限。無ければ静的データで動く |
 | `stream/detector.py` | detector Lambda の本体（`stream.yaml` の ZipFile と同じ。`tests/test_stream.py` が一致を確かめる） |
@@ -290,12 +290,17 @@ aws cloudformation deploy \
     RouteTableIds=rtb-0cccccccccccccccc \
     Owner=fukuda \
     KbAdminPrincipalArn=arn:aws:iam::123456789012:role/Admin \
-    AgentImageUri=123456789012.dkr.ecr.ap-northeast-1.amazonaws.com/fukuda-nwc-poc-agent:v2
+    AgentImageTag=v2
 ```
+
+**VPC / サブネット / ルートテーブルを手で入れるのはここだけ。**イメージの URI は `ecr.yaml` の Export（`fukuda-nwc-poc-agent-repository-uri`）から取り、`AgentImageTag` のタグを付ける。
+`main.yaml` は VPC ID・サブネット・SG・バケット名を Export し、`lab.yaml` / `stream.yaml` / `graph.yaml` は `Fn::ImportValue` で受け取るので、以降のスタックにネットワークの値は入れない。
+**Export を参照されているスタックは消せず、Export の値も変えられない。**消す順番は `graph` → `stream` → `lab` → `main` → `ecr`（「片付け」）。
+別のリポジトリのイメージを使うときだけ `AgentImageUri=<URI:タグ>` を足す（その場合も `ecr.yaml` は先に要る。`Fn::ImportValue` は使わない側の分岐でも解決されるため）。
 
 DX / VPN 経由でこのスタックの ssm エンドポイントを使うなら `ClientCidr=192.0.2.0/24` を足す。
 OpenSearch Serverless のコレクションと Runtime の作成で、全体で 10〜20 分ほどかかる。
-**ナレッジベース対応の前のイメージ（`v1`）では動かない。**手順 2 で新しいタグ（例 `v2`）を push してから指定する。
+**ナレッジベース対応の前のイメージ（`v1`）では動かない。**手順 2 で新しいタグ（例 `v2`）を push してから `AgentImageTag` に指定する。
 
 ```bash
 aws cloudformation describe-stacks --region ap-northeast-1 --stack-name fukuda-nwc-poc \
@@ -439,14 +444,14 @@ CLI が使えない端末では、上の手順 1・3・lab-3 の `aws cloudforma
 | テンプレート | スタック名 | 必ず入れるパラメータ | 出力で控えるもの |
 |---|---|---|---|
 | `ecr.yaml` | `fukuda-nwc-poc-ecr` | なし（既定のまま） | `RepositoryUri`（手順 2 の push 先） |
-| `main.yaml` | `fukuda-nwc-poc` | `VpcId` / `RuntimeSubnetIds`（2 つ選ぶ）/ `InstanceSubnetId` / `RouteTableIds` / `KbAdminPrincipalArn` / `AgentImageUri`（手順 2 で push したタグ）。社内から DX / VPN で入るなら `ClientCidr` | `KbBucketName` `InstanceId` `KnowledgeBaseId` `DataSourceId` `EndpointSecurityGroupId` と `StartSessionCommand` |
-| `lab.yaml` | `fukuda-nwc-poc-lab` | `VpcId` / `SubnetId` / `AssetBucketName`（上の `KbBucketName`）。`EndpointSecurityGroupId` は上の出力を入れる | `LabInstanceId` と `StartSessionCommand` |
+| `main.yaml` | `fukuda-nwc-poc` | `VpcId` / `RuntimeSubnetIds`（2 つ選ぶ）/ `InstanceSubnetId` / `RouteTableIds` / `KbAdminPrincipalArn` / `AgentImageTag`（手順 2 で push したタグ）。社内から DX / VPN で入るなら `ClientCidr` | `KbBucketName` `InstanceId` `KnowledgeBaseId` `DataSourceId` `EndpointSecurityGroupId` と `StartSessionCommand` |
+| `lab.yaml` | `fukuda-nwc-poc-lab` | なし（VPC / サブネット / SG / バケットは `main.yaml` の Export から取る） | `LabInstanceId` と `StartSessionCommand` |
 
-- VPC / サブネット / ルートテーブルはドロップダウンで選べる（`VpcId` `SubnetId` 型のパラメータ）。`RouteTableIds` と `KbAdminPrincipalArn` と `AgentImageUri` は文字列なので手で貼る。
+- VPC / サブネット / ルートテーブルはドロップダウンで選べる（`VpcId` `SubnetId` 型のパラメータ）。`RouteTableIds` と `KbAdminPrincipalArn` は文字列なので手で貼る。`main.yaml` 以外のスタックにはネットワークのパラメータが無い（Export で受け渡す）。
 - `ImageId` は SSM パラメータ名が既定で入っている。触らない（作成時に最新の AL2023 arm64 AMI に解決される）。
 - `main.yaml` の `Create*Endpoints` は、VPC に同じエンドポイントが既にあるときだけ `false` にする（前提の「既存の VPC エンドポイントがある場合」）。
 - 出力の `StartSessionCommand` などは CLI の形で出るので、手順 7 と lab-4 はそのまま PC の CLI で打つ。
-- **更新するとき**は、スタックを選んで **更新** → **既存テンプレートを置き換える** → 同じ手順。パラメータは前回の値が入った状態で出る。`AgentImageUri` のタグを変えるだけなら **現在のテンプレートを使用** でパラメータだけ直す。
+- **更新するとき**は、スタックを選んで **更新** → **既存テンプレートを置き換える** → 同じ手順。パラメータは前回の値が入った状態で出る。`AgentImageTag` を変えるだけなら **現在のテンプレートを使用** でパラメータだけ直す。
 - **消すとき**は、スタックを選んで **削除**。順番は `fukuda-nwc-poc-lab` → `fukuda-nwc-poc` → `fukuda-nwc-poc-ecr`。バケットに中身が残っていると `DELETE_FAILED` になるので、先に S3 コンソールで **空にする** を押す（ECR はイメージごと消える）。Runtime の ENI が残って SG が消せないときは 8 時間待って **削除** をもう一度（下の「片付け」）。
 
 ## lab（任意）: containerlab + FRR を EC2 で動かす
@@ -481,7 +486,8 @@ aws s3 cp containerlab_0.79.0_linux_arm64.rpm s3://fukuda-nwc-poc-kb-12345678901
 
 ### lab-3. デプロイする
 
-`main.yaml` の出力 `EndpointSecurityGroupId` を渡すと、lab の EC2 から ssm / ssmmessages / ecr のエンドポイントへ 443 を許すルールが足される。
+VPC / サブネット（`main.yaml` の `InstanceSubnetId`）/ エンドポイントの SG / バケットは `main.yaml` の Export から取るので、パラメータは要らない。
+エンドポイントの SG には lab の EC2 から ssm / ssmmessages / ecr へ 443 を許すルールが足される。
 
 ```bash
 aws cloudformation deploy \
@@ -489,12 +495,7 @@ aws cloudformation deploy \
   --stack-name fukuda-nwc-poc-lab \
   --template-file lab.yaml \
   --capabilities CAPABILITY_NAMED_IAM \
-  --tags Project=fukuda-nwc-poc owner=fukuda \
-  --parameter-overrides \
-    VpcId=vpc-0123456789abcdef0 \
-    SubnetId=subnet-0aaaaaaaaaaaaaaaa \
-    EndpointSecurityGroupId=sg-0ddddddddddddddd0 \
-    AssetBucketName=fukuda-nwc-poc-kb-123456789012
+  --tags Project=fukuda-nwc-poc owner=fukuda
 ```
 
 起動時に Docker と containerlab を入れ、ECR からイメージを取り、トポロジを上げる（5 分ほど）。`AutoStartLab=false` にすると上げずに待つ。
@@ -548,7 +549,7 @@ aws s3 cp confluentinc-kafka-connect-s3-12.1.11.zip s3://fukuda-nwc-poc-kb-12345
 
 ### s-2. stream.yaml をデプロイする
 
-`SubnetIds` は AZ の違う 2 つ（`main.yaml` の Runtime のサブネットでよい）。`RouteTableIds` は `main.yaml` に渡したものと同じ。`EndpointSecurityGroupId` / `LabSecurityGroupId` / `LabRoleName` は `main.yaml` / `lab.yaml` の出力。
+VPC / サブネット（`main.yaml` の Runtime サブネットの先頭 2 つ）/ ルートテーブル / エンドポイントの SG / バケットは `main.yaml` の Export から、lab の SG とロールは `lab.yaml` の Export から取る。**`lab.yaml` を先にデプロイしておく。**
 
 ```bash
 aws cloudformation deploy \
@@ -556,15 +557,7 @@ aws cloudformation deploy \
   --stack-name fukuda-nwc-poc-stream \
   --template-file stream.yaml \
   --capabilities CAPABILITY_NAMED_IAM \
-  --tags Project=fukuda-nwc-poc owner=fukuda \
-  --parameter-overrides \
-    VpcId=vpc-0123456789abcdef0 \
-    SubnetIds=subnet-0aaaaaaaaaaaaaaaa,subnet-0bbbbbbbbbbbbbbbb \
-    RouteTableIds=rtb-0cccccccccccccccc \
-    EndpointSecurityGroupId=sg-0ddddddddddddddd0 \
-    LabSecurityGroupId=sg-0eeeeeeeeeeeeeee0 \
-    LabRoleName=fukuda-nwc-poc-lab \
-    AssetBucketName=fukuda-nwc-poc-kb-123456789012
+  --tags Project=fukuda-nwc-poc owner=fukuda
 ```
 
 MSK の作成に 20〜30 分かかる。出来上がると SSM の `/fukuda-nwc-poc/msk-bootstrap`（ブローカー）と `/fukuda-nwc-poc/anomaly-table` が書かれ、lab の Telegraf と Web / エージェントはそこから読む。
@@ -584,18 +577,15 @@ Web の「異常一覧」タブか、チャットで「今の異常は？」と�
 
 ### g-1. graph.yaml をデプロイする
 
+VPC / サブネット（`main.yaml` の Runtime サブネット）/ Runtime と Web の SG は `main.yaml` の Export から取る。
+
 ```bash
 aws cloudformation deploy \
   --region ap-northeast-1 \
   --stack-name fukuda-nwc-poc-graph \
   --template-file graph.yaml \
   --capabilities CAPABILITY_NAMED_IAM \
-  --tags Project=fukuda-nwc-poc owner=fukuda \
-  --parameter-overrides \
-    VpcId=vpc-0123456789abcdef0 \
-    SubnetIds=subnet-0aaaaaaaaaaaaaaaa,subnet-0bbbbbbbbbbbbbbbb \
-    RuntimeSecurityGroupId=sg-0fffffffffffffff0 \
-    InstanceSecurityGroupId=sg-0aaaaaaaaaaaaaaa0
+  --tags Project=fukuda-nwc-poc owner=fukuda
 ```
 
 10〜15 分。出来上がると SSM の `/fukuda-nwc-poc/neptune-endpoint` が書かれる。
@@ -640,7 +630,7 @@ aws cloudformation delete-stack --region ap-northeast-1 --stack-name fukuda-nwc-
 ## 変更するとき
 
 - **画面（`web/app.py`）を直すときは S3 に置いてインスタンスを再起動する**（手順 4）。スタックの再デプロイは要らない。Web の起動のしかた（UserData）を変えたときだけ `main.yaml` を再デプロイする。CloudFormation はインスタンスを停止・起動し、起動のたびにファイルを書き直す。1〜2 分切れる。
-- **エージェントを更新するときは、新しいタグで push して `AgentImageUri` だけ変えて再デプロイする。**`agent/data/` を変えたときも同じ（トポロジはイメージに入っている）。Web の「トポロジ」タブは S3 の `web/data/` を見るので、そちらも置き直す。
+- **エージェントを更新するときは、新しいタグで push して `AgentImageTag` だけ変えて再デプロイする。**`agent/data/` を変えたときも同じ（トポロジはイメージに入っている）。Web の「トポロジ」タブは S3 の `web/data/` を見るので、そちらも置き直す。
 - **ガードレールを変えたら、`GuardrailVersion` の `Description` の `r1` を `r2` に上げる。**版は作ったときの中身で固定されるので、上げないと Runtime は古い版のまま判定する。
 - 手順書を変えたら、手順 4 をやり直す。スタックの再デプロイは要らない。
 - `ImageId` は再デプロイのたびに最新の AL2023 を引く。新しい AMI が出ていると**インスタンスが作り直され、インスタンス ID が変わる**（Web は状態を持たないので中身は失われない）。`StartSessionCommand` の出力を見直す。
@@ -650,6 +640,7 @@ aws cloudformation delete-stack --region ap-northeast-1 --stack-name fukuda-nwc-
 ## 片付け
 
 **先にナレッジベースのバケットを空にする。**中身が残っているとバケットが消せず、スタック削除が `DELETE_FAILED` になる。
+**順番はこのとおりに。**後のスタックが前のスタックの Export を参照しているので、参照されている間は消せない（`Export ... is in use` で `DELETE_FAILED`）。
 
 ```bash
 aws cloudformation delete-stack --region ap-northeast-1 --stack-name fukuda-nwc-poc-graph   # フェーズ 2 を作っていれば先に

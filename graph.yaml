@@ -9,8 +9,6 @@ Metadata:
     ParameterGroups:
       - Label: { default: Naming }
         Parameters: [NamePrefix, Owner]
-      - Label: { default: Network (same VPC as main.yaml) }
-        Parameters: [VpcId, SubnetIds, RuntimeSecurityGroupId, InstanceSecurityGroupId]
       - Label: { default: Neptune }
         Parameters: [InstanceClass, EngineVersion, DeletionProtection]
 
@@ -25,17 +23,6 @@ Parameters:
     Default: fukuda
     AllowedPattern: "^[A-Za-z0-9._-]{1,64}$"
     Description: Value of the owner tag
-  VpcId:
-    Type: AWS::EC2::VPC::Id
-  SubnetIds:
-    Type: List<AWS::EC2::Subnet::Id>
-    Description: At least two private subnets in two AZs (Neptune subnet group). The runtime subnets of main.yaml are fine.
-  RuntimeSecurityGroupId:
-    Type: AWS::EC2::SecurityGroup::Id
-    Description: Output RuntimeSecurityGroupId of main.yaml (the AgentCore runtime reaches Neptune from here)
-  InstanceSecurityGroupId:
-    Type: AWS::EC2::SecurityGroup::Id
-    Description: Output InstanceSecurityGroupId of main.yaml (the chat web EC2 reaches Neptune from here)
   InstanceClass:
     Type: String
     Default: db.t4g.medium
@@ -62,7 +49,7 @@ Resources:
     Properties:
       DBSubnetGroupName: !Sub ${NamePrefix}-graph
       DBSubnetGroupDescription: !Sub ${NamePrefix} Neptune subnets
-      SubnetIds: !Ref SubnetIds
+      SubnetIds: !Split [",", { "Fn::ImportValue": !Sub "${NamePrefix}-runtime-subnet-ids" }]
       Tags:
         - { Key: Project, Value: !Ref NamePrefix }
         - { Key: owner, Value: !Ref Owner }
@@ -72,10 +59,10 @@ Resources:
     Properties:
       GroupName: !Sub ${NamePrefix}-neptune
       GroupDescription: !Sub ${NamePrefix} Neptune - 8182 from the runtime and the web
-      VpcId: !Ref VpcId
+      VpcId: { "Fn::ImportValue": !Sub "${NamePrefix}-vpc-id" }
       SecurityGroupIngress:
-        - { IpProtocol: tcp, FromPort: 8182, ToPort: 8182, SourceSecurityGroupId: !Ref RuntimeSecurityGroupId, Description: AgentCore runtime }
-        - { IpProtocol: tcp, FromPort: 8182, ToPort: 8182, SourceSecurityGroupId: !Ref InstanceSecurityGroupId, Description: chat web }
+        - { IpProtocol: tcp, FromPort: 8182, ToPort: 8182, SourceSecurityGroupId: { "Fn::ImportValue": !Sub "${NamePrefix}-runtime-sg-id" }, Description: AgentCore runtime }
+        - { IpProtocol: tcp, FromPort: 8182, ToPort: 8182, SourceSecurityGroupId: { "Fn::ImportValue": !Sub "${NamePrefix}-instance-sg-id" }, Description: chat web }
       SecurityGroupEgress:
         - { IpProtocol: "-1", CidrIp: 127.0.0.1/32, Description: none }
       Tags:

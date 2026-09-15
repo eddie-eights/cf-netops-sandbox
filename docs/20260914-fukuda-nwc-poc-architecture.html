@@ -185,7 +185,7 @@
 <ol>
   <li><code>ecr.yaml</code> をデプロイして ECR リポジトリを作る</li>
   <li>arm64 のエージェントイメージ（トポロジのツールと静的データ入り）をビルドして push する</li>
-  <li><code>main.yaml</code> をデプロイする。<code>KbAdminPrincipalArn</code> にデプロイする人の IAM ロールの ARN を渡す</li>
+  <li><code>main.yaml</code> をデプロイする。VPC / サブネット / ルートテーブルと <code>KbAdminPrincipalArn</code>（デプロイする人の IAM ロールの ARN）、push したタグ <code>AgentImageTag</code> を渡す。ネットワークの値を手で入れるのはこのスタックだけで、VPC ID・サブネット・SG・バケット名は Export され、<code>lab.yaml</code> / <code>stream.yaml</code> / <code>graph.yaml</code> は <code>Fn::ImportValue</code> で受け取る</li>
   <li>Gradio の画面と wheel（arm64 / cp313）を S3 の <code>web/</code> に置いて EC2 を再起動し、<code>kb-docs/</code> の md を S3 に置いて取り込みジョブを流す</li>
   <li>Runtime のロググループに保持期間とタグを付け、利用者に <code>ssm:StartSession</code> の権限を渡す</li>
   <li>PC でポートフォワーディングを始め、ブラウザで <code>http://localhost:8080/</code> を開く</li>

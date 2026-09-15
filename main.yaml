@@ -14,7 +14,7 @@ Metadata:
       - Label: { default: Network }
         Parameters: [VpcId, RuntimeSubnetIds, InstanceSubnetId, RouteTableIds, ClientCidr]
       - Label: { default: Agent }
-        Parameters: [AgentImageUri, RuntimeName, ModelId]
+        Parameters: [AgentImageTag, AgentImageUri, RuntimeName, ModelId]
       - Label: { default: Knowledge base and guardrail }
         Parameters: [KbAdminPrincipalArn, GuardrailProfileId, NumberOfResults, RerankModelId, NumberOfRerankedResults]
       - Label: { default: Chat web (EC2) }
@@ -45,16 +45,21 @@ Parameters:
     Description: Private subnet for the chat web EC2 instance. The ssm / ssmmessages / bedrock-agentcore endpoints are placed here (1 AZ).
   RouteTableIds:
     Type: CommaDelimitedList
-    Default: ""
-    Description: Route tables of RuntimeSubnetIds and InstanceSubnetId, each listed once. Required only when CreateS3GatewayEndpoint is true.
+    Description: Route tables of RuntimeSubnetIds and InstanceSubnetId, each listed once. Used when CreateS3GatewayEndpoint is true.
   ClientCidr:
     Type: String
     Default: ""
     AllowedPattern: "^$|^([0-9]{1,3}\\.){3}[0-9]{1,3}/[0-9]{1,2}$"
     Description: Optional. Corporate CIDR whose PCs call the ssm / ssmmessages endpoints of this stack over DX or VPN. Leave empty if PCs reach AWS APIs another way.
+  AgentImageTag:
+    Type: String
+    Default: v1
+    AllowedPattern: "^[A-Za-z0-9._-]{1,128}$"
+    Description: Tag pushed to the agent repository of ecr.yaml (README step 2). The repository URI is imported from ecr.yaml.
   AgentImageUri:
     Type: String
-    Description: "ECR image URI with tag, built for linux/arm64 (e.g. 123456789012.dkr.ecr.ap-northeast-1.amazonaws.com/fukuda-nwc-poc-agent:v1)"
+    Default: ""
+    Description: "Optional. Leave empty to use <ecr.yaml repository>:<AgentImageTag>. Set only to run an image from another repository, with tag, built for linux/arm64 (e.g. 123456789012.dkr.ecr.ap-northeast-1.amazonaws.com/fukuda-nwc-poc-agent:v1)"
   RuntimeName:
     Type: String
     Default: fukuda_nwc_poc_agent
@@ -136,14 +141,10 @@ Conditions:
   CreateAgentCoreEndpointCond: !Equals [!Ref CreateAgentCoreEndpoint, "true"]
   CreateS3GatewayEndpointCond: !Equals [!Ref CreateS3GatewayEndpoint, "true"]
   RerankCond: !Not [!Equals [!Ref RerankModelId, ""]]
+  AgentImageUriCond: !Not [!Equals [!Ref AgentImageUri, ""]]
   AllowClientCond: !And
     - !Condition CreateSsmEndpointsCond
     - !Not [!Equals [!Ref ClientCidr, ""]]
-  CreateAnyInterfaceEndpointCond: !Or
-    - !Condition CreateRuntimeEndpointsCond
-    - !Condition CreateKbEndpointCond
-    - !Condition CreateSsmEndpointsCond
-    - !Condition CreateAgentCoreEndpointCond
 
 Resources:
   # ---------------------------------------------------------------- security groups
@@ -185,7 +186,7 @@ Resources:
 
   EndpointSecurityGroup:
     Type: AWS::EC2::SecurityGroup
-    Condition: CreateAnyInterfaceEndpointCond
+    # 条件を付けない。lab.yaml / stream.yaml が Fn::ImportValue で受け取り、443 の受信ルールを足すため（Export は常に要る）
     Properties:
       GroupName: !Sub ${NamePrefix}-endpoints
       GroupDescription: Interface endpoints created by this stack - HTTPS from the chat web and the runtime
@@ -738,7 +739,10 @@ Resources:
       RoleArn: !GetAtt RuntimeRole.Arn
       AgentRuntimeArtifact:
         ContainerConfiguration:
-          ContainerUri: !Ref AgentImageUri
+          ContainerUri: !If
+            - AgentImageUriCond
+            - !Ref AgentImageUri
+            - !Join [":", [{ "Fn::ImportValue": !Sub "${NamePrefix}-agent-repository-uri" }, !Ref AgentImageTag]]
       NetworkConfiguration:
         NetworkMode: VPC
         NetworkModeConfig:
@@ -948,21 +952,41 @@ Outputs:
   RuntimeLogGroupName:
     Description: Created by AgentCore, not by this stack. Set retention and the Project tag by hand (README step 4).
     Value: !Sub /aws/bedrock-agentcore/runtimes/${AgentRuntime.AgentRuntimeId}-DEFAULT
+  VpcId:
+    Description: Imported by lab.yaml / stream.yaml / graph.yaml
+    Value: !Ref VpcId
+    Export: { Name: !Sub "${NamePrefix}-vpc-id" }
+  RuntimeSubnetIds:
+    Description: Imported by stream.yaml (MSK brokers, first two) and graph.yaml (Neptune subnet group)
+    Value: !Join [",", !Ref RuntimeSubnetIds]
+    Export: { Name: !Sub "${NamePrefix}-runtime-subnet-ids" }
+  InstanceSubnetId:
+    Description: Imported by lab.yaml (the lab EC2 sits next to the chat web)
+    Value: !Ref InstanceSubnetId
+    Export: { Name: !Sub "${NamePrefix}-instance-subnet-id" }
+  RouteTableIds:
+    Description: Imported by stream.yaml (DynamoDB gateway endpoint)
+    Value: !Join [",", !Ref RouteTableIds]
+    Export: { Name: !Sub "${NamePrefix}-route-table-ids" }
   InstanceSecurityGroupId:
     Description: Allow 443 from this SG on existing ssm / ssmmessages / bedrock-agentcore endpoints
     Value: !Ref InstanceSecurityGroup
+    Export: { Name: !Sub "${NamePrefix}-instance-sg-id" }
   RuntimeSecurityGroupId:
     Description: Allow 443 from this SG on existing ecr / logs / bedrock-runtime / bedrock-agent-runtime endpoints
     Value: !Ref RuntimeSecurityGroup
+    Export: { Name: !Sub "${NamePrefix}-runtime-sg-id" }
   KbBucketName:
+    Description: Imported by lab.yaml (lab/) and stream.yaml (stream/)
     Value: !Ref KbBucket
+    Export: { Name: !Sub "${NamePrefix}-kb-bucket-name" }
   UploadWebCommand:
     Description: Run in this repository after "pip download" into wheels/ (README step 4). Also copies the agent modules the web UI shares (topology / anomalies / graph). The instance pulls web/ on every boot.
     Value: !Sub aws s3 cp web/app.py s3://${KbBucket}/web/app.py && aws s3 cp web/requirements.txt s3://${KbBucket}/web/requirements.txt && for f in topology anomalies graph; do aws s3 cp agent/$f.py s3://${KbBucket}/web/$f.py; done && aws s3 cp agent/data/ s3://${KbBucket}/web/data/ --recursive && aws s3 sync wheels/ s3://${KbBucket}/web/wheels/
   EndpointSecurityGroupId:
-    Condition: CreateAnyInterfaceEndpointCond
-    Description: Pass to lab.yaml (EndpointSecurityGroupId) so the lab EC2 can reach the ecr / ssm endpoints created here
+    Description: Imported by lab.yaml / stream.yaml, which add 443 ingress rules so the lab EC2 and MSK Connect can reach the ecr / ssm endpoints created here
     Value: !Ref EndpointSecurityGroup
+    Export: { Name: !Sub "${NamePrefix}-endpoint-sg-id" }
   UploadDocsCommand:
     Description: Run in this repository to upload the sample markdown files
     Value: !Sub aws s3 cp kb-docs/ s3://${KbBucket}/docs/ --recursive --exclude "*" --include "*.md"
