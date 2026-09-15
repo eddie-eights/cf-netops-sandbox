@@ -1,8 +1,8 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >-
   fukuda-nwc-poc - optional CodeBuild project that builds the arm64 images in AWS (native arm64, no QEMU, no corporate
-  proxy or certificate in the way) and pushes them to the repositories of ecr.yaml. Replaces README step 2 and lab-1
-  when the PC cannot build. Costs nothing while idle; each build is billed per minute (README).
+  proxy or certificate in the way) from a zip you upload to the source bucket of this stack, and pushes them to the
+  repositories of ecr.yaml. Replaces README step 2 and lab-1 when the PC cannot build. Costs nothing while idle.
 
 Parameters:
   NamePrefix:
@@ -15,16 +15,11 @@ Parameters:
     Default: fukuda
     AllowedPattern: "^[A-Za-z0-9._-]{1,64}$"
     Description: Value of the owner tag.
-  RepositoryUrl:
+  SourceObjectKey:
     Type: String
-    Default: https://github.com/eddie-eights/cf-netops-sandbox.git
-    AllowedPattern: "^https://[A-Za-z0-9._/-]+\\.git$"
-    Description: Public git repository that holds agent/ and lab/snmpd/. Cloned anonymously (no GitHub connection needed).
-  GitRef:
-    Type: String
-    Default: main
-    AllowedPattern: "^[A-Za-z0-9._/-]{1,128}$"
-    Description: Branch or tag to build. Override per build from the console (Environment variables override) if needed.
+    Default: src.zip
+    AllowedPattern: "^[A-Za-z0-9._/-]{1,200}\\.zip$"
+    Description: Object key of the zip in the source bucket that this stack creates. The zip holds agent/ and lab/snmpd/ (README step 2-b).
   LogRetentionDays:
     Type: Number
     Default: 30
@@ -41,8 +36,29 @@ Resources:
         - { Key: Project, Value: !Ref NamePrefix }
         - { Key: owner, Value: !Ref Owner }
 
+  # ---------------------------------------------------------------- source bucket
+  # ここに agent/ と lab/snmpd/ を zip で置く（コンソールのアップロードでよい）。7 日で消えるので放置しても溜まらない
+  SourceBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub ${NamePrefix}-build-${AWS::AccountId}
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 }
+      LifecycleConfiguration:
+        Rules:
+          - { Id: expire, Status: Enabled, ExpirationInDays: 7, AbortIncompleteMultipartUpload: { DaysAfterInitiation: 1 } }
+      Tags:
+        - { Key: Project, Value: !Ref NamePrefix }
+        - { Key: owner, Value: !Ref Owner }
+
   # ---------------------------------------------------------------- role
-  # 押せるのは ecr.yaml のリポジトリ（<NamePrefix>-*）だけ。ソースは公開リポジトリを git clone するので GitHub の認証は要らない
+  # 読めるのは上のバケット、押せるのは ecr.yaml のリポジトリ（<NamePrefix>-*）だけ
   BuildRole:
     Type: AWS::IAM::Role
     Properties:
@@ -65,6 +81,10 @@ Resources:
                 Effect: Allow
                 Action: [logs:CreateLogStream, logs:PutLogEvents]
                 Resource: !Sub "${LogGroup.Arn}:*"
+              - Sid: Source
+                Effect: Allow
+                Action: [s3:GetObject, s3:GetObjectVersion]
+                Resource: !Sub "${SourceBucket.Arn}/*"
               - Sid: EcrLogin
                 Effect: Allow
                 Action: ecr:GetAuthorizationToken
@@ -109,14 +129,13 @@ Resources:
           # コンソールの「ビルドの開始」→「環境変数の上書き」で TARGET / IMAGE_TAG を変える
           - { Name: TARGET, Value: agent }        # agent | lab
           - { Name: IMAGE_TAG, Value: v1 }        # agent と lab-snmpd のタグ（同じタグは push できない。更新のたびに変える）
-          - { Name: REPO_URL, Value: !Ref RepositoryUrl }
-          - { Name: GIT_REF, Value: !Ref GitRef }
           - { Name: NAME_PREFIX, Value: !Ref NamePrefix }
           - { Name: FRR_TAG, Value: "10.2.1" }
           - { Name: MULTITOOL_TAG, Value: v0.10.0 }
           - { Name: DOCKER_BUILDKIT, Value: "1" }
       Source:
-        Type: NO_SOURCE
+        Type: S3
+        Location: !Sub ${SourceBucket}/${SourceObjectKey}
         BuildSpec: |
           version: 0.2
           phases:
@@ -124,15 +143,15 @@ Resources:
               commands:
                 - REG="$(aws sts get-caller-identity --query Account --output text).dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
                 - aws ecr get-login-password | docker login --username AWS --password-stdin "$REG"
-                - git clone --depth 1 --branch "$GIT_REF" "$REPO_URL" src
-                - uname -m
+                # zip の中に repo 名のフォルダが 1 段あってもよいように、agent/Dockerfile の場所から根を決める
+                - SRC="$(dirname "$(dirname "$(find . -path '*agent/Dockerfile' | head -1)")")"; echo "source root: $SRC"; uname -m
             build:
               commands:
                 - |
                   set -eu
                   case "$TARGET" in
                     agent)
-                      docker build -t "$REG/$NAME_PREFIX-agent:$IMAGE_TAG" src/agent
+                      docker build -t "$REG/$NAME_PREFIX-agent:$IMAGE_TAG" "$SRC/agent"
                       docker push "$REG/$NAME_PREFIX-agent:$IMAGE_TAG"
                       ;;
                     lab)
@@ -142,7 +161,7 @@ Resources:
                       docker pull "wbitt/network-multitool:$MULTITOOL_TAG"
                       docker tag "wbitt/network-multitool:$MULTITOOL_TAG" "$REG/$NAME_PREFIX-lab-multitool:$MULTITOOL_TAG"
                       docker push "$REG/$NAME_PREFIX-lab-multitool:$MULTITOOL_TAG"
-                      docker build -t "$REG/$NAME_PREFIX-lab-snmpd:$IMAGE_TAG" src/lab/snmpd
+                      docker build -t "$REG/$NAME_PREFIX-lab-snmpd:$IMAGE_TAG" "$SRC/lab/snmpd"
                       docker push "$REG/$NAME_PREFIX-lab-snmpd:$IMAGE_TAG"
                       ;;
                     *) echo "TARGET must be agent or lab (got: $TARGET)"; exit 1 ;;
@@ -155,6 +174,9 @@ Resources:
         - { Key: owner, Value: !Ref Owner }
 
 Outputs:
+  SourceBucketName:
+    Value: !Ref SourceBucket
+    Description: Upload src.zip (agent/ and lab/snmpd/) here before starting a build.
   ProjectName:
     Value: !Ref Project
     Description: CodeBuild project. Start it from the console (Start build) or with the commands in the README.
