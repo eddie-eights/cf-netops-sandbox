@@ -334,6 +334,36 @@ aws cloudformation deploy \
     AgentImageTag=v2
 ```
 
+上の `vpc-0123…` などは例で、**自分のアカウントに既にある VPC の ID に置き換える**（このテンプレートは VPC を作らない。「前提」の AWS 側のとおり、DNS 設定が有効な VPC が先に要る）。
+何を入れるかと調べ方:
+
+| パラメータ | 入れるもの | 調べ方 |
+|---|---|---|
+| `VpcId` | 置き先の VPC の ID（`vpc-` で始まる） | コンソール VPC → お使いの VPC。CLI は下の 1 本目 |
+| `RuntimeSubnetIds` | その VPC の**プライベート**サブネットを **2 つ以上**、カンマ区切り。AZ ID が `apne1-az1` / `apne1-az2` / `apne1-az4` のもの（AgentCore の制約。AZ 名 `ap-northeast-1a` と AZ ID の対応はアカウントごとに違う） | コンソール VPC → サブネット（列「アベイラビリティーゾーン ID」）。CLI は下の 2 本目 |
+| `InstanceSubnetId` | チャット画面の EC2 を置くプライベートサブネット 1 つ。`RuntimeSubnetIds` のどれかと同じでよい | 同上 |
+| `RouteTableIds` | 上のサブネットが使っているルートテーブルの ID を、重複なくカンマ区切り（S3 のゲートウェイエンドポイントを付ける先） | コンソール VPC → サブネット → 各サブネットの「ルートテーブル」タブ。CLI は下の 3 本目 |
+| `KbAdminPrincipalArn` | デプロイする自分の IAM ロール（かユーザー）の ARN | 「前提」の AWS 側の `get-caller-identity` → `get-role` |
+| `AgentImageTag` | 手順 2 で push したタグ（`v1` など） | ECR → `fukuda-nwc-poc-agent` |
+
+```bash
+aws ec2 describe-vpcs --region ap-northeast-1 --query 'Vpcs[].[VpcId,CidrBlock,Tags[?Key==`Name`].Value|[0]]' --output table
+```
+
+```bash
+aws ec2 describe-subnets --region ap-northeast-1 --filters Name=vpc-id,Values=vpc-0123456789abcdef0 \
+  --query 'Subnets[].[SubnetId,AvailabilityZoneId,CidrBlock,MapPublicIpOnLaunch,Tags[?Key==`Name`].Value|[0]]' --output table
+```
+
+```bash
+aws ec2 describe-route-tables --region ap-northeast-1 --filters Name=vpc-id,Values=vpc-0123456789abcdef0 \
+  --query 'RouteTables[].[RouteTableId,Associations[].SubnetId|join(`,`,@),Routes[?GatewayId!=`local`].GatewayId|[0]]' --output table
+```
+
+サブネットが「プライベート」かは、そのルートテーブルに `igw-` へのルートが**無い**ことで見る（`MapPublicIpOnLaunch` が `False` でも判断できる）。
+サブネットがルートテーブルに明示的に関連付いていないときは、VPC のメインルートテーブル（`describe-route-tables` で `Associations[].Main` が `true` のもの）の ID を入れる。
+VPC が無いアカウントなら、先に VPC ウィザードで「VPC など」→ パブリック 0 / プライベート 2 / NAT なし で作る（無料。AZ は上の 3 つのどれかにする）。
+
 **VPC / サブネット / ルートテーブルを手で入れるのはここだけ。**イメージの URI は `ecr.yaml` の Export（`fukuda-nwc-poc-agent-repository-uri`）から取り、`AgentImageTag` のタグを付ける。
 `main.yaml` は VPC ID・サブネット・SG・バケット名を Export し、`lab.yaml` / `stream.yaml` / `graph.yaml` は `Fn::ImportValue` で受け取るので、以降のスタックにネットワークの値は入れない。
 **Export を参照されているスタックは消せず、Export の値も変えられない。**消す順番は `graph` → `stream` → `lab` → `main` → `ecr`（「片付け」）。
