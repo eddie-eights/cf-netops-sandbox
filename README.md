@@ -44,6 +44,15 @@ lab（任意、lab.yaml、別スタック）: 同じ VPC の EC2 1 台で contai
   Neptune（graph.yaml）─ Gremlin（boto3 neptunedata、IAM 認証）─▶ エージェントの topology.py と Web の「トポロジ」タブ（図・表・リンクの追加削除）
 ```
 
+**どのファイルがどこで動くか。**`app.py` という名前のファイルが 2 つあり、動く場所が違う。置き場所を取り違えると動かない。
+
+| ファイル | 動く場所 | 何をするか | 環境変数を入れるもの |
+|---|---|---|---|
+| `web/app.py` | **EC2**（`fukuda-nwc-poc-web.service`、127.0.0.1:8080） | Gradio の画面（チャット・トポロジ・異常一覧）。チャットは boto3 の `invoke_agent_runtime` で Runtime に投げるだけで、モデルもナレッジベースも直接は呼ばない | `main.yaml` の UserData が `/etc/fukuda-nwc-poc-web.env` に書く（`RUNTIME_ARN` / `AWS_REGION` など） |
+| `agent/app.py` | **AgentCore Runtime のコンテナ**（手順 2 で ECR に push したイメージ） | `BedrockAgentCoreApp`。`POST /invocations` を受けて Retrieve → Converse → ツールを回す。画面は無い | `main.yaml` の `AgentRuntime` の `EnvironmentVariables`（`MODEL_ID` / `KNOWLEDGE_BASE_ID` など） |
+
+**`agent/app.py` を EC2 に置かない**（S3 の `web/app.py` に上書きしない）。置くと `KeyError: 'MODEL_ID'` で落ちるか、立ってもブラウザが `404 Not Found` になり、EC2 のロールに `bedrock:Retrieve` / `bedrock:InvokeModel` が無いのでその先にも進めない。無いのは意図した形で、それらは Runtime のロール（`RuntimeRole`）が持つ。EC2 のロールに足して直さない。2026-09-15 以降の `main.yaml` は起動時にこれを検出し、`is not web/app.py` と cloud-init のログに出して止まる。
+
 | ファイル | 中身 |
 |---|---|
 | `ecr.yaml` | エージェントイメージの ECR リポジトリ。先にデプロイする。リポジトリ URI を Export し、`main.yaml` が取る |
@@ -628,6 +637,21 @@ aws ssm describe-instance-information --region ap-northeast-1 \
   --query 'InstanceInformationList[].[InstanceId,PingStatus,AgentVersion]' --output table
 ```
 
+画面を開く前に、Runtime だけを CLI から呼んで確かめられる（任意。管理者の PC で、`bedrock-agentcore:InvokeAgentRuntime` の権限が要る）。画面が悪いのか Runtime が悪いのかを切り分けるときに使う。1 行目で手順 3 の出力 `AgentRuntimeArn` を `$RUNTIME_ARN` に入れる（`echo` で `arn:aws:bedrock-agentcore:` で始まる値が出ること）。`--runtime-session-id` は 33 文字以上と決まっているので `uuidgen`（36 文字）で作る。`--payload` は CLI v2 では base64 を渡すのが既定なので、生の JSON を渡すために `--cli-binary-format raw-in-base64-out` を付ける。
+
+```bash
+RUNTIME_ARN=$(aws cloudformation describe-stacks --region ap-northeast-1 --stack-name fukuda-nwc-poc \
+  --query "Stacks[0].Outputs[?OutputKey=='AgentRuntimeArn'].OutputValue" --output text); echo "$RUNTIME_ARN"
+aws bedrock-agentcore invoke-agent-runtime --region ap-northeast-1 \
+  --agent-runtime-arn "$RUNTIME_ARN" --qualifier DEFAULT \
+  --runtime-session-id "$(uuidgen | tr 'A-Z' 'a-z')" \
+  --content-type application/json --accept application/json \
+  --cli-binary-format raw-in-base64-out \
+  --payload '{"prompt":"%BGP-5-ADJCHANGE が出た。最初に何を見る？"}' /dev/stdout
+```
+
+回答の JSON が出て、本文に `参照: bgp-neighbor-down.md` が含まれれば Runtime とナレッジベースは動いている（画面と同じ経路）。`AccessDeniedException` は打った人の権限、`ResourceNotFoundException` は ARN、それ以外の失敗は Runtime のログ（手順 5 の `$LOG_GROUP`）を見る。
+
 利用者の PC でポートフォワーディングを始める。1 行目で手順 3 の出力 `WebInstanceId` を `$INSTANCE_ID` に入れる（手順 4 と同じ行。`echo` で `i-0` で始まる ID が出ること）。**開いている間はこのターミナルを閉じない。**
 
 ```bash
@@ -868,6 +892,10 @@ aws s3 rm s3://fukuda-nwc-poc-kb-$ACCOUNT_ID/stream/ --recursive
 | ブラウザが「接続できない」 | Web が落ちている。管理者がシェルで入り `sudo systemctl status fukuda-nwc-poc-web` と `sudo journalctl -u fukuda-nwc-poc-web -n 100`。起動時の失敗は `/var/log/cloud-init-output.log`（Web が 20 秒で立たなければ journald もここに写る）。環境変数は `/etc/fukuda-nwc-poc-web.env`（並びは `.env.example`）。`python3.13` のインストールや `aws s3 sync` が `AccessDenied` で止まっていたら S3 ゲートウェイのポリシー（前提の「`Create*Endpoints` パラメータ」。2026-09-15 より前の `main.yaml` はバケットを許していない。`git pull` して手順 3 を打ち直し、再起動） |
 | ブラウザが「接続できない」が、journald に `web/ is not in s3://` | 手順 4 の Web の部品を置いていない。置いてインスタンスを再起動する |
 | journald に `ModuleNotFoundError: No module named 'topology'`（`anomalies` / `graph` も同じ） | 手順 4 の `agent/` の 3 モジュールを `web/` に置いていない。`for f in …` の行を打ってから再起動する |
+| journald に `KeyError: 'MODEL_ID'`（`KNOWLEDGE_BASE_ID` も同じ）、または cloud-init のログに `is not web/app.py` | S3 の `web/app.py` が `agent/app.py` になっている（「どのファイルがどこで動くか」）。手順 4 の `aws s3 cp web/app.py …` を打ち直して再起動する。EC2 の環境変数に `MODEL_ID` を足すのは直し方が違う |
+| ブラウザで `{"detail":"Not Found"}` / 404 | 同じ原因。EC2 で動いているのが `BedrockAgentCoreApp`（`/invocations` しか無い） |
+| journald の `AccessDenied` が `bedrock:Retrieve` / `bedrock:InvokeModel` で、主体が `fukuda-nwc-poc-web` のロール | 同じ原因。Web のロールにこの権限は無く、足さない。Retrieve と InvokeModel は Runtime のロール（`main.yaml` の `RuntimeRole`）が持つ |
+| Runtime のログの `InvokeModel` が `AccessDeniedException` で、リソースが `ap-northeast-3` の `foundation-model` | `jp.amazon.nova-2-lite-v1:0` は東京と大阪に振り分ける。`RuntimeRole` の `BedrockInvoke` はリージョンを `*` にしてあるので、出るならスタックの外のポリシー（SCP / Permissions boundary）が大阪を止めている。振り分け先は `aws bedrock get-inference-profile --region ap-northeast-1 --inference-profile-identifier jp.amazon.nova-2-lite-v1:0` で見える |
 | journald に `environment variable RUNTIME_ARN / AWS_REGION is not set` | Web の環境変数が渡っていない。UserData が `/etc/fukuda-nwc-poc-web.env` に書く（並びは `.env.example` と同じ）ので、`sudo cat /etc/fukuda-nwc-poc-web.env` を `.env.example` と見比べ、無ければ `/var/log/cloud-init-output.log` で `cat > /etc/…` より前（`aws s3 sync` や `pip install`）で止まっていないか見る。2026-09-15 以降の `main.yaml` は、起動 20 秒後に Web が動いていなければ journald をこのログに写すので、cloud-init のログ 1 本で分かる |
 | 手順 3 の `cloudformation deploy` が認証エラー（`AccessDenied` / `InvalidClientTokenId` / `not authorized to perform: iam:CreateRole`）で落ちる。読み取りは通る | aws-vault の一時セッション（`get-session-token`）で打っている。手順 0-1 のとおり `aws-vault exec <プロファイル> --no-session` のサブシェルの中で打つ |
 | 手順 2 のビルドで `pip install` が `Retrying (Retry(total=4 …))` を繰り返して落ちる | 行末が `CERTIFICATE_VERIFY_FAILED` なら社内 CA の差し替え（手順 2 の「社内ネットワークで打つとき」）。`agent/Dockerfile` の `--trusted-host` が残っているか見る。`ReadTimeoutError` は QEMU が遅いだけなので打ち直す |

@@ -946,6 +946,12 @@ Resources:
             echo "web/ is not in s3://${KbBucket} yet. Upload it (output UploadWebCommand) and reboot the instance." >&2
             exit 0
           fi
+          # 置き間違いの検出。EC2 で動かすのは web/app.py（Gradio の画面）だけ。agent/app.py（BedrockAgentCoreApp）は Runtime のコンテナの中でしか動かない
+          # （EC2 に置くと MODEL_ID / KNOWLEDGE_BASE_ID の KeyError で落ちるか、画面が無いのでブラウザが 404 になる）
+          if ! grep -q "^import gradio" $APP/src/app.py; then
+            echo "s3://${KbBucket}/web/app.py is not web/app.py (no 'import gradio'). agent/app.py must not be placed here; it runs only inside the AgentCore Runtime container. Upload web/app.py (output UploadWebCommand) and reboot the instance." >&2
+            exit 1
+          fi
           # インターネットに出ないので PyPI は見ない。wheel は arm64 / cp313 で揃えてある。--target で $APP/lib に入れる
           python3.13 -m pip install --quiet --no-index --find-links $APP/src/wheels --target $APP/lib --upgrade \
             -r $APP/src/requirements.txt
