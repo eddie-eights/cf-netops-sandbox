@@ -57,6 +57,7 @@ lab（任意、lab.yaml、別スタック）: 同じ VPC の EC2 1 台で contai
 | `web/` | EC2 で動かす Gradio の画面（`app.py`）と依存（`requirements.txt`）。`agent/` の 3 モジュールと一緒に S3 に置く（出力 `UploadWebCommand`） |
 | `lab/` | lab の材料。`wvs2.clab.yml.in`（containerlab の定義。イメージ名は起動時に埋める）、`frr/`、`snmpd/`（Dockerfile と設定。trap の送信も）、`telegraf.conf.in`（ポーリングと trap 受信 → MSK）、`lab.sh` |
 | `kb-docs/` | ナレッジベースに入れる手順書の例（架空の md 3 つ） |
+| `ops/` | `up.sh`（手順 1〜7 をまとめて打つ）と `down.sh`（片付けをまとめて打つ）。毎日消して作り直す運用向け（「毎日の起動と片付けをスクリプトで打つ」） |
 | `tests/` | 模擬テスト（AWS に触れない。打ち方は「手元で確かめる」）。`test_app.py`（エージェント）、`test_graph.py`（Neptune の読み書きと静的への切り戻し）、`test_stream.py`（detector） |
 
 ## なぜこの形にしたか
@@ -218,6 +219,39 @@ WSL を再起動すると QEMU の登録は消えるので、`docker buildx ls` 
 ## 手順
 
 以下はすべて**人が実行する**。AWS にリソースが作られ、課金が始まる。
+
+### 毎日の起動と片付けをスクリプトで打つ
+
+業務終了後にスタックを全部消し、翌朝また作る運用なら、手順 1〜7 と「片付け」をまとめた 2 本を使う。中身は下の手順のコマンドそのもので、
+**できているものは飛ばす**（ECR に同じタグのイメージがあればビルドしない、`wheels/` があれば取り直さない）ので、途中で落ちても同じコマンドを打ち直せばよい。
+手順 0 の環境変数は要らない（スクリプトが認証情報から取る）。**aws-vault の人は 0-1 の `--no-session` のサブシェルの中で打つ**（一時セッションで入っていると、その旨を出して止まる）。
+
+```bash
+ops/up.sh
+```
+
+| 順 | 何をする | 対応する手順 |
+|---|---|---|
+| 0 | 認証を確かめ、アカウント ID と管理者 ARN を取る（IAM ユーザーはその ARN、ロールなら `get-role` で本体の ARN） | 0 |
+| 1 | `ecr.yaml` をデプロイ | 1 |
+| 2 | ECR にタグ `v1` が**無いときだけ** arm64 でビルドして push（docker が無ければ 2-b を案内して止まる） | 2 |
+| 3 | `main.yaml` をデプロイ（初回 10〜20 分） | 3 |
+| 4 | wheel を取り（`wheels/` が空のときだけ）、Web の部品と手順書を S3 に置き、取り込みが `COMPLETE` になるまで待つ。EC2 の初回の UserData が終わるのを待ってから再起動し、Web のサービスが `active` になるまで待つ | 4 |
+| 5 | Runtime のロググループに保持 7 日とタグ。まだ無ければ先に同じ名前で作る（AgentCore が既存のロググループをそのまま使うかは 2026-09-15 時点で未確認。使わず別名で作った場合は手順 5 を手で打つ） | 5 |
+| 7 | 利用者に配る `StartSessionCommand` を表示し、ポートフォワーディングを開いたまま止まる（`Ctrl+C` で閉じる） | 7 |
+
+手順 6（利用者への権限）は人に渡す作業なので入れていない。環境変数で変えられるもの: `IMAGE_TAG`（既定 `v1`。`agent/` を変えたら `IMAGE_TAG=v2 ops/up.sh`）、
+`ADMIN_ARN`（自動で取れない認証の形のとき）、`VPC_CIDR` / `CLIENT_CIDR`（手順 3 の同名パラメータ）、`LOCAL_PORT`（PC 側のポート。既定 8080）、`NO_PORTFORWARD=1`（手順 5 で止める）。
+
+```bash
+ops/down.sh
+```
+
+「片付け」と同じ順（graph / stream → lab → 本体 → ecr → build → Runtime のロググループ）で消し、**それぞれ消え終わるまで待ってから次へ進む**。
+バケットは先に空にする。作っていないスタックは飛ばす。最後に `Project=fukuda-nwc-poc` のタグが付いたものが残っていないかを出す（何も出なければ全部消えている）。
+`KEEP_ECR=1 ops/down.sh` で ECR（イメージ）だけ残せる。残すと翌朝の `ops/up.sh` がビルドを飛ばせる（保管料は月数円。Runtime はイメージが無いと作れないので、翌朝ビルドし直す時間が惜しいならこちら）。
+
+どちらも bash スクリプトなので、Windows は WSL のシェルから打つ。以下は、スクリプトの中身を 1 つずつ手で打つときの説明でもある。
 
 コマンドの中の値は 3 種類ある。**書き方で見分けられるようにしてある。**
 
@@ -859,6 +893,8 @@ aws s3 rm s3://fukuda-nwc-poc-kb-$ACCOUNT_ID/stream/ --recursive
 
 ## 片付け
 
+まとめて打つなら `ops/down.sh`（「毎日の起動と片付けをスクリプトで打つ」）。以下はその中身。
+
 **先にナレッジベースのバケットを空にする。**中身が残っているとバケットが消せず、スタック削除が `DELETE_FAILED` になる。
 **順番はこのとおりに。**後のスタックが前のスタックの Export を参照しているので、参照されている間は消せない（`Export ... is in use` で `DELETE_FAILED`）。
 
@@ -986,6 +1022,7 @@ uv run python tests/test_app.py && uv run python tests/test_graph.py && uv run p
 ```
 
 健全なら lint は何も出さず、テストはそれぞれ最後の行が `通過 41 / 失敗 0`、`通過 18 / 失敗 0`、`通過 21 / 失敗 0` になる。
+`ops/up.sh` と `ops/down.sh` は AWS に触らないと動かせないので、構文だけ `bash -n ops/up.sh ops/down.sh` で見る（何も出なければよい）。
 `pyproject.toml` と `uv.lock` はこの確認のためだけのもので、AWS に置く依存は `agent/requirements.txt` と `web/requirements.txt`。`.venv/` は gitignore してある。
 
 ## 確認したこと・確認できていないこと
