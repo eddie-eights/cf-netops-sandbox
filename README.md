@@ -224,8 +224,10 @@ WSL を再起動すると QEMU の登録は消えるので、`docker buildx ls` 
 | 書き方 | 意味 | 例 |
 |---|---|---|
 | そのままの文字 | **実際の値。置き換えない** | `fukuda-nwc-poc`、`owner=fukuda`、`ap-northeast-1`、`v1`、スタック名、バケット名の前半 |
-| `$ACCOUNT_ID` `$ADMIN_ARN` `$LOG_GROUP` のように `$` で始まる | **あなたの環境の値が入った環境変数。**手順 0 で入れる。入れておけば、後のコマンドは README からコピーしてそのまま打てる（シェルが `$ACCOUNT_ID` を 12 桁の数字に置き換えて実行する） | `$ACCOUNT_ID` → `123456789012` のような 12 桁 |
-| `<日本語>` の山括弧 | 手で書き換える場所（少ない） | `<ロール名>` `<プロファイル>` |
+| `$ACCOUNT_ID` `$ADMIN_ARN` `$INSTANCE_ID` のように `$` で始まる | **あなたの環境の値が入った環境変数。**`$ACCOUNT_ID` と `$ADMIN_ARN` は手順 0 で入れる。それ以外（`$REPO` `$INSTANCE_ID` `$KB_ID` `$DS_ID` `$JOB_ID` `$LOG_GROUP` `$LAB_INSTANCE_ID`）は**スタックの出力から取る値**で、使う枠の 1 行目に「取るコマンド + `echo`」を置いてある。枠ごと上から順にコピーして打てば、値を書き換える場所は無い（シェルが `$ACCOUNT_ID` を 12 桁の数字に置き換えて実行する） | `$ACCOUNT_ID` → `123456789012` のような 12 桁。`$INSTANCE_ID` → `i-0` で始まるインスタンス ID |
+| `<日本語>` の山括弧 | 手で書き換える場所（手順 0-1 と 0-3、手順 6 の JSON だけ） | `<ロール名>` `<プロファイル>` `<アカウント ID>` |
+
+**コマンドの枠の中に、ID・ARN・バケット名の実物は 1 つも書いていない**（環境ごとに違うので書けない）。`i-0…` や `arn:aws:…` の形が本文に出てきたら、それは「こういう形の値が出る」という説明で、打つものではない。
 
 ### 0. 自分の環境の値を環境変数に入れる
 
@@ -318,7 +320,7 @@ echo "ACCOUNT_ID=$ACCOUNT_ID"; echo "ADMIN_ARN=$ADMIN_ARN"
 ```
 
 2 行とも `=` の右に値が出ていれば手順 1 へ。どちらかが空なら、その番号に戻る。
-（`$LOG_GROUP` は手順 5 でスタックの出力から取るので、ここでは入れない。）
+（`$INSTANCE_ID` `$KB_ID` `$LOG_GROUP` などスタックの出力から取る値は、スタックができる手順 3 より前には存在しないので、ここでは入れない。使う枠の 1 行目で毎回取る。）
 
 #### 0-5. 毎回打ちたくないとき（任意）
 
@@ -331,7 +333,7 @@ export ADMIN_ARN=$ADMIN_ARN
 EOF2
 ```
 
-次回からは、0-1（aws-vault のサブシェル）の後にこれを打つだけでよい。
+次回からは、0-1（aws-vault のサブシェル）の後にこれを打つだけでよい。スタックの出力から取る値（`$INSTANCE_ID` など）はファイルに入れなくてよい（各枠の 1 行目で取り直す）。
 
 ```bash
 source ~/.fukuda-nwc-poc.env; echo "ACCOUNT_ID=$ACCOUNT_ID"; echo "ADMIN_ARN=$ADMIN_ARN"
@@ -340,6 +342,7 @@ source ~/.fukuda-nwc-poc.env; echo "ACCOUNT_ID=$ACCOUNT_ID"; echo "ADMIN_ARN=$AD
 #### コンソールで進めるとき
 
 環境変数は要らない。0-2 の 12 桁をバケット名（`fukuda-nwc-poc-kb-<アカウント ID>`）に、0-3 の `echo` の値をパラメータ `KbAdminPrincipalArn` に貼る。
+手順 3 より後の `$INSTANCE_ID` などは、スタックの **出力** タブの値を貼る（どの出力がどの変数かは手順 3 の表）。
 
 ### 1. ECR リポジトリを作る
 
@@ -351,20 +354,28 @@ aws cloudformation deploy \
   --tags Project=fukuda-nwc-poc owner=fukuda
 ```
 
+できたら、push 先のリポジトリ URI を出力から見ておく（手順 2 の 1 行目でもう一度取る）。
+
 ```bash
 aws cloudformation describe-stacks --region ap-northeast-1 --stack-name fukuda-nwc-poc-ecr \
-  --query 'Stacks[0].Outputs[?OutputKey==`RepositoryUri`].OutputValue' --output text
+  --query "Stacks[0].Outputs[?OutputKey=='RepositoryUri'].OutputValue" --output text
 ```
+
+`123456789012.dkr.ecr.ap-northeast-1.amazonaws.com/fukuda-nwc-poc-agent` の形（先頭の 12 桁は `$ACCOUNT_ID` と同じ）で出ればよい。
 
 ### 2. イメージをビルドして push する
 
 インターネットに出られる端末で行う。**必ず arm64 でビルドする。**タグは上書きできない設定なので、更新のたびに変える。
 
 ```bash
-REPO="$ACCOUNT_ID.dkr.ecr.ap-northeast-1.amazonaws.com/fukuda-nwc-poc-agent"   # 手順 1 の出力 RepositoryUri と同じ値になる
+REPO=$(aws cloudformation describe-stacks --region ap-northeast-1 --stack-name fukuda-nwc-poc-ecr \
+  --query "Stacks[0].Outputs[?OutputKey=='RepositoryUri'].OutputValue" --output text); echo "$REPO"
 aws ecr get-login-password --region ap-northeast-1 | docker login --username AWS --password-stdin "${REPO%%/*}"
 docker buildx build --platform linux/arm64 -t "$REPO:v1" --push agent/
 ```
+
+1 行目で手順 1 の出力 `RepositoryUri` を `$REPO` に入れる（`echo` で手順 1 と同じ値が出ること。空なら手順 1 のスタックが無いか、手順 0-1 の認証が切れている）。2 行目の `${REPO%%/*}` は `/` より前（レジストリのホスト名）だけを取る書き方で、書き換えない。
+`v1` はイメージのタグで、手順 3 の `AgentImageTag` にそのまま入れる。
 
 トポロジのツール（`agent/topology.py` と `agent/data/`）はイメージに入るので、`agent/data/` を変えたら新しいタグで push し直す。
 
@@ -435,12 +446,27 @@ VPC / サブネット / ルートテーブルは `main.yaml` が作る（`10.0.0
 
 DX / VPN 経由でこのスタックの ssm エンドポイントを使うなら `ClientCidr=<社内 PC の CIDR>`（例 `192.0.2.0/24`。ネットワーク担当に聞く）を足す。AWS の API に直接出られるなら付けない。
 OpenSearch Serverless のコレクションと Runtime の作成で、全体で 10〜20 分ほどかかる。
-**ナレッジベース対応の前のイメージ（`v1`）では動かない。**手順 2 で新しいタグ（例 `v2`）を push してから `AgentImageTag` に指定する。
+`AgentImageTag` は手順 2（か 2-b）で push したタグそのもの（初回は `v1`）。`agent/` を直して push し直したときは、新しいタグ（`v2` など。タグは上書きできない設定なので同じ名前は使えない）を push してから、ここを新しいタグにして同じコマンドを打ち直す。
+
+できたら出力を一覧で見る。
 
 ```bash
 aws cloudformation describe-stacks --region ap-northeast-1 --stack-name fukuda-nwc-poc \
   --query 'Stacks[0].Outputs' --output table
 ```
+
+以降の手順で使う出力はこれ。**README の各枠は、この出力を 1 行目で取って環境変数に入れてから使う**ので、手で写す必要は無い。コンソールで進めるときは **出力** タブの同じ名前の値を貼る。
+
+| 出力 | 何の値 | 使う手順（環境変数） |
+|---|---|---|
+| `WebInstanceId` | Web を動かす EC2 のインスタンス ID（`i-0` で始まる） | 4 の再起動、7 のポートフォワーディング（`$INSTANCE_ID`） |
+| `KbBucketName` | S3 バケット名。`fukuda-nwc-poc-kb-` + アカウント ID | 4、lab-2、s-1、片付け。README では `fukuda-nwc-poc-kb-$ACCOUNT_ID` と書いてあり、同じ値になる |
+| `KnowledgeBaseId` / `DataSourceId` | ナレッジベースとデータソースの ID（英数字 10 桁） | 4 の取り込み（`$KB_ID` / `$DS_ID`） |
+| `RuntimeLogGroupName` | Runtime のロググループ名 | 5、片付け（`$LOG_GROUP`） |
+| `StartSessionCommand` | 7 のコマンドにインスタンス ID を埋めた完成形 | 7。利用者に配るときはこちらをコピーして渡す（利用者の PC には環境変数が無い） |
+| `UploadWebCommand` / `UploadDocsCommand` / `StartIngestionCommand` | 4 のコマンドにバケット名と ID を埋めた完成形 | 4。README の枠と同じ内容なので、どちらを打ってもよい |
+| `ChatUrl` | `http://localhost:8080/` | 7 |
+| `EndpointSecurityGroupId` ほか（`VpcId` `RuntimeSubnetIds` など） | ネットワークの ID | 手では使わない（`lab.yaml` などが Export で受け取る） |
 
 ### 4. 手順書と Web の部品を S3 に置く
 
@@ -456,30 +482,48 @@ uv run --python 3.13 --with pip python -m pip download --only-binary=:all: \
 
 uv には `pip download` に当たるものが無いので、使い捨ての環境に pip を入れて打つ（`--with pip`）。uv を使わない端末なら先頭を `python3 -m pip download` に替える（python3 と pip が要る）。
 
+置くのは 5 種類。`web/app.py`、その依存の一覧、**`agent/` の 3 モジュール（`topology.py` `anomalies.py` `graph.py`。Web の「トポロジ」「異常一覧」タブが import する。置き忘れると Web が `ModuleNotFoundError` で立たない）**、静的トポロジの `agent/data/`、上で取った `wheels/`。
+
 ```bash
 aws s3 cp web/app.py s3://fukuda-nwc-poc-kb-$ACCOUNT_ID/web/app.py
 aws s3 cp web/requirements.txt s3://fukuda-nwc-poc-kb-$ACCOUNT_ID/web/requirements.txt
+for f in topology anomalies graph; do aws s3 cp agent/$f.py s3://fukuda-nwc-poc-kb-$ACCOUNT_ID/web/$f.py; done
 aws s3 cp agent/data/ s3://fukuda-nwc-poc-kb-$ACCOUNT_ID/web/data/ --recursive
 aws s3 sync wheels/ s3://fukuda-nwc-poc-kb-$ACCOUNT_ID/web/wheels/
-aws ec2 reboot-instances --region ap-northeast-1 --instance-ids i-0123456789abcdef0
 ```
 
-コマンドは出力 `UploadWebCommand` にもある（再起動は別）。`web/app.py` を直したときも同じ手順（置いて再起動）。`wheels/` は gitignore してある。
+置けたらインスタンスを再起動する（起動のたびに `web/` を取り直す）。1 行目で手順 3 の出力 `WebInstanceId` を `$INSTANCE_ID` に入れる。`echo` で `i-0` で始まる ID が出ること。
+
+```bash
+INSTANCE_ID=$(aws cloudformation describe-stacks --region ap-northeast-1 --stack-name fukuda-nwc-poc \
+  --query "Stacks[0].Outputs[?OutputKey=='WebInstanceId'].OutputValue" --output text); echo "$INSTANCE_ID"
+aws ec2 reboot-instances --region ap-northeast-1 --instance-ids "$INSTANCE_ID"
+```
+
+上の 5 行は出力 `UploadWebCommand`（バケット名を埋めて 1 行にしたもの）と同じ。`web/app.py` を直したときも同じ手順（置いて再起動）。`wheels/` は gitignore してある。
 
 **手順書。**このリポジトリの `kb-docs/` を S3 に置いて、取り込みジョブを流す。**ナレッジベースは S3 を自動で見に行かない。**md を足したり直したりしたら、置き直して取り込みをやり直す。
 S3 と Bedrock の API を呼ぶので、インターネットか AWS の API に届く端末で行う。コマンドは出力 `UploadDocsCommand` と `StartIngestionCommand` にもある。
 
+最初の 3 行で手順 3 の出力 `KnowledgeBaseId` / `DataSourceId` を `$KB_ID` / `$DS_ID` に入れる（`echo` で英数字 10 桁が 2 つ出ること）。最後の行は取り込みジョブを始めて、そのジョブ ID を `$JOB_ID` に入れる。
+
 ```bash
+KB_ID=$(aws cloudformation describe-stacks --region ap-northeast-1 --stack-name fukuda-nwc-poc \
+  --query "Stacks[0].Outputs[?OutputKey=='KnowledgeBaseId'].OutputValue" --output text)
+DS_ID=$(aws cloudformation describe-stacks --region ap-northeast-1 --stack-name fukuda-nwc-poc \
+  --query "Stacks[0].Outputs[?OutputKey=='DataSourceId'].OutputValue" --output text)
+echo "KB_ID=$KB_ID DS_ID=$DS_ID"
 aws s3 cp kb-docs/ s3://fukuda-nwc-poc-kb-$ACCOUNT_ID/docs/ --recursive --exclude "*" --include "*.md"
-aws bedrock-agent start-ingestion-job --region ap-northeast-1 \
-  --knowledge-base-id KB12345678 --data-source-id DS12345678
+JOB_ID=$(aws bedrock-agent start-ingestion-job --region ap-northeast-1 \
+  --knowledge-base-id "$KB_ID" --data-source-id "$DS_ID" \
+  --query ingestionJob.ingestionJobId --output text); echo "$JOB_ID"
 ```
 
-返ってきた `ingestionJobId` で状態を見る。`COMPLETE` になり、`statistics` の `numberOfDocumentsFailed` が 0 なら取り込めている。
+同じターミナルで、ジョブの状態を見る。`COMPLETE` になり、`statistics` の `numberOfDocumentsFailed` が 0 なら取り込めている（md 3 つで 1〜2 分）。
 
 ```bash
 aws bedrock-agent get-ingestion-job --region ap-northeast-1 \
-  --knowledge-base-id KB12345678 --data-source-id DS12345678 --ingestion-job-id JOB1234567 \
+  --knowledge-base-id "$KB_ID" --data-source-id "$DS_ID" --ingestion-job-id "$JOB_ID" \
   --query 'ingestionJob.[status,statistics,failureReasons]'
 ```
 
@@ -488,7 +532,7 @@ aws bedrock-agent get-ingestion-job --region ap-northeast-1 \
 ### 5. Runtime のロググループに保持期間とタグを付ける
 
 Runtime のロググループは AgentCore が作るので、スタックの管理外になる。既定は無期限保持。
-名前は出力 `RuntimeLogGroupName`（`/aws/bedrock-agentcore/runtimes/fukuda_nwc_poc_agent-<英数字 10 桁>-DEFAULT` の形。下の 1 行目が出力から取る）。**まだ無ければ、手順 7 で 1 回チャットした後に行う**（`ResourceNotFoundException` が出たらまだ無い）。
+名前は出力 `RuntimeLogGroupName`（`/aws/bedrock-agentcore/runtimes/fukuda_nwc_poc_agent-<英数字 10 桁>-DEFAULT` の形）。下の 1 行目がそれを `$LOG_GROUP` に入れる（`echo` でこの形が出ること）。**まだ無ければ、手順 7 で 1 回チャットした後に行う**（`ResourceNotFoundException` が出たらまだ無い）。
 
 ```bash
 LOG_GROUP=$(aws cloudformation describe-stacks --region ap-northeast-1 --stack-name fukuda-nwc-poc \
@@ -501,7 +545,7 @@ aws logs tag-resource --region ap-northeast-1 \
 
 ### 6. 利用者に権限を渡す
 
-利用者の IAM ロール（または Identity Center の許可セット）に次を付ける。`Project` タグの付いたインスタンスへのポートフォワーディングだけを許す。JSON の `<アカウント ID>` は手順 0-2 の 12 桁に書き換える（JSON の中ではシェル変数は使えない）。
+利用者の IAM ロール（または Identity Center の許可セット）に次を付ける。`Project` タグの付いたインスタンスへのポートフォワーディングだけを許す。JSON の `<アカウント ID>` は手順 0-2 の 12 桁（`echo "$ACCOUNT_ID"` で出る値）に書き換える。**この README で手で値を書き換える場所はここだけ**（IAM ポリシーの JSON はシェルを通らないので環境変数が使えない）。
 
 ```json
 {
@@ -547,14 +591,18 @@ aws ssm describe-instance-information --region ap-northeast-1 \
   --query 'InstanceInformationList[].[InstanceId,PingStatus,AgentVersion]' --output table
 ```
 
-利用者の PC でポートフォワーディングを始める（コマンドは出力 `StartSessionCommand` にもある）。**開いている間はこのターミナルを閉じない。**
+利用者の PC でポートフォワーディングを始める。1 行目で手順 3 の出力 `WebInstanceId` を `$INSTANCE_ID` に入れる（手順 4 と同じ行。`echo` で `i-0` で始まる ID が出ること）。**開いている間はこのターミナルを閉じない。**
 
 ```bash
+INSTANCE_ID=$(aws cloudformation describe-stacks --region ap-northeast-1 --stack-name fukuda-nwc-poc \
+  --query "Stacks[0].Outputs[?OutputKey=='WebInstanceId'].OutputValue" --output text); echo "$INSTANCE_ID"
 aws ssm start-session --region ap-northeast-1 \
-  --target i-0123456789abcdef0 \
+  --target "$INSTANCE_ID" \
   --document-name AWS-StartPortForwardingSession \
   --parameters '{"portNumber":["8080"],"localPortNumber":["8080"]}'
 ```
+
+利用者に配るときは、出力 `StartSessionCommand`（インスタンス ID を埋めた 1 行）をそのまま渡す。利用者の PC には `describe-stacks` の権限も環境変数も無いため。
 
 Windows ではクォートの扱いが違うので、パラメータをファイルにして渡すのが確実。`pf.json` に `{"portNumber":["8080"],"localPortNumber":["8080"]}` と書いて `--parameters file://pf.json` とする。
 
@@ -566,32 +614,33 @@ PC の 8080 が使用中なら `localPortNumber` を変え、URL のポートも
 
 ## コンソールからデプロイするとき
 
-CLI が使えない端末では、手順 1・3・lab-3・s-2・g-1 の `aws cloudformation deploy` を AWS コンソールで置き換えられる（5 つとも 51,200 バイト未満なので、S3 に置かずにそのままアップロードできる）。**順番は CLI と同じ ecr → main → lab → stream → graph**（後のスタックが前のスタックの Export を読む。無いと作成の最初で `No export named … found` で止まる）。**S3 への配置（手順 4・lab-2）と ECR への push（手順 2・lab-1）はコンソールでは代わりにならない**（S3 はコンソールのアップロードでも置けるが、wheel 58 個と `lab/` の階層をそのまま置くので CLI の方が確実。push は docker が要る）。
+CLI が使えない端末では、手順 1・3・lab-3・s-2・g-1 の `aws cloudformation deploy` を AWS コンソールで置き換えられる（6 つとも 51,200 バイト未満なので、S3 に置かずにそのままアップロードできる。一番大きい `main.yaml` で約 46 KB）。**順番は CLI と同じ ecr → main → lab → stream → graph**（後のスタックが前のスタックの Export を読む。無いと作成の最初で `No export named … found` で止まる）。**S3 への配置（手順 4・lab-2）と ECR への push（手順 2・lab-1）はコンソールでは代わりにならない**（S3 はコンソールのアップロードでも置けるが、wheel 58 個と `lab/` の階層をそのまま置くので CLI の方が確実。push は docker が要る）。
 
-コンソールは **東京（ap-northeast-1）** に切り替えてから始める。3 つのスタックとも同じ操作で、違うのはテンプレートとパラメータだけ。
+コンソールは **東京（ap-northeast-1）** に切り替えてから始める。どのスタックも同じ操作で、違うのはテンプレートとパラメータだけ。
 
 | 順 | 操作 |
 |---|---|
 | 1 | CloudFormation → **スタックの作成** → **新しいリソースを使用（標準）** |
-| 2 | 「テンプレートの準備」は **テンプレートファイルのアップロード** を選び、`ecr.yaml` / `main.yaml` / `lab.yaml` を選んで **次へ**（コンソールが自分の S3 バケットに置く。43 KB の `main.yaml` もそのまま通る） |
+| 2 | 「テンプレートの準備」は **テンプレートファイルのアップロード** を選び、そのスタックのテンプレート（下の表）を選んで **次へ**（コンソールが自分の S3 バケットに置く。46 KB の `main.yaml` もそのまま通る） |
 | 3 | **スタック名** を入れ（下の表）、パラメータを埋めて **次へ** |
 | 4 | **タグ** に `Project` = `fukuda-nwc-poc` と `owner` = `fukuda` を足す（`ops` の残骸探しと請求の内訳がこのタグで分かれる） |
-| 5 | 一番下の **「AWS CloudFormation によって IAM リソースがカスタム名で作成される場合があることを承認します」** にチェック（`main.yaml` と `lab.yaml`。`ecr.yaml` には出ない）→ **次へ** → 内容を確認して **送信** |
+| 5 | 一番下の **「AWS CloudFormation によって IAM リソースがカスタム名で作成される場合があることを承認します」** にチェック（`ecr.yaml` 以外で出る）→ **次へ** → 内容を確認して **送信** |
 | 6 | **イベント** タブで進み方を見る。`CREATE_COMPLETE` になったら **出力** タブを開く。失敗したら `ROLLBACK_IN_PROGRESS` になる前に、イベントを **失敗したイベントを検出** で絞って最初の `CREATE_FAILED` の「状況の理由」を読む |
 
 | テンプレート | スタック名 | 必ず入れるパラメータ | 出力で控えるもの |
 |---|---|---|---|
 | `ecr.yaml` | `fukuda-nwc-poc-ecr` | なし（既定のまま） | `RepositoryUri`（手順 2 の push 先） |
 | `build.yaml` | `fukuda-nwc-poc-build` | なし（既定のまま）。ecr の後ならいつでも | `SourceBucketName`（zip を置く先）と `ProjectName`（手順 2-b で「ビルドの開始」を押すプロジェクト） |
-| `main.yaml` | `fukuda-nwc-poc` | `KbAdminPrincipalArn` / `AgentImageTag`（手順 2 で push したタグ）。VPC はスタックが作る（社内と重なるなら `VpcCidr`）。社内から DX / VPN で入るなら `ClientCidr` | `KbBucketName` `InstanceId` `KnowledgeBaseId` `DataSourceId` `EndpointSecurityGroupId` と `StartSessionCommand` |
+| `main.yaml` | `fukuda-nwc-poc` | `KbAdminPrincipalArn` / `AgentImageTag`（手順 2 で push したタグ）。VPC はスタックが作る（社内と重なるなら `VpcCidr`）。社内から DX / VPN で入るなら `ClientCidr` | `WebInstanceId` `KbBucketName` `KnowledgeBaseId` `DataSourceId` `RuntimeLogGroupName` と `StartSessionCommand`（対応は手順 3 の表） |
 | `lab.yaml` | `fukuda-nwc-poc-lab` | なし（VPC / サブネット / SG / バケットは `main.yaml` の Export から取る） | `LabInstanceId` と `StartSessionCommand` |
 | `stream.yaml` | `fukuda-nwc-poc-stream` | なし（`main.yaml` と `lab.yaml` の Export から取る。lab を先に作る） | `UploadPluginCommand` / `SinkPrefix`（s-1・s-3 で使う） |
-| `graph.yaml` | `fukuda-nwc-poc-graph` | なし（`main.yaml` の Export から取る） | Neptune のエンドポイント（g-2 で使う） |
+| `graph.yaml` | `fukuda-nwc-poc-graph` | なし（`main.yaml` の Export から取る） | `ClusterEndpoint`（確認用。Web とエージェントは SSM パラメータから読むので、貼る先は無い） |
 
 - ネットワークのパラメータは無い（`main.yaml` が VPC を作り、他のスタックは Export で受け取る）。`KbAdminPrincipalArn` は文字列なので手で貼る。
 - `ImageId` は SSM パラメータ名が既定で入っている。触らない（作成時に最新の AL2023 arm64 AMI に解決される）。
 - `main.yaml` の `Create*Endpoints` は既定の `true` のまま。
 - 出力の `StartSessionCommand` などは CLI の形で出るので、手順 7 と lab-4 はそのまま PC の CLI で打つ。
+- コンソールで進めると環境変数が無いので、手順 4・5・7・lab-4・lab-5 の枠の `$INSTANCE_ID` などは、**出力** タブの値を手で貼る（どの出力かは手順 3 の表と、各枠の 1 行目の `OutputKey`）。
 - **更新するとき**は、スタックを選んで **更新** → **既存テンプレートを置き換える** → 同じ手順。パラメータは前回の値が入った状態で出る。`AgentImageTag` を変えるだけなら **現在のテンプレートを使用** でパラメータだけ直す。
 - **消すとき**は、スタックを選んで **削除**。順番は `fukuda-nwc-poc-graph` → `fukuda-nwc-poc-stream` → `fukuda-nwc-poc-lab` → `fukuda-nwc-poc` → `fukuda-nwc-poc-ecr`（Export を使っているスタックが残っていると `Export … is in use` で消せない）。バケットに中身が残っていると `DELETE_FAILED` になるので、先に S3 コンソールで **空にする** を押す（ECR はイメージごと消える）。Runtime の ENI が残って SG が消せないときは 8 時間待って **削除** をもう一度（下の「片付け」）。
 
@@ -602,7 +651,7 @@ BGP の主副切替と SNMP の見え方を手で確かめるためのもので�
 
 ### lab-1. イメージを ECR に置く
 
-`ecr.yaml` を上の手順 1 のとおり更新すると（`CreateLabRepositories=true` が既定）、`fukuda-nwc-poc-lab-frr` / `-lab-snmpd` / `-lab-multitool` ができる。
+手順 1 の `ecr.yaml` は既定（`CreateLabRepositories=true`）で `fukuda-nwc-poc-lab-frr` / `-lab-snmpd` / `-lab-multitool` も作っているので、ECR 側の準備は要らない。
 インターネットに出られる端末で、**arm64 のイメージ**を取って push する。snmpd だけはビルドする。
 
 ```bash
@@ -645,10 +694,12 @@ aws cloudformation deploy \
 
 ### lab-4. 入って確かめる
 
-管理者用のシェルセッション（手順 6 の `SSM-SessionManagerRunShell`）で入る。コマンドは出力 `StartSessionCommand` にもある。
+管理者用のシェルセッション（手順 6 の `SSM-SessionManagerRunShell`）で入る。1 行目で lab スタックの出力 `LabInstanceId` を `$LAB_INSTANCE_ID` に入れる（Web の EC2 とは別のインスタンス。`echo` で `i-0` で始まる ID が出ること）。出力 `StartSessionCommand` に ID を埋めた完成形もある。
 
 ```bash
-aws ssm start-session --region ap-northeast-1 --target i-0eeeeeeeeeeeeeee0
+LAB_INSTANCE_ID=$(aws cloudformation describe-stacks --region ap-northeast-1 --stack-name fukuda-nwc-poc-lab \
+  --query "Stacks[0].Outputs[?OutputKey=='LabInstanceId'].OutputValue" --output text); echo "$LAB_INSTANCE_ID"
+aws ssm start-session --region ap-northeast-1 --target "$LAB_INSTANCE_ID"
 ```
 
 ```bash
@@ -659,13 +710,22 @@ sudo lab heal-main   # 主回線を戻す
 sudo lab snmp hq-snmp-01
 ```
 
-起動に失敗したら `/var/log/cloud-init-output.log` と `sudo journalctl -u fukuda-nwc-poc-lab`。ECR から取れないときはエンドポイントの SG（`EndpointSecurityGroupId` を渡したか）。
+起動に失敗したら `/var/log/cloud-init-output.log` と `sudo journalctl -u fukuda-nwc-poc-lab`。ECR から取れないときは、エンドポイントの SG に lab の SG からの 443 が足されているか（`lab.yaml` が `main.yaml` の Export から SG を取って足す。手で SG を直していないか）。
 
 ### lab-5. 止める・消す
 
+1 行目は lab-4 と同じ（`$LAB_INSTANCE_ID` を入れる）。止める・起動するは出力 `StopCommand` / `StartCommand` にも完成形がある。
+
 ```bash
-aws ec2 stop-instances --region ap-northeast-1 --instance-ids i-0eeeeeeeeeeeeeee0    # 止める（EBS 16 GB の保管料だけ）
-aws ec2 start-instances --region ap-northeast-1 --instance-ids i-0eeeeeeeeeeeeeee0   # 起動すると lab も上がる
+LAB_INSTANCE_ID=$(aws cloudformation describe-stacks --region ap-northeast-1 --stack-name fukuda-nwc-poc-lab \
+  --query "Stacks[0].Outputs[?OutputKey=='LabInstanceId'].OutputValue" --output text); echo "$LAB_INSTANCE_ID"
+aws ec2 stop-instances --region ap-northeast-1 --instance-ids "$LAB_INSTANCE_ID"    # 止める（EBS 16 GB の保管料だけ）
+aws ec2 start-instances --region ap-northeast-1 --instance-ids "$LAB_INSTANCE_ID"   # 起動すると lab も上がる
+```
+
+スタックごと消すとき（`stream.yaml` を作っているなら、先にそちらを消し終える。lab の Export を使っているため）。
+
+```bash
 aws cloudformation delete-stack --region ap-northeast-1 --stack-name fukuda-nwc-poc-lab
 ```
 
@@ -675,7 +735,7 @@ lab の設定（`lab/frr/` など）を変えたら lab-2 を置き直して再�
 
 lab の SNMP（ポーリングと trap）を MSK に流し、detector Lambda が `link_down` を DynamoDB に書く。Web の「異常一覧」とエージェントの `list_anomalies` がそれを読む。
 トポロジは Neptune に置き、Web から編集できる。**どちらも時間課金なので、使う日に作って当日中に消す**（下の試算）。
-`main.yaml` と `lab.yaml` はそのまま使う（`main.yaml` は `PARAM_PREFIX` を渡すよう変えたので、古いものは一度 deploy し直す）。
+`main.yaml` と `lab.yaml` はそのまま使う（2026-09-15 より前に `main.yaml` をデプロイしていた場合だけ、手順 3 のコマンドで一度 deploy し直す。SSM パラメータの接頭辞を渡すよう変えたため）。
 
 順番: `stream.yaml` → lab EC2 の Telegraf を起動（lab-3 の再デプロイか再起動）→ `graph.yaml` → Web の再起動と投入。
 
@@ -707,7 +767,14 @@ MSK の作成に 20〜30 分かかる。出来上がると SSM の `/fukuda-nwc-
 
 ### s-3. lab の Telegraf を動かす
 
-`lab.yaml` を `TelegrafVersion=1.40.0`（既定）で lab-3 と同じコマンドでデプロイし直す（起動時に rpm を入れ、`fukuda-nwc-poc-telegraf` サービスを作る）。すでに動いている lab は再起動でもよい。
+lab の EC2 は起動のたびに s-1 で置いた rpm を入れて `fukuda-nwc-poc-telegraf` サービスを作るので、**すでに lab が動いていれば再起動するだけでよい**（1 行目は lab-4 と同じ）。lab をまだ作っていなければ lab-3 を打つ（`TelegrafVersion` は既定の `1.40.0` のまま）。
+
+```bash
+LAB_INSTANCE_ID=$(aws cloudformation describe-stacks --region ap-northeast-1 --stack-name fukuda-nwc-poc-lab \
+  --query "Stacks[0].Outputs[?OutputKey=='LabInstanceId'].OutputValue" --output text); echo "$LAB_INSTANCE_ID"
+aws ec2 reboot-instances --region ap-northeast-1 --instance-ids "$LAB_INSTANCE_ID"
+```
+
 Telegraf は起動のたびに `lab telegraf-render` で SSM のブローカーを設定に埋める。`stream.yaml` より先に上げた場合は失敗して 60 秒ごとにやり直すので、そのまま待てばつながる。
 
 ```bash
@@ -745,18 +812,25 @@ aws cloudformation delete-stack --region ap-northeast-1 --stack-name fukuda-nwc-
 aws cloudformation delete-stack --region ap-northeast-1 --stack-name fukuda-nwc-poc-stream
 ```
 
-`stream` は MSK Connect → MSK の順に消えるので 15 分ほど。S3 の `stream/` に置いた生データとプラグインは残る（要らなければ `aws s3 rm --recursive`）。DynamoDB のテーブルはスタックと一緒に消える。
+`stream` は MSK Connect → MSK の順に消えるので 15 分ほど。S3 の `stream/` に置いた生データとプラグインは残る（要らなければ次で消す）。DynamoDB のテーブルはスタックと一緒に消える。
+
+```bash
+aws s3 rm s3://fukuda-nwc-poc-kb-$ACCOUNT_ID/stream/ --recursive
+```
 
 ## うまくいかないとき
 
 | 症状 | 見るところ |
 |---|---|
+| コマンドが `--instance-ids` / `--target` / `--knowledge-base-id` の値が不正だと言う（`InvalidInstanceID.Malformed`、`Invalid target`、`ValidationException`）、または `s3://fukuda-nwc-poc-kb-/` のようにバケット名が欠ける | 環境変数が空。`echo "$ACCOUNT_ID"` などで確かめる。別のターミナルには入っていないので、手順 0 と、その枠の 1 行目（出力から取る行）を打ち直す |
+| `describe-stacks` の行の `echo` が空 | スタック名が違う（まだ作っていない、別リージョン）か、手順 0-1 の認証が切れている。`aws cloudformation list-stacks --region ap-northeast-1 --query 'StackSummaries[?StackStatus!=`DELETE_COMPLETE`].[StackName,StackStatus]' --output table` で見る |
 | `SessionManagerPlugin is not found` | PC に Session Manager plugin が入っていない |
 | `start-session` がタイムアウトする / 名前が解決できない | PC から ssm / ssmmessages に届いていない（前提の「利用者の PC 側」） |
 | `TargetNotConnected` | インスタンスが登録されていない。ssm / ssmmessages エンドポイントとその SG、インスタンスロール、手順 7 の `PingStatus`。起動直後は数分待つ。SSM Agent が 3.3.40.0 より古いと `ec2messages` エンドポイントも要る |
 | `AccessDeniedException`（start-session） | 手順 6 の権限。インスタンスに `Project` タグがあるか |
 | ブラウザが「接続できない」 | Web が落ちている。管理者がシェルで入り `sudo systemctl status fukuda-nwc-poc-web` と `sudo journalctl -u fukuda-nwc-poc-web -n 100`。起動時の失敗は `/var/log/cloud-init-output.log`。`python3.13` のインストールで止まっていたら S3 ゲートウェイ（前提の「`Create*Endpoints` パラメータ」） |
 | ブラウザが「接続できない」が、journald に `web/ is not in s3://` | 手順 4 の Web の部品を置いていない。置いてインスタンスを再起動する |
+| journald に `ModuleNotFoundError: No module named 'topology'`（`anomalies` / `graph` も同じ） | 手順 4 の `agent/` の 3 モジュールを `web/` に置いていない。`for f in …` の行を打ってから再起動する |
 | 手順 3 の `cloudformation deploy` が認証エラー（`AccessDenied` / `InvalidClientTokenId` / `not authorized to perform: iam:CreateRole`）で落ちる。読み取りは通る | aws-vault の一時セッション（`get-session-token`）で打っている。手順 0-1 のとおり `aws-vault exec <プロファイル> --no-session` のサブシェルの中で打つ |
 | 手順 2 のビルドで `pip install` が `Retrying (Retry(total=4 …))` を繰り返して落ちる | 行末が `CERTIFICATE_VERIFY_FAILED` なら社内 CA の差し替え（手順 2 の「社内ネットワークで打つとき」）。`agent/Dockerfile` の `--trusted-host` が残っているか見る。`ReadTimeoutError` は QEMU が遅いだけなので打ち直す |
 | `docker login` / `docker push` / `aws` が `x509: certificate signed by unknown authority` や `SSL validation failed` | WSL 側に社内 CA が無い。Windows の `certmgr.msc` から社内のルート証明書を Base64 でエクスポートし、`/usr/local/share/ca-certificates/corp-root.crt` に置いて `sudo update-ca-certificates` → `sudo systemctl restart docker` |
@@ -779,7 +853,7 @@ aws cloudformation delete-stack --region ap-northeast-1 --stack-name fukuda-nwc-
 - **エージェントを更新するときは、新しいタグで push して `AgentImageTag` だけ変えて再デプロイする。**`agent/data/` を変えたときも同じ（トポロジはイメージに入っている）。Web の「トポロジ」タブは S3 の `web/data/` を見るので、そちらも置き直す。
 - **ガードレールを変えたら、`GuardrailVersion` の `Description` の `r1` を `r2` に上げる。**版は作ったときの中身で固定されるので、上げないと Runtime は古い版のまま判定する。
 - 手順書を変えたら、手順 4 をやり直す。スタックの再デプロイは要らない。
-- `ImageId` は再デプロイのたびに最新の AL2023 を引く。新しい AMI が出ていると**インスタンスが作り直され、インスタンス ID が変わる**（Web は状態を持たないので中身は失われない）。`StartSessionCommand` の出力を見直す。
+- `ImageId` は再デプロイのたびに最新の AL2023 を引く。新しい AMI が出ていると**インスタンスが作り直され、インスタンス ID が変わる**（Web は状態を持たないので中身は失われない）。手順 4・7 の枠は毎回出力から ID を取るのでそのまま打てばよいが、利用者に配った `StartSessionCommand` は配り直す。
 - UserData の本文は `Fn::Sub` を通るので、ドル記号と波かっこの組み合わせを HTML / Python / シェルに書かない（書くなら `${!...}` にする）。
 - UserData の上限は 16 KB。Gradio の画面は S3 に置いているので、UserData には入れない。
 
@@ -788,18 +862,33 @@ aws cloudformation delete-stack --region ap-northeast-1 --stack-name fukuda-nwc-
 **先にナレッジベースのバケットを空にする。**中身が残っているとバケットが消せず、スタック削除が `DELETE_FAILED` になる。
 **順番はこのとおりに。**後のスタックが前のスタックの Export を参照しているので、参照されている間は消せない（`Export ... is in use` で `DELETE_FAILED`）。
 
+手順 0 の `$ACCOUNT_ID` が入ったターミナルで、上から順に打つ。作っていないスタック（フェーズ 2、lab、build）の行は、無いものを消そうとするだけで何も起きずに通る（`wait` もすぐ返る）。`wait` の行は前のスタックが消え終わるまで待つためのもので、**飛ばすと次の `delete-stack` が `Export … is in use` で失敗する**。
+
 ```bash
-# 先に手順 0 を打って $ACCOUNT_ID を入れる。$LOG_GROUP は手順 5 の 1 行目
-aws cloudformation delete-stack --region ap-northeast-1 --stack-name fukuda-nwc-poc-graph   # フェーズ 2 を作っていれば先に
+# 0. Runtime のロググループ名。fukuda-nwc-poc を消すと出力ごと見えなくなるので、先に取っておく
+LOG_GROUP=$(aws cloudformation describe-stacks --region ap-northeast-1 --stack-name fukuda-nwc-poc \
+  --query "Stacks[0].Outputs[?OutputKey=='RuntimeLogGroupName'].OutputValue" --output text); echo "$LOG_GROUP"
+# 1. フェーズ 2（作っていれば）。graph と stream は互いに依存しないので同時に消してよい
+aws cloudformation delete-stack --region ap-northeast-1 --stack-name fukuda-nwc-poc-graph
 aws cloudformation delete-stack --region ap-northeast-1 --stack-name fukuda-nwc-poc-stream
-aws cloudformation delete-stack --region ap-northeast-1 --stack-name fukuda-nwc-poc-lab   # lab を作っていれば先に
+aws cloudformation wait stack-delete-complete --region ap-northeast-1 --stack-name fukuda-nwc-poc-graph
+aws cloudformation wait stack-delete-complete --region ap-northeast-1 --stack-name fukuda-nwc-poc-stream
+# 2. lab（作っていれば）。stream が消え終わってから
+aws cloudformation delete-stack --region ap-northeast-1 --stack-name fukuda-nwc-poc-lab
+aws cloudformation wait stack-delete-complete --region ap-northeast-1 --stack-name fukuda-nwc-poc-lab
+# 3. 本体。先にバケットを空にする（中身が残ると DELETE_FAILED）
 aws s3 rm s3://fukuda-nwc-poc-kb-$ACCOUNT_ID --recursive
 aws cloudformation delete-stack --region ap-northeast-1 --stack-name fukuda-nwc-poc
 aws cloudformation wait stack-delete-complete --region ap-northeast-1 --stack-name fukuda-nwc-poc
+# 4. ECR（イメージごと消える）と build（手順 2-b で作っていれば。zip が残ると DELETE_FAILED なので先に空にする）
 aws cloudformation delete-stack --region ap-northeast-1 --stack-name fukuda-nwc-poc-ecr
-aws cloudformation delete-stack --region ap-northeast-1 --stack-name fukuda-nwc-poc-build   # 手順 2-b で作っていれば（順番は問わない）
+aws s3 rm s3://fukuda-nwc-poc-build-$ACCOUNT_ID --recursive
+aws cloudformation delete-stack --region ap-northeast-1 --stack-name fukuda-nwc-poc-build
+# 5. スタックの外にある Runtime のロググループ（手順 5 で作られていれば）
 aws logs delete-log-group --region ap-northeast-1 --log-group-name "$LOG_GROUP"
 ```
+
+`wait` が `Waiter StackDeleteComplete failed` で返ったら、そのスタックが `DELETE_FAILED` になっている。コンソールのイベントで理由を見て（下の ENI か、バケットの中身）、直してから同じ `delete-stack` と `wait` を打ち直す。build を作っていなければ 4 の `s3 rm` は `NoSuchBucket` と出るだけ。
 
 - **Runtime の ENI は削除後も最大 8 時間残る。**その間は Runtime の SG が消せず、スタック削除が `DELETE_FAILED` になることがある。時間をおいて削除し直す。
 - `fukuda-nwc-poc` を消すと VPC・サブネット・エンドポイント・SG も一緒に消える。VPC が `DELETE_FAILED` で残るのは、上の Runtime の ENI か、手で足した ENI / SG が残っているとき。
