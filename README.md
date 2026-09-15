@@ -273,54 +273,17 @@ docker buildx build --platform linux/arm64 -t "$REPO:v1" --push agent/
 
 トポロジのツール（`agent/topology.py` と `agent/data/`）はイメージに入るので、`agent/data/` を変えたら新しいタグで push し直す。
 
-**社内プロキシの中で打つとき。**ビルド中の `pip install` はコンテナの中で走るので、PC のシェルや uv が使っているプロキシの設定は届かない
-（`uv sync` は通るのに `pip install` が `Retrying (Retry(total=4 …))` を繰り返して落ちるのはこれ。ベースイメージの pull は daemon がするので、そこまでは通る）。
-`env | grep -i proxy` で PC に入っている値をそのまま `--build-arg` で渡す（値は例。イメージには残らない）。
-
-```bash
-docker buildx build --platform linux/arm64 -t "$REPO:v1" --push \
-  --build-arg HTTP_PROXY=http://proxy.example.com:8080 \
-  --build-arg HTTPS_PROXY=http://proxy.example.com:8080 \
-  --build-arg NO_PROXY=localhost,127.0.0.1 \
-  agent/
-```
-
-`Retrying` の行の末尾でどれかが分かる。`ProxyError` / `NewConnectionError` はプロキシが届いていない（上の 3 つ）。
-`SSLError: CERTIFICATE_VERIFY_FAILED` はプロキシが証明書を差し替えている（`--build-arg PIP_TRUSTED_HOSTS="pypi.org files.pythonhosted.org"` を足す。検証を外すので社内だけ）。
-社内の PyPI ミラーがあるなら `--build-arg PIP_INDEX_URL=https://nexus.example.com/repository/pypi/simple`（`PIP_TRUSTED_HOSTS` にはミラーのホスト名）。
-`ReadTimeoutError` は QEMU の arm64 エミュレーションで遅いだけなので、そのまま打ち直す（`Dockerfile` の `PIP_DEFAULT_TIMEOUT=100` で既に長めにしてある）。
-lab-1 の `lab/snmpd/` は apk なので同じ `--build-arg` の 3 つを付ければ通る。
-
-**証明書が無くて落ちるとき（プロキシの設定が無くても起きる）。**社内ネットワークが TLS を終端して自前のルート証明書で署名し直していると、
-PC（Windows と WSL）にはその証明書が入っていて通るのに、コンテナの中には無いので `pip install` が
-`Retrying … SSLError(SSLCertVerificationError … CERTIFICATE_VERIFY_FAILED` で落ちる。直し方は、その証明書を `agent/certs/` に置くだけ。
-ビルド中だけ読んでイメージには残らない（`*.crt` / `*.pem` は gitignore 済み）。
-
-1. WSL に証明書が入っているか見る。`uv sync` や `curl https://pypi.org` が通っているなら入っている。
-   ```bash
-   ls /usr/local/share/ca-certificates/      # ここに .crt があればそれ
-   ```
-   無ければ Windows から取り出す。`certmgr.msc` → 信頼されたルート証明機関 → 社内のルート証明書を右クリック → すべてのタスク → エクスポート →
-   「Base64 encoded X.509 (.CER)」で `C:\Users\<自分>\corp-root.cer` に保存し、WSL で次を打つ（WSL の `aws` / `docker login` もこれで通るようになる）。
-   ```bash
-   sudo cp /mnt/c/Users/<自分>/corp-root.cer /usr/local/share/ca-certificates/corp-root.crt
-   sudo update-ca-certificates
-   sudo systemctl restart docker
-   ```
-2. リポジトリの `agent/certs/` と `lab/snmpd/certs/` にコピーして、手順 2 / lab-1 のコマンドをそのまま打つ。
-   ```bash
-   cp /usr/local/share/ca-certificates/corp-root.crt agent/certs/
-   cp /usr/local/share/ca-certificates/corp-root.crt lab/snmpd/certs/
-   docker buildx build --platform linux/arm64 -t "$REPO:v1" --push agent/
-   ```
-   証明書が複数あるなら全部置く（`.crt` と `.pem` を読む。Windows の DER 形式の `.cer` は読めないので Base64 で書き出す）。
-   証明書がどうしても手に入らないときだけ `--build-arg PIP_TRUSTED_HOSTS="pypi.org files.pythonhosted.org"`（検証を外す）。
+**社内ネットワークで打つとき。**社内ネットワークは SSL インスペクションで証明書チェーンを社内 CA に差し替えている。PC（Windows / WSL）には社内 CA が
+入っているので `uv sync` や `docker pull` は通るが、コンテナの中で走る `pip install` は社内 CA を持たないので、何もしないと
+`Retrying (Retry(total=4 …)) … CERTIFICATE_VERIFY_FAILED` で落ちる（プロキシの設定は関係ない。2026-09-15 に確認）。
+`agent/Dockerfile` は PyPI の 3 ホスト（`pypi.org` / `files.pythonhosted.org` / `pypi.python.org`）を `--trusted-host` にしてあるので、上のコマンドをそのまま打てば通る。
+`ReadTimeoutError` は QEMU の arm64 エミュレーションで遅いだけなので、そのまま打ち直す（`PIP_DEFAULT_TIMEOUT=100` で既に長めにしてある）。
 
 ### 2-b. PC でビルドできないとき: AWS の中でビルドする（`build.yaml`）
 
-会社の PC に Docker が入れられない、プロキシや証明書でどうしても通らない、コンソールだけで進めたい、というときは
+会社の PC に Docker が入れられない、コンソールだけで進めたい、というときは
 CodeBuild にビルドさせる。`build.yaml` は S3 バケット 1 つと CodeBuild のプロジェクト 1 つで、**バケットに置いた zip**（`agent/` と `lab/snmpd/`）を
-**arm64 のビルド環境**で `docker build` して push する。ネイティブ arm64 なので QEMU も buildx も要らず、社内のプロキシと証明書も関係ない。
+**arm64 のビルド環境**で `docker build` して push する。ネイティブ arm64 なので QEMU も buildx も要らず、社内ネットワークの証明書も関係ない。
 GitHub には繋がない（zip は手元のファイルから作る）。
 **待機中は 0 円**（zip は 7 日で自動で消える）、ビルド中だけ分課金（`arm1.small` は $0.00425/分。東京。2026-09-15 に Price List API で検証。
 エージェントのビルドは 3〜5 分なので 1 回 2〜3 円。加えて月 100 分の無料枠がある）。
@@ -330,7 +293,7 @@ GitHub には繋がない（zip は手元のファイルから作る）。
 | 順 | 操作 |
 |---|---|
 | 1 | CloudFormation → スタックの作成 → `build.yaml` をアップロード → スタック名 `fukuda-nwc-poc-build` → IAM の承認にチェック → 作成。`ecr.yaml` の後ならいつでもよい |
-| 2 | 手元でこのリポジトリのフォルダを zip にする。Windows ならフォルダを右クリック → 送る → 圧縮 (zip 形式) フォルダー。zip の中に `agent/` と `lab/snmpd/` が入っていればよく、1 段フォルダが挟まっていてもよい（`agent/certs/` の証明書は入れなくてよい。入っていても無害） |
+| 2 | 手元でこのリポジトリのフォルダを zip にする。Windows ならフォルダを右クリック → 送る → 圧縮 (zip 形式) フォルダー。zip の中に `agent/` と `lab/snmpd/` が入っていればよく、1 段フォルダが挟まっていてもよい |
 | 3 | S3 → `fukuda-nwc-poc-build-123456789012`（出力 `SourceBucketName`）→ アップロード → 名前を **`src.zip`** にして置く |
 | 4 | CodeBuild → ビルドプロジェクト → `fukuda-nwc-poc-build` → **ビルドの開始（上書きあり）** → 環境変数の上書きで `TARGET` = `agent`、`IMAGE_TAG` = 手順 3 の `AgentImageTag` と同じ値（初回は `v1`）→ **ビルドの開始** |
 | 5 | ログの末尾が `pushed TARGET=agent IMAGE_TAG=v1 …` になれば ECR に入っている。ECR → `fukuda-nwc-poc-agent` にタグが見える |
@@ -340,7 +303,7 @@ CLI なら次。ビルドの開始は `build.yaml` の出力 `StartAgentBuildCom
 
 ```bash
 aws cloudformation deploy --region ap-northeast-1 --stack-name fukuda-nwc-poc-build --template-file build.yaml --capabilities CAPABILITY_NAMED_IAM --tags Project=fukuda-nwc-poc owner=fukuda
-zip -r src.zip agent lab/snmpd -x 'agent/certs/*.crt' 'agent/certs/*.pem' 'lab/snmpd/certs/*.crt' 'lab/snmpd/certs/*.pem'
+zip -r src.zip agent lab/snmpd -x 'lab/snmpd/certs/*.crt' 'lab/snmpd/certs/*.pem'
 aws s3 cp src.zip s3://fukuda-nwc-poc-build-123456789012/src.zip
 aws codebuild start-build --region ap-northeast-1 --project-name fukuda-nwc-poc-build --environment-variables-override name=TARGET,value=agent name=IMAGE_TAG,value=v1
 ```
@@ -557,6 +520,8 @@ docker tag wbitt/network-multitool:v0.10.0 "$REG/fukuda-nwc-poc-lab-multitool:v0
 docker buildx build --platform linux/arm64 -t "$REG/fukuda-nwc-poc-lab-snmpd:v1" --push lab/snmpd/
 ```
 
+snmpd のビルドは apk なので `--trusted-host` に当たるものが無い。社内ネットワークで `apk add` が証明書で落ちたら、WSL の `/usr/local/share/ca-certificates/corp-root.crt` を `lab/snmpd/certs/` にコピーして打ち直す（ビルド中だけ読む。gitignore 済み）。
+
 ### lab-2. 設定と containerlab の rpm を S3 に置く
 
 ```bash
@@ -697,8 +662,8 @@ aws cloudformation delete-stack --region ap-northeast-1 --stack-name fukuda-nwc-
 | `AccessDeniedException`（start-session） | 手順 6 の権限。インスタンスに `Project` タグがあるか |
 | ブラウザが「接続できない」 | Web が落ちている。管理者がシェルで入り `sudo systemctl status fukuda-nwc-poc-web` と `sudo journalctl -u fukuda-nwc-poc-web -n 100`。起動時の失敗は `/var/log/cloud-init-output.log`。`python3.13` のインストールで止まっていたら S3 ゲートウェイ（前提の「既存の VPC エンドポイントがある場合」） |
 | ブラウザが「接続できない」が、journald に `web/ is not in s3://` | 手順 4 の Web の部品を置いていない。置いてインスタンスを再起動する |
-| 手順 2 のビルドで `pip install` が `Retrying (Retry(total=4 …))` を繰り返して落ちる | コンテナの中にプロキシの設定か社内の証明書が無い。行末が `SSLError` / `CERTIFICATE_VERIFY_FAILED` なら手順 2 の「証明書が無くて落ちるとき」（`agent/certs/` に置く）。`ProxyError` / `NewConnectionError` なら「社内プロキシの中で打つとき」（`--build-arg HTTP_PROXY` …） |
-| `docker login` / `docker push` / `aws` が `x509: certificate signed by unknown authority` や `SSL validation failed` | WSL 側に社内の証明書が無い。手順 2 の「証明書が無くて落ちるとき」の 1（`update-ca-certificates` と docker の再起動） |
+| 手順 2 のビルドで `pip install` が `Retrying (Retry(total=4 …))` を繰り返して落ちる | 行末が `CERTIFICATE_VERIFY_FAILED` なら社内 CA の差し替え（手順 2 の「社内ネットワークで打つとき」）。`agent/Dockerfile` の `--trusted-host` が残っているか見る。`ReadTimeoutError` は QEMU が遅いだけなので打ち直す |
+| `docker login` / `docker push` / `aws` が `x509: certificate signed by unknown authority` や `SSL validation failed` | WSL 側に社内 CA が無い。Windows の `certmgr.msc` から社内のルート証明書を Base64 でエクスポートし、`/usr/local/share/ca-certificates/corp-root.crt` に置いて `sudo update-ca-certificates` → `sudo systemctl restart docker` |
 | `pip install` で `No matching distribution` | wheel が arm64 / cp313 でない。手順 4 の `pip download` の `--platform` と `--abi` を確かめ、`wheels/` を置き直して再起動する |
 | 「エージェントの呼び出しに失敗しました」 | journald の `invoke failed:` の行。`AccessDenied` は Runtime の ARN とインスタンスロール、`Could not connect to the endpoint URL` は bedrock-agentcore エンドポイントと SG。その先は Runtime のログ |
 | 送信して 150 秒で失敗する | Runtime が返らなかった（ツールの往復を含む）。初回のセッション起動が遅い場合は再送する |

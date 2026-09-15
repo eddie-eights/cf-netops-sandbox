@@ -10,8 +10,6 @@ lab/wvs2.clab.yml
 # uv の仮想環境
 .venv/
 
-# 社内の証明書（README の手順 2）
-agent/certs/*.crt
-agent/certs/*.pem
+# 社内の証明書（README の lab-1）
 lab/snmpd/certs/*.crt
 lab/snmpd/certs/*.pem
