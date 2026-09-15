@@ -144,7 +144,7 @@ OpenSearch Serverless のセキュリティポリシー・アクセスポリシ�
 - デプロイする人の権限に、OpenSearch Serverless（`aoss:*`。インデックスを作るのに `aoss:APIAccessAll` が要る）と、ガードレールの作成が含まれる。
   Standard 階層のガードレールを作るには、ガードレールそのものに加えて `arn:aws:bedrock:<リージョン>:<アカウント>:guardrail-profile/apac.guardrail.v1:0` への `bedrock:CreateGuardrail` が要る。管理者権限なら足りる。
 - **パラメータ `KbAdminPrincipalArn` に、デプロイする人の IAM ロール（またはユーザー）の ARN を入れる。**CloudFormation はその認証情報で OpenSearch のインデックスを作るので、データアクセスポリシーに入れておく必要がある。
-  `sts` の `assumed-role` の ARN ではなく、`iam` のロールの ARN にする。調べ方は手順 0 の (b)。
+  `sts` の `assumed-role` の ARN ではなく、`iam` のロールの ARN にする。調べ方は手順 0-3。
 - **ガードレールの判定は、東京以外の APAC のリージョンで行われることがある**（Standard 階層はクロスリージョン推論が必須）。行き先は ap-northeast-1 / ap-northeast-2 / ap-northeast-3 / ap-south-1 / ap-southeast-1 / ap-southeast-2（2026-09-14 に AWS の文書で確認）。データを国内に留める決まりがある場合は使えない。
 - イメージのビルドは、インターネットに出られる端末で行う（Docker と buildx）。
 - **Session Manager の設定（アカウント単位）で KMS 暗号化を必須にしている場合**は、`kms` エンドポイントとインスタンスロールへの `kms:Decrypt` が別に要る。このテンプレートには入れていない。
@@ -224,64 +224,122 @@ WSL を再起動すると QEMU の登録は消えるので、`docker buildx ls` 
 | 書き方 | 意味 | 例 |
 |---|---|---|
 | そのままの文字 | **実際の値。置き換えない** | `fukuda-nwc-poc`、`owner=fukuda`、`ap-northeast-1`、`v1`、スタック名、バケット名の前半 |
-| `$ACCOUNT_ID` `$ADMIN_ARN` `$LOG_GROUP` のように `$` で始まる | **あなたの環境の値。**手順 0 で 1 回シェル変数に入れると、後のコマンドはコピーしてそのまま打てる | `$ACCOUNT_ID` → `123456789012` のような 12 桁 |
-| `<日本語>` の山括弧 | 手で書き換える場所（少ない） | `<ロール名>` |
+| `$ACCOUNT_ID` `$ADMIN_ARN` `$LOG_GROUP` のように `$` で始まる | **あなたの環境の値が入った環境変数。**手順 0 で入れる。入れておけば、後のコマンドは README からコピーしてそのまま打てる（シェルが `$ACCOUNT_ID` を 12 桁の数字に置き換えて実行する） | `$ACCOUNT_ID` → `123456789012` のような 12 桁 |
+| `<日本語>` の山括弧 | 手で書き換える場所（少ない） | `<ロール名>` `<プロファイル>` |
 
-### 0. 自分の環境の値を控える
+### 0. 自分の環境の値を環境変数に入れる
 
-**ターミナルを開くたびに、この 3 つを打ち直す**（シェル変数はそのターミナルの中でしか生きない）。
+**手順 1 以降のコマンドは、この手順で入れた環境変数を前提にしている。**飛ばすと `$ACCOUNT_ID` が空文字になり、
+バケット名が `fukuda-nwc-poc-kb-` のように欠けて `NoSuchBucket`、`KbAdminPrincipalArn` が空で `Parameter ... failed to satisfy constraint` のように落ちる。
 値そのものは公開リポジトリに書けないので、ここで自分の環境から取る。
 
-**(a) アカウント ID。** ECR とバケットの名前に入る。
+**環境変数はターミナルごと。**別のターミナルを開いたり、閉じて開き直したりしたら、0-1 から打ち直す（0-5 にファイルに残す方法がある）。
 
-```bash
-export ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text); echo "$ACCOUNT_ID"
-```
+#### 0-1. 認証を通す（aws-vault を使っているとき）
 
-12 桁の数字が出ればよい。コンソールの右上（アカウント名の横）に出る数字と同じ。空や `Unable to locate credentials` なら `aws configure` / SSO のログインができていない。
-
-**(b) 自分の IAM ロールの ARN。** 手順 3 の `KbAdminPrincipalArn` に入れる。CloudFormation はこの認証情報で OpenSearch Serverless のインデックスを作るので、データアクセスポリシーにこの ARN が要る。
-
-```bash
-aws sts get-caller-identity --query Arn --output text
-```
-
-出た値で分かれる。
-
-| 出た値の形 | 意味 | 次に打つもの |
-|---|---|---|
-| `arn:aws:sts::123456789012:assumed-role/<ロール名>/<セッション名>` | ロールを assume して使っている（Identity Center・スイッチロール） | 下の `get-role` を `<ロール名>` で打つ。Identity Center のロール名は `AWSReservedSSO_AdministratorAccess_0123abcd…` のように長い |
-| `arn:aws:iam::123456789012:user/<ユーザー名>` | IAM ユーザーを直接使っている | この値をそのまま `ADMIN_ARN` に入れる（`get-role` は要らない） |
-
-```bash
-export ADMIN_ARN=$(aws iam get-role --role-name <ロール名> --query Role.Arn --output text); echo "$ADMIN_ARN"
-```
-
-`arn:aws:iam::123456789012:role/…` の形で出ればよい（`sts` ではなく `iam`、`assumed-role` ではなく `role`）。
-Identity Center のロールは `role/aws-reserved/sso.amazonaws.com/ap-northeast-1/AWSReservedSSO_…` のようにパスが付くが、**出た値をパスごとそのまま使う**。
-`NoSuchEntity` なら `<ロール名>` の綴りが違う（`aws iam list-roles --query 'Roles[].RoleName' --output text` で探す）。
-
-**(c) リージョン。** すべて `ap-northeast-1`（東京）。コマンドには `--region ap-northeast-1` を書いてあるので、変数は要らない。
-
-コンソールで進めるときは、(a) をバケット名（`fukuda-nwc-poc-kb-<アカウント ID>`）に、(b) をパラメータ `KbAdminPrincipalArn` に貼る。
-
-**(d) aws-vault を使っているとき。** `aws-vault exec <プロファイル>` は既定で `sts get-session-token` の一時セッションを渡す。
-この一時セッションでは IAM の API が呼べず、名前付きの IAM ロールを作る手順 3 の `cloudformation deploy` が認証エラーで落ちる
-（2026-09-15 に会社 PC で確認）。**`--no-session` を付けて、IAM ユーザーの長期キーをそのまま渡す。**
-
-```bash
-aws-vault exec <プロファイル> --no-session -- aws cloudformation deploy --region ap-northeast-1 --stack-name fukuda-nwc-poc --template-file main.yaml --capabilities CAPABILITY_NAMED_IAM --tags Project=fukuda-nwc-poc owner=fukuda --parameter-overrides Owner=fukuda KbAdminPrincipalArn="$ADMIN_ARN" AgentImageTag=v1
-```
-
-コマンドごとに付けるのが面倒なら、サブシェルを開いて手順 0〜7 をその中で打つ（`exit` で抜けるまで有効）。
+`aws-vault exec <プロファイル>` は既定で `sts get-session-token` の一時セッションを渡す。この一時セッションでは IAM の API が呼べず、
+名前付きの IAM ロールを作る `cloudformation deploy`（手順 1 / 3 / lab / stream / graph）が認証エラーで落ちる（2026-09-15 に会社 PC で確認）。
+**`--no-session` を付けてサブシェルを開き、以降の手順は全部その中で打つ。**`exit` で抜けるまで有効。環境変数もこのサブシェルの中で入れる（外で入れても引き継がれるが、順番を迷わないよう中で入れる）。
 
 ```bash
 aws-vault exec <プロファイル> --no-session
 ```
 
-手順 1 / lab / stream / graph の `deploy` も IAM ロールを作るので同じ。`aws-vault` の一時セッションで動くのは読み取り（`describe-*`）と S3 / ECR の操作だけ。
-`--no-session` のとき手順 0 の (b) は `arn:aws:iam::<アカウント ID>:user/<ユーザー名>` の形で出るので、それをそのまま `ADMIN_ARN` に入れる。
+通ったか確かめる。エラーなく JSON が出ればよい。
 
+```bash
+aws sts get-caller-identity
+```
+
+aws-vault を使っていない（`aws configure` の長期キー、または SSO ログイン）なら、この 0-1 は飛ばして 0-2 へ。
+
+#### 0-2. アカウント ID を `ACCOUNT_ID` に入れる
+
+ECR のレジストリ名（`<アカウント ID>.dkr.ecr.…`）とバケット名（`fukuda-nwc-poc-kb-<アカウント ID>`）に入る。
+
+```bash
+export ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+```
+
+```bash
+echo "$ACCOUNT_ID"
+```
+
+| `echo` の結果 | 意味 |
+|---|---|
+| `123456789012` のような 12 桁の数字 | よい。コンソール右上（アカウント名の横）の数字と同じになる |
+| 空行 | 認証が通っていない。0-1 に戻る（`aws sts get-caller-identity` を単体で打ってエラーを見る） |
+| `Unable to locate credentials` など | 同上 |
+
+#### 0-3. 自分の IAM ロール（かユーザー）の ARN を `ADMIN_ARN` に入れる
+
+手順 3 の `KbAdminPrincipalArn` に入る。CloudFormation はこの認証情報で OpenSearch Serverless のインデックスを作るので、データアクセスポリシーにこの ARN が要る。
+まず、いま何者として認証しているかを見る。
+
+```bash
+aws sts get-caller-identity --query Arn --output text
+```
+
+出た値の形で次が分かれる。
+
+| 出た値の形 | 意味 | やること |
+|---|---|---|
+| `arn:aws:iam::123456789012:user/<ユーザー名>` | IAM ユーザーの長期キー（`aws configure`、または aws-vault の `--no-session`） | **この値をそのまま入れる**（下の A） |
+| `arn:aws:sts::123456789012:assumed-role/<ロール名>/<セッション名>` | ロールを assume して使っている（Identity Center、スイッチロール） | `<ロール名>` を控えて **B** を打つ。Identity Center のロール名は `AWSReservedSSO_AdministratorAccess_0123abcd…` のように長い |
+
+**A. IAM ユーザーのとき。**
+
+```bash
+export ADMIN_ARN=$(aws sts get-caller-identity --query Arn --output text)
+```
+
+**B. ロールのとき。**`<ロール名>` を上で控えた名前に書き換えて打つ。
+
+```bash
+export ADMIN_ARN=$(aws iam get-role --role-name <ロール名> --query Role.Arn --output text)
+```
+
+どちらも、入った値を見る。
+
+```bash
+echo "$ADMIN_ARN"
+```
+
+| `echo` の結果 | 意味 |
+|---|---|
+| `arn:aws:iam::123456789012:user/…` または `arn:aws:iam::123456789012:role/…` | よい。`iam` で、`user` か `role`。Identity Center のロールは `role/aws-reserved/sso.amazonaws.com/ap-northeast-1/AWSReservedSSO_…` のようにパスが付くが、**パスごとそのまま使う** |
+| `arn:aws:sts::…:assumed-role/…` | A を打ってしまっている。B を打ち直す |
+| 空行、または `NoSuchEntity` | `<ロール名>` の綴りが違う。`aws iam list-roles --query 'Roles[].RoleName' --output text` で探して B を打ち直す |
+
+#### 0-4. 2 つとも入っているか、最後にまとめて確かめる
+
+```bash
+echo "ACCOUNT_ID=$ACCOUNT_ID"; echo "ADMIN_ARN=$ADMIN_ARN"
+```
+
+2 行とも `=` の右に値が出ていれば手順 1 へ。どちらかが空なら、その番号に戻る。
+（`$LOG_GROUP` は手順 5 でスタックの出力から取るので、ここでは入れない。）
+
+#### 0-5. 毎回打ちたくないとき（任意）
+
+値をファイルに残し、ターミナルを開くたびに読み込む。**このファイルはアカウント ID を含むので、リポジトリの中に置かない**（ホームに置く）。
+
+```bash
+cat > ~/.fukuda-nwc-poc.env <<EOF2
+export ACCOUNT_ID=$ACCOUNT_ID
+export ADMIN_ARN=$ADMIN_ARN
+EOF2
+```
+
+次回からは、0-1（aws-vault のサブシェル）の後にこれを打つだけでよい。
+
+```bash
+source ~/.fukuda-nwc-poc.env; echo "ACCOUNT_ID=$ACCOUNT_ID"; echo "ADMIN_ARN=$ADMIN_ARN"
+```
+
+#### コンソールで進めるとき
+
+環境変数は要らない。0-2 の 12 桁をバケット名（`fukuda-nwc-poc-kb-<アカウント ID>`）に、0-3 の `echo` の値をパラメータ `KbAdminPrincipalArn` に貼る。
 
 ### 1. ECR リポジトリを作る
 
@@ -367,7 +425,7 @@ aws cloudformation deploy \
     AgentImageTag=v1
 ```
 
-手で決めるのは 2 つだけ。`KbAdminPrincipalArn` は手順 0 の (b) で入れた `$ADMIN_ARN`（コンソールなら `arn:aws:iam::<アカウント ID>:role/…` を貼る）、`AgentImageTag` は手順 2 で push したタグ。
+手で決めるのは 2 つだけ。`KbAdminPrincipalArn` は手順 0-3 で入れた `$ADMIN_ARN`（コンソールなら `arn:aws:iam::<アカウント ID>:role/…` を貼る）、`AgentImageTag` は手順 2 で push したタグ。
 VPC / サブネット / ルートテーブルは `main.yaml` が作る（`10.0.0.0/16`。社内と重なるなら `VpcCidr=10.123.0.0/16` のように足す）。
 
 イメージの URI は `ecr.yaml` の Export（`fukuda-nwc-poc-agent-repository-uri`）から取り、`AgentImageTag` のタグを付ける。
@@ -443,7 +501,7 @@ aws logs tag-resource --region ap-northeast-1 \
 
 ### 6. 利用者に権限を渡す
 
-利用者の IAM ロール（または Identity Center の許可セット）に次を付ける。`Project` タグの付いたインスタンスへのポートフォワーディングだけを許す。JSON の `<アカウント ID>` は手順 0 の (a) の 12 桁に書き換える（JSON の中ではシェル変数は使えない）。
+利用者の IAM ロール（または Identity Center の許可セット）に次を付ける。`Project` タグの付いたインスタンスへのポートフォワーディングだけを許す。JSON の `<アカウント ID>` は手順 0-2 の 12 桁に書き換える（JSON の中ではシェル変数は使えない）。
 
 ```json
 {
@@ -699,7 +757,7 @@ aws cloudformation delete-stack --region ap-northeast-1 --stack-name fukuda-nwc-
 | `AccessDeniedException`（start-session） | 手順 6 の権限。インスタンスに `Project` タグがあるか |
 | ブラウザが「接続できない」 | Web が落ちている。管理者がシェルで入り `sudo systemctl status fukuda-nwc-poc-web` と `sudo journalctl -u fukuda-nwc-poc-web -n 100`。起動時の失敗は `/var/log/cloud-init-output.log`。`python3.13` のインストールで止まっていたら S3 ゲートウェイ（前提の「`Create*Endpoints` パラメータ」） |
 | ブラウザが「接続できない」が、journald に `web/ is not in s3://` | 手順 4 の Web の部品を置いていない。置いてインスタンスを再起動する |
-| 手順 3 の `cloudformation deploy` が認証エラー（`AccessDenied` / `InvalidClientTokenId` / `not authorized to perform: iam:CreateRole`）で落ちる。読み取りは通る | aws-vault の一時セッション（`get-session-token`）で打っている。手順 0 の (d) のとおり `aws-vault exec <プロファイル> --no-session -- …` にする |
+| 手順 3 の `cloudformation deploy` が認証エラー（`AccessDenied` / `InvalidClientTokenId` / `not authorized to perform: iam:CreateRole`）で落ちる。読み取りは通る | aws-vault の一時セッション（`get-session-token`）で打っている。手順 0-1 のとおり `aws-vault exec <プロファイル> --no-session` のサブシェルの中で打つ |
 | 手順 2 のビルドで `pip install` が `Retrying (Retry(total=4 …))` を繰り返して落ちる | 行末が `CERTIFICATE_VERIFY_FAILED` なら社内 CA の差し替え（手順 2 の「社内ネットワークで打つとき」）。`agent/Dockerfile` の `--trusted-host` が残っているか見る。`ReadTimeoutError` は QEMU が遅いだけなので打ち直す |
 | `docker login` / `docker push` / `aws` が `x509: certificate signed by unknown authority` や `SSL validation failed` | WSL 側に社内 CA が無い。Windows の `certmgr.msc` から社内のルート証明書を Base64 でエクスポートし、`/usr/local/share/ca-certificates/corp-root.crt` に置いて `sudo update-ca-certificates` → `sudo systemctl restart docker` |
 | `pip install` で `No matching distribution` | wheel が arm64 / cp313 でない。手順 4 の `pip download` の `--platform` と `--abi` を確かめ、`wheels/` を置き直して再起動する |
@@ -731,7 +789,7 @@ aws cloudformation delete-stack --region ap-northeast-1 --stack-name fukuda-nwc-
 **順番はこのとおりに。**後のスタックが前のスタックの Export を参照しているので、参照されている間は消せない（`Export ... is in use` で `DELETE_FAILED`）。
 
 ```bash
-# 先に手順 0 の (a) を打って $ACCOUNT_ID を入れる。$LOG_GROUP は手順 5 の 1 行目
+# 先に手順 0 を打って $ACCOUNT_ID を入れる。$LOG_GROUP は手順 5 の 1 行目
 aws cloudformation delete-stack --region ap-northeast-1 --stack-name fukuda-nwc-poc-graph   # フェーズ 2 を作っていれば先に
 aws cloudformation delete-stack --region ap-northeast-1 --stack-name fukuda-nwc-poc-stream
 aws cloudformation delete-stack --region ap-northeast-1 --stack-name fukuda-nwc-poc-lab   # lab を作っていれば先に
