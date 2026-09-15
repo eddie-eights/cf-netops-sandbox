@@ -473,7 +473,7 @@ PC の 8080 が使用中なら `localPortNumber` を変え、URL のポートも
 
 ## コンソールからデプロイするとき
 
-CLI が使えない端末では、上の手順 1・3・lab-3 の `aws cloudformation deploy` を AWS コンソールで置き換えられる。**S3 への配置（手順 4・lab-2）と ECR への push（手順 2・lab-1）はコンソールでは代わりにならない**（S3 はコンソールのアップロードでも置けるが、wheel 58 個と `lab/` の階層をそのまま置くので CLI の方が確実。push は docker が要る）。
+CLI が使えない端末では、手順 1・3・lab-3・s-2・g-1 の `aws cloudformation deploy` を AWS コンソールで置き換えられる（5 つとも 51,200 バイト未満なので、S3 に置かずにそのままアップロードできる）。**順番は CLI と同じ ecr → main → lab → stream → graph**（後のスタックが前のスタックの Export を読む。無いと作成の最初で `No export named … found` で止まる）。**S3 への配置（手順 4・lab-2）と ECR への push（手順 2・lab-1）はコンソールでは代わりにならない**（S3 はコンソールのアップロードでも置けるが、wheel 58 個と `lab/` の階層をそのまま置くので CLI の方が確実。push は docker が要る）。
 
 コンソールは **東京（ap-northeast-1）** に切り替えてから始める。3 つのスタックとも同じ操作で、違うのはテンプレートとパラメータだけ。
 
@@ -491,13 +491,15 @@ CLI が使えない端末では、上の手順 1・3・lab-3 の `aws cloudforma
 | `ecr.yaml` | `fukuda-nwc-poc-ecr` | なし（既定のまま） | `RepositoryUri`（手順 2 の push 先） |
 | `main.yaml` | `fukuda-nwc-poc` | `VpcId` / `RuntimeSubnetIds`（2 つ選ぶ）/ `InstanceSubnetId` / `RouteTableIds` / `KbAdminPrincipalArn` / `AgentImageTag`（手順 2 で push したタグ）。社内から DX / VPN で入るなら `ClientCidr` | `KbBucketName` `InstanceId` `KnowledgeBaseId` `DataSourceId` `EndpointSecurityGroupId` と `StartSessionCommand` |
 | `lab.yaml` | `fukuda-nwc-poc-lab` | なし（VPC / サブネット / SG / バケットは `main.yaml` の Export から取る） | `LabInstanceId` と `StartSessionCommand` |
+| `stream.yaml` | `fukuda-nwc-poc-stream` | なし（`main.yaml` と `lab.yaml` の Export から取る。lab を先に作る） | `UploadPluginCommand` / `SinkPrefix`（s-1・s-3 で使う） |
+| `graph.yaml` | `fukuda-nwc-poc-graph` | なし（`main.yaml` の Export から取る） | Neptune のエンドポイント（g-2 で使う） |
 
 - VPC / サブネット / ルートテーブルはドロップダウンで選べる（`VpcId` `SubnetId` 型のパラメータ）。`RouteTableIds` と `KbAdminPrincipalArn` は文字列なので手で貼る。`main.yaml` 以外のスタックにはネットワークのパラメータが無い（Export で受け渡す）。
 - `ImageId` は SSM パラメータ名が既定で入っている。触らない（作成時に最新の AL2023 arm64 AMI に解決される）。
 - `main.yaml` の `Create*Endpoints` は、VPC に同じエンドポイントが既にあるときだけ `false` にする（前提の「既存の VPC エンドポイントがある場合」）。
 - 出力の `StartSessionCommand` などは CLI の形で出るので、手順 7 と lab-4 はそのまま PC の CLI で打つ。
 - **更新するとき**は、スタックを選んで **更新** → **既存テンプレートを置き換える** → 同じ手順。パラメータは前回の値が入った状態で出る。`AgentImageTag` を変えるだけなら **現在のテンプレートを使用** でパラメータだけ直す。
-- **消すとき**は、スタックを選んで **削除**。順番は `fukuda-nwc-poc-lab` → `fukuda-nwc-poc` → `fukuda-nwc-poc-ecr`。バケットに中身が残っていると `DELETE_FAILED` になるので、先に S3 コンソールで **空にする** を押す（ECR はイメージごと消える）。Runtime の ENI が残って SG が消せないときは 8 時間待って **削除** をもう一度（下の「片付け」）。
+- **消すとき**は、スタックを選んで **削除**。順番は `fukuda-nwc-poc-graph` → `fukuda-nwc-poc-stream` → `fukuda-nwc-poc-lab` → `fukuda-nwc-poc` → `fukuda-nwc-poc-ecr`（Export を使っているスタックが残っていると `Export … is in use` で消せない）。バケットに中身が残っていると `DELETE_FAILED` になるので、先に S3 コンソールで **空にする** を押す（ECR はイメージごと消える）。Runtime の ENI が残って SG が消せないときは 8 時間待って **削除** をもう一度（下の「片付け」）。
 
 ## lab（任意）: containerlab + FRR を EC2 で動かす
 
