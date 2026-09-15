@@ -1,5 +1,5 @@
 # 手元の確認（cfn-lint と tests/）のためだけの設定。AWS に置くものは agent/requirements.txt と web/requirements.txt。
-# 使い方: uv sync --group dev → uv run cfn-lint *.yaml / uv run python tests/test_app.py
+# 使い方: uv sync --group dev → uv run cfn-lint *.yaml / uv run python tests/test_app.py。Web を手元で動かすなら uv sync --group web
 [project]
 name = "fukuda-nwc-poc"
 version = "0.0.0"
@@ -10,6 +10,12 @@ requires-python = ">=3.13,<3.14"
 dev = [
   "cfn-lint>=1.0",
   "pyyaml>=6.0",
+]
+# 手元で web/app.py を動かすとき（README「Web を手元で動かす」）。中身は web/requirements.txt と同じ
+web = [
+  "gradio==5.50.0",
+  "boto3>=1.40,<2",
+  "pyyaml>=6.0,<7",
 ]
 
 [tool.uv]

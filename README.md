@@ -55,6 +55,7 @@ lab（任意、lab.yaml、別スタック）: 同じ VPC の EC2 1 台で contai
 | `stream/detector.py` | detector Lambda の本体（`stream.yaml` の ZipFile と同じ。`tests/test_stream.py` が一致を確かめる） |
 | `agent/` | Runtime に載せるコンテナ（Python 3.13、`bedrock-agentcore` SDK、arm64）。`topology.py` がトポロジのツール（Neptune → 静的の順）、`graph.py` が Neptune の読み書き、`anomalies.py` が異常一覧のツール、`data/` が静的トポロジ（`devices.yaml` / `topology.json`、架空の 10 台） |
 | `web/` | EC2 で動かす Gradio の画面（`app.py`）と依存（`requirements.txt`）。`agent/` の 3 モジュールと一緒に S3 に置く（出力 `UploadWebCommand`） |
+| `.env.example` | 環境変数の一覧（Web / エージェント / lab。意味と AWS 上で誰が入れるか）。AWS 上ではスタックが書くので手で用意しない。EC2 で Web が立たないときの見比べ先で、手元で `web/app.py` を動かすときは `.env` に写して使う（「Web を手元で動かす」） |
 | `lab/` | lab の材料。`wvs2.clab.yml.in`（containerlab の定義。イメージ名は起動時に埋める）、`frr/`、`snmpd/`（Dockerfile と設定。trap の送信も）、`telegraf.conf.in`（ポーリングと trap 受信 → MSK）、`lab.sh` |
 | `kb-docs/` | ナレッジベースに入れる手順書の例（架空の md 3 つ） |
 | `ops/` | `up.sh`（手順 1〜7 をまとめて打つ）と `down.sh`（片付けをまとめて打つ）。毎日消して作り直す運用向け（「毎日の起動と片付けをスクリプトで打つ」） |
@@ -864,9 +865,10 @@ aws s3 rm s3://fukuda-nwc-poc-kb-$ACCOUNT_ID/stream/ --recursive
 | `start-session` がタイムアウトする / 名前が解決できない | PC から ssm / ssmmessages に届いていない（前提の「利用者の PC 側」） |
 | `TargetNotConnected` | インスタンスが登録されていない。ssm / ssmmessages エンドポイントとその SG、インスタンスロール、手順 7 の `PingStatus`。起動直後は数分待つ。SSM Agent が 3.3.40.0 より古いと `ec2messages` エンドポイントも要る |
 | `AccessDeniedException`（start-session） | 手順 6 の権限。インスタンスに `Project` タグがあるか |
-| ブラウザが「接続できない」 | Web が落ちている。管理者がシェルで入り `sudo systemctl status fukuda-nwc-poc-web` と `sudo journalctl -u fukuda-nwc-poc-web -n 100`。起動時の失敗は `/var/log/cloud-init-output.log`。`python3.13` のインストールや `aws s3 sync` が `AccessDenied` で止まっていたら S3 ゲートウェイのポリシー（前提の「`Create*Endpoints` パラメータ」。2026-09-15 より前の `main.yaml` はバケットを許していない。`git pull` して手順 3 を打ち直し、再起動） |
+| ブラウザが「接続できない」 | Web が落ちている。管理者がシェルで入り `sudo systemctl status fukuda-nwc-poc-web` と `sudo journalctl -u fukuda-nwc-poc-web -n 100`。起動時の失敗は `/var/log/cloud-init-output.log`（Web が 20 秒で立たなければ journald もここに写る）。環境変数は `/etc/fukuda-nwc-poc-web.env`（並びは `.env.example`）。`python3.13` のインストールや `aws s3 sync` が `AccessDenied` で止まっていたら S3 ゲートウェイのポリシー（前提の「`Create*Endpoints` パラメータ」。2026-09-15 より前の `main.yaml` はバケットを許していない。`git pull` して手順 3 を打ち直し、再起動） |
 | ブラウザが「接続できない」が、journald に `web/ is not in s3://` | 手順 4 の Web の部品を置いていない。置いてインスタンスを再起動する |
 | journald に `ModuleNotFoundError: No module named 'topology'`（`anomalies` / `graph` も同じ） | 手順 4 の `agent/` の 3 モジュールを `web/` に置いていない。`for f in …` の行を打ってから再起動する |
+| journald に `environment variable RUNTIME_ARN / AWS_REGION is not set` | Web の環境変数が渡っていない。UserData が `/etc/fukuda-nwc-poc-web.env` に書く（並びは `.env.example` と同じ）ので、`sudo cat /etc/fukuda-nwc-poc-web.env` を `.env.example` と見比べ、無ければ `/var/log/cloud-init-output.log` で `cat > /etc/…` より前（`aws s3 sync` や `pip install`）で止まっていないか見る。2026-09-15 以降の `main.yaml` は、起動 20 秒後に Web が動いていなければ journald をこのログに写すので、cloud-init のログ 1 本で分かる |
 | 手順 3 の `cloudformation deploy` が認証エラー（`AccessDenied` / `InvalidClientTokenId` / `not authorized to perform: iam:CreateRole`）で落ちる。読み取りは通る | aws-vault の一時セッション（`get-session-token`）で打っている。手順 0-1 のとおり `aws-vault exec <プロファイル> --no-session` のサブシェルの中で打つ |
 | 手順 2 のビルドで `pip install` が `Retrying (Retry(total=4 …))` を繰り返して落ちる | 行末が `CERTIFICATE_VERIFY_FAILED` なら社内 CA の差し替え（手順 2 の「社内ネットワークで打つとき」）。`agent/Dockerfile` の `--trusted-host` が残っているか見る。`ReadTimeoutError` は QEMU が遅いだけなので打ち直す |
 | `docker login` / `docker push` / `aws` が `x509: certificate signed by unknown authority` や `SSL validation failed` | WSL 側に社内 CA が無い。Windows の `certmgr.msc` から社内のルート証明書を Base64 でエクスポートし、`/usr/local/share/ca-certificates/corp-root.crt` に置いて `sudo update-ca-certificates` → `sudo systemctl restart docker` |
@@ -1026,6 +1028,30 @@ uv run python tests/test_app.py && uv run python tests/test_graph.py && uv run p
 健全なら lint は何も出さず、テストはそれぞれ最後の行が `通過 41 / 失敗 0`、`通過 18 / 失敗 0`、`通過 21 / 失敗 0` になる。
 `ops/up.sh` と `ops/down.sh` は AWS に触らないと動かせないので、構文だけ `bash -n ops/up.sh ops/down.sh` で見る（何も出なければよい）。
 `pyproject.toml` と `uv.lock` はこの確認のためだけのもので、AWS に置く依存は `agent/requirements.txt` と `web/requirements.txt`。`.venv/` は gitignore してある。
+
+### Web を手元で動かす
+
+EC2 に置く前に画面だけ見たいとき、または EC2 で立たない原因を切り分けるとき。チャットは AgentCore Runtime を呼ぶので、手順 3 が済んでいて認証（手順 0-1）が通っていることが要る。トポロジのタブは `agent/data/` の静的データで出る（Runtime が無ければチャットだけエラー表示になる）。
+
+環境変数は `.env.example` に全部並べてある（意味と、AWS 上で誰が入れるか）。写して `RUNTIME_ARN` だけ埋める。`.env` は gitignore 済みで、`web/app.py` がリポジトリ直下の `.env` を読む（`ENV_FILE=<パス>` で場所を変えられる。同じ名前は後の行が勝つ）。
+
+```bash
+cp .env.example .env
+```
+
+```bash
+RUNTIME_ARN=$(aws cloudformation describe-stacks --region ap-northeast-1 --stack-name fukuda-nwc-poc --query "Stacks[0].Outputs[?OutputKey=='AgentRuntimeArn'].OutputValue" --output text); echo "$RUNTIME_ARN"; echo "RUNTIME_ARN=$RUNTIME_ARN" >> .env
+```
+
+```bash
+uv sync --group web
+```
+
+```bash
+uv run python web/app.py
+```
+
+ブラウザで http://127.0.0.1:8080 を開く。`RUNTIME_ARN` が空だと `environment variable RUNTIME_ARN is not set` と出て止まる（EC2 でも同じ文言が journald に出る。「うまくいかないとき」）。
 
 ## 確認したこと・確認できていないこと
 

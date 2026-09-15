@@ -16,6 +16,7 @@ import html
 import json
 import logging
 import os
+import sys
 import uuid
 
 import boto3
@@ -23,15 +24,53 @@ import gradio as gr
 import pandas as pd
 from botocore.exceptions import BotoCoreError, ClientError
 
+HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+def load_env_file() -> str:
+    """手元で動かすときの .env（リポジトリ直下。ENV_FILE=<パス> で変えられる。並びは .env.example）。
+    EC2 では systemd の EnvironmentFile が渡すので無くてよい。既にある環境変数は上書きしない。同じ名前は後の行が勝つ。
+    読めたらそのパスを返す"""
+    path = os.environ.get("ENV_FILE") or os.path.join(HERE, "..", ".env")
+    if not os.path.isfile(path):
+        return ""
+    values = {}
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            k, v = k.strip().removeprefix("export ").strip(), v.strip()
+            if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
+                v = v[1:-1]
+            if k and v:
+                values[k] = v
+    for k, v in values.items():
+        os.environ.setdefault(k, v)
+    return os.path.abspath(path)
+
+
+ENV_FILE = load_env_file()
+_missing = [k for k in ("RUNTIME_ARN", "AWS_REGION") if not os.environ.get(k)]
+if _missing:
+    sys.exit(f"environment variable {' / '.join(_missing)} is not set. "
+             "EC2: /etc/<NamePrefix>-web.env is written by the UserData of main.yaml (compare with .env.example). "
+             "local: cp .env.example .env and fill it in (README)")
 ARN = os.environ["RUNTIME_ARN"]
 REGION = os.environ["AWS_REGION"]
 PORT = int(os.environ.get("PORT", "8080"))
-DATA_DIR = os.environ.get("DATA_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "data"))
+DATA_DIR = os.environ.get("DATA_DIR") or os.path.join(HERE, "data")
+if not os.path.isabs(DATA_DIR):  # 相対パスはリポジトリ直下から（.env.example の DATA_DIR=agent/data）
+    DATA_DIR = os.path.normpath(os.path.join(HERE, "..", DATA_DIR))
 TITLE = os.environ.get("TITLE", "NWC PoC")
 MAX_PROMPT = 4000
 
-# エージェントと同じモジュール（同じディレクトリに置く）。静的データの場所だけ DATA_DIR に合わせる
-os.environ.setdefault("TOPOLOGY_DATA_DIR", DATA_DIR)
+# エージェントと同じモジュール。EC2 では同じディレクトリに置く（UploadWebCommand）。手元ではリポジトリの agent/ から読む。
+# 静的データの場所だけ DATA_DIR に合わせる
+if not os.path.isfile(os.path.join(HERE, "topology.py")):
+    sys.path.append(os.path.join(HERE, "..", "agent"))
+os.environ["TOPOLOGY_DATA_DIR"] = DATA_DIR
 import anomalies  # noqa: E402
 import graph  # noqa: E402
 import topology  # noqa: E402

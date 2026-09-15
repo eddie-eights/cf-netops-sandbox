@@ -171,7 +171,8 @@ run_on_instance "$INSTANCE_ID" "true"          # 初回の UserData が終わる
 aws ec2 reboot-instances --region "$REGION" --instance-ids "$INSTANCE_ID"
 sleep 30
 wait_ssm_online "$INSTANCE_ID"
-run_on_instance "$INSTANCE_ID" "systemctl is-active $PREFIX-web.service"
+# 起動の失敗（環境変数や依存の不足）は数秒後に落ちる。1 分待って動かなければ status と journald を出して止まる
+run_on_instance "$INSTANCE_ID" "for i in 1 2 3 4 5 6 7 8 9 10 11 12; do systemctl is-active --quiet $PREFIX-web.service && exit 0; sleep 5; done; systemctl --no-pager status $PREFIX-web.service; journalctl --no-pager -u $PREFIX-web.service -n 50; exit 1"
 echo "Web が動いている"
 
 # ---- 5. Runtime のロググループ -------------------------------------------------------

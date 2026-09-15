@@ -991,6 +991,16 @@ Resources:
           systemctl daemon-reload
           systemctl enable ${NamePrefix}-web.service
           systemctl restart ${NamePrefix}-web.service
+          # 環境変数や依存の不足は起動の数秒後に落ちる。20 秒待って動いていなければ journald をこのログ（/var/log/cloud-init-output.log）に写す。
+          # 環境変数の並びはリポジトリの .env.example と同じ
+          sleep 20
+          if systemctl is-active --quiet ${NamePrefix}-web.service; then
+            echo "${NamePrefix}-web.service is active (env: /etc/${NamePrefix}-web.env)"
+          else
+            echo "${NamePrefix}-web.service is not active. Compare /etc/${NamePrefix}-web.env with .env.example in the repo. journald follows:" >&2
+            journalctl --no-pager -u ${NamePrefix}-web.service -n 50 >&2
+            exit 1
+          fi
           --==BOUNDARY==--
 
 Outputs:
