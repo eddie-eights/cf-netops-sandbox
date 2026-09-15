@@ -290,6 +290,31 @@ docker buildx build --platform linux/arm64 -t "$REPO:v1" --push \
 `ReadTimeoutError` は QEMU の arm64 エミュレーションで遅いだけなので、そのまま打ち直す（`Dockerfile` の `PIP_DEFAULT_TIMEOUT=100` で既に長めにしてある）。
 lab-1 の `lab/snmpd/` は apk なので同じ `--build-arg` の 3 つを付ければ通る。
 
+**証明書が無くて落ちるとき（プロキシの設定が無くても起きる）。**社内ネットワークが TLS を終端して自前のルート証明書で署名し直していると、
+PC（Windows と WSL）にはその証明書が入っていて通るのに、コンテナの中には無いので `pip install` が
+`Retrying … SSLError(SSLCertVerificationError … CERTIFICATE_VERIFY_FAILED` で落ちる。直し方は、その証明書を `agent/certs/` に置くだけ。
+ビルド中だけ読んでイメージには残らない（`*.crt` / `*.pem` は gitignore 済み）。
+
+1. WSL に証明書が入っているか見る。`uv sync` や `curl https://pypi.org` が通っているなら入っている。
+   ```bash
+   ls /usr/local/share/ca-certificates/      # ここに .crt があればそれ
+   ```
+   無ければ Windows から取り出す。`certmgr.msc` → 信頼されたルート証明機関 → 社内のルート証明書を右クリック → すべてのタスク → エクスポート →
+   「Base64 encoded X.509 (.CER)」で `C:\Users\<自分>\corp-root.cer` に保存し、WSL で次を打つ（WSL の `aws` / `docker login` もこれで通るようになる）。
+   ```bash
+   sudo cp /mnt/c/Users/<自分>/corp-root.cer /usr/local/share/ca-certificates/corp-root.crt
+   sudo update-ca-certificates
+   sudo systemctl restart docker
+   ```
+2. リポジトリの `agent/certs/` と `lab/snmpd/certs/` にコピーして、手順 2 / lab-1 のコマンドをそのまま打つ。
+   ```bash
+   cp /usr/local/share/ca-certificates/corp-root.crt agent/certs/
+   cp /usr/local/share/ca-certificates/corp-root.crt lab/snmpd/certs/
+   docker buildx build --platform linux/arm64 -t "$REPO:v1" --push agent/
+   ```
+   証明書が複数あるなら全部置く（`.crt` と `.pem` を読む。Windows の DER 形式の `.cer` は読めないので Base64 で書き出す）。
+   証明書がどうしても手に入らないときだけ `--build-arg PIP_TRUSTED_HOSTS="pypi.org files.pythonhosted.org"`（検証を外す）。
+
 ### 3. 本体をデプロイする
 
 名前付きの IAM ロールを作るので `CAPABILITY_NAMED_IAM` が要る。
@@ -634,7 +659,8 @@ aws cloudformation delete-stack --region ap-northeast-1 --stack-name fukuda-nwc-
 | `AccessDeniedException`（start-session） | 手順 6 の権限。インスタンスに `Project` タグがあるか |
 | ブラウザが「接続できない」 | Web が落ちている。管理者がシェルで入り `sudo systemctl status fukuda-nwc-poc-web` と `sudo journalctl -u fukuda-nwc-poc-web -n 100`。起動時の失敗は `/var/log/cloud-init-output.log`。`python3.13` のインストールで止まっていたら S3 ゲートウェイ（前提の「既存の VPC エンドポイントがある場合」） |
 | ブラウザが「接続できない」が、journald に `web/ is not in s3://` | 手順 4 の Web の部品を置いていない。置いてインスタンスを再起動する |
-| 手順 2 のビルドで `pip install` が `Retrying (Retry(total=4 …))` を繰り返して落ちる | コンテナの中にプロキシの設定が無い。手順 2 の「社内プロキシの中で打つとき」（`--build-arg HTTP_PROXY` …）。`Retrying` の行末が `SSLError` なら `PIP_TRUSTED_HOSTS` |
+| 手順 2 のビルドで `pip install` が `Retrying (Retry(total=4 …))` を繰り返して落ちる | コンテナの中にプロキシの設定か社内の証明書が無い。行末が `SSLError` / `CERTIFICATE_VERIFY_FAILED` なら手順 2 の「証明書が無くて落ちるとき」（`agent/certs/` に置く）。`ProxyError` / `NewConnectionError` なら「社内プロキシの中で打つとき」（`--build-arg HTTP_PROXY` …） |
+| `docker login` / `docker push` / `aws` が `x509: certificate signed by unknown authority` や `SSL validation failed` | WSL 側に社内の証明書が無い。手順 2 の「証明書が無くて落ちるとき」の 1（`update-ca-certificates` と docker の再起動） |
 | `pip install` で `No matching distribution` | wheel が arm64 / cp313 でない。手順 4 の `pip download` の `--platform` と `--abi` を確かめ、`wheels/` を置き直して再起動する |
 | 「エージェントの呼び出しに失敗しました」 | journald の `invoke failed:` の行。`AccessDenied` は Runtime の ARN とインスタンスロール、`Could not connect to the endpoint URL` は bedrock-agentcore エンドポイントと SG。その先は Runtime のログ |
 | 送信して 150 秒で失敗する | Runtime が返らなかった（ツールの往復を含む）。初回のセッション起動が遅い場合は再送する |
