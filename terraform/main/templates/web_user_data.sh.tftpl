@@ -1,0 +1,91 @@
+Content-Type: multipart/mixed; boundary="==BOUNDARY=="
+MIME-Version: 1.0
+
+--==BOUNDARY==
+Content-Type: text/cloud-config; charset="us-ascii"
+MIME-Version: 1.0
+
+#cloud-config
+cloud_final_modules:
+- [scripts-user, always]
+
+--==BOUNDARY==
+Content-Type: text/x-shellscript; charset="utf-8"
+MIME-Version: 1.0
+Content-Transfer-Encoding: 8bit
+
+#!/bin/bash
+set -euo pipefail
+APP=/opt/${name_prefix}-web
+# /usr/bin/python3 は 3.9 のまま（AL2023 の仕様）。3.13 と pip を別に入れる。取得経路は S3 ゲートウェイエンドポイント
+command -v python3.13 >/dev/null || dnf install -y python3.13 python3.13-pip
+install -d -m 0755 $APP
+# 画面のコード（app.py）・静的データ（data/）・依存の wheel（wheels/）を S3 から取る（README の手順 4）
+aws s3 sync --delete --region ${region} s3://${bucket}/web/ $APP/src/
+# バケットは terraform/main が作るので、初回の apply の時点では web/ が空。置いてから reboot-instances すれば、この user_data がもう一度走る
+if [ ! -f $APP/src/requirements.txt ]; then
+  echo "web/ is not in s3://${bucket} yet. Upload it (output upload_web_command) and reboot the instance." >&2
+  exit 0
+fi
+# 置き間違いの検出。EC2 で動かすのは web/app.py（Gradio の画面）だけ。agent/app.py（BedrockAgentCoreApp）は Runtime のコンテナの中でしか動かない
+# （EC2 に置くと MODEL_ID / KNOWLEDGE_BASE_ID の KeyError で落ちるか、画面が無いのでブラウザが 404 になる）
+if ! grep -q "^import gradio" $APP/src/app.py; then
+  echo "s3://${bucket}/web/app.py is not web/app.py (no 'import gradio'). agent/app.py must not be placed here; it runs only inside the AgentCore Runtime container. Upload web/app.py (output upload_web_command) and reboot the instance." >&2
+  exit 1
+fi
+# インターネットに出ないので PyPI は見ない。wheel は arm64 / cp313 で揃えてある。--target で $APP/lib に入れる
+python3.13 -m pip install --quiet --no-index --find-links $APP/src/wheels --target $APP/lib --upgrade \
+  -r $APP/src/requirements.txt
+
+cat > /etc/${name_prefix}-web.env <<__ENV__
+RUNTIME_ARN=${runtime_arn}
+AWS_REGION=${region}
+PORT=8080
+TITLE=NWC PoC
+DATA_DIR=$APP/src/data
+PARAM_PREFIX=/${name_prefix}
+PYTHONPATH=$APP/lib
+GRADIO_TEMP_DIR=/var/lib/${name_prefix}-web/tmp
+GRADIO_ANALYTICS_ENABLED=False
+HF_HUB_OFFLINE=1
+HF_HUB_DISABLE_TELEMETRY=1
+__ENV__
+
+cat > /etc/systemd/system/${name_prefix}-web.service <<__UNIT__
+[Unit]
+Description=${name_prefix} chat web (Gradio, 127.0.0.1:8080, reached via SSM port forwarding)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+EnvironmentFile=/etc/${name_prefix}-web.env
+ExecStart=/usr/bin/python3.13 $APP/src/app.py
+DynamicUser=yes
+StateDirectory=${name_prefix}-web
+Environment=HOME=/var/lib/${name_prefix}-web
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+__UNIT__
+
+systemctl daemon-reload
+systemctl enable ${name_prefix}-web.service
+systemctl restart ${name_prefix}-web.service
+# 環境変数や依存の不足は起動の数秒後に落ちる。20 秒待って動いていなければ journald をこのログ（/var/log/cloud-init-output.log）に写す。
+# 環境変数の並びはリポジトリの .env.example と同じ
+sleep 20
+if systemctl is-active --quiet ${name_prefix}-web.service; then
+  echo "${name_prefix}-web.service is active (env: /etc/${name_prefix}-web.env)"
+else
+  echo "${name_prefix}-web.service is not active. Compare /etc/${name_prefix}-web.env with .env.example in the repo. journald follows:" >&2
+  journalctl --no-pager -u ${name_prefix}-web.service -n 50 >&2
+  exit 1
+fi
+--==BOUNDARY==--

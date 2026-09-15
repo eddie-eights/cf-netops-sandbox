@@ -1,78 +1,86 @@
 #!/usr/bin/env bash
-# README の「片付け」をまとめて打つ。スタックを依存の逆順に消し、消え終わるまで待つ。
+# README の「片付け」をまとめて打つ。Terraform のルートを依存の逆順に destroy し、消え終わるまで待つ。
+# state（terraform/<ルート>/terraform.tfstate）にリソースが載っているルートだけを消す。作っていないルートは飛ばす。
 #
-# 使い方（aws-vault なら `aws-vault exec <プロファイル> --no-session` のサブシェルの中で）:
-#   ops/down.sh              # 全部消す（graph → stream → lab → 本体 → ecr → build → Runtime のロググループ）
+# 使い方（リポジトリの直下で。aws-vault なら `aws-vault exec <プロファイル> --no-session` のサブシェルの中で）:
+#   ops/down.sh              # 全部消す（graph → stream → lab → main → ecr → build → Runtime のロググループ）
 #   KEEP_ECR=1 ops/down.sh   # ECR（イメージ）だけ残す。翌日の ops/up.sh でビルドを飛ばせる（保管料は月数円）
+#
+# 社内の SSL 検査がある PC では ops/up.sh と同じく AWS_CA_BUNDLE（または OPENSEARCH_CACERT_FILE）を入れてから打つ。
+# terraform/main の destroy はベクトルインデックスを消すために OpenSearch Serverless のエンドポイントへ HTTPS でつなぐ。
 set -uo pipefail
 
 REGION=ap-northeast-1
 PREFIX=fukuda-nwc-poc
+OWNER=fukuda
+cd "$(dirname "$0")/.."
 
 log()  { printf '\n\033[1;34m== %s\033[0m\n' "$*"; }
 die()  { printf '\033[1;31mNG: %s\033[0m\n' "$*" >&2; exit 1; }
-status() {
-  aws cloudformation describe-stacks --region "$REGION" --stack-name "$1" \
-    --query 'Stacks[0].StackStatus' --output text 2>/dev/null || echo NONE
+tf() {  # tf <ルート> <terraform のサブコマンドと引数…>
+  local root="$1"; shift
+  terraform -chdir="terraform/$root" "$@"
 }
-delete_and_wait() {  # delete_and_wait <スタック名…>  同時に消してよいものをまとめて渡す
-  local s
-  for s in "$@"; do
-    if [ "$(status "$s")" = NONE ]; then echo "$s: 無い"; continue; fi
-    echo "$s: 消す"
-    aws cloudformation delete-stack --region "$REGION" --stack-name "$s"
-  done
-  for s in "$@"; do
-    [ "$(status "$s")" = NONE ] && continue
-    if ! aws cloudformation wait stack-delete-complete --region "$REGION" --stack-name "$s"; then
-      aws cloudformation describe-stack-events --region "$REGION" --stack-name "$s" \
-        --query "StackEvents[?ResourceStatus=='DELETE_FAILED'].[LogicalResourceId,ResourceStatusReason]" --output text >&2
-      die "$s が消えなかった（上の理由。Runtime の ENI なら最大 8 時間待って打ち直す）"
-    fi
-    echo "$s: 消えた"
-  done
+has_resources() {  # has_resources <ルート>  state があり、リソースが 1 つ以上載っている（init もここで済ませる）
+  [ -f "terraform/$1/terraform.tfstate" ] || return 1
+  tf "$1" init -input=false >/dev/null || die "terraform/$1 の init に失敗した（provider の取得。社内 PC は README「社内 PC で使うとき」）"
+  [ -n "$(tf "$1" state list 2>/dev/null)" ]
 }
-empty_bucket() {
-  if aws s3api head-bucket --bucket "$1" 2>/dev/null; then
-    echo "s3://$1 を空にする"; aws s3 rm "s3://$1" --recursive --only-show-errors
-  fi
+destroy_root() {  # destroy_root <ルート> [-var 名前=値 …]
+  local root="$1"; shift
+  if ! has_resources "$root"; then echo "terraform/$root: 無い（state が無いか空）"; return 0; fi
+  echo "terraform/$root: 消す"
+  tf "$root" destroy -input=false -auto-approve -var "owner=$OWNER" "$@" \
+    || die "terraform/$root が消えなかった（上のエラー。Runtime の ENI でサブネットや SG が消えないときは最大 8 時間待って ops/down.sh を打ち直す）"
+  echo "terraform/$root: 消えた"
 }
 
-log "0. 認証"
-ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text) || die "認証が通っていない"
+log "0. 道具と認証"
+command -v terraform >/dev/null || die "terraform が無い"
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text) || die "認証が通っていない（aws-vault なら --no-session のサブシェルの中で打つ）"
 echo "ACCOUNT_ID=$ACCOUNT_ID"
-LOG_GROUP=$(aws cloudformation describe-stacks --region "$REGION" --stack-name "$PREFIX" \
-  --query "Stacks[0].Outputs[?OutputKey=='RuntimeLogGroupName'].OutputValue" --output text 2>/dev/null || true)
+CACERT="${OPENSEARCH_CACERT_FILE:-${AWS_CA_BUNDLE:-}}"
+MAIN_VARS=()
+if [ -n "$CACERT" ]; then MAIN_VARS+=(-var "opensearch_cacert_file=$CACERT"); fi
 
-log "1. フェーズ 2（graph / stream）"
-delete_and_wait "$PREFIX-graph" "$PREFIX-stream"
+log "1. フェーズ 2（graph → stream。stream は lab の state を読むので lab より先）"
+destroy_root graph
+destroy_root stream
 
 log "2. lab"
-delete_and_wait "$PREFIX-lab"
+destroy_root lab
 
-log "3. 本体"
-empty_bucket "$PREFIX-kb-$ACCOUNT_ID"
-delete_and_wait "$PREFIX"
+log "3. 本体（terraform/main。バケットは中身ごと消える）"
+LOG_GROUP=""
+if has_resources main; then
+  LOG_GROUP=$(tf main output -raw runtime_log_group_name 2>/dev/null || true)
+fi
+destroy_root main ${MAIN_VARS[@]+"${MAIN_VARS[@]}"}
 
 if [ -n "${KEEP_ECR:-}" ]; then
   log "4. ECR は残す（KEEP_ECR）"
 else
-  log "4. ECR"
-  delete_and_wait "$PREFIX-ecr"
+  log "4. ECR（イメージごと消える）"
+  destroy_root ecr
 fi
 
 log "5. build（作っていれば）"
-empty_bucket "$PREFIX-build-$ACCOUNT_ID"
-delete_and_wait "$PREFIX-build"
+destroy_root build
 
-log "6. Runtime のロググループ"
-if [ -n "$LOG_GROUP" ] && [ "$LOG_GROUP" != None ]; then
+log "6. Runtime のロググループ（AgentCore が作るもので Terraform の管理外）"
+if [ -n "$LOG_GROUP" ]; then
   aws logs delete-log-group --region "$REGION" --log-group-name "$LOG_GROUP" 2>/dev/null && echo "$LOG_GROUP: 消した" || echo "$LOG_GROUP: 無い"
 else
-  echo "本体が無かったので名前が取れない。残っていれば: aws logs describe-log-groups --region $REGION --log-group-name-prefix /aws/bedrock-agentcore/runtimes/${PREFIX//-/_}"
+  echo "本体の state が無かったので名前が取れない。残っていれば: aws logs describe-log-groups --region $REGION --log-group-name-prefix /aws/bedrock-agentcore/runtimes/${PREFIX//-/_}"
 fi
 
 log "7. 残っていないか（Project=$PREFIX のタグ）"
 aws resourcegroupstaggingapi get-resources --region "$REGION" --tag-filters "Key=Project,Values=$PREFIX" \
   --query 'ResourceTagMappingList[].ResourceARN' --output text | tr '\t' '\n' | sed '/^$/d' || true
-echo "（何も出なければ全部消えている。ecr を残したときはリポジトリ 4 つが出る）"
+echo "（何も出なければ全部消えている。ecr を残したときはリポジトリが出る。消した直後の数分は消えたものが出ることがある）"
+OLD_STACKS=$(aws cloudformation list-stacks --region "$REGION" \
+  --query "StackSummaries[?starts_with(StackName, '$PREFIX') && StackStatus != 'DELETE_COMPLETE'].StackName" \
+  --output text 2>/dev/null || true)
+if [ -n "$OLD_STACKS" ] && [ "$OLD_STACKS" != None ]; then
+  echo "CloudFormation 版のスタックも残っている: $OLD_STACKS （README「CloudFormation 版から移るとき」）"
+fi

@@ -1,4 +1,4 @@
-"""stream/detector.py の模擬テスト。boto3 を差し替えて、stream.yaml に埋めた ZipFile と一致することも確かめる。
+"""stream/detector.py の模擬テスト。boto3 を差し替えて動きを確かめ、terraform/stream が detector.py を index.py として zip にして Lambda に載せることも確かめる。
 実行は python3 tests/test_stream.py（依存は無い）。"""
 import base64, importlib.util, json, os, re, sys, types
 
@@ -12,21 +12,16 @@ def check(name, cond):
     passed += 1
     print("ok", name)
 
-# ---- stream.yaml の ZipFile（2 つ目 = DetectorFunction）と detector.py が同じか
-with open(os.path.join(ROOT, "stream.yaml"), encoding="utf-8") as f:
-    y = f.read()
+# ---- terraform/stream が detector.py をそのまま Lambda に載せるか
+with open(os.path.join(ROOT, "terraform", "stream", "main.tf"), encoding="utf-8") as f:
+    tf = f.read()
 with open(SRC, encoding="utf-8") as f:
     src = f.read()
-starts = [m.end() for m in re.finditer(r"        ZipFile: \|\n", y)]
-check("stream.yaml に ZipFile は 2 つ（bootstrap / detector）", len(starts) == 2)
-body = []
-for line in y[starts[1]:].split("\n"):
-    if line.strip() and not line.startswith("          "):
-        break
-    body.append(line[10:] if line.startswith("          ") else "")
-embedded = "\n".join(body).rstrip("\n") + "\n"
-check("ZipFile と stream/detector.py が一致", embedded == src)
-check("ZipFile は 4096 文字以内", len(src) <= 4096)
+check("terraform/stream は stream/detector.py を読む", 'file("${path.module}/../../stream/detector.py")' in tf)
+check("zip の中の名前は index.py", re.search(r'filename\s*=\s*"index\.py"', tf) is not None)
+check("handler は index.handler", re.search(r'handler\s*=\s*"index\.handler"', tf) is not None)
+check("detector.py を変えると Lambda も更新される（source_code_hash）", re.search(r'source_code_hash\s*=\s*data\.archive_file\.detector\.output_base64sha256', tf) is not None)
+check("detector.py に handler がある", "def handler(" in src)
 
 # ---- boto3 の差し替え
 class CondFail(Exception):

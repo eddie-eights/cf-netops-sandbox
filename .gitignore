@@ -15,3 +15,15 @@ lab/wvs2.clab.yml
 # 社内の証明書（README の lab-1）
 lab/snmpd/certs/*.crt
 lab/snmpd/certs/*.pem
+
+# Terraform（state はローカル。消すと Terraform が作ったものを見失うので、このリポジトリのフォルダごと残す）
+.terraform/
+*.tfstate
+*.tfstate.*
+.terraform.tfstate.lock.info
+*.tfvars
+!*.tfvars.example
+terraform/**/.build/
+# 手順 2-b と s-1 で作る・取るファイル
+src.zip
+confluentinc-*.zip

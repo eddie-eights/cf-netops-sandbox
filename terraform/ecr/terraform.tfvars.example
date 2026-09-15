@@ -1,0 +1,5 @@
+# Copy to terraform.tfvars (gitignored) only when the defaults are not right. Every value has a default in variables.tf.
+# region                  = "ap-northeast-1"
+# name_prefix             = "fukuda-nwc-poc"
+# owner                   = "fukuda"
+# create_lab_repositories = true

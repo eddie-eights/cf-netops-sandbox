@@ -1,0 +1,101 @@
+Content-Type: multipart/mixed; boundary="==BOUNDARY=="
+MIME-Version: 1.0
+
+--==BOUNDARY==
+Content-Type: text/cloud-config; charset="us-ascii"
+MIME-Version: 1.0
+
+#cloud-config
+cloud_final_modules:
+- [scripts-user, always]
+
+--==BOUNDARY==
+Content-Type: text/x-shellscript; charset="utf-8"
+MIME-Version: 1.0
+Content-Transfer-Encoding: 8bit
+
+#!/bin/bash
+set -euo pipefail
+LAB=/opt/${name_prefix}-lab
+REGISTRY=${account_id}.dkr.ecr.${region}.amazonaws.com
+# Docker は AL2023 のリポジトリから（S3 ゲートウェイエンドポイント経由）。containerlab は S3 に置いた rpm から
+command -v docker >/dev/null || dnf install -y docker
+systemctl enable --now docker
+install -d -m 0755 $LAB
+aws s3 sync --delete --region ${region} s3://${bucket}/lab/ $LAB/src/
+if [ ! -f $LAB/src/lab.sh ] || [ ! -f $LAB/src/containerlab_${containerlab_version}_linux_arm64.rpm ]; then
+  echo "lab/ or the containerlab rpm is not in s3://${bucket}/lab/ yet. Upload (output UploadLabCommand) and reboot." >&2
+  exit 0
+fi
+command -v containerlab >/dev/null || dnf install -y $LAB/src/containerlab_${containerlab_version}_linux_arm64.rpm
+chmod 0755 $LAB/src/lab.sh
+ln -sfn $LAB/src/lab.sh /usr/local/bin/lab
+# フェーズ 2: Telegraf の rpm が lab/ にあれば入れる（無ければ何もしない。terraform/stream が無くてもここは通る）
+TELEGRAF_RPM=$LAB/src/telegraf-${telegraf_version}-1.aarch64.rpm
+if [ -f $TELEGRAF_RPM ] && ! rpm -q telegraf-${telegraf_version} >/dev/null 2>&1; then
+  dnf install -y $TELEGRAF_RPM
+  systemctl disable --now telegraf.service 2>/dev/null || true
+fi
+
+cat > /etc/${name_prefix}-lab.env <<__ENV__
+AWS_REGION=${region}
+REGISTRY=$REGISTRY
+FRR_IMAGE=$REGISTRY/${name_prefix}-lab-frr:${frr_image_tag}
+SNMPD_IMAGE=$REGISTRY/${name_prefix}-lab-snmpd:${snmpd_image_tag}
+MULTITOOL_IMAGE=$REGISTRY/${name_prefix}-lab-multitool:${multitool_image_tag}
+PARAM_PREFIX=/${name_prefix}
+__ENV__
+
+cat > /etc/systemd/system/${name_prefix}-lab.service <<__UNIT__
+[Unit]
+Description=${name_prefix} containerlab topology (wvs2)
+After=docker.service network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=$LAB/src/lab.sh up
+ExecStop=$LAB/src/lab.sh down
+TimeoutStartSec=600
+
+[Install]
+WantedBy=multi-user.target
+__UNIT__
+
+# フェーズ 2: Telegraf。ExecStartPre で SSM の /<name_prefix>/msk-bootstrap を読んで設定を作る。terraform/stream が無い間は
+# 失敗して 60 秒ごとに試し直す（トポロジには影響しない）。162/udp で trap を受けるので root で動かす
+if [ -f $TELEGRAF_RPM ]; then
+  cat > /etc/systemd/system/${name_prefix}-telegraf.service <<__UNIT__
+[Unit]
+Description=${name_prefix} Telegraf - SNMP poll + trap from the lab to MSK (phase 2)
+After=docker.service network-online.target ${name_prefix}-lab.service
+Wants=${name_prefix}-lab.service
+
+[Service]
+EnvironmentFile=/etc/${name_prefix}-lab.env
+WorkingDirectory=$LAB/src
+ExecStartPre=$LAB/src/lab.sh telegraf-render
+ExecStart=/usr/bin/telegraf --config /etc/telegraf/telegraf.conf
+Restart=on-failure
+RestartSec=60
+
+[Install]
+WantedBy=multi-user.target
+__UNIT__
+fi
+
+systemctl daemon-reload
+$LAB/src/lab.sh render
+$LAB/src/lab.sh pull
+if [ "${auto_start_lab}" = "true" ]; then
+  systemctl enable ${name_prefix}-lab.service
+  systemctl restart ${name_prefix}-lab.service
+else
+  systemctl disable ${name_prefix}-lab.service || true
+fi
+if [ -f $TELEGRAF_RPM ]; then
+  systemctl enable ${name_prefix}-telegraf.service
+  systemctl restart ${name_prefix}-telegraf.service || true
+fi
+--==BOUNDARY==--

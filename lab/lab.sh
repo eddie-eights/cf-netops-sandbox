@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# lab EC2（lab.yaml）の上で containerlab を動かす。UserData が /usr/local/bin/lab に置くので、SSM セッションから `sudo lab check` で使う。
+# lab EC2（terraform/lab）の上で containerlab を動かす。user_data が /usr/local/bin/lab に置くので、SSM セッションから `sudo lab check` で使う。
 #   lab.sh render | pull | up | down | status | check | snmp <node> | fail-main | heal-main | failover | clab <args...>
-#   lab.sh telegraf-render | telegraf-status     （フェーズ 2: Telegraf → MSK。stream.yaml を立ててから）
+#   lab.sh telegraf-render | telegraf-status     （フェーズ 2: Telegraf → MSK。terraform/stream を apply してから）
 # 元はローカル PoC の app/wvs2-lab/lab.sh。違いは 3 つ: containerlab を直接呼ぶ（root）、イメージは ECR から取る（pull）、
 # wvs2.clab.yml はテンプレート（.in）からイメージ URI を埋めて作る（render）。
 set -euo pipefail
@@ -9,7 +9,7 @@ cd "$(dirname "$0")"
 SELF="$PWD/$(basename "$0")"
 LAB=wvs2
 TOPO=wvs2.clab.yml
-# lab.yaml の UserData が書く。REGISTRY / FRR_IMAGE / SNMPD_IMAGE / MULTITOOL_IMAGE / AWS_REGION
+# terraform/lab の user_data が書く。REGISTRY / FRR_IMAGE / SNMPD_IMAGE / MULTITOOL_IMAGE / AWS_REGION
 ENV_FILE=$(ls /etc/*-lab.env 2>/dev/null | head -1 || true)
 [ -n "$ENV_FILE" ] && set -a && . "$ENV_FILE" && set +a
 
@@ -103,11 +103,11 @@ case "${1:-}" in
     fi
     ;;
   telegraf-render)
-    # stream.yaml の bootstrap Lambda が SSM に書いたブローカーを埋めて /etc/telegraf/telegraf.conf を作る。
-    # stream スタックが無いときは失敗して終わる（unit は Restart=on-failure で 60 秒ごとに試し直す）
+    # terraform/stream が SSM に書いたブローカーを埋めて /etc/telegraf/telegraf.conf を作る。
+    # terraform/stream が無いときは失敗して終わる（unit は Restart=on-failure で 60 秒ごとに試し直す）
     : "${AWS_REGION:?}" "${PARAM_PREFIX:?}"
     b=$(aws ssm get-parameter --region "$AWS_REGION" --name "$PARAM_PREFIX/msk-bootstrap" --query Parameter.Value --output text) || {
-      echo "SSM $PARAM_PREFIX/msk-bootstrap が読めない。stream.yaml はまだ？" >&2; exit 1; }
+      echo "SSM $PARAM_PREFIX/msk-bootstrap が読めない。terraform/stream はまだ？" >&2; exit 1; }
     q=$(printf '"%s"' "${b//,/\",\"}")
     install -d -m 0755 /etc/telegraf
     sed -e "s#__KAFKA_BROKERS__#$q#" -e "s#__AWS_REGION__#$AWS_REGION#" telegraf.conf.in > /etc/telegraf/telegraf.conf

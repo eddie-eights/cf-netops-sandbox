@@ -1,0 +1,32 @@
+# Copy to terraform.tfvars (gitignored) only when the defaults are not right. Every value has a default in variables.tf.
+# ops/up.sh passes owner / kb_admin_principal_arn / agent_image_tag (and vpc_cidr / client_cidr when set) with -var.
+#
+# region      = "ap-northeast-1"
+# name_prefix = "fukuda-nwc-poc"
+# owner       = "fukuda"
+#
+# vpc_cidr    = "10.0.0.0/16"
+# az_id_a     = "apne1-az1"
+# az_id_b     = "apne1-az4"
+# client_cidr = ""                 # corporate CIDR that reaches the ssm / ssmmessages endpoints over DX or VPN
+#
+# agent_image_tag = "v1"
+# agent_image_uri = ""             # leave empty to use the terraform/ecr repository
+# runtime_name    = "fukuda_nwc_poc_agent"
+# model_id        = "jp.amazon.nova-2-lite-v1:0"
+#
+# kb_admin_principal_arn     = ""  # leave empty to derive it from the caller (IAM user ARN, or the role of an assumed-role session)
+# guardrail_profile_id       = "apac.guardrail.v1:0"
+# number_of_results          = 20
+# rerank_model_id            = "amazon.rerank-v1:0"
+# number_of_reranked_results = 5
+# opensearch_cacert_file     = ""  # PEM of the corporate CA when HTTPS is inspected on this PC
+#
+# instance_type     = "t4g.small"
+# ami_ssm_parameter = "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64"
+#
+# create_runtime_endpoints   = true
+# create_kb_endpoint         = true
+# create_ssm_endpoints       = true
+# create_agentcore_endpoint  = true
+# create_s3_gateway_endpoint = true

@@ -1,5 +1,5 @@
 # Telegraf の設定テンプレート（フェーズ 2）。lab.sh telegraf-render が __KAFKA_BROKERS__ / __AWS_REGION__ を埋めて
-# /etc/telegraf/telegraf.conf に書く。ブローカーは SSM パラメータ /<NamePrefix>/msk-bootstrap（stream.yaml が書く）から取る。
+# /etc/telegraf/telegraf.conf に書く。ブローカーは SSM パラメータ /<name_prefix>/msk-bootstrap（terraform/stream が書く）から取る。
 #
 # 流れ: CE の snmpd を 10 秒ごとにポーリング（ifTable）+ snmpd からの trap を udp 162 で受ける → MSK（IAM 認証、TLS）
 #   metrics トピック: interface（ifDescr / ifOperStatus / ifInErrors ...）と system（sysName / sysUpTime）

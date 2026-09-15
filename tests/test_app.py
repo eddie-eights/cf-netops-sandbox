@@ -148,7 +148,7 @@ check("全体図はノード 10 リンク 10", len(t.topology_graph()["nodes"]) 
 check("Neptune が無ければ元データは static", t.SOURCE == "static" and t.topology_graph()["source"] == "static" and not app.graph.configured())
 check("load_static は asn を機器に足す", any(d.get("asn") for d in t.load_static()[0]))
 a = app.anomalies
-check("異常一覧はテーブル未設定なら error と空リスト", a.list_anomalies()["anomalies"] == [] and "stream.yaml" in a.list_anomalies()["error"])
+check("異常一覧はテーブル未設定なら error と空リスト", a.list_anomalies()["anomalies"] == [] and "terraform/stream" in a.list_anomalies()["error"])
 check("app.run_tool は list_anomalies を anomalies に振る", "error" in app.run_tool("list_anomalies", {"status": "open"}) and app.run_tool("list_devices", {})["count"] == 10)
 check("anomalies.run_tool の未知ツール", "unknown" in a.run_tool("nope", {})["error"])
 

@@ -1,6 +1,6 @@
-"""Neptune（graph.yaml）に置いたトポロジの読み書き。boto3 の neptunedata で Gremlin を送る（IAM 認証の署名は boto3 が付ける）。
+"""Neptune（terraform/graph）に置いたトポロジの読み書き。boto3 の neptunedata で Gremlin を送る（IAM 認証の署名は boto3 が付ける）。
 
-エンドポイントは環境変数 NEPTUNE_ENDPOINT（host:port）、無ければ SSM の <PARAM_PREFIX>/neptune-endpoint（graph.yaml が書く）。
+エンドポイントは環境変数 NEPTUNE_ENDPOINT（host:port）、無ければ SSM の <PARAM_PREFIX>/neptune-endpoint（terraform/graph が書く）。
 どちらも無ければ configured() が False で、topology.py は data/ の静的データを使う（フェーズ 1 のまま動く）。
 
 グラフの形は data/topology.json と同じ:

@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>fukuda-nwc-poc 構成図</title>
 <meta name="description" content="閉域の既存 VPC で、EC2 のチャット Web から AgentCore Runtime、Knowledge Base（OpenSearch Serverless のハイブリッド検索）、ガードレール付きの Bedrock へ会話が流れる構成の図解。">
-<meta name="mb-tags" content="aws cloudformation agentcore bedrock knowledge-base opensearch-serverless guardrails architecture">
+<meta name="mb-tags" content="aws terraform agentcore bedrock knowledge-base opensearch-serverless guardrails architecture">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Ubuntu+Sans:wght@400;500;700&family=Noto+Sans+JP:wght@400;500;700&family=Ubuntu+Mono:wght@400;700&display=swap" rel="stylesheet">
@@ -50,7 +50,7 @@
     <li>PC から EC2 へは SSM のポートフォワーディングで入り、EC2 から先は VPC エンドポイントだけで AWS のサービスに届く</li>
     <li>エージェントは Knowledge Base をハイブリッド検索（ベクトル + キーワード）で候補 20 件を引き、リランクで 5 件に絞って Amazon Nova 2 Lite に渡す</li>
     <li>ガードレールが質問と回答の両方を判定し、止めたときは定型文を返す</li>
-    <li>置いておくだけで 1 時間 ≈ $0.52（約 79 円）。<em>OpenSearch Serverless だけで月 ≈ $240</em> かかるので、使わない期間はスタックを消す</li>
+    <li>置いておくだけで 1 時間 ≈ $0.52（約 79 円）。<em>OpenSearch Serverless だけで月 ≈ $240</em> かかるので、使わない期間は <code>terraform/main</code> を destroy する</li>
   </ul>
 </div>
 
@@ -126,7 +126,7 @@
 <circle cx="50" cy="771" r="9" fill="#FFFFFF" stroke="#111110" stroke-width="1.5"/><text x="50" y="775" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="11" fill="#111110" font-weight="700" text-anchor="middle">5</text>
 </svg>
   </div>
-  <figcaption>fig.1 EC2 の Web から LLM と会話するときの流れ。通信はすべて TLS 443。番号は「会話 1 往復の流れ」に対応する。任意の lab（<code>lab.yaml</code>、containerlab + FRR の EC2 1 台）は同じ VPC に置くが、この流れにはつながらない</figcaption>
+  <figcaption>fig.1 EC2 の Web から LLM と会話するときの流れ。通信はすべて TLS 443。番号は「会話 1 往復の流れ」に対応する。任意の lab（<code>terraform/lab</code>、containerlab + FRR の EC2 1 台）は同じ VPC に置くが、この流れにはつながらない</figcaption>
 </figure>
 
 <h2 id="flow">会話 1 往復の流れ</h2>
@@ -171,7 +171,7 @@
   <div class="mb-card">
     <div class="mb-card-title">1 か月置いたまま</div>
     <p><strong>≈ $383</strong>（約 57,400 円）</p>
-    <p>EC2 を止めてもほとんど減りません。使わない期間はスタックごと消します。lab の EC2（t4g.large）は起動中だけ約 13 円/h。使ったら止めます。</p>
+    <p>EC2 を止めてもほとんど減りません。使わない期間は terraform destroy で消します。lab の EC2（t4g.large）は起動中だけ約 13 円/h。使ったら止めます。</p>
   </div>
 </div>
 
@@ -183,13 +183,13 @@
 <h2 id="deploy">デプロイから会話まで</h2>
 
 <ol>
-  <li><code>ecr.yaml</code> をデプロイして ECR リポジトリを作る</li>
+  <li><code>terraform/ecr</code> を apply して ECR リポジトリを作る</li>
   <li>arm64 のエージェントイメージ（トポロジのツールと静的データ入り）をビルドして push する</li>
-  <li><code>main.yaml</code> をデプロイする。VPC / サブネット / ルートテーブルと <code>KbAdminPrincipalArn</code>（デプロイする人の IAM ロールの ARN）、push したタグ <code>AgentImageTag</code> を渡す。ネットワークの値を手で入れるのはこのスタックだけで、VPC ID・サブネット・SG・バケット名は Export され、<code>lab.yaml</code> / <code>stream.yaml</code> / <code>graph.yaml</code> は <code>Fn::ImportValue</code> で受け取る</li>
+  <li><code>terraform/main</code> を apply する。VPC / サブネット / ルートテーブルを作り、push したタグ <code>agent_image_tag</code> を渡す（OpenSearch の管理者は apply した人の認証情報から自動で取る）。VPC ID・サブネット・SG・バケット名は出力に出し、<code>terraform/lab</code> / <code>terraform/stream</code> / <code>terraform/graph</code> はローカルの state（<code>terraform_remote_state</code>）から読む</li>
   <li>Gradio の画面と wheel（arm64 / cp313）を S3 の <code>web/</code> に置いて EC2 を再起動し、<code>kb-docs/</code> の md を S3 に置いて取り込みジョブを流す</li>
   <li>Runtime のロググループに保持期間とタグを付け、利用者に <code>ssm:StartSession</code> の権限を渡す</li>
   <li>PC でポートフォワーディングを始め、ブラウザで <code>http://localhost:8080/</code> を開く</li>
-  <li>（任意）lab のイメージを ECR に、設定と containerlab の rpm を S3 に置き、<code>lab.yaml</code> をデプロイする。SSM セッションで入って <code>sudo lab check</code></li>
+  <li>（任意）lab のイメージを ECR に、設定と containerlab の rpm を S3 に置き、<code>terraform/lab</code> を apply する。SSM セッションで入って <code>sudo lab check</code></li>
 </ol>
 
 <pre><code class="language-bash">aws ssm start-session --region ap-northeast-1 \
@@ -205,7 +205,7 @@
 
 <p>
 フェーズ 1 では lab と Web はつながっておらず、トポロジもコンテナに焼いた静的データでした。
-フェーズ 2 は 2 つの別スタック（<code>stream.yaml</code> / <code>graph.yaml</code>）を足して、これをつなぎます。
+フェーズ 2 は 2 つの別ルート（<code>terraform/stream</code> / <code>terraform/graph</code>）を足して、これをつなぎます。
 どちらも時間課金なので、<strong>使う日に作って当日中に消す</strong>前提です。
 </p>
 
@@ -220,7 +220,7 @@ Neptune ── Gremlin ──▶ エージェントのトポロジツール / We
 <ul>
   <li><strong>異常の定義は「インタフェースが down」だけ。</strong>ポーリングで <code>ifOperStatus</code> が 2 になるか、snmpd が送る linkDown trap を受けたら <code>open</code>、up に戻れば <code>resolved</code>。BGP の隣接や経路の変化は見ません。</li>
   <li><strong>trap とポーリングの両方を持つのは、速さと確実さのため。</strong>trap は 5 秒以内に届きますが取りこぼすことがあり、ポーリングは 10 秒周期ですが必ず追いつきます。detector は同じ機器・同じインタフェースを 1 件にまとめます。</li>
-  <li><strong>Web とエージェントは、同じ 3 つのモジュールでトポロジと異常を読みます。</strong>Neptune と DynamoDB の場所は SSM のパラメータから引き、無ければ静的データに戻る（60 秒キャッシュ）ので、フェーズ 2 のスタックを消してもフェーズ 1 のまま動きます。</li>
+  <li><strong>Web とエージェントは、同じ 3 つのモジュールでトポロジと異常を読みます。</strong>Neptune と DynamoDB の場所は SSM のパラメータから引き、無ければ静的データに戻る（60 秒キャッシュ）ので、フェーズ 2 を destroy してもフェーズ 1 のまま動きます。</li>
   <li><strong>Neptune の中身は Web から手で編集します。</strong>「静的データを投入」で 10 台と 10 本を入れ、以後リンクの追加・削除ができます。lab の実配線とは同期しません。</li>
   <li><strong>費用は stream + graph で 1 時間 ≈ $0.43（約 65 円）。</strong>MSK kafka.t3.small × 2 が $0.12、MSK Connect 1 MCU が $0.14、Neptune db.t4g.medium が $0.14、lambda / sts のエンドポイントが $0.03。1 か月置くと ≈ $317（約 47,600 円）。東京の税抜単価で、2026-09-15 に AWS Price List API で確認。</li>
 </ul>
@@ -228,7 +228,7 @@ Neptune ── Gremlin ──▶ エージェントのトポロジツール / We
 <h2 id="limits">確認できていないこと</h2>
 
 <p>
-テンプレート 5 つは <code>cfn-lint</code> を通し、エージェントと detector と Neptune の読み書きは boto3 を差し替えた模擬テスト（41 / 21 / 18 項目）を通しました。
+Terraform の 6 ルートは <code>terraform validate</code> と <code>terraform fmt</code> を通し、エージェントと detector と Neptune の読み書きは boto3 を差し替えた模擬テスト（41 / 23 / 18 項目）を通しました。
 Gradio の画面はフェーズ 1 の版は手元で起動し、フェーズ 2 の 3 タブ版は構文検査までです。AWS 上にはまだデプロイしていません。次の点は実環境で確かめる必要があります。
 </p>
 

@@ -1,6 +1,6 @@
 """detector Lambda。MSK の metrics / traps トピックを読み、異常を DynamoDB に書く。
 
-stream.yaml の ZipFile と同じ内容（tests/test_stream.py が一致を確かめる。4096 文字まで）。
+terraform/stream が index.py として zip にして Lambda に載せる（tests/test_stream.py が確かめる）。
 記録: ifOperStatus が down のインタフェース（ポーリング）と linkDown トラップ（即時）。
 解消: up に戻ったポーリング、linkUp トラップ。キーは <機器>#<種別>#<インタフェース>。
 機器名は sysName タグ > DEVICE_MAP（IP=機器名,...）の順で引く。

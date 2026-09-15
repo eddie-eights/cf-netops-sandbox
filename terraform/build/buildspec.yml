@@ -1,0 +1,32 @@
+version: 0.2
+phases:
+  pre_build:
+    commands:
+      - REG="$(aws sts get-caller-identity --query Account --output text).dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
+      - aws ecr get-login-password | docker login --username AWS --password-stdin "$REG"
+      # zip の中に repo 名のフォルダが 1 段あってもよいように、agent/Dockerfile の場所から根を決める
+      - SRC="$(dirname "$(dirname "$(find . -path '*agent/Dockerfile' | head -1)")")"; echo "source root: $SRC"; uname -m
+  build:
+    commands:
+      - |
+        set -eu
+        case "$TARGET" in
+          agent)
+            docker build -t "$REG/$NAME_PREFIX-agent:$IMAGE_TAG" "$SRC/agent"
+            docker push "$REG/$NAME_PREFIX-agent:$IMAGE_TAG"
+            ;;
+          lab)
+            docker pull "quay.io/frrouting/frr:$FRR_TAG"
+            docker tag "quay.io/frrouting/frr:$FRR_TAG" "$REG/$NAME_PREFIX-lab-frr:$FRR_TAG"
+            docker push "$REG/$NAME_PREFIX-lab-frr:$FRR_TAG"
+            docker pull "wbitt/network-multitool:$MULTITOOL_TAG"
+            docker tag "wbitt/network-multitool:$MULTITOOL_TAG" "$REG/$NAME_PREFIX-lab-multitool:$MULTITOOL_TAG"
+            docker push "$REG/$NAME_PREFIX-lab-multitool:$MULTITOOL_TAG"
+            docker build -t "$REG/$NAME_PREFIX-lab-snmpd:$IMAGE_TAG" "$SRC/lab/snmpd"
+            docker push "$REG/$NAME_PREFIX-lab-snmpd:$IMAGE_TAG"
+            ;;
+          *) echo "TARGET must be agent or lab (got: $TARGET)"; exit 1 ;;
+        esac
+  post_build:
+    commands:
+      - echo "pushed TARGET=$TARGET IMAGE_TAG=$IMAGE_TAG to $REG"
