@@ -12,7 +12,7 @@ EC2 のセキュリティグループに**受信ルールは 1 つも無い**。
 | フェーズ | できること | 作るもの（`terraform/` の下） | 待機の時間課金（東京） |
 |---|---|---|---|
 | `PHASE=1`（既定） | LLM + RAG の対話（チャットが手順書を引いて答える） | `ecr` / `main` | 約 $0.52/h（約 79 円） |
-| `PHASE=2` | フェーズ 1 に加えて、データパイプライン（lab の containerlab → Telegraf → Kafka → Spark → S3 Tables。異常は「異常一覧」に出る）と、トポロジの操作（Neptune。Web の「トポロジ」タブで編集する） | + `lab` / `stream` / `analytics` / `graph` | さらに約 $0.69/h（約 104 円）。`SKIP_*` で一部を外せる |
+| `PHASE=2` | フェーズ 1 に加えて、データパイプライン（lab の containerlab → Telegraf → Kafka → Spark → S3 Tables。`SINKS` で OpenSearch Serverless（ログ）と Prometheus（メトリクス）にも流せる。異常は「異常一覧」に出る）と、トポロジの操作（Neptune。Web の「トポロジ」タブで編集する） | + `lab` / `stream` / `analytics` / `graph` | さらに約 $0.69/h（約 104 円）。`SKIP_*` で一部を外せる |
 | `PHASE=3` | フェーズ 2 に加えて、エージェントが異常の原因を Temporal のワークフローで調べて修復案を出し、人が Web の「承認」タブで承認すると lab で直して確かめる。エージェントのツールは AgentCore Gateway（MCP）経由 | + `workflow` | さらに約 $0.05/h（約 8 円） |
 
 フェーズ 2 は、組織の SCP / IAM で止められていることがある（「前提」の「AWS 側」）。番号 2B / 5A / 5B は 2026-09-17 に無くなった（2B → 2、5A + 5B → 3）。
@@ -52,7 +52,10 @@ Web の部品（利用者が手で行う）: web/app.py + agent/data/ + wheels/ 
   lab EC2 の Telegraf ─ SNMP ポーリング（10 秒、CE 4 台）+ SNMP trap（linkUp/linkDown、snmpd → 203.0.113.1:162）
     ─ Kafka（IAM 認証、9098）─▶ MSK（2 ブローカー、terraform/stream）─┬▶ detector Lambda ─▶ DynamoDB の異常テーブル ─▶ Web の「異常一覧」/ エージェントの list_anomalies
                                                                  ├▶ MSK Connect（S3 sink）─▶ S3 の stream/（任意。CREATE_S3_SINK=0 で外す）
-                                                                 └▶ Spark（EMR Serverless、terraform/analytics）─▶ S3 Tables（Iceberg）の snmp_metrics（履歴の正本。60 秒ごとに追記）
+                                                                 ├▶ Spark（EMR Serverless、terraform/analytics）─ 全トピック ─▶ S3 Tables（Iceberg）の snmp_metrics（履歴の正本。60 秒ごとに追記）
+                                                                 ├▶ Spark ─ traps（ログ）だけ ─▶ OpenSearch Serverless の snmp-logs（deploy.env の SINKS に opensearch を足したとき）
+                                                                 └▶ Spark ─ metrics だけ ─▶ Amazon Managed Service for Prometheus（SINKS に prometheus を足したとき）
+    Kafka から 4 つに分ける設計（2026-09-17）の 4 本目、log + metrics → Splunk は Kafka の sink（MSK Connect）にする予定で後回し。Grafana での可視化も後回し
   Neptune（terraform/graph）─ Gremlin（boto3 neptunedata、IAM 認証）─▶ エージェントの topology.py と Web の「トポロジ」タブ（図・表・リンクの追加削除）
 
 フェーズ 3（PHASE=3。terraform/workflow の 1 ルート。フェーズ 2 の lab と stream が要る）:
@@ -81,7 +84,7 @@ Web の部品（利用者が手で行う）: web/app.py + agent/data/ + wheels/ 
 | `terraform/lab/` | フェーズ 2。containerlab + FRR の lab を動かす EC2 1 台（`templates/lab_user_data.sh.tftpl`）。VPC / サブネット / SG / バケットは `terraform/main` の state から読む。stream を作るときは Telegraf も入れる |
 | `terraform/stream/` | フェーズ 2。`network.tf`（SG と lambda・sts・dynamodb エンドポイント）/ `msk.tf`（MSK。2 ブローカー、IAM 認証）/ `anomalies.tf`（DynamoDB の異常テーブル）/ `detector.tf`（detector Lambda）/ `sink.tf`（MSK Connect の S3 sink）/ `access.tf`（`terraform/main` と `terraform/lab` のロールに足す権限）/ `locals.tf`。`terraform/main` と `terraform/lab` の state を読む |
 | `terraform/analytics/` | フェーズ 2。`tables.tf`（S3 Tables のテーブルバケット・namespace `netops`・Iceberg テーブル `snmp_metrics`）/ `emr.tf`（EMR Serverless の Spark アプリケーション。ARM64、アイドル 15 分で止まる）/ `access.tf`（ジョブの実行ロール）/ `network.tf`（EMR の SG、MSK への 9098、`s3tables` の interface エンドポイント）/ `locals.tf` / `outputs.tf`（`start-job-run` に渡す JSON）。`terraform/main` と `terraform/stream` の state を読む |
-| `spark/snmp_to_iceberg.py` | analytics のジョブ本体。Kafka の `metrics` / `traps` を読み、Telegraf の JSON を行にして S3 Tables のテーブルに 60 秒ごとに追記する（Structured Streaming）。`ops/up.sh` が jar 6 本と一緒に S3 の `analytics/` に置く（a-1） |
+| `spark/snmp_sinks.py` | analytics のジョブ本体。Kafka の `metrics` / `traps` を読み、Telegraf の JSON を行にして格納先に 60 秒ごとに流す（Structured Streaming。格納先ごとに別のクエリ）。iceberg = 全トピック → S3 Tables、opensearch = `traps` → OpenSearch Serverless の `_bulk`（SigV4）、prometheus = `metrics` の数値の field → Amazon Managed Service for Prometheus の remote write（protobuf + snappy を手組み）。`ops/up.sh` が jar 6 本と一緒に S3 の `analytics/` に置く（a-1） |
 | `terraform/graph/` | フェーズ 2。Neptune（db.t4g.medium × 1、IAM 認証）と、`terraform/main` のロールへの Gremlin 権限。`terraform/main` の state を読む。無ければ静的データで動く |
 | `terraform/workflow/` | フェーズ 3。`ecs.tf`（ECS クラスタ・タスク定義（temporal + worker の 2 コンテナ、ARM64、1 vCPU / 2 GB）・サービス・SG・ロググループ）/ `proposals.tf`（DynamoDB の修復案テーブルと SSM の `proposal-table`、Web と Runtime のロールへの読み書き権限）/ `iam.tf`（タスクのロール。Runtime の呼び出し、lab の EC2 への `AWS-RunShellScript` だけ）/ `gateway.tf`（AgentCore Gateway（MCP、IAM 認証）と tools Lambda、SSM の `gateway-url`。`create_gateway=false` で外せる）/ `locals.tf`。`terraform/ecr` / `main` / `lab` / `stream` の state を読む |
 | `workflow/` | ワーカーのコンテナ（`worker.py` / `Dockerfile` / `requirements.txt`。Python 3.13、`temporalio` SDK、arm64）。starter（異常を拾ってワークフローを起こす）とワークフロー（調査 → 修復案 → 承認待ち → lab で修復 → 確認）が 1 プロセス |
@@ -382,7 +385,7 @@ PHASE=2 ops/up.sh
 | 2 | ECR に**無いタグだけ** arm64 でビルドして push する（エージェント。lab を作るときは lab の frr / multitool / snmpd も。`PHASE=3` ではワーカーもビルドし、Temporal（`temporalio/temporal`）は arm64 のイメージをそのまま ECR にミラーする）。PC の `docker buildx` で作る（dockerd が動いていないとき、agent か snmpd を作るのに `docker buildx ls` に `linux/arm64` が無いときは止まる） | 2 / lab-1 |
 | 3 | `terraform/main` を init / apply（初回 10〜20 分）。graph を作るとき（`PHASE=2` で `SKIP_GRAPH` が空）は、終わったら `terraform/graph` の apply を**裏で**始める（10〜15 分。ログは `ops/logs/graph-apply.log`） | 3 / g-1 |
 | 4 | wheel を取り（`wheels/` が空のときだけ）、Web の部品と手順書を S3 に置き、取り込みが `COMPLETE` になるまで待つ。EC2 の初回の user_data が終わるのを待ってから再起動し、Web のサービスが `active` になるまで待つ | 4 |
-| 5 | **lab を作るときだけ**（`PHASE=2` で `SKIP_LAB` が空）。containerlab の rpm（stream を作るなら Telegraf の rpm と S3 sink の zip も。`CREATE_S3_SINK=0` なら zip は取らない）をリポジトリの直下に取り（無いときだけ）、lab の設定と一緒に S3 に置く。lab の EC2 を作る前に置くので、Telegraf まで最初の起動で入る。**analytics を作るときは**、Spark の jar 6 本（Maven Central）を `jars/` に取り（無いときだけ）、`spark/snmp_to_iceberg.py` と一緒に S3 の `analytics/` に置く | lab-2 / s-1 / a-1 |
+| 5 | **lab を作るときだけ**（`PHASE=2` で `SKIP_LAB` が空）。containerlab の rpm（stream を作るなら Telegraf の rpm と S3 sink の zip も。`CREATE_S3_SINK=0` なら zip は取らない）をリポジトリの直下に取り（無いときだけ）、lab の設定と一緒に S3 に置く。lab の EC2 を作る前に置くので、Telegraf まで最初の起動で入る。**analytics を作るときは**、Spark の jar 6 本（Maven Central）を `jars/` に取り（無いときだけ）、`spark/snmp_sinks.py` と一緒に S3 の `analytics/` に置く | lab-2 / s-1 / a-1 |
 | 6 | **lab を作るときだけ。**`terraform/lab` を init / apply | lab-3 |
 | 7 | **stream を作るときだけ**（`SKIP_STREAM` が空）。`terraform/stream` を init / apply（MSK の作成に 20〜30 分）。lab が前の実行から残っていて Telegraf が入っていなければ、lab の EC2 を再起動する | s-2 / s-3 |
 | 7-3 | **analytics を作るときだけ**（`SKIP_ANALYTICS` が空）。`terraform/analytics` を init / apply（数分） | a-2 |
@@ -408,6 +411,7 @@ Terraform の確認プロンプトは出さずに進む（スクリプトの中�
 | `SKIP_LAB=1` | `PHASE=2` で lab を作らない。約 $0.09/h 下がる。stream は lab の Telegraf から流すので、`SKIP_STREAM=1` も書く（無いと止まる） |
 | `SKIP_STREAM=1` | `PHASE=2` で stream（MSK → detector → DynamoDB と、MSK Connect の S3 sink）を作らない。読む Kafka が無くなるので analytics も作らない。「異常一覧」は使えない。約 $0.46/h 下がる |
 | `SKIP_ANALYTICS=1` | `PHASE=2` で analytics（EMR Serverless の Spark と S3 Tables）を作らない。約 $0.17/h 下がる。stream の異常一覧は動く |
+| `SINKS` | analytics の Spark の格納先（カンマ区切り。既定 `iceberg`）。`iceberg` = 全トピック → S3 Tables、`opensearch` = `traps` → OpenSearch Serverless の TIMESERIES コレクション（VPC の中からだけ届く。OCU がフェーズ 1 のコレクションと共有されるか確認できていないので最大 +$0.33/h）、`prometheus` = `metrics` → Amazon Managed Service for Prometheus（エンドポイント 2 本で +$0.03/h と取り込みのサンプル課金）。`terraform/analytics` の `sinks` に渡す |
 | `SKIP_GRAPH=1` | `PHASE=2` で graph（Neptune）を作らない。約 $0.14/h 下がる。「トポロジ」タブは静的データを出す（編集はできない） |
 | `CREATE_S3_SINK=0` | stream の S3 sink（MSK Connect）を作らない。約 $0.14/h 下がる。履歴の正本は analytics の S3 Tables なので、外してもデータは残る。`ops/down.sh` には要らない（state から読む） |
 | `IMAGE_TAG` | エージェントのイメージのタグ（`PHASE=3` ではワーカーも同じタグ）。既定 `v1`。`agent/` や `workflow/` を変えたら `v2` などに書き換える（`deploy.env` に書けば毎回付けなくてよい。行を消すと `v1` に戻す差分になる） |
@@ -1005,7 +1009,7 @@ terraform -chdir=terraform/stream output -raw detector_logs; echo
 
 ### a-1. Spark の jar とスクリプトを S3 に置く
 
-Spark が Kafka（MSK の IAM 認証）と S3 Tables を読み書きするための jar 6 本を Maven Central から取り、`spark/snmp_to_iceberg.py` と一緒に `terraform/main` のバケットの `analytics/` に置く。**a-2 の apply より前に置く**（ジョブがここから読む）。
+Spark が Kafka（MSK の IAM 認証）と S3 Tables を読み書きするための jar 6 本を Maven Central から取り、`spark/snmp_sinks.py` と一緒に `terraform/main` のバケットの `analytics/` に置く。**a-2 の apply より前に置く**（ジョブがここから読む）。
 版は `ops/up.sh` の `JAR_URLS`（Spark 3.5.6 = EMR Serverless の `emr-7.13.0`）と揃える。`jars/` は gitignore 済み。
 
 ```bash
@@ -1017,7 +1021,7 @@ mkdir -p jars && cd jars && curl -LO https://repo1.maven.org/maven2/org/apache/s
 ```
 
 ```bash
-aws s3 cp spark/snmp_to_iceberg.py "s3://$KB_BUCKET/analytics/"
+aws s3 cp spark/snmp_sinks.py "s3://$KB_BUCKET/analytics/"
 ```
 
 ```bash
@@ -1028,6 +1032,9 @@ aws s3 sync jars/ "s3://$KB_BUCKET/analytics/jars/" --exclude "*" --include "*.j
 
 VPC / サブネット / バケットは `terraform/main` の state から、MSK のクラスターと SG とブローカーは `terraform/stream` の state から読む（stream が無いと precondition で止まる）。
 作るのは S3 Tables のテーブルバケット `fukuda-nwc-poc-tables`（namespace `netops`、テーブル `snmp_metrics`）、EMR Serverless の Spark アプリケーション（ARM64、`emr-7.13.0`、アイドル 15 分で止まる）、ジョブの実行ロール、EMR の SG（MSK の SG に 9098 の受信を足す）、`s3tables` の interface エンドポイント（2 AZ）。数分。
+
+格納先は変数 `sinks`（既定 `["iceberg"]`）で選ぶ。`opensearch` を足すと OpenSearch Serverless の TIMESERIES コレクション `fukuda-nwc-poc-logs`（VPC エンドポイント経由だけ。インデックス `snmp-logs` は最初の書き込みで作られる）、`prometheus` を足すと Amazon Managed Service for Prometheus のワークスペース `fukuda-nwc-poc-metrics` と `aps-workspaces` の interface エンドポイント（2 AZ）も作る。
+`ops/up.sh` は `deploy.env` の `SINKS` をこの変数に渡す。手で打つときは apply に `-var 'sinks=["iceberg","opensearch","prometheus"]'` を付ける（`--metric-topics` / `--log-topics` は変数 `metric_topics` / `log_topics`。既定 `metrics` / `traps`）。
 
 ```bash
 terraform -chdir=terraform/analytics init
@@ -1040,7 +1047,7 @@ terraform -chdir=terraform/analytics apply
 ### a-3. Spark のジョブを起こす
 
 アプリケーションは器だけで、ジョブを起こすまで課金されない。ジョブは Structured Streaming で、止めるまで動き続ける（`--mode STREAMING`。落ちても EMR Serverless が再開する）。
-`start-job-run` に渡す JSON は Terraform の出力にある（`job_driver_json` が Kafka のブローカー・テーブル名・チェックポイントの引数と Iceberg / S3 Tables の設定、`configuration_overrides_json` がドライバーのログを CloudWatch Logs に出す設定）。
+`start-job-run` に渡す JSON は Terraform の出力にある（`job_driver_json` が Kafka のブローカー・格納先（`--sinks` と格納先ごとのテーブル名 / エンドポイント / URL）・チェックポイントの引数と Iceberg / S3 Tables の設定、`configuration_overrides_json` がドライバーのログを CloudWatch Logs に出す設定）。
 
 ```bash
 APP_ID=$(terraform -chdir=terraform/analytics output -raw application_id); echo "$APP_ID"
@@ -1059,7 +1066,7 @@ OVERRIDES=$(terraform -chdir=terraform/analytics output -raw configuration_overr
 ```
 
 ```bash
-aws emr-serverless start-job-run --region ap-northeast-1 --application-id "$APP_ID" --execution-role-arn "$ROLE_ARN" --name snmp-to-iceberg --mode STREAMING --job-driver "$JOB_DRIVER" --configuration-overrides "$OVERRIDES" --tags Project=fukuda-nwc-poc,owner=fukuda
+aws emr-serverless start-job-run --region ap-northeast-1 --application-id "$APP_ID" --execution-role-arn "$ROLE_ARN" --name snmp-sinks --mode STREAMING --job-driver "$JOB_DRIVER" --configuration-overrides "$OVERRIDES" --tags Project=fukuda-nwc-poc,owner=fukuda
 ```
 
 起動に 2〜5 分。様子は `list_job_runs_command` の出力のコマンドで見る（`RUNNING` になれば読んでいる。`FAILED` ならロググループ `/aws/emr-serverless/fukuda-nwc-poc` のドライバーの stderr）。テーブルに行が入ったかは `list_tables_command` と Athena（S3 Tables のカタログ `s3tablescatalog`）で見る。
@@ -1451,6 +1458,14 @@ MSK Connect を作らなければ（`CREATE_S3_SINK=0`）stream は約 $0.15/h�
 | S3 Tables のストレージ・リクエスト・compaction | $0.0265/GB 月 + リクエスト | 約 $0 |
 | **合計** | | **約 $0.17（約 26 円）** |
 
+`SINKS` に足したぶんは上に含めていない（2026-09-17）。
+
+| 格納先を足したときの項目 | 単価 | 1 時間 |
+|---|---|---|
+| `prometheus`: インターフェイスエンドポイント aps-workspaces × 2 AZ | $0.014/h/AZ | $0.028 |
+| `prometheus`: Amazon Managed Service for Prometheus の取り込み | 料金ページの値は確認できていない（10 秒間隔 × 機器 4 台 × 数十 field で月数百万サンプル）。ワークスペース自体は無料 | 未検証 |
+| `opensearch`: OpenSearch Serverless の TIMESERIES コレクション | インデックス $0.326/OCU 時間、検索 $0.334/OCU 時間 | フェーズ 1 のコレクション（VECTORSEARCH 型）と OCU を共有するか確認できていない。共有されなければ最小 0.5 + 0.5 OCU で **+$0.33**、されれば 0 |
+
 | パターン | 1 時間 | 1 か月（730 時間） |
 |---|---|---|
 | 上の想定（1 人が 1 分に 1 回話す） | 約 $0.81（約 121 円） | 使い方しだい |
@@ -1497,7 +1512,8 @@ MSK Connect を作らなければ（`CREATE_S3_SINK=0`）stream は約 $0.15/h�
 - Gateway のツールが見るトポロジは静的データ（`agent/data/`）と DynamoDB の異常一覧だけ。Neptune には Runtime の中のツールだけが届く（Gateway があるときは Runtime のツールを使わないので、フェーズ 3 ではチャットのトポロジも静的になる）。
 - 修復の対象は lab の EC2 で、打てるのは `sudo lab heal-main` と `sudo lab check` だけ（`workflow/worker.py` の `ALLOWED_ACTIONS`。エージェントがそれ以外を返したら `none` にする）。実機には何も打たない。
 - Grafana などの可視化は保留。異常一覧と修復案は DynamoDB の表をそのまま出す。
-- OpenSearch の全文検索（Kafka のメッセージを OpenSearch にも入れること）。別のコレクションが要りそうで月 ≒ $240 の可能性があるので、お金の判断として入れていない（`docs/phases.md`）。
+- Kafka から 4 つに分ける設計（2026-09-17）の 4 本目、log + metrics → Splunk。Spark を通さず Kafka の sink（MSK Connect の Splunk Connect for Kafka）にする予定で後回し。Splunk 自体も置いていない（Splunk Enterprise の公式コンテナイメージ `splunk/splunk` はあるが、arm64 のイメージがあるか、Free ライセンス（500 MB/日）で HEC が使えるかは確認できていない）。
+- OpenSearch Serverless（`SINKS=opensearch`）と Prometheus（`SINKS=prometheus`）の可視化。Grafana は置いていない（後回し）。中身は VPC の中からしか届かないので、見るなら Web の EC2 から curl するか Grafana を足す。
 - Neptune のトポロジと lab の実配線の同期。Neptune は手で編集するもので、lab を変えても追随しない。
 - 手順書の自動取り込み。S3 のイベントで取り込みジョブを流す仕組みは入れていない。
 - 日本語向けの形態素解析（kuromoji など）。キーワード検索は OpenSearch の既定のアナライザで、日本語は細かく切られる。ログの文字列やコマンド名のような英数字の一致には効く。
@@ -1612,7 +1628,7 @@ uv run python web/app.py
 - `deploy.env` の読み込みとフェーズの分け方を、偽の `aws` / `terraform` で `ops/up.sh` の手順 0 まで流した（2026-09-17）。ファイル無しでフェーズ 1、`PHASE=2` で lab + stream + analytics + graph、`SKIP_STREAM` で analytics も外れ、`SKIP_ANALYTICS` / `SKIP_LAB` + `SKIP_STREAM` / `SKIP_GRAPH` で外れること。`PHASE=3` で workflow が足され、`PHASE=3` に `SKIP_LAB` か `SKIP_STREAM` を書くと止まること。`SKIP_LAB=1` だけ、`2B` / `5A`、`WITH_LAB` / `WITH_STREAM`、値の誤りで何も作らずに止まること。環境変数がファイルより優先されること。`ops/down.sh` がファイルの `KEEP_ECR` を読むこと。
 - 7 つのルート（`ecr` / `main` / `lab` / `stream` / `analytics` / `graph` / `workflow`）で `terraform init -backend=false` と `terraform validate` が通り、`terraform fmt -check -recursive` に差分が無い（Terraform 1.16.0、hashicorp/aws 6.64.0、opensearch-project/opensearch 2.6.0、hashicorp/time 0.14.2、hashicorp/archive 2.8.1。2026-09-16）。
 - stream と graph の模擬テスト。`tests/test_stream.py`（23 項目: `terraform/stream` の `archive_file` が `stream/detector.py` を `index.py` として zip する配線、機器名の引き方、ポーリングの open / resolved、`first_seen` を保つ、解消済みへの up を数えない、MIB 無しの trap から ifDescr を取る、linkUp で resolved、壊れたレコードを飛ばす）、`tests/test_graph.py`（18 項目: SSM 未設定なら静的、GraphSON の読み替え、Neptune からの組み立て、失敗時と空のときの静的への切り戻し、`add_link` の正規化と重複拒否、`remove_link` / `add_device` / `seed` の Gremlin）。
-- analytics の静的テスト `tests/test_analytics.py`（81 項目、2026-09-17: `terraform/analytics` が読む main / stream の出力が実際に定義されていること、EMR の SG に CIDR の受信が無いこと、S3 Tables のテーブルの列が `spark/snmp_to_iceberg.py` の select の列と同じ順で同じ型であること、`start-job-run` に渡す JSON の Iceberg / S3 Tables の設定、Kafka の MSK IAM 認証のオプション 4 つ、60 秒トリガーと append、`ops/up.sh` の jar 6 本が Spark 3.5.6 と揃っていること、up / down の順番）。
+- analytics の静的テスト `tests/test_analytics.py`（137 項目、2026-09-17: `terraform/analytics` が読む main / stream の出力が実際に定義されていること、EMR の SG に CIDR の受信が無いこと、S3 Tables のテーブルの列が `spark/snmp_sinks.py` の select の列と同じ順で同じ型であること、`start-job-run` に渡す JSON の Iceberg / S3 Tables の設定と `--sinks` / `--metric-topics` / `--log-topics`、`sinks` で OpenSearch Serverless のコレクション（TIMESERIES、VPC エンドポイントだけ）と Prometheus のワークスペース + `aps-workspaces` のエンドポイントが count で生えること、実行ロールの `aoss:APIAccessAll` / `aps:RemoteWrite`、Kafka の MSK IAM 認証のオプション 4 つ、格納先ごとの checkpoint と 60 秒トリガー、`ops/up.sh` の `SINKS` の検査と jar 6 本が Spark 3.5.6 と揃っていること、up / down の順番。スクリプトは pyspark 無しで import して、引数の検査・トピックの振り分け・メトリクス名とラベル名の規則・remote write の protobuf と snappy（テストの中で手で復号する）・`_bulk` の文書を実際に動かす）。
 - workflow の静的テスト `tests/test_workflow.py`（100 項目、2026-09-17: ワーカーのプロンプトと JSON の読み取り、`ALLOWED_ACTIONS` が `lab/lab.sh` のサブコマンドにあること、起こす条件とワークフロー ID、DynamoDB の読み書きの形（GSI `status-updated_at-index`、承認は `pending` のときだけ通る条件式）、Runtime の呼び方（`qualifier=DEFAULT`、セッション ID 33 文字以上）、MCP クライアントの JSON / SSE の読み取りと `toolConfig` への変換、`tools/tools.json` が `agent/` のツール仕様と名前・引数・必須・説明まで同じであること、tools Lambda の振り分け、`terraform/workflow` の配線（ARM64 の Fargate、`start-dev` の SQLite、worker が temporal の起動を待つ、環境変数、IAM が `InvokeAgentRuntime` と `AWS-RunShellScript` だけ、Gateway の `AWS_IAM` / `MCP`、Lambda の zip の中身）、`ops/up.sh` / `down.sh` / `check.sh` と `deploy.env.example`）。
 - `temporalio/temporal` 1.9.1 のイメージが arm64 を含むこと（マニフェスト、2026-09-17）。
 - EMR Serverless の `emr-7.13.0` が Spark 3.5.6 であること、S3 Tables のカタログが `emr-7.5.0` 以上で使えること、jar 6 本が Maven Central にあること（HTTP 200）、S3 Tables のデータが `<uuid>--table-s3` という名前のバケットに置かれること、EMR Serverless が 0.0.0.0/0 の受信を持つ SG を拒否すること、`start-job-run` に `--mode STREAMING` があること（2026-09-17、AWS の文書）。

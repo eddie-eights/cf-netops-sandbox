@@ -1,7 +1,7 @@
 # ---------------------------------------------------------------- runtime role of the Spark job
 resource "aws_iam_role" "emr" {
   name        = "${var.name_prefix}-emr-runtime"
-  description = "EMR Serverless job runtime - reads MSK, writes the S3 Tables table, reads the script and jars from the asset bucket"
+  description = "EMR Serverless job runtime - reads MSK, writes the sinks (S3 Tables, OpenSearch Serverless, Prometheus), reads the script and jars from the asset bucket"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -23,7 +23,7 @@ resource "aws_iam_role_policy" "emr" {
 
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [
+    Statement = concat([
       {
         # スクリプトと jar を読む。checkpoint とログを書く
         Sid      = "AssetBucket"
@@ -88,6 +88,22 @@ resource "aws_iam_role_policy" "emr" {
         Action   = "logs:DescribeLogGroups"
         Resource = "*"
       },
-    ]
+      ],
+      # ---- 格納先ごと（sinks.tf。選んだものだけ）
+      # 「cond ? [..] : []」は両辺の型が揃わず validate が落ちるので for … if で絞る
+      [for s in [{
+        # コレクションの API（中身の権限はデータアクセスポリシー aws_opensearchserverless_access_policy.logs）
+        Sid      = "OpenSearchCollection"
+        Effect   = "Allow"
+        Action   = "aoss:APIAccessAll"
+        Resource = local.sink_opensearch ? aws_opensearchserverless_collection.logs[0].arn : ""
+      }] : s if local.sink_opensearch],
+      [for s in [{
+        Sid      = "PrometheusRemoteWrite"
+        Effect   = "Allow"
+        Action   = "aps:RemoteWrite"
+        Resource = local.sink_prometheus ? aws_prometheus_workspace.metrics[0].arn : ""
+      }] : s if local.sink_prometheus],
+    )
   })
 }

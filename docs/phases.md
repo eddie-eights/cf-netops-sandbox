@@ -88,7 +88,10 @@ lab（EC2 の containerlab: FRR × 6 + snmpd × 4 + ホスト × 4）
   └─ Telegraf（SNMP 10 秒ポーリング + trap）─▶ stream（MSK、トピック metrics / traps）
                                                  ├─▶ detector Lambda ─▶ DynamoDB の異常一覧（Web とエージェントが読む「いま」）
                                                  ├─▶ MSK Connect（S3 sink）─▶ S3 の stream/（任意。CREATE_S3_SINK=0 で外す）
-                                                 └─▶ analytics（Spark on EMR Serverless）─▶ S3 Tables（Iceberg）の snmp_metrics（履歴の正本）
+                                                 ├─▶ analytics（Spark on EMR Serverless）─ 全トピック ─▶ S3 Tables（Iceberg）の snmp_metrics（履歴の正本）
+                                                 ├─▶ analytics の Spark ─ traps（ログ）だけ ─▶ OpenSearch Serverless の snmp-logs（SINKS に opensearch。既定では作らない）
+                                                 └─▶ analytics の Spark ─ metrics だけ ─▶ Amazon Managed Service for Prometheus（SINKS に prometheus。既定では作らない）
+  4 本目の log + metrics → Splunk は Kafka の sink（MSK Connect）にする予定で後回し（2026-09-17 ユーザー決定「splunkは後回しでもOK」）
 graph（Neptune のトポロジ。Web の「トポロジ」タブから編集）
 ```
 
@@ -112,6 +115,7 @@ graph（Neptune のトポロジ。Web の「トポロジ」タブから編集）
 | stream | MSK は IAM 認証（9098）。異常の「いま」は **DynamoDB**（オンデマンド）。ブローカーとテーブル名は SSM パラメータ経由で lab と Web に渡す |
 | S3 sink | 任意。`CREATE_S3_SINK=0` にすると MSK Connect を作らず約 $0.14/h 下がる。履歴の正本は analytics の S3 Tables なので、外してもデータは残る |
 | analytics の実体 | **EMR Serverless**（Glue ではない。ジョブが無ければ 0、アプリケーションは器だけ）。ARM64、release `emr-7.13.0`（Spark 3.5.6。S3 Tables は 7.5.0 以上。2026-09-17 確認） |
+| analytics の格納先 | **Kafka から 4 つに分ける**（2026-09-17 ユーザー決定）。Spark が 3 本: iceberg = 全トピック → S3 Tables（既定）、opensearch = ログ（いまは `traps` だけ。Telegraf に syslog を足したら `logs` も）→ OpenSearch Serverless の TIMESERIES コレクション `<prefix>-logs`（VPC エンドポイント経由だけ）、prometheus = メトリクス（`metrics`）→ Amazon Managed Service for Prometheus `<prefix>-metrics`（remote write を SigV4 で）。格納先ごとに別のストリーミングクエリと checkpoint。4 本目の Splunk（log + metrics）は Spark を通さず MSK Connect の sink にする予定で後回し。`deploy.env` の `SINKS`（既定 `iceberg`）→ `terraform/analytics` の `var.sinks` |
 | analytics のテーブル | **S3 Tables（Iceberg）**。テーブルバケット `<prefix>-tables`、namespace `netops`、テーブル `snmp_metrics`（namespace とテーブル名はアンダースコアだけ。ハイフン不可）。テーブルは Terraform で作る（destroy でバケットまで消せるように） |
 | analytics のジョブ | Structured Streaming、`--mode STREAMING`、60 秒トリガー、driver 1 + executor 1 の 2 vCPU。Kafka / MSK IAM / S3 Tables カタログの jar 6 本は `ops/up.sh` が Maven Central から取って `s3://<バケット>/analytics/jars/` に置く。起動は `ops/up.sh` の start-job-run（動いていれば起こさない） |
 | analytics のネットワーク | NAT が無いので S3 Tables の API は **interface エンドポイント `s3tables`（2 AZ）**、データ本体は main の S3 ゲートウェイエンドポイント。EMR の SG は inbound を自分自身からだけにする（0.0.0.0/0 の inbound があると EMR Serverless が拒否する） |
@@ -129,9 +133,10 @@ graph（Neptune のトポロジ。Web の「トポロジ」タブから編集）
   - EMR Serverless / S3 Tables が組織の SCP / IAM で止められていないか。
 - lab の配線と Neptune のトポロジの同期（Neptune は手で編集するもので、lab を変えても追随しない）。
 - **BGP の状態の監視。**拾うのはインタフェースの up/down（ポーリングと trap）だけで、隣接や経路の変化は異常にならない。
-- Grafana などの可視化（**保留**）。異常一覧は DynamoDB の表をそのまま出す。
+- Grafana などの可視化（**保留**。2026-09-17 ユーザー決定「OpenSearchとPrometheusはgrafanaで可視化したいけどそこは後回しでOK」）。異常一覧は DynamoDB の表をそのまま出す。OpenSearch Serverless / Prometheus の中身は VPC の中からしか届かない。
 - 異常の重み付けや相関（同時に落ちた複数のリンクを 1 件にまとめる、など）。detector Lambda（閾値判定 → DynamoDB）を残すか、Spark 側に寄せるか。
-- **OpenSearch の全文検索は入れない（2026-09-17 ユーザー決定「いれなくてOK」）。**Spark の後に Kafka のメッセージを OpenSearch にも入れる案（2026-09-16 の見直しの矢印にある「+ OpenSearch」）は、次の理由で見送った。フェーズ 1 のコレクションは `VECTORSEARCH` 型で、ID 指定の書き込み・`_update` は `SEARCH` 型だけ、`TIMESERIES` 型は upsert ができない
+- **（失効）OpenSearch の全文検索は入れない（2026-09-17 朝のユーザー決定「いれなくてOK」）。同日午後の「spark から s3 iceburg, splunk, open search + prometheus この3パターンに格納したい」「Kafka から 4 つに分ける」で置き換わり、ログ（`traps`）だけを Spark から OpenSearch Serverless の TIMESERIES コレクションに入れる形で実装した（`SINKS=opensearch`。既定では作らない）。**下の理由のうち「別に立てると OCU がもう 1 セット出る可能性」はそのまま残っている（確認できていない）。以下は当時の判断:
+  Spark の後に Kafka のメッセージを OpenSearch にも入れる案（2026-09-16 の見直しの矢印にある「+ OpenSearch」）は、次の理由で見送った。フェーズ 1 のコレクションは `VECTORSEARCH` 型で、ID 指定の書き込み・`_update` は `SEARCH` 型だけ、`TIMESERIES` 型は upsert ができない
   （[Supported operations](https://docs.aws.amazon.com/opensearch-service/latest/developerguide/serverless-genref.html)、
   [Choosing a collection type](https://docs.aws.amazon.com/opensearch-service/latest/developerguide/serverless-overview.html)。2026-09-16 に確認）ので相乗りはできない見込み。
   **別に立てると最小 OCU（月 ≒ $240）がもう 1 セット出る可能性がある**（コレクショングループに入らない Classic のコレクションは KMS キーが同じなら OCU を共有できるが、型が違っても共有されるかは未確認）。

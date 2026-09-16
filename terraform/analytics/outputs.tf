@@ -24,7 +24,7 @@ output "table_identifier" {
 }
 
 output "script_s3_uri" {
-  description = "Where ops/up.sh puts spark/snmp_to_iceberg.py"
+  description = "Where ops/up.sh puts spark/snmp_sinks.py"
   value       = "s3://${local.bucket}/${local.script_key}"
 }
 
@@ -35,11 +35,18 @@ output "jars_s3_prefix" {
 
 # start-job-run の引数。ops/up.sh はこれと同じものを組み立てる。手で打つときは README の a-3
 output "job_driver_json" {
-  description = "jobDriver for start-job-run (script, jars, catalog, Kafka options)"
+  description = "jobDriver for start-job-run (script, sinks and their endpoints, jars, catalog)"
   value = jsonencode({
     sparkSubmit = {
-      entryPoint          = "s3://${local.bucket}/${local.script_key}"
-      entryPointArguments = [local.bootstrap, local.iceberg_table, "s3://${local.bucket}/${local.checkpoint}/"]
+      entryPoint = "s3://${local.bucket}/${local.script_key}"
+      # 「cond ? [..] : []」は両辺の型が揃わず validate が落ちるので for … if で絞る
+      entryPointArguments = concat(
+        ["--bootstrap", local.bootstrap, "--checkpoint", "s3://${local.bucket}/${local.checkpoint}/", "--sinks", join(",", var.sinks), "--region", var.region,
+        "--metric-topics", local.metric_topics, "--log-topics", local.log_topics],
+        [for a in ["--iceberg-table", local.iceberg_table] : a if local.sink_iceberg],
+        [for a in ["--opensearch-endpoint", local.opensearch_endpoint, "--opensearch-index", local.opensearch_index] : a if local.sink_opensearch],
+        [for a in ["--prometheus-url", local.prometheus_remote_write_url] : a if local.sink_prometheus],
+      )
       sparkSubmitParameters = join(" ", [
         "--conf spark.jars=s3://${local.bucket}/${local.jars_prefix}/*.jar",
         "--conf spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions",
@@ -85,4 +92,29 @@ output "list_tables_command" {
 output "log_group_name" {
   description = "CloudWatch log group of the job driver"
   value       = aws_cloudwatch_log_group.emr.name
+}
+
+output "sinks" {
+  description = "Where the streaming job stores the messages (var.sinks: iceberg = all topics, opensearch = log topics, prometheus = metric topics)"
+  value       = var.sinks
+}
+
+output "opensearch_collection_endpoint" {
+  description = "OpenSearch Serverless collection the log topics go to (empty unless sinks has opensearch). Reachable only from inside the VPC"
+  value       = local.opensearch_endpoint
+}
+
+output "prometheus_workspace_id" {
+  description = "Amazon Managed Service for Prometheus workspace the metric topics go to (empty unless sinks has prometheus)"
+  value       = local.sink_prometheus ? aws_prometheus_workspace.metrics[0].id : ""
+}
+
+output "prometheus_remote_write_url" {
+  description = "remote write URL the job posts to (empty unless sinks has prometheus)"
+  value       = local.prometheus_remote_write_url
+}
+
+output "prometheus_query_url" {
+  description = "Query endpoint of the workspace (PromQL over HTTP with SigV4, or Grafana data source). Empty unless sinks has prometheus"
+  value       = local.sink_prometheus ? "${aws_prometheus_workspace.metrics[0].prometheus_endpoint}api/v1/query" : ""
 }

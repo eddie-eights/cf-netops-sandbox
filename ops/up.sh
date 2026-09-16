@@ -22,6 +22,8 @@
 #   SKIP_LAB=1              PHASE=2 で lab を作らない（stream は lab が要るので SKIP_STREAM=1 も要る）
 #   SKIP_STREAM=1           PHASE=2 で stream と analytics（stream の Kafka を読む）を作らない
 #   SKIP_ANALYTICS=1        PHASE=2 で analytics（Spark → S3 Tables）を作らない
+#   SINKS=iceberg           analytics の Spark の格納先（カンマ区切り。iceberg = 全トピック → S3 Tables（既定）、opensearch = traps → OpenSearch Serverless、
+#                           prometheus = metrics → Amazon Managed Service for Prometheus。terraform/analytics の var.sinks に渡す）
 #   SKIP_GRAPH=1            PHASE=2 で graph（Neptune）を作らない
 #   CREATE_S3_SINK=0        MSK Connect の S3 sink を作らない（Confluent の zip が取れないとき。ops/down.sh は state を見て合わせる）
 #   IMAGE_TAG               エージェント（PHASE=3 ではワーカーも）のイメージのタグ。既定 v1。ECR にそのタグが無いときだけ PC の docker buildx でビルドして push する（タグは上書きできない）
@@ -65,7 +67,7 @@ JAR_URLS=(
   "$MAVEN/software/amazon/msk/aws-msk-iam-auth/2.3.2/aws-msk-iam-auth-2.3.2-all.jar"
   "$MAVEN/software/amazon/s3tables/s3-tables-catalog-for-iceberg-runtime/0.1.8/s3-tables-catalog-for-iceberg-runtime-0.1.8.jar"
 )
-SPARK_SCRIPT=spark/snmp_to_iceberg.py
+SPARK_SCRIPT=spark/snmp_sinks.py
 
 . "$(dirname "$0")/deploy-env.sh"
 resolve_deploy_env_file  # DEPLOY_ENV_FILE の相対パスは、下の cd の前の場所から見る
@@ -183,6 +185,17 @@ case "$CREATE_S3_SINK" in
   0|1) ;;
   *) die "CREATE_S3_SINK は 1（作る。既定）か 0（作らない）（いまは「$CREATE_S3_SINK」）。まだ何も作っていない" ;;
 esac
+# analytics の Spark の格納先。terraform/analytics の var.sinks（list）にするので ["iceberg","opensearch"] の形に組む
+SINKS="${SINKS:-iceberg}"
+SINKS=$(printf '%s' "$SINKS" | tr -d ' ')
+SINKS_TF=""
+for s in $(printf '%s' "$SINKS" | tr ',' ' '); do
+  case "$s" in
+    iceberg|opensearch|prometheus) SINKS_TF="$SINKS_TF${SINKS_TF:+,}\"$s\"" ;;
+    *) die "SINKS は iceberg / opensearch / prometheus のカンマ区切り（いまは「$SINKS」）。まだ何も作っていない" ;;
+  esac
+done
+[ -n "$SINKS_TF" ] || die "SINKS が空。iceberg / opensearch / prometheus を 1 つ以上（既定は iceberg）。まだ何も作っていない"
 if [ -n "${WITH_LAB:-}" ]; then
   die "WITH_LAB は無くなった（lab はフェーズ 2 に入った）。lab だけ作るなら PHASE=2 と SKIP_STREAM=1 と SKIP_GRAPH=1。まだ何も作っていない"
 fi
@@ -261,7 +274,9 @@ echo "PHASE=$PHASE"
 echo "作るルート: $ROOTS"
 # 待機時の 1 時間あたりの目安（セント。東京リージョンの税抜。単価は 2026-09-14〜15 に Price List API で確認。内訳は README「1 時間起動したときの試算」）。
 # フェーズ 1 = 52（Interface エンドポイント・OpenSearch Serverless・Web の EC2）、lab = 9、graph = 14、stream = 29（S3 sink 無しなら 15）、
-# analytics = 17（ストリーミングのジョブが動いている間の EMR Serverless の 2 vCPU + s3tables のエンドポイント 2 本。単価は 2026-09-17 に確認）、
+# analytics = 17（ストリーミングのジョブが動いている間の EMR Serverless の 2 vCPU + s3tables のエンドポイント 2 本。単価は 2026-09-17 に確認）
+#   + SINKS に prometheus があれば 3（aps-workspaces のエンドポイント 2 本。取り込みのサンプル課金は別）。opensearch はコレクションの OCU が
+#   フェーズ 1 のコレクションと共有されるか確認できていないので数に入れず、下で注意だけ出す（共有されなければ最大 +33）、
 # workflow = 5（Fargate ARM 1 vCPU / 2 GB のタスク 1 つ。Gateway と Lambda と DynamoDB は使った分だけ。単価は 2026-09-17 に確認）。
 # README の試算を変えたらここも変える
 COST_CENTS=52
@@ -270,11 +285,17 @@ if [ -z "$SKIP_GRAPH" ]; then COST_CENTS=$((COST_CENTS + 14)); fi
 if [ -z "$SKIP_STREAM" ]; then
   if [ "$CREATE_S3_SINK" = 1 ]; then COST_CENTS=$((COST_CENTS + 29)); else COST_CENTS=$((COST_CENTS + 15)); fi
 fi
-if [ -z "$SKIP_ANALYTICS" ]; then COST_CENTS=$((COST_CENTS + 17)); fi
+if [ -z "$SKIP_ANALYTICS" ]; then
+  COST_CENTS=$((COST_CENTS + 17))
+  case ",$SINKS," in *,prometheus,*) COST_CENTS=$((COST_CENTS + 3)) ;; esac
+fi
 if [ -n "$WORKFLOW" ]; then COST_CENTS=$((COST_CENTS + 5)); fi
 COST_NOTE=$(printf '待機だけで約 $%d.%02d/h（約 %d 円/h。チャットの分は別）の時間課金。使い終わったら当日中に ops/down.sh を打つ' \
   $((COST_CENTS / 100)) $((COST_CENTS % 100)) $(((COST_CENTS * 150 + 50) / 100)))
 printf '\033[1;33m%s\033[0m\n' "$COST_NOTE"
+case ",$SINKS," in
+  *,opensearch,*) printf '\033[1;33m%s\033[0m\n' "SINKS に opensearch がある: OpenSearch Serverless のコレクションをもう 1 つ作る。OCU がフェーズ 1 のコレクションと共有されなければ最大 +\$0.33/h（README「1 時間起動したときの試算」）" ;;
+esac
 
 # ---- 1. ECR --------------------------------------------------------------------
 log "1. ECR リポジトリ（terraform/ecr）"
@@ -470,10 +491,10 @@ fi
 
 # ---- 7-3. analytics ------------------------------------------------------------------
 if [ -z "$SKIP_ANALYTICS" ]; then
-  log "7-3. analytics（terraform/analytics。S3 Tables と EMR Serverless。数分）"
-  tf_apply analytics
+  log "7-3. analytics（terraform/analytics。S3 Tables と EMR Serverless。格納先: $SINKS。数分）"
+  tf_apply analytics -var "sinks=[$SINKS_TF]"
   APP_ID=$(tf analytics output -raw application_id); echo "APP_ID=$APP_ID"
-  log "7-4. Spark のストリーミングジョブ（Kafka → S3 Tables）を起こす（README の a-3。動いていれば何もしない）"
+  log "7-4. Spark のストリーミングジョブ（Kafka → $SINKS）を起こす（README の a-3。動いていれば何もしない）"
   RUNNING=$(aws emr-serverless list-job-runs --region "$REGION" --application-id "$APP_ID" \
     --states SUBMITTED PENDING SCHEDULED RUNNING --query 'jobRuns[].id' --output text)
   if [ -n "$RUNNING" ] && [ "$RUNNING" != None ]; then
@@ -481,7 +502,7 @@ if [ -z "$SKIP_ANALYTICS" ]; then
   else
     JOB_RUN_ID=$(aws emr-serverless start-job-run --region "$REGION" --application-id "$APP_ID" \
       --execution-role-arn "$(tf analytics output -raw runtime_role_arn)" \
-      --name snmp-to-iceberg --mode STREAMING \
+      --name snmp-sinks --mode STREAMING \
       --job-driver "$(tf analytics output -raw job_driver_json)" \
       --configuration-overrides "$(tf analytics output -raw configuration_overrides_json)" \
       --tags "Project=$PREFIX,owner=$OWNER" \
