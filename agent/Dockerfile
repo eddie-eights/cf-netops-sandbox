@@ -17,7 +17,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --trusted-host pypi.org --trusted-host files.pythonhosted.org --trusted-host pypi.python.org -r requirements.txt
 
-COPY app.py topology.py anomalies.py graph.py .
+COPY app.py topology.py anomalies.py graph.py mcp_client.py proposals.py .
 COPY data/ data/
 
 # root で動かさない

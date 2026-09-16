@@ -6,7 +6,8 @@
   2. 資料と質問を Converse に渡す。ガードレールは質問（guardContent）と回答を判定する。
      モデルがトポロジのツール（topology.py。機器一覧・隣接・影響範囲・全体図。Neptune があればそこから、
      無ければコンテナ内の静的データ）や異常一覧（anomalies.py。DynamoDB）を使うと言ったら、
-     結果を返して最大 MAX_TOOL_ROUNDS 回まで往復する
+     結果を返して最大 MAX_TOOL_ROUNDS 回まで往復する。Gateway（MCP。terraform/workflow）があれば
+     ツールはそちら（mcp_client.py）から取り、届かなければコンテナ内の関数に戻す
   3. 回答の末尾に参照した資料のファイル名を付けて返す
 
 HTTP の口は bedrock-agentcore SDK が持つ: 0.0.0.0:8080 の POST /invocations と GET /ping。
@@ -26,6 +27,7 @@ from botocore.exceptions import BotoCoreError, ClientError
 
 import anomalies
 import graph
+import mcp_client
 import topology
 
 MODEL_ID = os.environ["MODEL_ID"]
@@ -42,12 +44,24 @@ MAX_TOKENS = int(os.environ.get("MAX_TOKENS", "1024"))
 MAX_TURNS = int(os.environ.get("MAX_TURNS", "10"))
 # 1 回の質問でツールを呼び直す上限。超えたら、そこまでの本文で打ち切る
 MAX_TOOL_ROUNDS = int(os.environ.get("MAX_TOOL_ROUNDS", "5"))
+# コンテナ内の関数。Gateway（MCP。terraform/workflow）があれば mcp_client がそちらの一覧を返す
 TOOL_SPECS = topology.TOOL_SPECS + anomalies.TOOL_SPECS
 
 
+def tool_specs() -> list:
+    """Gateway（MCP）のツール一覧、無い・届かないときはコンテナ内の関数"""
+    return mcp_client.tool_specs() or TOOL_SPECS
+
+
 def run_tool(name: str, args: dict) -> dict:
-    """トポロジ（topology.py）と異常一覧（anomalies.py）のツールを名前で振り分ける"""
-    return (topology if name in topology.TOOLS else anomalies).run_tool(name, args)
+    """Gateway のツールならそちらへ。失敗したら同名のコンテナ内の関数（topology.py / anomalies.py）に戻す"""
+    if mcp_client.has(name):
+        out = mcp_client.call(name, args)
+        if "error" not in out or (name not in topology.TOOLS and name not in anomalies.TOOLS):
+            return out
+    if name in topology.TOOLS or name in anomalies.TOOLS:
+        return (topology if name in topology.TOOLS else anomalies).run_tool(name, args)
+    return {"error": f"unknown tool {name}"}
 
 
 SYSTEM_PROMPT = os.environ.get(
@@ -163,7 +177,7 @@ def invoke(payload):
             "guardrailIdentifier": GUARDRAIL_ID,
             "guardrailVersion": GUARDRAIL_VERSION,
         }
-    request["toolConfig"] = {"tools": TOOL_SPECS}
+    request["toolConfig"] = {"tools": tool_specs()}
     try:
         res, text, tool_calls = converse_with_tools(request)
     except (ClientError, BotoCoreError):

@@ -21,7 +21,7 @@
 | 3（欠番）/ 4（ベクトル + 全文検索） | 4 はフェーズ 1 に取り込み済み（ナレッジベースの検索）。番号は使わない |
 | 5A（エージェントの調査ワークフロー）+ 5B（人が承認して直す） | **3** にまとめた |
 
-**まだ作っていないのはフェーズ 3 だけ。**フェーズ 2 は Terraform とスクリプトがあり、AWS 上の apply は未確認（下の「決まっていないこと」）。
+**3 つとも Terraform とスクリプトがある**（フェーズ 3 は 2026-09-17 に着手済み）。AWS 上の apply はどのフェーズも未確認（各フェーズの「決まっていないこと」）。
 
 ## 全体
 
@@ -29,7 +29,7 @@
 |---|---|---|---|---|
 | 1（`PHASE=1`、既定） | LLM + RAG で対話する。閉域の VPC でチャットし、手順書を引いて答える | `terraform/ecr` → `terraform/main` | 置いておくだけ 約 $0.52/h（約 79 円） | **動く**（このリポジトリの本体） |
 | 2（`PHASE=2`） | データパイプライン。EC2 の中の疑似ネットワーク（containerlab）の SNMP を Telegraf が Kafka に流し、Spark が S3 Tables（Iceberg）に追記し続ける。異常は DynamoDB の一覧に出る。トポロジは Neptune で持って Web から編集する | フェーズ 1 に `terraform/lab` → `terraform/stream` → `terraform/analytics`、並行して `terraform/graph` | さらに約 $0.69/h（約 104 円。lab 0.09 + stream 0.29 + analytics 0.17 + graph 0.14） | 作ってある（使う日だけ作る。**AWS 上の apply は未確認**） |
-| 3（`PHASE=3`） | 異常の検知 → 原因調査 → 修復案を、エージェントが Temporal のワークフローで回し、**人が承認**してから直す | 未着手（`terraform/` に新しいルートを足す） | 約 $0.05/h（Temporal のサーバーとワーカーを ECS on Fargate の 1 タスクで動かす例） | **道具は決まった**（Temporal / ECS on Fargate）。`PHASE=3` はまだ止まる |
+| 3（`PHASE=3`） | 異常の検知 → 原因調査 → 修復案を、エージェントが Temporal のワークフローで回し、**人が Web の「承認」タブで承認**してから lab で直して確かめる。エージェントのツールは AgentCore Gateway（MCP）経由 | フェーズ 2 に `terraform/workflow` | さらに約 $0.05/h（約 8 円。Temporal のサーバーとワーカーを ECS on Fargate の 1 タスク（ARM、1 vCPU / 2 GB）で動かす） | 作ってある（2026-09-17。使う日だけ作る。**AWS 上の apply は未確認**） |
 
 費用は 1 時間立てたときの目安。内訳と前提は README の「1 時間起動したときの試算」にある（単価はフェーズ 1 が 2026-09-14、lab・graph・stream が 2026-09-15、analytics が 2026-09-17 に AWS Price List API と料金ページで確認した値）。
 どこまで作るかは `deploy.env` の `PHASE` で選ぶ（README の「毎日の起動と片付けをスクリプトで打つ」）。フェーズ 2 の一部だけ要らないときは `SKIP_LAB` / `SKIP_STREAM` / `SKIP_ANALYTICS` / `SKIP_GRAPH`。
@@ -131,11 +131,11 @@ graph（Neptune のトポロジ。Web の「トポロジ」タブから編集）
 - **BGP の状態の監視。**拾うのはインタフェースの up/down（ポーリングと trap）だけで、隣接や経路の変化は異常にならない。
 - Grafana などの可視化（**保留**）。異常一覧は DynamoDB の表をそのまま出す。
 - 異常の重み付けや相関（同時に落ちた複数のリンクを 1 件にまとめる、など）。detector Lambda（閾値判定 → DynamoDB）を残すか、Spark 側に寄せるか。
-- **OpenSearch の全文検索**（2026-09-16 の見直しの矢印にある「+ OpenSearch」）。フェーズ 1 のコレクションは `VECTORSEARCH` 型で、ID 指定の書き込み・`_update` は `SEARCH` 型だけ、`TIMESERIES` 型は upsert ができない
+- **OpenSearch の全文検索は入れない（2026-09-17 ユーザー決定「いれなくてOK」）。**Spark の後に Kafka のメッセージを OpenSearch にも入れる案（2026-09-16 の見直しの矢印にある「+ OpenSearch」）は、次の理由で見送った。フェーズ 1 のコレクションは `VECTORSEARCH` 型で、ID 指定の書き込み・`_update` は `SEARCH` 型だけ、`TIMESERIES` 型は upsert ができない
   （[Supported operations](https://docs.aws.amazon.com/opensearch-service/latest/developerguide/serverless-genref.html)、
   [Choosing a collection type](https://docs.aws.amazon.com/opensearch-service/latest/developerguide/serverless-overview.html)。2026-09-16 に確認）ので相乗りはできない見込み。
   **別に立てると最小 OCU（月 ≒ $240）がもう 1 セット出る可能性がある**（コレクショングループに入らない Classic のコレクションは KMS キーが同じなら OCU を共有できるが、型が違っても共有されるかは未確認）。
-  お金の判断なので**入れていない**。異常の置き場を DynamoDB から OpenSearch に寄せるか（2026-09-16「DynamoDB は要らないのでは」）も、これと一緒に決める。
+  異常の置き場は DynamoDB のまま（履歴の正本は S3 Tables）。
 - S3 Tables の保守（compaction は S3 Tables が自動で行う。書き込みの粒度・パーティションの切り方は未定）。
 - S3 sink（MSK Connect）を既定で作るか。Spark が Kafka を直接読むので役割が重なり、外せば $0.142/MCU 時間（月 ≒ $104）が浮く。いまの既定は作る（`CREATE_S3_SINK=1`）。
 
@@ -143,7 +143,7 @@ graph（Neptune のトポロジ。Web の「トポロジ」タブから編集）
 
 ## フェーズ 3 — Temporal でエージェントが調査し、人が承認して直す
 
-**このリポジトリには入っていない。**コードも Terraform も無い（`PHASE=3` は `ops/up.sh` が止まる）。**pending ではない。**
+**2026-09-17 に着手した**（ユーザー決定「ECSで着手して」「agent gateway の MCP も一緒に」）。`terraform/workflow`（ECS on Fargate のタスク + DynamoDB の修復案テーブル + AgentCore Gateway（MCP）と tools Lambda）、`workflow/`（ワーカー）、`tools/`（Gateway のツール）、`agent/mcp_client.py` / `agent/proposals.py`、Web の「承認」タブ、`PHASE=3 ops/up.sh`、`tests/test_workflow.py`（100 項目）。手順は README の「workflow（フェーズ 3）」。**AWS 上の apply は未確認。**
 **2026-09-16 のユーザー決定**「原因調査は AI エージェントがする。人がするのは修復を実行する承認だけ」、
 **2026-09-17 のユーザー決定**「フェーズ 3 は Temporal でエージェントが原因調査して人間が承認するまで」で、
 旧 5A（調べる）と旧 5B（人が承認して直す）を 1 つのフェーズにまとめた。
@@ -159,6 +159,8 @@ graph（Neptune のトポロジ。Web の「トポロジ」タブから編集）
   - EKS にすると、クラスタとエンドポイントで**月 ≒ $153〜$173 が上乗せ**になる。ECS ならどちらも 0 なので、ECS に変えた。
   - 「一旦」なので、Kubernetes の形で試す必要が出たら EKS に戻す。そのときの費用は下の「EKS に戻すとき」にある。
 - **チャットはワークフローに載せない。**同期のチャットを載せると 1 往復ごとに実行が要る。
+- **エージェントのツールは AgentCore Gateway（MCP、IAM 認証）に出す**（2026-09-17 ユーザー要望）。ツール定義は `tools/tools.json`、実体は tools Lambda（`tools/handler.py`。静的トポロジと DynamoDB の異常一覧）。Runtime は SSM の `gateway-url` があれば `tools/list` と `tools/call` を Gateway に投げ、無ければ（届かなければ）コンテナの中の同名の関数で答える。Gateway は `create_gateway=false` で外せる。
+- **Web とワーカーは Temporal でつながない。**修復案テーブル（DynamoDB）の `status` を Web が書き、ワーカーがポーリングで読む。画面側に Temporal の SDK を入れず、Temporal を閉域の外に出さないため。
 
 ### 着手できる時期
 
@@ -177,7 +179,7 @@ graph（Neptune のトポロジ。Web の「トポロジ」タブから編集）
 - **VPC は main を使い回す。**`terraform/stream` / `terraform/graph` / `terraform/analytics` と同じく `data.terraform_remote_state.main.outputs.vpc_id` で入れる。新しい VPC を作ると ECR や Logs のエンドポイントを一から並べることになる。
 - **サーバーとワーカーは、まず 1 つのタスクに同居させる。**同じタスクなら `localhost` で繋がり、ロードバランサもサービス検出も要らない。
   別々のタスクに分けて **Service Connect を使うなら `ecs-agent` エンドポイントが要る**（Envoy の管理がこれを使う。同じ ECS の文書）。
-- イメージは VPC 内の ECR から引く（フェーズ 1 と同じ）。Temporal のイメージが arm64 を持つかは着手時に確かめる。
+- イメージは VPC 内の ECR から引く（フェーズ 1 と同じ）。`temporalio/temporal` 1.9.1 は arm64 を持つ（マニフェスト、2026-09-17 確認）ので、`ops/up.sh` が ECR にミラーする。
 - 毎日 `ops/down.sh` で消す運用なので、**このタスクも「使う日に作って当日中に消す」側に入れる。**
 
 ### EKS に戻すとき
@@ -188,14 +190,21 @@ graph（Neptune のトポロジ。Web の「トポロジ」タブから編集）
 - `sts` は `terraform/stream` が持っている。**同じ VPC に同じサービスのエンドポイントを 2 つ作らない**（二重に課金される）。
 - 閉域を外す（NAT を置く）話にはしない。**閉域という前提そのものを崩す。**
 
+### 2026-09-17 の実装で決めたこと（PMO 判断。変えるなら issue で）
+
+- Temporal のデータはタスク内の SQLite（`temporal server start-dev --db-filename`）。タスクが入れ替わると実行履歴は消える。毎日消す運用なので外に出さない。
+- Temporal の Web UI（8233）は Web の EC2 を踏み台にした SSM のポートフォワーディング（`AWS-StartPortForwardingSessionToRemoteHost`）で PC から開く。認証は無い。
+- ワークフローは**異常 1 件に 1 実行**（`investigate-<anomaly_id>`。同じ異常が open のうちは起こし直さない）。
+- エージェントは Temporal のアクティビティから AgentCore Runtime を `InvokeAgentRuntime` で呼び、JSON（cause / action / command / reason）で答えさせる。
+- 調査に読ませるのは DynamoDB の異常（1 件）と、Runtime のツールで引けるトポロジ・異常一覧・ナレッジベース。S3 Tables の `snmp_metrics` はまだ読ませていない。
+- 承認は Web の「承認」タブ。承認待ちは 120 分（`approval_timeout_minutes`）、Verify は 30 秒おきに 6 回（`verify_attempts`）。
+- 打てるのは lab の EC2 への `sudo lab heal-main` / `sudo lab check` だけ（SSM Run Command の `AWS-RunShellScript`。IAM でその 1 台と文書に絞る）。**実機には何も打たない。**
+
 ### 決まっていないこと
 
-- Temporal のデータの置き場（タスク内の SQLite で始めるか、最初から外に出すか）。
-- Temporal の Web UI をどう見るか（閉域なので、ブラウザから直接は届かない）。
-- ワークフローの粒度（異常 1 件に 1 実行か、まとめるか）。
-- エージェントをどこから呼ぶか（AgentCore Runtime を Temporal のアクティビティから呼ぶ形か、別か）。
-- 調査に何を読ませるか（DynamoDB の異常、Neptune のトポロジ、S3 Tables の `snmp_metrics`、ナレッジベース）。
-- 承認の画面（Web のタブか、別の仕組みか）。承認待ちの上限時間、Verify の回数と間隔。
+- **AWS 上の apply は未確認。**Gateway（MCP）に VPC モードの Runtime と Fargate のタスクから届くか、`start-dev` が Fargate で上がるか、`temporalio` 1.33.0 の SDK と Temporal 1.9.1 の組み合わせ、Nova 2 Lite が求めた JSON で答えるか、組織の SCP / IAM が ECS / Gateway / Lambda を止めていないか（README の「確認できていないこと」）。
+- Gateway のツールは静的トポロジしか見ない（Neptune は Runtime の中のツールだけ）。Gateway があるときのチャットのトポロジを Neptune に戻すか。
+- 調査に S3 Tables の `snmp_metrics`（履歴）を読ませるか。
 - 実機に対して何をどこまで打たせるか。**lab 以外に打つ話は何も決まっていない。**
 - **Zero-Touch にする時期（pending）。**
 

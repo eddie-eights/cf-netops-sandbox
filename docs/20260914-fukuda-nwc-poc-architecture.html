@@ -205,7 +205,7 @@
 
 <p>
 フェーズ 1 では lab と Web はつながっておらず、トポロジもコンテナに焼いた静的データでした。
-フェーズ 2 は 4 つのルート（<code>terraform/lab</code> → <code>terraform/stream</code> → <code>terraform/analytics</code> と <code>terraform/graph</code>）を足して、lab の SNMP を Kafka に流し、Spark で S3 Tables（Iceberg）に溜め、トポロジを Neptune に置きます（2026-09-17 のユーザー決定でフェーズ 2 の範囲をここまでにし、旧 2B を取り込みました。フェーズ 3 は Temporal でエージェントが原因を調査し人が承認するまで。<code>docs/phases.md</code>）。
+フェーズ 2 は 4 つのルート（<code>terraform/lab</code> → <code>terraform/stream</code> → <code>terraform/analytics</code> と <code>terraform/graph</code>）を足して、lab の SNMP を Kafka に流し、Spark で S3 Tables（Iceberg）に溜め、トポロジを Neptune に置きます（2026-09-17 のユーザー決定でフェーズ 2 の範囲をここまでにし、旧 2B を取り込みました。フェーズ 3 は <code>terraform/workflow</code> を足して、Temporal on ECS Fargate のワーカーがエージェントに原因を調査させ、人が Web の「承認」タブで承認すると lab で直します。エージェントのツールは AgentCore Gateway（MCP）経由。2026-09-17 着手。<code>docs/phases.md</code>）。
 どれも時間課金なので、<strong>使う日に作って当日中に消す</strong>前提です。
 </p>
 

@@ -3,7 +3,8 @@
 #   フェーズ 1（既定）  LLM + RAG で対話する。ECR・イメージ・本体・Web（README の手順 1〜5・7）
 #   フェーズ 2          フェーズ 1 に、データパイプライン lab（containerlab + Telegraf）→ stream（MSK → detector → DynamoDB）
 #                       → analytics（Spark on EMR Serverless → S3 Tables）と、graph（Neptune のトポロジと投入）を足す
-#   フェーズ 3          Temporal でエージェントが原因を調べ、人が承認する。まだ Terraform が無い（docs/phases.md）
+#   フェーズ 3          フェーズ 2 に workflow（Temporal on ECS Fargate のワーカー + AgentCore Gateway（MCP））を足す。
+#                       エージェントが異常の原因を調べて修復案を出し、Web の「承認」タブで人が承認すると lab で直す
 # 毎日全部消す運用向け。何度打っても同じ状態に収束する（できているものは Terraform が差分なしで飛ばし、ECR にあるタグはビルドしない）。
 # Terraform の state はこの PC のリポジトリの中（terraform/<ルート>/terraform.tfstate）に置く。消すのは ops/down.sh。
 #
@@ -17,13 +18,13 @@
 # PHASE を下げて打っても、前に作ったルートは消さない（消すのは ops/down.sh）。
 #
 # 設定できるキー（deploy.env か環境変数。全部任意。意味は deploy.env.example、読み方は ops/deploy-env.sh）:
-#   PHASE                   どこまで作るか。1（既定）か 2。3 はまだ Terraform が無いので止まる（docs/phases.md）
+#   PHASE                   どこまで作るか。1（既定）か 2 か 3（3 は 2 の全部 + workflow。lab と stream が要るので SKIP_LAB / SKIP_STREAM は書けない）
 #   SKIP_LAB=1              PHASE=2 で lab を作らない（stream は lab が要るので SKIP_STREAM=1 も要る）
 #   SKIP_STREAM=1           PHASE=2 で stream と analytics（stream の Kafka を読む）を作らない
 #   SKIP_ANALYTICS=1        PHASE=2 で analytics（Spark → S3 Tables）を作らない
 #   SKIP_GRAPH=1            PHASE=2 で graph（Neptune）を作らない
 #   CREATE_S3_SINK=0        MSK Connect の S3 sink を作らない（Confluent の zip が取れないとき。ops/down.sh は state を見て合わせる）
-#   IMAGE_TAG               エージェントのイメージのタグ。既定 v1。ECR にそのタグが無いときだけ PC の docker buildx でビルドして push する（タグは上書きできない）
+#   IMAGE_TAG               エージェント（PHASE=3 ではワーカーも）のイメージのタグ。既定 v1。ECR にそのタグが無いときだけ PC の docker buildx でビルドして push する（タグは上書きできない）
 #   ADMIN_ARN               terraform/main の kb_admin_principal_arn。既定は空（Terraform が今の認証情報から決める）
 #   VPC_CIDR                terraform/main の vpc_cidr（社内と重なるとき）
 #   CLIENT_CIDR             terraform/main の client_cidr（DX / VPN 経由のとき）
@@ -191,6 +192,7 @@ fi
 flag_value SKIP_LAB; flag_value SKIP_STREAM; flag_value SKIP_ANALYTICS; flag_value SKIP_GRAPH; flag_value NO_PORTFORWARD
 # どこまで作るか。後のフェーズは前のフェーズの state を読むので、指定したフェーズまでを順に作る
 PHASE="${PHASE:-1}"
+WORKFLOW=""
 case "$PHASE" in
   1)
     SKIP_LAB=1; SKIP_STREAM=1; SKIP_ANALYTICS=1; SKIP_GRAPH=1 ;;
@@ -205,11 +207,15 @@ case "$PHASE" in
     if [ -n "$SKIP_LAB" ] && [ -n "$SKIP_GRAPH" ]; then
       echo "SKIP_LAB と SKIP_STREAM と SKIP_GRAPH があるので、フェーズ 1 と同じものだけ作る"
     fi ;;
-  3) die "フェーズ 3（Temporal の調査と承認）はまだ Terraform が無い（docs/phases.md）。いま作れるのは PHASE=1 か PHASE=2" ;;
+  3)
+    if [ -n "$SKIP_LAB" ] || [ -n "$SKIP_STREAM" ]; then
+      die "フェーズ 3 は lab と stream が要る（ワーカーが stream の異常テーブルを読み、lab の EC2 で直す）。SKIP_LAB / SKIP_STREAM を外す。まだ何も作っていない"
+    fi
+    WORKFLOW=1 ;;
   2B|2b) die "フェーズ 2B は 2026-09-17 にフェーズ 2 に入った（Spark → S3 Tables は PHASE=2 の analytics）。PHASE=2 にする" ;;
-  5A|5a|5B|5b) die "フェーズ $PHASE は 2026-09-17 にフェーズ 3 にまとまった（docs/phases.md）。まだ Terraform が無い。いま作れるのは PHASE=1 か PHASE=2" ;;
+  5A|5a|5B|5b) die "フェーズ $PHASE は 2026-09-17 にフェーズ 3 にまとまった（docs/phases.md）。PHASE=3 にする" ;;
   4) die "フェーズ 4 は無い（フェーズ 1 に取り込み済み。docs/phases.md）。PHASE=1 か PHASE=2 にする" ;;
-  *) die "PHASE は 1 か 2（いまは「$PHASE」）" ;;
+  *) die "PHASE は 1 か 2 か 3（いまは「$PHASE」）" ;;
 esac
 command -v aws >/dev/null || die "aws CLI が無い（README「WSL2 の準備」）"
 command -v terraform >/dev/null || die "terraform が無い（README「WSL2 の準備」。1.11 以上）"
@@ -247,6 +253,7 @@ if [ -z "$SKIP_LAB" ]; then ROOTS="$ROOTS lab"; fi
 if [ -z "$SKIP_STREAM" ]; then ROOTS="$ROOTS stream"; fi
 if [ -z "$SKIP_ANALYTICS" ]; then ROOTS="$ROOTS analytics"; fi
 if [ -z "$SKIP_GRAPH" ]; then ROOTS="$ROOTS graph"; fi
+if [ -n "$WORKFLOW" ]; then ROOTS="$ROOTS workflow"; fi
 echo "ACCOUNT_ID=$ACCOUNT_ID"
 echo "CALLER_ARN=$CALLER_ARN"
 echo "IMAGE_TAG=$IMAGE_TAG"
@@ -254,7 +261,8 @@ echo "PHASE=$PHASE"
 echo "作るルート: $ROOTS"
 # 待機時の 1 時間あたりの目安（セント。東京リージョンの税抜。単価は 2026-09-14〜15 に Price List API で確認。内訳は README「1 時間起動したときの試算」）。
 # フェーズ 1 = 52（Interface エンドポイント・OpenSearch Serverless・Web の EC2）、lab = 9、graph = 14、stream = 29（S3 sink 無しなら 15）、
-# analytics = 17（ストリーミングのジョブが動いている間の EMR Serverless の 2 vCPU + s3tables のエンドポイント 2 本。単価は 2026-09-17 に確認）。
+# analytics = 17（ストリーミングのジョブが動いている間の EMR Serverless の 2 vCPU + s3tables のエンドポイント 2 本。単価は 2026-09-17 に確認）、
+# workflow = 5（Fargate ARM 1 vCPU / 2 GB のタスク 1 つ。Gateway と Lambda と DynamoDB は使った分だけ。単価は 2026-09-17 に確認）。
 # README の試算を変えたらここも変える
 COST_CENTS=52
 if [ -z "$SKIP_LAB" ]; then COST_CENTS=$((COST_CENTS + 9)); fi
@@ -263,6 +271,7 @@ if [ -z "$SKIP_STREAM" ]; then
   if [ "$CREATE_S3_SINK" = 1 ]; then COST_CENTS=$((COST_CENTS + 29)); else COST_CENTS=$((COST_CENTS + 15)); fi
 fi
 if [ -z "$SKIP_ANALYTICS" ]; then COST_CENTS=$((COST_CENTS + 17)); fi
+if [ -n "$WORKFLOW" ]; then COST_CENTS=$((COST_CENTS + 5)); fi
 COST_NOTE=$(printf '待機だけで約 $%d.%02d/h（約 %d 円/h。チャットの分は別）の時間課金。使い終わったら当日中に ops/down.sh を打つ' \
   $((COST_CENTS / 100)) $((COST_CENTS % 100)) $(((COST_CENTS * 150 + 50) / 100)))
 printf '\033[1;33m%s\033[0m\n' "$COST_NOTE"
@@ -272,21 +281,26 @@ log "1. ECR リポジトリ（terraform/ecr）"
 tf_apply ecr
 REPO=$(tf ecr output -raw agent_repository_url); echo "REPO=$REPO"
 REG="${REPO%%/*}"
+TEMPORAL_TAG=1.9.1   # terraform/workflow の temporal_image_tag の既定値。変えるときは両方を変える
 
 # ---- 2. イメージ ----------------------------------------------------------------
 log "2. イメージ（ECR に無いタグだけ作る）"
-NEED_AGENT=""; NEED_FRR=""; NEED_MULTITOOL=""; NEED_SNMPD=""
+NEED_AGENT=""; NEED_FRR=""; NEED_MULTITOOL=""; NEED_SNMPD=""; NEED_WORKER=""; NEED_TEMPORAL=""
 if ecr_has "$PREFIX-agent" "$IMAGE_TAG"; then echo "agent:$IMAGE_TAG はある（作り直すなら IMAGE_TAG を変える）"; else NEED_AGENT=1; fi
 if [ -z "$SKIP_LAB" ]; then
   if ecr_has "$PREFIX-lab-frr" "$FRR_TAG"; then echo "lab-frr:$FRR_TAG はある"; else NEED_FRR=1; fi
   if ecr_has "$PREFIX-lab-multitool" "$MULTITOOL_TAG"; then echo "lab-multitool:$MULTITOOL_TAG はある"; else NEED_MULTITOOL=1; fi
   if ecr_has "$PREFIX-lab-snmpd" "$SNMPD_TAG"; then echo "lab-snmpd:$SNMPD_TAG はある"; else NEED_SNMPD=1; fi
 fi
+if [ -n "$WORKFLOW" ]; then
+  if ecr_has "$PREFIX-worker" "$IMAGE_TAG"; then echo "worker:$IMAGE_TAG はある"; else NEED_WORKER=1; fi
+  if ecr_has "$PREFIX-temporal" "$TEMPORAL_TAG"; then echo "temporal:$TEMPORAL_TAG はある"; else NEED_TEMPORAL=1; fi
+fi
 NEED_LAB="$NEED_FRR$NEED_MULTITOOL$NEED_SNMPD"
-if [ -n "$NEED_AGENT$NEED_LAB" ]; then
+if [ -n "$NEED_AGENT$NEED_LAB$NEED_WORKER$NEED_TEMPORAL" ]; then
   docker info >/dev/null 2>&1 || die "dockerd に接続できない（WSL なら sudo service docker start。README「WSL2 の準備」）"
   # agent と snmpd は RUN があるので、x86_64 の PC では QEMU（binfmt）が要る
-  if [ -n "$NEED_AGENT$NEED_SNMPD" ] && ! docker buildx ls | grep -q 'linux/arm64'; then
+  if [ -n "$NEED_AGENT$NEED_SNMPD$NEED_WORKER" ] && ! docker buildx ls | grep -q 'linux/arm64'; then
     die "docker buildx ls の Platforms に linux/arm64 が無い（README「WSL2 の準備」の docker の行）"
   fi
   aws ecr get-login-password --region "$REGION" | docker login --username AWS --password-stdin "$REG"
@@ -305,6 +319,15 @@ if [ -n "$NEED_AGENT$NEED_LAB" ]; then
   fi
   if [ -n "$NEED_SNMPD" ]; then
     docker buildx build --platform linux/arm64 -t "$REG/$PREFIX-lab-snmpd:$SNMPD_TAG" --push lab/snmpd/
+  fi
+  if [ -n "$NEED_WORKER" ]; then
+    docker buildx build --platform linux/arm64 -t "$REG/$PREFIX-worker:$IMAGE_TAG" --push workflow/
+  fi
+  if [ -n "$NEED_TEMPORAL" ]; then
+    # Temporal の CLI 入りイメージ（temporal server start-dev。arm64 あり）。Fargate は ECR からしか安定して引けないのでミラーする
+    docker pull --platform linux/arm64 "temporalio/temporal:$TEMPORAL_TAG"
+    docker tag "temporalio/temporal:$TEMPORAL_TAG" "$REG/$PREFIX-temporal:$TEMPORAL_TAG"
+    docker push "$REG/$PREFIX-temporal:$TEMPORAL_TAG"
   fi
 fi
 
@@ -348,7 +371,7 @@ fi
 log "4-2. Web の部品を s3://$KB_BUCKET/web/ に置く"
 aws s3 cp web/app.py "s3://$KB_BUCKET/web/app.py"
 aws s3 cp web/requirements.txt "s3://$KB_BUCKET/web/requirements.txt"
-for f in topology anomalies graph; do aws s3 cp "agent/$f.py" "s3://$KB_BUCKET/web/$f.py"; done
+for f in topology anomalies graph proposals; do aws s3 cp "agent/$f.py" "s3://$KB_BUCKET/web/$f.py"; done
 aws s3 cp agent/data/ "s3://$KB_BUCKET/web/data/" --recursive
 aws s3 sync wheels/ "s3://$KB_BUCKET/web/wheels/"
 
@@ -482,6 +505,25 @@ if [ -n "$GRAPH_PID" ]; then
 fi
 if [ -z "$SKIP_STREAM" ] || [ -z "$SKIP_GRAPH" ]; then
   log "8-3. Web を再起動する（起動時に SSM の異常テーブルと Neptune を読むため）"
+  run_on_instance "$INSTANCE_ID" "systemctl restart $PREFIX-web.service; $WEB_ACTIVE"
+  echo "Web が動いている"
+fi
+
+# ---- 8-5. workflow（フェーズ 3）--------------------------------------------------------
+if [ -n "$WORKFLOW" ]; then
+  log "8-5. workflow（terraform/workflow。Temporal のワーカーと AgentCore Gateway。数分）"
+  tf_apply workflow -var "worker_image_tag=$IMAGE_TAG"
+  WF_CLUSTER=$(tf workflow output -raw cluster_name); WF_SERVICE=$(tf workflow output -raw service_name)
+  echo "ECS のサービスが安定するのを待つ（イメージの取得と Temporal の起動。1〜3 分）"
+  aws ecs wait services-stable --region "$REGION" --cluster "$WF_CLUSTER" --services "$WF_SERVICE"
+  WF_TASK=$(aws ecs list-tasks --region "$REGION" --cluster "$WF_CLUSTER" --service-name "$WF_SERVICE" --query 'taskArns[0]' --output text)
+  WF_TASK_IP=$(aws ecs describe-tasks --region "$REGION" --cluster "$WF_CLUSTER" --tasks "$WF_TASK" \
+    --query 'tasks[0].attachments[0].details[?name==`privateIPv4Address`].value | [0]' --output text)
+  echo "WF_TASK=${WF_TASK##*/} WF_TASK_IP=$WF_TASK_IP"
+  echo "ワーカーのログ: $(tf workflow output -raw worker_logs_command)"
+  echo "Temporal の UI（Web の EC2 経由でタスクの 8233 へ。PC の http://localhost:8233/ ）:"
+  echo "  aws ssm start-session --region $REGION --target $INSTANCE_ID --document-name AWS-StartPortForwardingSessionToRemoteHost --parameters '{\"host\":[\"$WF_TASK_IP\"],\"portNumber\":[\"8233\"],\"localPortNumber\":[\"8233\"]}'"
+  log "8-6. Web を再起動する（起動時に SSM の修復案テーブルを読むため。エージェントは Gateway を 5 分以内に拾う）"
   run_on_instance "$INSTANCE_ID" "systemctl restart $PREFIX-web.service; $WEB_ACTIVE"
   echo "Web が動いている"
 fi

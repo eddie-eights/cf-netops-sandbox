@@ -1,0 +1,80 @@
+[
+  {
+    "name": "list_devices",
+    "description": "監視対象ネットワークの機器一覧（拠点 site、役割 role、管理 IP、AS 番号）。site や role で絞れる。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "site": {
+          "type": "string",
+          "description": "拠点名で絞る（hq / dc / br1 / br2 / carrier）。空なら全部"
+        },
+        "role": {
+          "type": "string",
+          "description": "役割で絞る（pe / ce / host）。空なら全部"
+        }
+      }
+    }
+  },
+  {
+    "name": "neighbors",
+    "description": "機器の隣接（接続先の機器、両端のインタフェース名、回線の種別 ebgp/ibgp/l2、主副、帯域）。",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "device_id"
+      ],
+      "properties": {
+        "device_id": {
+          "type": "string",
+          "description": "機器名（例 hq-ce-01）"
+        }
+      }
+    }
+  },
+  {
+    "name": "blast_radius",
+    "description": "機器が停止したときに影響が及ぶ範囲（指定ホップ数以内の機器と拠点）。",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "device_id"
+      ],
+      "properties": {
+        "device_id": {
+          "type": "string",
+          "description": "停止を想定する機器名"
+        },
+        "max_hops": {
+          "type": "integer",
+          "description": "何ホップ先まで見るか（既定 2、最大 6）"
+        }
+      }
+    }
+  },
+  {
+    "name": "topology_graph",
+    "description": "ネットワーク全体のノードとリンクの一覧。全体像を説明するときに使う。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {}
+    }
+  },
+  {
+    "name": "list_anomalies",
+    "description": "監視で見つかった異常の一覧（機器、種別 link_down / trap、対象インタフェース、発生時刻、最後に確認した時刻、poll か trap か）。「今の異常は」「どこが落ちている」と聞かれたら status=open で呼ぶ。過去の分は status=resolved。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string",
+          "description": "open（未解消、既定）か resolved（解消済み）"
+        },
+        "limit": {
+          "type": "integer",
+          "description": "件数の上限（既定 20、最大 100）"
+        }
+      }
+    }
+  }
+]

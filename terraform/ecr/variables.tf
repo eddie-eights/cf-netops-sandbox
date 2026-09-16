@@ -31,3 +31,9 @@ variable "create_lab_repositories" {
   type        = bool
   default     = true
 }
+
+variable "create_workflow_repositories" {
+  description = "Also create the two repositories of the phase 3 workflow images (worker / temporal, README workflow-1). false keeps only the agent and lab repositories."
+  type        = bool
+  default     = true
+}

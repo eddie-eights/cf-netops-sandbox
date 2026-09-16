@@ -17,3 +17,13 @@ output "multitool_repository_url" {
   description = "Push ghcr.io/srl-labs/network-multitool:v0.10.0 here with tag v0.10.0 (README lab-1)."
   value       = try(aws_ecr_repository.lab["multitool"].repository_url, "")
 }
+
+output "worker_repository_url" {
+  description = "Build workflow/ and push it here with the same tag as the agent image (README workflow-1). Empty when create_workflow_repositories is false."
+  value       = try(aws_ecr_repository.workflow["worker"].repository_url, "")
+}
+
+output "temporal_repository_url" {
+  description = "Push temporalio/temporal:1.9.1 here with tag 1.9.1 (README workflow-1)."
+  value       = try(aws_ecr_repository.workflow["temporal"].repository_url, "")
+}

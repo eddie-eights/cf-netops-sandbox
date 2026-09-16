@@ -1,8 +1,10 @@
-# ECR repositories of fukuda-nwc-poc. The agent image (README step 2) and the three lab images (README lab-1) go here.
+# ECR repositories of fukuda-nwc-poc. The agent image (README step 2), the three lab images (README lab-1)
+# and the two workflow images (worker / temporal, README workflow-1) go here.
 # force_delete = true so that `terraform destroy` removes the repositories together with their images (daily ops/down.sh).
 
 locals {
-  lab_repositories = var.create_lab_repositories ? toset(["frr", "snmpd", "multitool"]) : toset([])
+  lab_repositories      = var.create_lab_repositories ? toset(["frr", "snmpd", "multitool"]) : toset([])
+  workflow_repositories = var.create_workflow_repositories ? toset(["worker", "temporal"]) : toset([])
 }
 
 resource "aws_ecr_repository" "agent" {
@@ -39,6 +41,22 @@ resource "aws_ecr_repository" "lab" {
   for_each = local.lab_repositories
 
   name                 = "${var.name_prefix}-lab-${each.key}"
+  image_tag_mutability = "IMMUTABLE"
+  force_delete         = true
+
+  image_scanning_configuration {
+    scan_on_push = true
+  }
+
+  encryption_configuration {
+    encryption_type = "AES256"
+  }
+}
+
+resource "aws_ecr_repository" "workflow" {
+  for_each = local.workflow_repositories
+
+  name                 = "${var.name_prefix}-${each.key}"
   image_tag_mutability = "IMMUTABLE"
   force_delete         = true
 

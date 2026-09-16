@@ -3,7 +3,7 @@
 # state（terraform/<ルート>/terraform.tfstate）にリソースが載っているルートだけを消す。作っていないルートは飛ばす。
 #
 # 使い方（リポジトリの直下で。aws-vault なら `aws-vault exec <プロファイル> --no-session` のサブシェルの中で）:
-#   ops/down.sh              # 全部消す（analytics → graph → stream → lab → main → ecr → Runtime のロググループ）。KEEP_ECR=0 と同じ
+#   ops/down.sh              # 全部消す（workflow → analytics → graph → stream → lab → main → ecr → Runtime のロググループ）。KEEP_ECR=0 と同じ
 #   KEEP_ECR=1 ops/down.sh   # ECR（イメージ）だけ残す。翌日の ops/up.sh でビルドを飛ばせる（保管料は月数円）
 #
 # ops/up.sh と同じ deploy.env（DEPLOY_ENV_FILE=<パス> で別のファイル）を読む。環境変数はファイルより優先。
@@ -109,6 +109,8 @@ if has_resources analytics; then
     done
   fi
 fi
+# workflow の worker_image_tag は必須変数だが destroy では使われないので、何でもよい値を渡す
+destroy_root workflow -var "worker_image_tag=${IMAGE_TAG:-destroy}"
 destroy_root analytics
 destroy_root graph
 STREAM_VARS=()

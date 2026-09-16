@@ -1,14 +1,15 @@
 """チャット Web（Gradio）。127.0.0.1 だけで待ち受け、利用者は SSM のポートフォワーディングで開く。
 
-タブは 3 つ:
+タブは 4 つ:
   - チャット: 質問を AgentCore Runtime に送る（boto3 の invoke_agent_runtime。署名はインスタンスロール）。
     セッション ID はブラウザのセッションごとに 1 つ（Runtime 側の会話履歴はこの ID で分かれる）
   - トポロジ: 段（pe / ce / host）に分けて SVG に描き、機器を表で出す。元データはエージェントと同じ
     topology.py（Neptune があればそこから、無ければ data/ の静的データ）。Neptune のときはリンクの追加・削除と
     静的データからの投入がここでできる。lab（terraform/lab）には触らない
   - 異常一覧: terraform/stream の detector が DynamoDB に書いた異常（anomalies.py）。未配備なら案内だけ出す
+  - 承認: terraform/workflow のワーカーが出した修復案（proposals.py）を見て、承認か却下を書き戻す。未配備なら案内だけ出す
 
-agent/ の topology.py / anomalies.py / graph.py をそのまま同じディレクトリに置いて import する（terraform/main の出力 upload_web_command）。
+agent/ の topology.py / anomalies.py / graph.py / proposals.py をそのまま同じディレクトリに置いて import する（terraform/main の出力 upload_web_command）。
 依存（gradio / boto3 / pyyaml）は S3 に置いた wheel から入れる（terraform/main の user_data）。インターネットには出ない。
 """
 
@@ -72,6 +73,7 @@ if not os.path.isfile(os.path.join(HERE, "topology.py")):
     sys.path.append(os.path.join(HERE, "..", "agent"))
 os.environ["TOPOLOGY_DATA_DIR"] = DATA_DIR
 import anomalies  # noqa: E402
+import proposals  # noqa: E402
 import graph  # noqa: E402
 import topology  # noqa: E402
 
@@ -192,6 +194,28 @@ def remove_link(a, b, a_if):
 ANOMALY_COLS = ["機器", "種別", "対象", "状態", "発生", "最終確認", "解消", "経路"]
 
 
+# ---------------------------------------------------------------- proposals (phase 3)
+PROPOSAL_COLS = ["proposal_id", "状態", "機器", "種別", "対象", "原因", "処置", "コマンド", "理由", "作成", "更新", "決めた人", "結果"]
+
+
+def proposal_table(status: str = "pending"):
+    r = proposals.list_proposals(status=status, limit=100)
+    rows = [{"proposal_id": p.get("proposal_id", ""), "状態": p.get("status", ""), "機器": p.get("device_id", ""),
+             "種別": p.get("kind", ""), "対象": p.get("target", ""), "原因": p.get("cause", ""), "処置": p.get("action", ""),
+             "コマンド": p.get("command", ""), "理由": p.get("reason", ""), "作成": p.get("created_at_jst", ""),
+             "更新": p.get("updated_at_jst", ""), "決めた人": p.get("decided_by", ""),
+             "結果": (p.get("verify_note") or p.get("apply_output") or "")[:200]} for p in r.get("proposals", [])]
+    msg = r["error"] if r.get("error") else f"{r.get('count', 0)} 件（{status}）"
+    return msg, pd.DataFrame(rows, columns=PROPOSAL_COLS)
+
+
+def decide_proposal(proposal_id: str, decision: str, status: str):
+    r = proposals.decide((proposal_id or "").strip(), decision, decided_by="web")
+    msg = r["error"] if r.get("error") else f"{r['proposal_id']} を {decision} にした（ワーカーが次の段に進める）"
+    _, table = proposal_table(status)
+    return msg, table
+
+
 def anomaly_table(status: str = "open"):
     r = anomalies.list_anomalies(status=status, limit=100)
     rows = [{"機器": a.get("device_id", ""), "種別": a.get("kind", ""), "対象": a.get("target", ""), "状態": a.get("status", ""),
@@ -285,6 +309,24 @@ with gr.Blocks(title=f"{TITLE} チャット") as demo:
         an_status.change(anomaly_table, [an_status], [an_msg, an_table])
         demo.load(anomaly_table, [an_status], [an_msg, an_table])
         gr.Markdown("lab で `lab failover` を打つと、SNMP ポーリング（10 秒）か trap（5 秒）で `link_down` が出ます。`lab heal-main` で resolved に変わります。")
+    with gr.Tab("承認"):
+        with gr.Row():
+            pr_status = gr.Radio(["pending", "approved", "applied", "verified", "failed", "rejected", "expired", "all"],
+                                 value="pending", label="状態（pending = 承認待ち）", scale=4)
+            pr_refresh = gr.Button("更新", scale=1)
+        pr_msg = gr.Markdown()
+        pr_table = gr.Dataframe(pd.DataFrame(columns=PROPOSAL_COLS), interactive=False, label="修復案（ワーカーが DynamoDB に書いたもの）")
+        with gr.Row():
+            pr_id = gr.Textbox(label="proposal_id（表の 1 列目をそのまま）", scale=4)
+            pr_approve = gr.Button("承認して直す", variant="primary", scale=1)
+            pr_reject = gr.Button("却下", scale=1)
+        pr_refresh.click(proposal_table, [pr_status], [pr_msg, pr_table])
+        pr_status.change(proposal_table, [pr_status], [pr_msg, pr_table])
+        demo.load(proposal_table, [pr_status], [pr_msg, pr_table])
+        pr_approve.click(lambda i, s: decide_proposal(i, "approved", s), [pr_id, pr_status], [pr_msg, pr_table])
+        pr_reject.click(lambda i, s: decide_proposal(i, "rejected", s), [pr_id, pr_status], [pr_msg, pr_table])
+        gr.Markdown("承認すると、ワーカーが lab EC2 で `sudo lab <コマンド>` を打ち（SSM Run Command）、異常が resolved になるまで数回確かめます。"
+                    "却下は何もしません。承認待ちのまま 2 時間（approval_timeout_minutes）で expired になります。")
 
 if __name__ == "__main__":
     demo.queue(default_concurrency_limit=4).launch(

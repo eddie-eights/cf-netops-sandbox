@@ -1,0 +1,22 @@
+# Copy to terraform.tfvars (gitignored) only when the defaults are not right. Every value except worker_image_tag has a default in variables.tf.
+# terraform/main, terraform/lab and terraform/stream must be applied first (this root reads their state files), and
+# terraform/ecr must have the worker / temporal repositories (create_workflow_repositories = true, the default).
+# ops/up.sh passes worker_image_tag = IMAGE_TAG on the command line.
+#
+# region      = "ap-northeast-1"
+# name_prefix = "fukuda-nwc-poc"
+# owner       = "fukuda"
+#
+# worker_image_tag   = "v1"
+# temporal_image_tag = "1.9.1"
+#
+# task_cpu           = 1024
+# task_memory        = 2048
+# desired_count      = 1
+# log_retention_days = 7
+#
+# poll_interval_seconds    = 60
+# approval_timeout_minutes = 120
+# verify_attempts          = 6
+#
+# create_gateway = true

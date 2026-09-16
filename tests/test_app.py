@@ -42,7 +42,16 @@ class App:
     def run(self, **kw):
         pass
 bac.BedrockAgentCoreApp = App
-sys.modules.update({"boto3": boto3, "botocore": botocore, "botocore.exceptions": exc, "bedrock_agentcore": bac})
+auth = types.ModuleType("botocore.auth"); awsreq = types.ModuleType("botocore.awsrequest")
+class SigV4Auth:  # mcp_client が読む。Gateway の URL が無いので署名は呼ばれない
+    def __init__(self, *a, **kw): pass
+    def add_auth(self, request): pass
+class AWSRequest:
+    def __init__(self, **kw): self.headers = {}
+    def prepare(self): return self
+auth.SigV4Auth = SigV4Auth; awsreq.AWSRequest = AWSRequest; botocore.auth = auth; botocore.awsrequest = awsreq
+sys.modules.update({"boto3": boto3, "botocore": botocore, "botocore.exceptions": exc, "botocore.auth": auth,
+                    "botocore.awsrequest": awsreq, "bedrock_agentcore": bac})
 
 RERANK_ARN = "arn:aws:bedrock:ap-northeast-1::foundation-model/amazon.rerank-v1:0"
 

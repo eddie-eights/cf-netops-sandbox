@@ -1,7 +1,7 @@
 """トポロジをエージェントのツールとして出す。
 
 元データは 2 通り。Neptune（terraform/graph。graph.configured() が真）があればそこから読み、無ければ
-静的データ（data/devices.yaml と data/topology.json）。どちらも中身はローカル lab（lab/wvs2.clab.yml）の
+静的データ（data/devices.yaml と data/topology.json。tools Lambda では devices.json）。どちらも中身はローカル lab（lab/wvs2.clab.yml）の
 10 台そのもので、すべて架空のアドレス。SNMP や lab には触らない。読み取りだけなので、モデルが何度呼んでも副作用は無い。
 Neptune のときは TTL 秒ごとに読み直す（画面で編集した結果が次の質問に効く）。
 
@@ -14,7 +14,6 @@ import os
 import time
 from collections import deque
 
-import yaml
 from botocore.exceptions import BotoCoreError, ClientError
 
 import graph
@@ -29,8 +28,16 @@ log = logging.getLogger("topology")
 
 def load_static() -> tuple[list[dict], list[dict]]:
     """data/ の静的データ。devices の各行に topology.json の asn を足して返す（Neptune の seed にも使う）"""
-    with open(os.path.join(DATA_DIR, "devices.yaml"), encoding="utf-8") as f:
-        devices = yaml.safe_load(f)["devices"]
+    # tools Lambda（terraform/workflow）には PyYAML が無いので、Terraform が JSON にした devices.json を先に見る
+    devices_json = os.path.join(DATA_DIR, "devices.json")
+    if os.path.exists(devices_json):
+        with open(devices_json, encoding="utf-8") as f:
+            devices = json.load(f)["devices"]
+    else:
+        import yaml  # noqa: PLC0415 - Runtime イメージだけが持つ
+
+        with open(os.path.join(DATA_DIR, "devices.yaml"), encoding="utf-8") as f:
+            devices = yaml.safe_load(f)["devices"]
     with open(os.path.join(DATA_DIR, "topology.json"), encoding="utf-8") as f:
         topo = json.load(f)
     asn = {n["device_id"]: n.get("asn") for n in topo["nodes"]}
