@@ -249,6 +249,7 @@ WSL を再起動すると QEMU の登録は消えるので、`docker buildx ls` 
 | AWS CLI v2 / Terraform 1.11 以上 / uv / Session Manager plugin | `aws --version`、`terraform version`、`uv --version`、`session-manager-plugin`。Homebrew なら下のコマンドで入る |
 | Docker Desktop が起動していて arm64 のビルドができる | `docker buildx ls` の `Platforms` に `linux/arm64` があること。Apple Silicon はネイティブで作るので QEMU の登録は要らない（WSL より速い） |
 | `ops/up.sh` / `ops/down.sh` が動く bash | macOS 標準の `/bin/bash` 3.2 のままでよい（3.2 で動く書き方にしてある）。Homebrew の bash を入れる必要はない |
+| 認証 | `aws login` で入ってよい。スクリプトはそのまま打てる。Terraform を手で打つときは手順 0-1 の「`aws login` で入っているとき」 |
 
 ```bash
 brew install awscli uv
@@ -256,7 +257,7 @@ brew tap hashicorp/tap && brew install hashicorp/tap/terraform
 brew install --cask session-manager-plugin
 ```
 
-Apple Silicon の Mac（Docker Desktop 29 / buildx 0.33 / Terraform 1.16 / AWS CLI 2.36）で、道具が揃うことと `ops/up.sh` / `ops/down.sh` が bash 3.2 で構文エラーにならないことは 2026-09-16 に確認した。**Mac で通しの apply はまだ打っていない。**Intel Mac は確かめていない。
+Apple Silicon の Mac（Docker Desktop 29 / buildx 0.33 / Terraform 1.16 / AWS CLI 2.36）で、道具が揃うことと `ops/up.sh` / `ops/down.sh` が bash 3.2 で構文エラーにならないことは 2026-09-16 に確認した。**Mac で通しの apply はまだ打っていない。**同日に `aws login` のプロファイルで `ops/up.sh` を打ったときは、ECR とイメージまで作ったあと `terraform/main` の plan が opensearch provider の `NoCredentialProviders` で落ちた（main は何も作っていない）。手順 0 で credential_process に切り替えるようにしたあと、同じプロファイルで `terraform/main` の plan が通ることを確かめた。Intel Mac は確かめていない。
 
 ### 社内 PC で使うとき
 
@@ -341,7 +342,7 @@ PHASE=2 ops/up.sh
 
 | 順 | 何をする | 対応する手順 |
 |---|---|---|
-| 0 | `aws` / `terraform` / `python3`（無ければ `uv`）/ `curl` / `docker` と `docker buildx` / `session-manager-plugin`（`NO_PORTFORWARD` が空のとき）があるか、認証が通っているかを確かめる。aws-vault の一時セッションなら止まる。CloudFormation 版のスタック（`fukuda-nwc-poc*`）が残っていれば止まる（「CloudFormation 版から移るとき」）。`PHASE` と作るルートを表示する（`PHASE` が `1` / `2` 以外なら止まる） | 0 |
+| 0 | `aws` / `terraform` / `python3`（無ければ `uv`）/ `curl` / `docker` と `docker buildx` / `session-manager-plugin`（`NO_PORTFORWARD` が空のとき）があるか、認証が通っているかを確かめる。aws-vault の一時セッションなら止まる。鍵が環境変数に無ければ（`aws login` など）、Terraform には AWS CLI 経由（`credential_process`）で認証情報を渡す（0-1 の「`aws login` で入っているとき」を一時ファイルで行う）。CloudFormation 版のスタック（`fukuda-nwc-poc*`）が残っていれば止まる（「CloudFormation 版から移るとき」）。`PHASE` と作るルートを表示する（`PHASE` が `1` / `2` 以外なら止まる） | 0 |
 | 1 | `terraform/ecr` を init / apply | 1 |
 | 2 | ECR に**無いタグだけ** arm64 でビルドして push する（エージェント。lab を作るときは lab の frr / multitool / snmpd も）。PC の `docker buildx` で作る（dockerd が動いていないとき、agent か snmpd を作るのに `docker buildx ls` に `linux/arm64` が無いときは止まる） | 2 / lab-1 |
 | 3 | `terraform/main` を init / apply（初回 10〜20 分）。`PHASE=2` なら、終わったら `terraform/graph` の apply を**裏で**始める（10〜15 分。ログは `ops/logs/graph-apply.log`） | 3 / g-1 |
@@ -382,8 +383,18 @@ ops/down.sh
 ```
 
 「片付け」と同じ順（graph → stream → lab → main → ecr → Runtime のロググループ）で、**state にリソースが載っているルートだけ** destroy する（作っていないルートは飛ばす。`ops/up.sh` に付けた `PHASE` / `WITH_LAB` / `SKIP_*` / `CREATE_S3_SINK` は付けなくてよい）。
-バケットは中身ごと、ECR はイメージごと消える。最後に `Project=fukuda-nwc-poc` のタグが付いたものが残っていないかを出す（何も出なければ全部消えている）。
-`KEEP_ECR=1 ops/down.sh` で ECR（イメージ）だけ残せる。残すと翌朝の `ops/up.sh` がビルドを飛ばせる（保管料は月数円。Runtime はイメージが無いと作れないので、翌朝ビルドし直す時間が惜しいならこちら）。
+バケットは中身ごと、ECR はイメージごと消える（`KEEP_ECR=1` のときは ECR を残す）。最後に `Project=fukuda-nwc-poc` のタグが付いたものが残っていないかを出す（何も出なければ全部消えている）。
+ECR を残すか消すかは環境変数 `KEEP_ECR` で選ぶ。残すと翌朝の `ops/up.sh` がビルドを飛ばせる（保管料は月数円。Runtime はイメージが無いと作れないので、翌朝ビルドし直す時間が惜しいならこちら）。
+
+| `KEEP_ECR` | ECR |
+|---|---|
+| 付けない / `0` | イメージごと消す（既定） |
+| `1` | 残す |
+| それ以外（`yes` など） | 手順 0 で止まる。何も消さない |
+
+```bash
+KEEP_ECR=1 ops/down.sh
+```
 
 **state の注意（ローカル state なので大事）。**
 
@@ -412,7 +423,7 @@ lab-1 のレジストリ名が `.dkr.ecr.…` のように欠けたり、手順 
 
 **環境変数はターミナルごと。**別のターミナルを開いたり、閉じて開き直したりしたら、0-1 から打ち直す（0-5 にファイルに残す方法がある）。
 
-#### 0-1. 認証を通す（aws-vault を使っているとき）
+#### 0-1. 認証を通す（aws-vault か aws login を使っているとき）
 
 `aws-vault exec <プロファイル>` は既定で `sts get-session-token` の一時セッションを渡す。この一時セッションでは IAM の API が呼べず、
 名前付きの IAM ロールを作る `terraform apply`（手順 1 / 3 / lab / stream / graph）が認証エラーで落ちる（2026-09-15 に会社 PC で CloudFormation 版で確認。Terraform も同じ認証情報で IAM の API を呼ぶ）。
@@ -428,7 +439,27 @@ aws-vault exec <プロファイル> --no-session
 aws sts get-caller-identity
 ```
 
-aws-vault を使っていない（`aws configure` の長期キー、または SSO ログイン）なら、この 0-1 は飛ばして 0-2 へ。
+aws-vault を使っていない（`aws configure` の長期キー、または SSO ログイン）なら、この 0-1 は飛ばして 0-2 へ。`aws login` で入っているときは、下の段落だけ済ませる。
+
+**`aws login`（コンソールの認証情報）で入っているとき。**`terraform/main` の opensearch provider は古い AWS SDK（Go v1）で、`aws login` のプロファイル（`login_session`）を読めない。plan / apply / destroy が `NoCredentialProviders: no valid providers in chain` で落ちる（2026-09-16 に Mac で確認）。Terraform を手で打つときは、AWS CLI から認証情報を受け取るプロファイルを `~/.aws/config` に書き足し、以降の手順をそのプロファイルで打つ（[AWS CLI ユーザーガイド](https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-sign-in.html) の「Sharing Login credentials as process credentials」と同じ形。15 分ごとの更新は CLI が続ける）。`ops/up.sh` / `ops/down.sh` は同じことを一時ファイルで行うので、スクリプトだけ使うなら要らない。
+
+`~/.aws/config` に足す 3 行（`<aws login したプロファイル>` は `aws login --profile` に付けた名前。付けていなければ `default`）:
+
+```ini
+[profile fukuda-nwc-poc-terraform]
+credential_process = aws configure export-credentials --profile <aws login したプロファイル> --format process
+region = ap-northeast-1
+```
+
+```bash
+export AWS_PROFILE=fukuda-nwc-poc-terraform
+```
+
+```bash
+aws sts get-caller-identity
+```
+
+↑ `aws login` した本人の ARN が出ればよい。`aws login` のセッション（最長 12 時間）が切れたら、`aws login` を打ち直す（このプロファイルは書き直さなくてよい）。
 
 #### 0-2. アカウント ID を `ACCOUNT_ID` に入れる
 
@@ -973,6 +1004,7 @@ aws s3 rm "s3://$KB_BUCKET/stream/" --recursive
 | `terraform/main` の apply が `does not have an attribute named "agent_repository_url"` | 手順 1 の `terraform/ecr` をこの PC で apply していない |
 | `terraform/lab` / `stream` / `graph` が `does not have an attribute named "vpc_id"`（`kb_bucket_name` なども同じ） | `terraform/main` をこの PC で apply していない、または先に destroy した。main を apply してから打ち直す（destroy のときは main を戻してから順番どおりに消す） |
 | `terraform/stream` の plan が `lab_security_group_id / lab_role_name が読めない` / `Confluent S3 sink の zip が無い` | s-2 の表 |
+| `terraform/main` の plan / apply / destroy が `NoCredentialProviders: no valid providers in chain`（`with provider["registry.terraform.io/opensearch-project/opensearch"]`） | `aws login` で入ったプロファイルを opensearch provider が読めない。`ops/up.sh` / `ops/down.sh` は手順 0 で「AWS CLI 経由（credential_process）で渡す」と出して自分で回避する。手で打つときは 0-1 の「`aws login` で入っているとき」 |
 | `Error acquiring the state lock` | 同じルートの terraform が別のターミナルで動いている（`ops/up.sh` を 2 つ打った など）。終わるのを待ってから打ち直す |
 | `SessionManagerPlugin is not found` | PC に Session Manager plugin が入っていない |
 | `start-session` がタイムアウトする / 名前が解決できない | PC から ssm / ssmmessages に届いていない（前提の「利用者の PC 側」） |
@@ -1079,6 +1111,8 @@ terraform -chdir=terraform/main destroy
 ```bash
 terraform -chdir=terraform/ecr destroy
 ```
+
+↑ ECR（イメージ）を残すなら打たない（`KEEP_ECR=1 ops/down.sh` と同じ）。
 
 最後に、Terraform の外にある Runtime のロググループ（手順 5 で作られていれば）。
 

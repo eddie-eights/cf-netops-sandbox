@@ -3,8 +3,11 @@
 # state（terraform/<ルート>/terraform.tfstate）にリソースが載っているルートだけを消す。作っていないルートは飛ばす。
 #
 # 使い方（リポジトリの直下で。aws-vault なら `aws-vault exec <プロファイル> --no-session` のサブシェルの中で）:
-#   ops/down.sh              # 全部消す（graph → stream → lab → main → ecr → Runtime のロググループ）
+#   ops/down.sh              # 全部消す（graph → stream → lab → main → ecr → Runtime のロググループ）。KEEP_ECR=0 と同じ
 #   KEEP_ECR=1 ops/down.sh   # ECR（イメージ）だけ残す。翌日の ops/up.sh でビルドを飛ばせる（保管料は月数円）
+#
+# 環境変数で変えられるもの（任意）:
+#   KEEP_ECR   ECR を残すか。1 = 残す、0 = 消す（既定）。それ以外の値は何も消さずに止まる
 #
 # ops/up.sh の PHASE / WITH_LAB / SKIP_* / CREATE_S3_SINK は渡さなくてよい（作っていないルートは飛ばし、S3 sink の有無は state から読む）。
 #
@@ -19,9 +22,29 @@ cd "$(dirname "$0")/.."
 
 log()  { printf '\n\033[1;34m== %s\033[0m\n' "$*"; }
 die()  { printf '\033[1;31mNG: %s\033[0m\n' "$*" >&2; exit 1; }
+# terraform に渡す認証情報。terraform/main の opensearch provider は古い AWS SDK（Go v1）で、`aws login` で入ったプロファイル
+# （login_session）を読めずに NoCredentialProviders で落ちる。鍵が環境変数に無い（= プロファイルから読む）ときは、AWS CLI から
+# 資格情報を受け取る credential_process だけのプロファイルを一時ファイルに書き、terraform にはそちらを読ませる
+# （AWS CLI ユーザーガイド「Sharing Login credentials as process credentials」の形。15 分ごとの更新は CLI が続ける）
+TF_AWS_CONFIG=""
+TF_AWS_ENV=()
+tf_use_cli_credentials() {
+  if [ -n "${AWS_ACCESS_KEY_ID:-}" ]; then  # aws-vault など、鍵が環境変数にあるときはそのまま渡す
+    echo "terraform の認証情報: 環境変数の鍵"
+    return 0
+  fi
+  local profile_opt=""
+  if [ -n "${AWS_PROFILE:-}" ]; then profile_opt="--profile $(printf '%q' "$AWS_PROFILE")"; fi
+  TF_AWS_CONFIG=$(mktemp "${TMPDIR:-/tmp}/$PREFIX-aws-config.XXXXXX") || die "一時ファイルを作れない（TMPDIR）"
+  trap 'rm -f "$TF_AWS_CONFIG"' EXIT
+  printf '[profile %s-terraform]\ncredential_process = env -u AWS_PROFILE AWS_CONFIG_FILE=%q aws configure export-credentials %s --format process\n' \
+    "$PREFIX" "${AWS_CONFIG_FILE:-$HOME/.aws/config}" "$profile_opt" >"$TF_AWS_CONFIG"
+  TF_AWS_ENV=(AWS_CONFIG_FILE="$TF_AWS_CONFIG" AWS_PROFILE="$PREFIX-terraform")
+  echo "terraform の認証情報: プロファイル ${AWS_PROFILE:-（既定）} を AWS CLI 経由（credential_process）で渡す"
+}
 tf() {  # tf <ルート> <terraform のサブコマンドと引数…>
   local root="$1"; shift
-  terraform -chdir="terraform/$root" "$@"
+  env ${TF_AWS_ENV[@]+"${TF_AWS_ENV[@]}"} terraform -chdir="terraform/$root" "$@"
 }
 has_resources() {  # has_resources <ルート>  state があり、リソースが 1 つ以上載っている（init もここで済ませる）
   [ -f "terraform/$1/terraform.tfstate" ] || return 1
@@ -38,9 +61,17 @@ destroy_root() {  # destroy_root <ルート> [-var 名前=値 …]
 }
 
 log "0. 道具と認証"
+KEEP_ECR="${KEEP_ECR:-0}"
+case "$KEEP_ECR" in
+  0) echo "KEEP_ECR=0: ECR もイメージごと消す（残すなら KEEP_ECR=1）" ;;
+  1) echo "KEEP_ECR=1: ECR（イメージ）は残す" ;;
+  *) die "KEEP_ECR は 1（ECR を残す）か 0（消す。既定）（いまは「$KEEP_ECR」）。まだ何も消していない" ;;
+esac
+command -v aws >/dev/null || die "aws CLI が無い"
 command -v terraform >/dev/null || die "terraform が無い"
-ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text) || die "認証が通っていない（aws-vault なら --no-session のサブシェルの中で打つ）"
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text) || die "認証が通っていない（aws-vault なら --no-session のサブシェルの中で打つ。aws login なら打ち直す）"
 echo "ACCOUNT_ID=$ACCOUNT_ID"
+tf_use_cli_credentials
 CACERT="${OPENSEARCH_CACERT_FILE:-${AWS_CA_BUNDLE:-}}"
 MAIN_VARS=()
 if [ -n "$CACERT" ]; then MAIN_VARS+=(-var "opensearch_cacert_file=$CACERT"); fi
@@ -64,8 +95,8 @@ if has_resources main; then
 fi
 destroy_root main ${MAIN_VARS[@]+"${MAIN_VARS[@]}"}
 
-if [ -n "${KEEP_ECR:-}" ]; then
-  log "4. ECR は残す（KEEP_ECR）"
+if [ "$KEEP_ECR" = 1 ]; then
+  log "4. ECR は残す（KEEP_ECR=1）"
 else
   log "4. ECR（イメージごと消える）"
   destroy_root ecr

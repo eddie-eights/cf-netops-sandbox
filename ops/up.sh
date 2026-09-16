@@ -52,9 +52,28 @@ cd "$(dirname "$0")/.."
 
 log()  { printf '\n\033[1;34m== %s\033[0m\n' "$*"; }
 die()  { printf '\033[1;31mNG: %s\033[0m\n' "$*" >&2; exit 1; }
+# terraform に渡す認証情報。terraform/main の opensearch provider は古い AWS SDK（Go v1）で、`aws login` で入ったプロファイル
+# （login_session）を読めずに NoCredentialProviders で落ちる。鍵が環境変数に無い（= プロファイルから読む）ときは、AWS CLI から
+# 資格情報を受け取る credential_process だけのプロファイルを一時ファイルに書き、terraform にはそちらを読ませる
+# （AWS CLI ユーザーガイド「Sharing Login credentials as process credentials」の形。15 分ごとの更新は CLI が続ける）
+TF_AWS_CONFIG=""
+TF_AWS_ENV=()
+tf_use_cli_credentials() {
+  if [ -n "${AWS_ACCESS_KEY_ID:-}" ]; then  # aws-vault など、鍵が環境変数にあるときはそのまま渡す
+    echo "terraform の認証情報: 環境変数の鍵"
+    return 0
+  fi
+  local profile_opt=""
+  if [ -n "${AWS_PROFILE:-}" ]; then profile_opt="--profile $(printf '%q' "$AWS_PROFILE")"; fi
+  TF_AWS_CONFIG=$(mktemp "${TMPDIR:-/tmp}/$PREFIX-aws-config.XXXXXX") || die "一時ファイルを作れない（TMPDIR）"
+  printf '[profile %s-terraform]\ncredential_process = env -u AWS_PROFILE AWS_CONFIG_FILE=%q aws configure export-credentials %s --format process\n' \
+    "$PREFIX" "${AWS_CONFIG_FILE:-$HOME/.aws/config}" "$profile_opt" >"$TF_AWS_CONFIG"
+  TF_AWS_ENV=(AWS_CONFIG_FILE="$TF_AWS_CONFIG" AWS_PROFILE="$PREFIX-terraform")
+  echo "terraform の認証情報: プロファイル ${AWS_PROFILE:-（既定）} を AWS CLI 経由（credential_process）で渡す"
+}
 tf() {  # tf <ルート> <terraform のサブコマンドと引数…>
   local root="$1"; shift
-  terraform -chdir="terraform/$root" "$@"
+  env ${TF_AWS_ENV[@]+"${TF_AWS_ENV[@]}"} terraform -chdir="terraform/$root" "$@"
 }
 tf_init() {  # tf_init <ルート>
   tf "$1" init -input=false >/dev/null \
@@ -129,6 +148,7 @@ on_exit() {  # 途中で止まっても、バックグラウンドの graph の 
     printf '\n%s\n' "terraform/graph の apply がまだ動いているので、終わるまで待つ（ログ: $GRAPH_LOG）。このターミナルは閉じない" >&2
     wait "$GRAPH_PID" || true
   fi
+  if [ -n "$TF_AWS_CONFIG" ]; then rm -f "$TF_AWS_CONFIG"; fi
 }
 trap on_exit EXIT
 
@@ -162,7 +182,7 @@ docker buildx version >/dev/null 2>&1 || die "docker buildx が無い（Ubuntu �
 if [ -z "${NO_PORTFORWARD:-}" ]; then
   command -v session-manager-plugin >/dev/null || die "Session Manager plugin が無い（手順 10 のポートフォワーディングに使う。README「WSL2 の準備」か「Mac で打つとき」。開かないなら NO_PORTFORWARD=1）"
 fi
-CALLER_ARN=$(aws sts get-caller-identity --query Arn --output text) || die "認証が通っていない（aws-vault なら --no-session のサブシェルの中で打つ）"
+CALLER_ARN=$(aws sts get-caller-identity --query Arn --output text) || die "認証が通っていない（aws-vault なら --no-session のサブシェルの中で打つ。aws login なら打ち直す）"
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 case "$CALLER_ARN" in
   arn:aws:iam::*:user/*)
@@ -172,6 +192,7 @@ case "$CALLER_ARN" in
   arn:aws:sts::*:assumed-role/*) ;;
   *) [ -n "${ADMIN_ARN:-}" ] || die "この認証情報の形（$CALLER_ARN）では kb_admin_principal_arn を決められない。ADMIN_ARN=arn:aws:iam::<アカウント ID>:role/<ロール名> を環境変数で渡す" ;;
 esac
+tf_use_cli_credentials
 # CloudFormation 版（2026-09-15 まで）のスタックが残っていると、同じ名前のリソースを作れずに apply が途中で落ちる
 OLD_STACKS=$(aws cloudformation list-stacks --region "$REGION" \
   --query "StackSummaries[?starts_with(StackName, '$PREFIX') && StackStatus != 'DELETE_COMPLETE'].StackName" \
@@ -404,6 +425,7 @@ fi
 if [ -n "${NO_PORTFORWARD:-}" ]; then exit 0; fi
 log "10. ポートフォワーディング（http://localhost:$LOCAL_PORT/ 。Ctrl+C で閉じる）"
 trap - EXIT
+if [ -n "$TF_AWS_CONFIG" ]; then rm -f "$TF_AWS_CONFIG"; fi
 exec aws ssm start-session --region "$REGION" --target "$INSTANCE_ID" \
   --document-name AWS-StartPortForwardingSession \
   --parameters "{\"portNumber\":[\"8080\"],\"localPortNumber\":[\"$LOCAL_PORT\"]}"
