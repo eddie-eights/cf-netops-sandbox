@@ -240,6 +240,24 @@ docker buildx ls          # Platforms に linux/arm64 があれば準備完了
 あとは手順 2（エージェント）と lab-1（lab のイメージ）のコマンドをそのまま打つ。QEMU で翻訳実行するので、エージェントのビルドはネイティブより数倍かかる（目安は数分から十数分）。
 WSL を再起動すると QEMU の登録は消えるので、`docker buildx ls` に `linux/arm64` が無くなっていたら `binfmt --install arm64` だけ打ち直す。
 
+### Mac で打つとき
+
+コマンドは WSL と同じ（全部 bash 用）。違うのは道具の入れ方だけ。
+
+| 見るもの | 確認 |
+|---|---|
+| AWS CLI v2 / Terraform 1.11 以上 / uv / Session Manager plugin | `aws --version`、`terraform version`、`uv --version`、`session-manager-plugin`。Homebrew なら下のコマンドで入る |
+| Docker Desktop が起動していて arm64 のビルドができる | `docker buildx ls` の `Platforms` に `linux/arm64` があること。Apple Silicon はネイティブで作るので QEMU の登録は要らない（WSL より速い） |
+| `ops/up.sh` / `ops/down.sh` が動く bash | macOS 標準の `/bin/bash` 3.2 のままでよい（3.2 で動く書き方にしてある）。Homebrew の bash を入れる必要はない |
+
+```bash
+brew install awscli uv
+brew tap hashicorp/tap && brew install hashicorp/tap/terraform
+brew install --cask session-manager-plugin
+```
+
+Apple Silicon の Mac（Docker Desktop 29 / buildx 0.33 / Terraform 1.16 / AWS CLI 2.36）で、道具が揃うことと `ops/up.sh` / `ops/down.sh` が bash 3.2 で構文エラーにならないことは 2026-09-16 に確認した。**Mac で通しの apply はまだ打っていない。**Intel Mac は確かめていない。
+
 ### 社内 PC で使うとき
 
 社内ネットワークは SSL インスペクションで証明書チェーンを社内 CA に差し替えている（プロキシは無い）。WSL の中の道具は Windows の証明書ストアを見ないので、**社内 CA を WSL に入れ、AWS CLI と Terraform にその場所を教える。**1 回だけ行う（6 で毎回の設定をファイルに残す）。
@@ -313,7 +331,7 @@ ops/up.sh
 
 | 順 | 何をする | 対応する手順 |
 |---|---|---|
-| 0 | `aws` / `terraform` / `python3`（無ければ `uv`）/ `curl` / `docker` と `docker buildx` があるか、認証が通っているかを確かめる。aws-vault の一時セッションなら止まる。CloudFormation 版のスタック（`fukuda-nwc-poc*`）が残っていれば止まる（「CloudFormation 版から移るとき」）。作るルートを表示する | 0 |
+| 0 | `aws` / `terraform` / `python3`（無ければ `uv`）/ `curl` / `docker` と `docker buildx` / `session-manager-plugin`（`NO_PORTFORWARD` が空のとき）があるか、認証が通っているかを確かめる。aws-vault の一時セッションなら止まる。CloudFormation 版のスタック（`fukuda-nwc-poc*`）が残っていれば止まる（「CloudFormation 版から移るとき」）。作るルートを表示する | 0 |
 | 1 | `terraform/ecr` を init / apply | 1 |
 | 2 | ECR に**無いタグだけ** arm64 でビルドして push する（エージェント、lab の frr / multitool / snmpd）。PC の `docker buildx` で作る（dockerd が動いていないとき、agent か snmpd を作るのに `docker buildx ls` に `linux/arm64` が無いときは止まる） | 2 / lab-1 |
 | 3 | `terraform/main` を init / apply（初回 10〜20 分）。終わったら `terraform/graph` の apply を**裏で**始める（10〜15 分。ログは `ops/logs/graph-apply.log`） | 3 / g-1 |

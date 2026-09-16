@@ -145,6 +145,10 @@ else die "python3 も uv も無い（README「WSL2 の準備」）"; fi
 if [ -z "$SKIP_LAB" ]; then command -v curl >/dev/null || die "curl が無い（lab の rpm を取るのに使う。sudo apt install curl）"; fi
 command -v docker >/dev/null || die "docker が無い（イメージのビルドに使う。README「WSL2 の準備」）"
 docker buildx version >/dev/null 2>&1 || die "docker buildx が無い（Ubuntu の docker.io には入っていない。README「WSL2 の準備」）"
+# 最後のポートフォワーディング（手順 10）で要る。40〜60 分かけた後で落ちないよう、ここで見る
+if [ -z "${NO_PORTFORWARD:-}" ]; then
+  command -v session-manager-plugin >/dev/null || die "Session Manager plugin が無い（手順 10 のポートフォワーディングに使う。README「WSL2 の準備」か「Mac で打つとき」。開かないなら NO_PORTFORWARD=1）"
+fi
 CALLER_ARN=$(aws sts get-caller-identity --query Arn --output text) || die "認証が通っていない（aws-vault なら --no-session のサブシェルの中で打つ）"
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 case "$CALLER_ARN" in
