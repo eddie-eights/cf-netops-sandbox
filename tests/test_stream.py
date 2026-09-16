@@ -13,8 +13,13 @@ def check(name, cond):
     print("ok", name)
 
 # ---- terraform/stream が detector.py をそのまま Lambda に載せるか
-with open(os.path.join(ROOT, "terraform", "stream", "main.tf"), encoding="utf-8") as f:
-    tf = f.read()
+# terraform/stream は関心ごとにファイルが分かれているので、ルートの .tf を全部つないで見る
+TF_DIR = os.path.join(ROOT, "terraform", "stream")
+tf = ""
+for name in sorted(os.listdir(TF_DIR)):
+    if name.endswith(".tf"):
+        with open(os.path.join(TF_DIR, name), encoding="utf-8") as f:
+            tf += f.read() + "\n"
 with open(SRC, encoding="utf-8") as f:
     src = f.read()
 check("terraform/stream は stream/detector.py を読む", 'file("${path.module}/../../stream/detector.py")' in tf)

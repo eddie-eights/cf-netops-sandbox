@@ -60,7 +60,7 @@ lab（任意、terraform/lab、別ルート）: 同じ VPC の EC2 1 台で cont
 | `terraform/build/` | 任意。PC でイメージをビルドできないとき、S3 に置いた zip から CodeBuild（arm64）でビルドして ECR に push する（手順 2-b。`buildspec.yml`）。待機中 0 円 |
 | `terraform/main/` | 本体。`network.tf`（VPC・サブネット 2 つ・VPC エンドポイント・SG）/ `kb.tf`（S3・OpenSearch Serverless・インデックス・ナレッジベース・ガードレール）/ `runtime.tf`（AgentCore Runtime と IAM）/ `web.tf`（EC2）/ `templates/web_user_data.sh.tftpl`（起動時に S3 から Web を取って入れる）/ `locals.tf` |
 | `terraform/lab/` | 任意。containerlab + FRR の lab を動かす EC2 1 台（`templates/lab_user_data.sh.tftpl`）。VPC / サブネット / SG / バケットは `terraform/main` の state から読む。フェーズ 2 では Telegraf も入れる |
-| `terraform/stream/` | フェーズ 2。MSK（2 ブローカー、IAM 認証）/ detector Lambda / DynamoDB の異常テーブル / MSK Connect の S3 sink / lambda・sts・dynamodb エンドポイント / `terraform/main` のロールへの読み取り権限。`terraform/main` と `terraform/lab` の state を読む |
+| `terraform/stream/` | フェーズ 2。`network.tf`（SG と lambda・sts・dynamodb エンドポイント）/ `msk.tf`（MSK。2 ブローカー、IAM 認証）/ `anomalies.tf`（DynamoDB の異常テーブル）/ `detector.tf`（detector Lambda）/ `sink.tf`（MSK Connect の S3 sink）/ `access.tf`（`terraform/main` と `terraform/lab` のロールに足す権限）/ `locals.tf`。`terraform/main` と `terraform/lab` の state を読む |
 | `terraform/graph/` | フェーズ 2。Neptune（db.t4g.medium × 1、IAM 認証）と、`terraform/main` のロールへの Gremlin 権限。`terraform/main` の state を読む。無ければ静的データで動く |
 | `terraform/<ルート>/terraform.tfvars.example` | 変数と既定値の一覧。既定のままでよい。変えたいときだけ同じ場所の `terraform.tfvars` に写す（gitignore 済み） |
 | `terraform/<ルート>/terraform.tfstate` | apply すると PC にできる state（gitignore 済み）。**Terraform が何を作ったかの記録で、これを消すと destroy できなくなる。**ARN などが平文で入るので共有しない。apply した PC に残るので、destroy もその PC で打つ（「毎日の起動と片付けをスクリプトで打つ」の注意） |
@@ -70,7 +70,7 @@ lab（任意、terraform/lab、別ルート）: 同じ VPC の EC2 1 台で cont
 | `.env.example` | 環境変数の一覧（Web / エージェント / lab。意味と AWS 上で誰が入れるか）。AWS 上では Terraform（user_data と Runtime の環境変数）が書くので手で用意しない。EC2 で Web が立たないときの見比べ先で、手元で `web/app.py` を動かすときは `.env` に写して使う（「Web を手元で動かす」） |
 | `lab/` | lab の材料。`wvs2.clab.yml.in`（containerlab の定義。イメージ名は起動時に埋める）、`frr/`、`snmpd/`（Dockerfile と設定。trap の送信も）、`telegraf.conf.in`（ポーリングと trap 受信 → MSK）、`lab.sh` |
 | `kb-docs/` | ナレッジベースに入れる手順書の例（架空の md 3 つ） |
-| `ops/` | `up.sh`（手順 1〜7 をまとめて打つ）と `down.sh`（片付けをまとめて打つ）。毎日消して作り直す運用向け（「毎日の起動と片付けをスクリプトで打つ」） |
+| `ops/` | `up.sh`（手順 1〜7 をまとめて打つ）と `down.sh`（片付けをまとめて打つ）。毎日消して作り直す運用向け（「毎日の起動と片付けをスクリプトで打つ」）。`check.sh` は AWS に触らない検査をまとめて打つ（「手元で確かめる」）。`vscode-setup.sh` は VS Code の設定を入れる（「VS Code の設定」） |
 | `tests/` | 模擬テスト（AWS に触れない。打ち方は「手元で確かめる」）。`test_app.py`（エージェント）、`test_graph.py`（Neptune の読み書きと静的への切り戻し）、`test_stream.py`（detector と、`terraform/stream` の `archive_file` の配線） |
 
 ## なぜこの形にしたか
@@ -1210,6 +1210,12 @@ AWS に触らずに、Terraform の構文検査と模擬テストを打てる。
 uv sync --group dev
 ```
 
+下の 4 つは `ops/check.sh` が同じ順番で打つ。**変更したら、まずこれを打つ。**最後の行が `すべて通過` なら健全で、途中で落ちたらそこで止まって何が失敗したかを出す。
+
+```bash
+bash ops/check.sh
+```
+
 ```bash
 terraform fmt -check -recursive terraform
 ```
@@ -1255,6 +1261,7 @@ uv run python web/app.py
 
 確認したこと（2026-09-14、フェーズ 2 は 2026-09-15、Terraform への移行は 2026-09-16）。
 
+- `ops/check.sh` が最後まで `すべて通過` で終わる（2026-09-16）。中身は次の 2 つと `bash -n`。
 - 6 つのルート（`ecr` / `build` / `main` / `lab` / `stream` / `graph`）で `terraform init -backend=false` と `terraform validate` が通り、`terraform fmt -check -recursive` に差分が無い（Terraform 1.16.0、hashicorp/aws 6.64.0、opensearch-project/opensearch 2.6.0、hashicorp/time 0.14.2、hashicorp/archive 2.8.1。2026-09-16）。
 - フェーズ 2 の模擬テスト。`tests/test_stream.py`（23 項目: `terraform/stream` の `archive_file` が `stream/detector.py` を `index.py` として zip する配線、機器名の引き方、ポーリングの open / resolved、`first_seen` を保つ、解消済みへの up を数えない、MIB 無しの trap から ifDescr を取る、linkUp で resolved、壊れたレコードを飛ばす）、`tests/test_graph.py`（18 項目: SSM 未設定なら静的、GraphSON の読み替え、Neptune からの組み立て、失敗時と空のときの静的への切り戻し、`add_link` の正規化と重複拒否、`remove_link` / `add_device` / `seed` の Gremlin）。
 - Telegraf の `inputs.snmp` は数値 OID とフィールド名を明示すれば MIB 無しで動き、`inputs.snmp_trap` は v2c を MIB 無しで受ける（varbind の名前は数値 OID）。`agent_host` タグは `source` に替わっている。net-snmp の `monitor` には `iquerySecName` と内部ユーザーが要る。
