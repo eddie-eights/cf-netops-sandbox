@@ -1,31 +1,36 @@
 #!/usr/bin/env bash
-# PHASE で指定したフェーズまでを 1 本で起こす。フェーズ 1 は README の手順 1〜5・7、フェーズ 2 はそれに lab と stream / graph（と投入）を足したもの。
+# deploy.env の PHASE で指定したフェーズまでを 1 本で起こす。
+#   フェーズ 1（既定）  LLM + RAG で対話する。ECR・イメージ・本体・Web（README の手順 1〜5・7）
+#   フェーズ 2          フェーズ 1 に、lab（containerlab の擬似トポロジ）と graph（Neptune のトポロジと投入）を足す
+#   WITH_STREAM=1       フェーズ 2 の任意。stream（lab → MSK → detector → DynamoDB の異常一覧）を足す
 # 毎日全部消す運用向け。何度打っても同じ状態に収束する（できているものは Terraform が差分なしで飛ばし、ECR にあるタグはビルドしない）。
 # Terraform の state はこの PC のリポジトリの中（terraform/<ルート>/terraform.tfstate）に置く。消すのは ops/down.sh。
 #
 # 使い方（リポジトリの直下で。aws-vault なら `aws-vault exec <プロファイル> --no-session` のサブシェルの中で）:
-#   ops/up.sh                   # フェーズ 1（ECR・イメージ・本体・Web）。最後にポートフォワーディングを開いたまま止まる（Ctrl+C で閉じる）
-#   PHASE=2 ops/up.sh           # フェーズ 2 まで（lab / stream / graph も）。初回は 40〜60 分
-#   WITH_LAB=1 ops/up.sh        # フェーズ 1 に lab だけ足す
-#   NO_PORTFORWARD=1 ops/up.sh  # ポートフォワーディングを開かずに終わる
+#   cp deploy.env.example deploy.env  # 初回だけ。どこまで作るかを deploy.env に書く（無ければ既定のフェーズ 1 で動く）
+#   ops/up.sh                         # deploy.env のとおりに作る。最後にポートフォワーディングを開いたまま止まる（Ctrl+C で閉じる）
+#   PHASE=2 ops/up.sh                 # その回だけ変える（環境変数は deploy.env より優先）。初回はフェーズ 2 で 30〜40 分、WITH_STREAM=1 で 40〜60 分
+#   DEPLOY_ENV_FILE=<パス> ops/up.sh  # 別の設定ファイルを読む
 #
-# stream（MSK / MSK Connect）と graph（Neptune）は時間課金。使い終わったら当日中に ops/down.sh を打つ（README「1 時間起動したときの試算」）。
+# どのフェーズも時間課金（試算は README「1 時間起動したときの試算」）。使い終わったら当日中に ops/down.sh を打つ。
 # PHASE を下げて打っても、前に作ったルートは消さない（消すのは ops/down.sh）。
 #
-# 環境変数で変えられるもの（全部任意）:
-#   IMAGE_TAG               エージェントのイメージのタグ。既定 v1。ECR にそのタグが無いときだけ PC の docker buildx でビルドして push する（タグは上書きできない）
+# 設定できるキー（deploy.env か環境変数。全部任意。意味は deploy.env.example、読み方は ops/deploy-env.sh）:
 #   PHASE                   どこまで作るか。1（既定）か 2。2B / 5A / 5B はまだ Terraform が無いので止まる（docs/phases.md）
-#   WITH_LAB=1              PHASE=1 に lab を足す（PHASE=2 では最初から作る）
-#   SKIP_LAB=1              PHASE=2 で lab を作らない（stream は lab の state を読むので、stream も作らない）
-#   SKIP_STREAM=1           PHASE=2 で stream（MSK → detector → DynamoDB）を作らない
+#   SKIP_LAB=1              PHASE=2 で lab を作らない（WITH_STREAM=1 とは一緒に使えない）
 #   SKIP_GRAPH=1            PHASE=2 で graph（Neptune）を作らない
+#   WITH_STREAM=1           PHASE=2 に stream を足す。lab が要る
 #   CREATE_S3_SINK=0        MSK Connect の S3 sink を作らない（Confluent の zip が取れないとき。ops/down.sh は state を見て合わせる）
+#   IMAGE_TAG               エージェントのイメージのタグ。既定 v1。ECR にそのタグが無いときだけ PC の docker buildx でビルドして push する（タグは上書きできない）
 #   ADMIN_ARN               terraform/main の kb_admin_principal_arn。既定は空（Terraform が今の認証情報から決める）
 #   VPC_CIDR                terraform/main の vpc_cidr（社内と重なるとき）
 #   CLIENT_CIDR             terraform/main の client_cidr（DX / VPN 経由のとき）
 #   OPENSEARCH_CACERT_FILE  terraform/main の opensearch_cacert_file（社内の SSL 検査の CA の PEM）。既定は AWS_CA_BUNDLE と同じ
 #   LOCAL_PORT              PC 側のポート。既定 8080
 #   NO_PORTFORWARD=1        ポートフォワーディングを開かずに終わる
+#   AWS_PROFILE / AWS_CA_BUNDLE  AWS CLI と terraform がそのまま読む
+# SKIP_LAB / SKIP_GRAPH / WITH_STREAM / NO_PORTFORWARD は 1 / 0 のほか true / false、yes / no でも書ける（CREATE_S3_SINK と ops/down.sh の KEEP_ECR は 1 か 0 だけ）。
+# WITH_LAB と SKIP_STREAM は 2026-09-16 に無くなった（lab はフェーズ 2 に入り、stream は WITH_STREAM=1 で足す形になった）。
 #
 # 手順 6（利用者への権限）は人に渡す作業なので入れていない。
 set -euo pipefail
@@ -33,8 +38,6 @@ set -euo pipefail
 REGION=ap-northeast-1
 PREFIX=fukuda-nwc-poc
 OWNER=fukuda
-IMAGE_TAG="${IMAGE_TAG:-v1}"
-LOCAL_PORT="${LOCAL_PORT:-8080}"
 # 下の 5 つは Terraform の変数の既定値に合わせてある（terraform/lab の *_image_tag / containerlab_version / telegraf_version、
 # terraform/stream の s3_sink_plugin_key）。変えるときは両方を変える
 FRR_TAG=10.2.1
@@ -47,7 +50,8 @@ TELEGRAF_RPM="telegraf-${TELEGRAF_VERSION}-1.aarch64.rpm"
 S3_SINK_ZIP=confluentinc-kafka-connect-s3-12.1.11.zip
 S3_SINK_URL="https://hub-downloads.confluent.io/api/plugins/confluentinc/kafka-connect-s3/versions/12.1.11/$S3_SINK_ZIP"
 
-CREATE_S3_SINK="${CREATE_S3_SINK:-1}"
+. "$(dirname "$0")/deploy-env.sh"
+resolve_deploy_env_file  # DEPLOY_ENV_FILE の相対パスは、下の cd の前の場所から見る
 cd "$(dirname "$0")/.."
 
 log()  { printf '\n\033[1;34m== %s\033[0m\n' "$*"; }
@@ -153,23 +157,41 @@ on_exit() {  # 途中で止まっても、バックグラウンドの graph の 
 trap on_exit EXIT
 
 # ---- 0. 道具と認証 -------------------------------------------------------------
-log "0. 道具と認証を確かめる"
+log "0. 設定と道具と認証を確かめる"
+load_deploy_env
+IMAGE_TAG="${IMAGE_TAG:-v1}"
+LOCAL_PORT="${LOCAL_PORT:-8080}"
+CREATE_S3_SINK="${CREATE_S3_SINK:-1}"
+case "$CREATE_S3_SINK" in
+  0|1) ;;
+  *) die "CREATE_S3_SINK は 1（作る。既定）か 0（作らない）（いまは「$CREATE_S3_SINK」）。まだ何も作っていない" ;;
+esac
+if [ -n "${WITH_LAB:-}" ]; then
+  die "WITH_LAB は無くなった（lab はフェーズ 2 に入った）。lab だけ作るなら PHASE=2 と SKIP_GRAPH=1。まだ何も作っていない"
+fi
+if [ -n "${SKIP_STREAM:-}" ]; then
+  echo "SKIP_STREAM は無くなったので無視する（stream は WITH_STREAM=1 のときだけ作る）"
+fi
+flag_value SKIP_LAB; flag_value SKIP_GRAPH; flag_value WITH_STREAM; flag_value NO_PORTFORWARD
 # どこまで作るか。後のフェーズは前のフェーズの state を読むので、指定したフェーズまでを順に作る
 PHASE="${PHASE:-1}"
-SKIP_LAB="${SKIP_LAB:-}"; SKIP_STREAM="${SKIP_STREAM:-}"; SKIP_GRAPH="${SKIP_GRAPH:-}"
 case "$PHASE" in
   1)
-    SKIP_STREAM=1; SKIP_GRAPH=1
-    if [ -z "${WITH_LAB:-}" ]; then SKIP_LAB=1; fi ;;
-  2) ;;
-  2B|2b|5A|5a|5B|5b) die "フェーズ $PHASE はまだ Terraform が無い（docs/phases.md）。いま作れるのは PHASE=1 か PHASE=2" ;;
-  3|4) die "フェーズ $PHASE は無い（3 は欠番、4 はフェーズ 1 に取り込み済み。docs/phases.md）。PHASE=1 か PHASE=2 を付ける" ;;
+    [ -z "$WITH_STREAM" ] || die "WITH_STREAM=1 はフェーズ 2 の任意（lab が要る）。PHASE=2 と一緒に書く。まだ何も作っていない"
+    SKIP_LAB=1; SKIP_GRAPH=1 ;;
+  2)
+    if [ -n "$WITH_STREAM" ] && [ -n "$SKIP_LAB" ]; then
+      die "WITH_STREAM=1 は lab が要る（Telegraf が lab の EC2 で動き、terraform/stream は lab の state から SG とロールを読む）。SKIP_LAB を外す。まだ何も作っていない"
+    fi
+    if [ -n "$SKIP_LAB" ] && [ -n "$SKIP_GRAPH" ]; then
+      echo "SKIP_LAB と SKIP_GRAPH の両方があるので、フェーズ 1 と同じものだけ作る"
+    fi ;;
+  2B|2b|5A|5a|5B|5b) die "フェーズ $PHASE はまだ Terraform が無い（docs/phases.md）。いま作れるのは PHASE=1 か PHASE=2（stream は WITH_STREAM=1）" ;;
+  3|4) die "フェーズ $PHASE は無い（3 は欠番、4 はフェーズ 1 に取り込み済み。docs/phases.md）。PHASE=1 か PHASE=2 にする" ;;
   *) die "PHASE は 1 か 2（いまは「$PHASE」）" ;;
 esac
-if [ -n "$SKIP_LAB" ] && [ -z "$SKIP_STREAM" ]; then
-  echo "SKIP_LAB なので stream も作らない（stream は lab の state から SG とロールを読む）"
-  SKIP_STREAM=1
-fi
+SKIP_STREAM=1
+if [ -n "$WITH_STREAM" ]; then SKIP_STREAM=""; fi
 command -v aws >/dev/null || die "aws CLI が無い（README「WSL2 の準備」）"
 command -v terraform >/dev/null || die "terraform が無い（README「WSL2 の準備」。1.11 以上）"
 if command -v python3 >/dev/null; then PY=(python3)
@@ -179,7 +201,7 @@ if [ -z "$SKIP_LAB" ]; then command -v curl >/dev/null || die "curl が無い（
 command -v docker >/dev/null || die "docker が無い（イメージのビルドに使う。README「WSL2 の準備」）"
 docker buildx version >/dev/null 2>&1 || die "docker buildx が無い（Ubuntu の docker.io には入っていない。README「WSL2 の準備」）"
 # 最後のポートフォワーディング（手順 10）で要る。40〜60 分かけた後で落ちないよう、ここで見る
-if [ -z "${NO_PORTFORWARD:-}" ]; then
+if [ -z "$NO_PORTFORWARD" ]; then
   command -v session-manager-plugin >/dev/null || die "Session Manager plugin が無い（手順 10 のポートフォワーディングに使う。README「WSL2 の準備」か「Mac で打つとき」。開かないなら NO_PORTFORWARD=1）"
 fi
 CALLER_ARN=$(aws sts get-caller-identity --query Arn --output text) || die "認証が通っていない（aws-vault なら --no-session のサブシェルの中で打つ。aws login なら打ち直す）"
@@ -190,7 +212,7 @@ case "$CALLER_ARN" in
       die "IAM ユーザーの一時セッション（get-session-token）で入っている。IAM の API が呼べないので aws-vault exec <プロファイル> --no-session で入り直す"
     fi ;;
   arn:aws:sts::*:assumed-role/*) ;;
-  *) [ -n "${ADMIN_ARN:-}" ] || die "この認証情報の形（$CALLER_ARN）では kb_admin_principal_arn を決められない。ADMIN_ARN=arn:aws:iam::<アカウント ID>:role/<ロール名> を環境変数で渡す" ;;
+  *) [ -n "${ADMIN_ARN:-}" ] || die "この認証情報の形（$CALLER_ARN）では kb_admin_principal_arn を決められない。deploy.env に ADMIN_ARN=arn:aws:iam::<アカウント ID>:role/<ロール名> を書く" ;;
 esac
 tf_use_cli_credentials
 # CloudFormation 版（2026-09-15 まで）のスタックが残っていると、同じ名前のリソースを作れずに apply が途中で落ちる
@@ -210,9 +232,18 @@ echo "CALLER_ARN=$CALLER_ARN"
 echo "IMAGE_TAG=$IMAGE_TAG"
 echo "PHASE=$PHASE"
 echo "作るルート: $ROOTS"
-if [ -z "$SKIP_STREAM" ] || [ -z "$SKIP_GRAPH" ]; then
-  printf '\033[1;33m%s\033[0m\n' "stream / graph は時間課金。使い終わったら当日中に ops/down.sh を打つ"
+# 待機時の 1 時間あたりの目安（セント。東京リージョンの税抜。単価は 2026-09-14〜15 に Price List API で確認。内訳は README「1 時間起動したときの試算」）。
+# フェーズ 1 = 52（Interface エンドポイント・OpenSearch Serverless・Web の EC2）、lab = 9、graph = 14、stream = 29（S3 sink 無しなら 15）。
+# README の試算を変えたらここも変える
+COST_CENTS=52
+if [ -z "$SKIP_LAB" ]; then COST_CENTS=$((COST_CENTS + 9)); fi
+if [ -z "$SKIP_GRAPH" ]; then COST_CENTS=$((COST_CENTS + 14)); fi
+if [ -z "$SKIP_STREAM" ]; then
+  if [ "$CREATE_S3_SINK" = 1 ]; then COST_CENTS=$((COST_CENTS + 29)); else COST_CENTS=$((COST_CENTS + 15)); fi
 fi
+COST_NOTE=$(printf '待機だけで約 $%d.%02d/h（約 %d 円/h。チャットの分は別）の時間課金。使い終わったら当日中に ops/down.sh を打つ' \
+  $((COST_CENTS / 100)) $((COST_CENTS % 100)) $(((COST_CENTS * 150 + 50) / 100)))
+printf '\033[1;33m%s\033[0m\n' "$COST_NOTE"
 
 # ---- 1. ECR --------------------------------------------------------------------
 log "1. ECR リポジトリ（terraform/ecr）"
@@ -326,10 +357,10 @@ WEB_ACTIVE="for i in 1 2 3 4 5 6 7 8 9 10 11 12; do systemctl is-active --quiet 
 run_on_instance "$INSTANCE_ID" "$WEB_ACTIVE"
 echo "Web が動いている"
 
-# ---- 5. lab とフェーズ 2 の材料 --------------------------------------------------------
+# ---- 5. lab と stream の材料 --------------------------------------------------------
 # lab の EC2 は起動のたびに s3://<バケット>/lab/ を読む。apply より前に置けば、Telegraf まで最初の起動で入る（再起動が要らない）
 if [ -z "$SKIP_LAB" ]; then
-  log "5-1. lab の材料（containerlab と Telegraf の rpm、トポロジ）を s3://$KB_BUCKET/lab/ に置く（README の lab-2 と s-1）"
+  log "5-1. lab の材料（containerlab の rpm とトポロジ。WITH_STREAM=1 なら Telegraf の rpm も）を s3://$KB_BUCKET/lab/ に置く（README の lab-2 と s-1）"
   fetch "https://github.com/srl-labs/containerlab/releases/download/v$CONTAINERLAB_VERSION/$CONTAINERLAB_RPM" "$CONTAINERLAB_RPM" \
     || die "containerlab の rpm が取れない（README の lab-2。社内 PC なら「社内 PC で使うとき」の証明書）"
   aws s3 sync lab/ "s3://$KB_BUCKET/lab/" --exclude "wvs2.clab.yml" --exclude "snmpd/certs/*"
@@ -348,7 +379,7 @@ if [ -z "$SKIP_STREAM" ]; then
     log "5-2. S3 sink のプラグイン（Confluent の zip）を s3://$KB_BUCKET/stream/ に置く（README の s-1）"
     if ! fetch "$S3_SINK_URL" "$S3_SINK_ZIP" || ! is_zip "$S3_SINK_ZIP"; then
       rm -f "$S3_SINK_ZIP"
-      die "Confluent の zip が取れない（利用条件への同意が要るとページが返る）。ブラウザで $S3_SINK_URL を開いて取り、リポジトリの直下に $S3_SINK_ZIP の名前で置いて打ち直す。S3 sink が要らなければ CREATE_S3_SINK=0 ops/up.sh"
+      die "Confluent の zip が取れない（利用条件への同意が要るとページが返る）。ブラウザで $S3_SINK_URL を開いて取り、リポジトリの直下に $S3_SINK_ZIP の名前で置いて打ち直す。S3 sink が要らなければ deploy.env に CREATE_S3_SINK=0 を書いて打ち直す"
     fi
     aws s3 cp "$S3_SINK_ZIP" "s3://$KB_BUCKET/stream/$S3_SINK_ZIP"
   fi
@@ -419,10 +450,8 @@ if [ -n "$LAB_INSTANCE_ID" ]; then
   echo "lab に入るコマンド:"
   tf lab output -raw start_session_command; echo
 fi
-if [ -z "$SKIP_STREAM" ] || [ -z "$SKIP_GRAPH" ]; then
-  printf '\033[1;33m%s\033[0m\n' "stream / graph は時間課金。使い終わったら当日中に ops/down.sh"
-fi
-if [ -n "${NO_PORTFORWARD:-}" ]; then exit 0; fi
+printf '\033[1;33m%s\033[0m\n' "$COST_NOTE"
+if [ -n "$NO_PORTFORWARD" ]; then exit 0; fi
 log "10. ポートフォワーディング（http://localhost:$LOCAL_PORT/ 。Ctrl+C で閉じる）"
 trap - EXIT
 if [ -n "$TF_AWS_CONFIG" ]; then rm -f "$TF_AWS_CONFIG"; fi

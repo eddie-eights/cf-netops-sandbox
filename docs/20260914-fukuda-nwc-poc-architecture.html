@@ -222,7 +222,7 @@ Neptune ── Gremlin ──▶ エージェントのトポロジツール / We
   <li><strong>trap とポーリングの両方を持つのは、速さと確実さのため。</strong>trap は 5 秒以内に届きますが取りこぼすことがあり、ポーリングは 10 秒周期ですが必ず追いつきます。detector は同じ機器・同じインタフェースを 1 件にまとめます。</li>
   <li><strong>Web とエージェントは、同じ 3 つのモジュールでトポロジと異常を読みます。</strong>Neptune と DynamoDB の場所は SSM のパラメータから引き、無ければ静的データに戻る（60 秒キャッシュ）ので、フェーズ 2 を destroy してもフェーズ 1 のまま動きます。</li>
   <li><strong>Neptune の中身は Web から手で編集します。</strong>「静的データを投入」で 10 台と 10 本を入れ、以後リンクの追加・削除ができます。lab の実配線とは同期しません。</li>
-  <li><strong>費用は stream + graph で 1 時間 ≈ $0.43（約 65 円）。</strong>MSK kafka.t3.small × 2 が $0.12、MSK Connect 1 MCU が $0.14、Neptune db.t4g.medium が $0.14、lambda / sts のエンドポイントが $0.03。1 か月置くと ≈ $317（約 47,600 円）。東京の税抜単価で、2026-09-15 に AWS Price List API で確認。</li>
+  <li><strong>費用はフェーズ 2（lab + graph）で 1 時間 ≈ $0.23（約 35 円）、stream（WITH_STREAM=1）でさらに ≈ $0.29（約 44 円）。</strong>lab の t4g.large が $0.09、Neptune db.t4g.medium が $0.14、MSK kafka.t3.small × 2 が $0.12、MSK Connect 1 MCU が $0.14、lambda / sts のエンドポイントが $0.03。1 か月置くとフェーズ 2 が ≈ $169（約 25,300 円）、stream が ≈ $213（約 32,000 円）。東京の税抜単価で、2026-09-15 に AWS Price List API で確認。</li>
 </ul>
 
 <h2 id="limits">確認できていないこと</h2>

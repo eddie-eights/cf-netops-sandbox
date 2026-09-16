@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # lab EC2（terraform/lab）の上で containerlab を動かす。user_data が /usr/local/bin/lab に置くので、SSM セッションから `sudo lab check` で使う。
 #   lab.sh render | pull | up | down | status | check | snmp <node> | fail-main | heal-main | failover | clab <args...>
-#   lab.sh telegraf-render | telegraf-status     （フェーズ 2: Telegraf → MSK。terraform/stream を apply してから）
+#   lab.sh telegraf-render | telegraf-status     （stream: Telegraf → MSK。deploy.env の WITH_STREAM=1 で terraform/stream を作ってから）
 # 元はローカル PoC の app/wvs2-lab/lab.sh。違いは 3 つ: containerlab を直接呼ぶ（root）、イメージは ECR から取る（pull）、
 # wvs2.clab.yml はテンプレート（.in）からイメージ URI を埋めて作る（render）。
 set -euo pipefail
@@ -97,7 +97,7 @@ case "${1:-}" in
     done
     echo "$w"
     if systemctl is-active -q "*-telegraf.service" 2>/dev/null; then
-      echo "== Telegraf（フェーズ 2）=="
+      echo "== Telegraf（stream）=="
       echo "  ポーリング（10 秒周期）と snmpd の linkDown トラップ（5 秒周期の monitor）が MSK に流れ、detector が DynamoDB に書く。"
       echo "  GUI の「異常一覧」か、エージェントに「今の異常は？」と聞くと hq-ce-01 eth1 の link_down が出る。戻すのは 'lab heal-main'"
     fi

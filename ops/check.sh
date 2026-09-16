@@ -31,7 +31,7 @@ for r in "${ROOTS[@]}"; do
 done
 
 log "3. ops スクリプトの構文"
-bash -n ops/up.sh ops/down.sh ops/check.sh ops/vscode-setup.sh
+bash -n ops/up.sh ops/down.sh ops/deploy-env.sh ops/check.sh ops/vscode-setup.sh
 if command -v python3 >/dev/null; then PY=(python3); else PY=(uv run --python 3.13 python); fi
 "${PY[@]}" -c 'import ast, sys; ast.parse(open(sys.argv[1], encoding="utf-8").read(), sys.argv[1])' ops/seed_graph.py
 echo "構文エラーなし"

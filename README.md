@@ -1,4 +1,4 @@
-# fukuda-nwc-poc — NetOps フェーズ 1（閉域ネットワーク版 / Terraform）
+# fukuda-nwc-poc — NetOps PoC（閉域ネットワーク版 / Terraform）
 
 ブラウザのチャット画面から AgentCore Runtime 上のエージェントと話し、エージェントが Bedrock（Amazon Nova 2 Lite）で答える。
 答える前に **Bedrock Knowledge Base**（OpenSearch Serverless、ベクトル検索とキーワード検索のハイブリッド）で手順書の md を引き、**Bedrock Guardrails** で質問と回答を判定する。
@@ -6,6 +6,16 @@
 
 ブラウザからは **SSM Session Manager のポートフォワーディング**で入る。NAT Gateway・EIP・パブリック IP・ロードバランサ・証明書は使わない。
 EC2 のセキュリティグループに**受信ルールは 1 つも無い**。
+
+**どこまで作るかは `deploy.env` の `PHASE` で選ぶ**（`cp deploy.env.example deploy.env` で写して書く。gitignore 済み）。`deploy.env` が無ければフェーズ 1 を作る。打ち方は「毎日の起動と片付けをスクリプトで打つ」。
+
+| フェーズ | できること | 作るもの（`terraform/` の下） | 待機の時間課金（東京） |
+|---|---|---|---|
+| `PHASE=1`（既定） | LLM + RAG の対話（チャットが手順書を引いて答える） | `ecr` / `main` | 約 $0.52/h（約 79 円） |
+| `PHASE=2` | フェーズ 1 に加えて、lab（containerlab の疑似トポロジ）とトポロジの操作（Neptune。Web の「トポロジ」タブで編集する） | + `lab` / `graph` | さらに約 $0.23/h（約 35 円） |
+| `PHASE=2` + `WITH_STREAM=1`（任意） | さらに、lab の SNMP から異常を拾って「異常一覧」に出す | + `stream` | さらに約 $0.29/h（約 44 円） |
+
+フェーズ 2 と `WITH_STREAM=1` は、組織の SCP / IAM で止められていることがある（「前提」の「AWS 側」）。
 
 ## 構成
 
@@ -29,20 +39,21 @@ AgentCore Runtime（VPC モード）
   │ 2. Converse + ガードレール + ツール ─ bedrock-runtime エンドポイント ─▶ Guardrail が質問を判定
   │      ↑ モデルが list_devices / neighbors / blast_radius を呼んだら        └▶ Amazon Nova 2 Lite（jp 推論プロファイル）
   │        トポロジ（Neptune があればそこから、無ければ agent/data/）で答えて往復（最大 5 回）  └▶ Guardrail が回答を判定
-  │        list_anomalies を呼んだら DynamoDB の異常一覧（terraform/stream）を返す
+  │        list_anomalies を呼んだら DynamoDB の異常一覧（terraform/stream。WITH_STREAM=1 のときだけ）を返す
   ▼ 回答の末尾に参照した md のファイル名を付けて返す
 
 取り込み（利用者が手で行う）: kb-docs/*.md ─ aws s3 cp ─▶ S3 ─ start-ingestion-job ─▶ Titan Embeddings V2 ─▶ OpenSearch Serverless
 Web の部品（利用者が手で行う）: web/app.py + agent/data/ + wheels/ ─ aws s3 sync ─▶ S3 の web/ ─ 起動時に EC2 が取る
 
-lab（任意、terraform/lab、別ルート）: 同じ VPC の EC2 1 台で containerlab + FRR × 6 + snmpd × 4 + ホスト × 4 を動かす。
-  SSM セッションで入って `sudo lab check` / `sudo lab failover`。イメージは ECR（terraform/ecr）、設定と rpm は S3 の lab/。
+フェーズ 2（PHASE=2。terraform/lab / terraform/graph、別ルート。使う日だけ作って当日中に消す）:
+  lab: 同じ VPC の EC2 1 台で containerlab + FRR × 6 + snmpd × 4 + ホスト × 4 を動かす。
+    SSM セッションで入って `sudo lab check` / `sudo lab failover`。イメージは ECR（terraform/ecr）、設定と rpm は S3 の lab/。
+  Neptune（terraform/graph）─ Gremlin（boto3 neptunedata、IAM 認証）─▶ エージェントの topology.py と Web の「トポロジ」タブ（図・表・リンクの追加削除）
 
-フェーズ 2（terraform/stream / terraform/graph、別ルート。使う日だけ作って当日中に消す）:
+フェーズ 2 の任意（WITH_STREAM=1。terraform/stream、別ルート。lab が要る）:
   lab EC2 の Telegraf ─ SNMP ポーリング（10 秒、CE 4 台）+ SNMP trap（linkUp/linkDown、snmpd → 203.0.113.1:162）
     ─ Kafka（IAM 認証、9098）─▶ MSK（2 ブローカー）─┬▶ detector Lambda ─▶ DynamoDB の異常テーブル ─▶ Web の「異常一覧」/ エージェントの list_anomalies
                                                 └▶ MSK Connect（S3 sink）─▶ S3 の stream/（生データの保管）
-  Neptune（terraform/graph）─ Gremlin（boto3 neptunedata、IAM 認証）─▶ エージェントの topology.py と Web の「トポロジ」タブ（図・表・リンクの追加削除）
 ```
 
 **どのファイルがどこで動くか。**`app.py` という名前のファイルが 2 つあり、動く場所が違う。置き場所を取り違えると動かない。
@@ -58,8 +69,8 @@ lab（任意、terraform/lab、別ルート）: 同じ VPC の EC2 1 台で cont
 |---|---|
 | `terraform/ecr/` | エージェントと lab のイメージの ECR リポジトリ（タグは上書き不可、destroy でイメージごと消える）。**最初に apply する。**`terraform/main` がリポジトリの URL をこのルートの state から読む |
 | `terraform/main/` | 本体。`network.tf`（VPC・サブネット 2 つ・VPC エンドポイント・SG）/ `kb.tf`（S3・OpenSearch Serverless・インデックス・ナレッジベース・ガードレール）/ `runtime.tf`（AgentCore Runtime と IAM）/ `web.tf`（EC2）/ `templates/web_user_data.sh.tftpl`（起動時に S3 から Web を取って入れる）/ `locals.tf` |
-| `terraform/lab/` | 任意。containerlab + FRR の lab を動かす EC2 1 台（`templates/lab_user_data.sh.tftpl`）。VPC / サブネット / SG / バケットは `terraform/main` の state から読む。フェーズ 2 では Telegraf も入れる |
-| `terraform/stream/` | フェーズ 2。`network.tf`（SG と lambda・sts・dynamodb エンドポイント）/ `msk.tf`（MSK。2 ブローカー、IAM 認証）/ `anomalies.tf`（DynamoDB の異常テーブル）/ `detector.tf`（detector Lambda）/ `sink.tf`（MSK Connect の S3 sink）/ `access.tf`（`terraform/main` と `terraform/lab` のロールに足す権限）/ `locals.tf`。`terraform/main` と `terraform/lab` の state を読む |
+| `terraform/lab/` | フェーズ 2。containerlab + FRR の lab を動かす EC2 1 台（`templates/lab_user_data.sh.tftpl`）。VPC / サブネット / SG / バケットは `terraform/main` の state から読む。stream（`WITH_STREAM=1`）を足すときは Telegraf も入れる |
+| `terraform/stream/` | フェーズ 2 の任意（`WITH_STREAM=1`）。`network.tf`（SG と lambda・sts・dynamodb エンドポイント）/ `msk.tf`（MSK。2 ブローカー、IAM 認証）/ `anomalies.tf`（DynamoDB の異常テーブル）/ `detector.tf`（detector Lambda）/ `sink.tf`（MSK Connect の S3 sink）/ `access.tf`（`terraform/main` と `terraform/lab` のロールに足す権限）/ `locals.tf`。`terraform/main` と `terraform/lab` の state を読む |
 | `terraform/graph/` | フェーズ 2。Neptune（db.t4g.medium × 1、IAM 認証）と、`terraform/main` のロールへの Gremlin 権限。`terraform/main` の state を読む。無ければ静的データで動く |
 | `terraform/<ルート>/terraform.tfvars.example` | 変数と既定値の一覧。既定のままでよい。変えたいときだけ同じ場所の `terraform.tfvars` に写す（gitignore 済み） |
 | `terraform/<ルート>/terraform.tfstate` | apply すると PC にできる state（gitignore 済み）。**Terraform が何を作ったかの記録で、これを消すと destroy できなくなる。**ARN などが平文で入るので共有しない。apply した PC に残るので、destroy もその PC で打つ（「毎日の起動と片付けをスクリプトで打つ」の注意） |
@@ -67,9 +78,10 @@ lab（任意、terraform/lab、別ルート）: 同じ VPC の EC2 1 台で cont
 | `agent/` | Runtime に載せるコンテナ（Python 3.13、`bedrock-agentcore` SDK、arm64）。`topology.py` がトポロジのツール（Neptune → 静的の順）、`graph.py` が Neptune の読み書き、`anomalies.py` が異常一覧のツール、`data/` が静的トポロジ（`devices.yaml` / `topology.json`、架空の 10 台） |
 | `web/` | EC2 で動かす Gradio の画面（`app.py`）と依存（`requirements.txt`）。`agent/` の 3 モジュールと一緒に S3 に置く（出力 `upload_web_command`） |
 | `.env.example` | 環境変数の一覧（Web / エージェント / lab。意味と AWS 上で誰が入れるか）。AWS 上では Terraform（user_data と Runtime の環境変数）が書くので手で用意しない。EC2 で Web が立たないときの見比べ先で、手元で `web/app.py` を動かすときは `.env` に写して使う（「Web を手元で動かす」） |
+| `deploy.env.example` | `ops/up.sh` / `ops/down.sh` の設定の見本（どのフェーズまで作るか、ECR を残すかなど）。`cp deploy.env.example deploy.env` で写して書く。`deploy.env` は gitignore 済みで、無ければフェーズ 1 を作る |
 | `lab/` | lab の材料。`wvs2.clab.yml.in`（containerlab の定義。イメージ名は起動時に埋める）、`frr/`、`snmpd/`（Dockerfile と設定。trap の送信も）、`telegraf.conf.in`（ポーリングと trap 受信 → MSK）、`lab.sh` |
 | `kb-docs/` | ナレッジベースに入れる手順書の例（架空の md 3 つ） |
-| `ops/` | `up.sh`（手順 1〜7、lab、フェーズ 2 までを 1 本で打つ）と `down.sh`（片付けをまとめて打つ）。毎日消して作り直す運用向け（「毎日の起動と片付けをスクリプトで打つ」）。`seed_graph.py` は `up.sh` が Web の EC2 の上で打つ Neptune への投入。`check.sh` は AWS に触らない検査をまとめて打つ（「手元で確かめる」）。`vscode-setup.sh` は VS Code の設定を入れる（「VS Code の設定」） |
+| `ops/` | `up.sh`（`deploy.env` の `PHASE` で指定したフェーズまで、手順 1〜7・lab・graph・stream を 1 本で打つ）と `down.sh`（片付けをまとめて打つ）。毎日消して作り直す運用向け（「毎日の起動と片付けをスクリプトで打つ」）。`deploy-env.sh` は 2 本が読む `deploy.env` の読み込み（シェルとしては実行しない）。`seed_graph.py` は `up.sh` が Web の EC2 の上で打つ Neptune への投入。`check.sh` は AWS に触らない検査をまとめて打つ（「手元で確かめる」）。`vscode-setup.sh` は VS Code の設定を入れる（「VS Code の設定」） |
 | `tests/` | 模擬テスト（AWS に触れない。打ち方は「手元で確かめる」）。`test_app.py`（エージェント）、`test_graph.py`（Neptune の読み書きと静的への切り戻し）、`test_stream.py`（detector と、`terraform/stream` の `archive_file` の配線） |
 
 ## なぜこの形にしたか
@@ -82,7 +94,7 @@ lab（任意、terraform/lab、別ルート）: 同じ VPC の EC2 1 台で cont
 | 証明書が要らない | `localhost` はブラウザが安全なコンテキストとして扱う。hosts の書き換えも要らない |
 | ブラウザに AWS の認証情報を置かない | Runtime を呼ぶのは EC2 のインスタンスロール |
 | 画面は Gradio | チャット・図・表を Python だけで組める。EC2 はインターネットに出ないので、依存は arm64 / cp313 の wheel を S3 に置いて `pip install --no-index` で入れる。テレメトリは環境変数で止める（`GRADIO_ANALYTICS_ENABLED=False` / `HF_HUB_OFFLINE=1`） |
-| トポロジは静的データをコンテナに同梱 | フェーズ 1 の範囲では機器から取らない。`agent/data/` の 10 台（架空）を Converse のツール（`list_devices` / `neighbors` / `blast_radius` / `topology_graph`）としてモデルに渡す。読むだけなので副作用が無く、Runtime に権限を足さなくてよい。Web の「トポロジ」タブも同じデータ |
+| トポロジは静的データをコンテナに同梱 | フェーズ 1 の範囲では機器から取らない。`agent/data/` の 10 台（架空）を Converse のツール（`list_devices` / `neighbors` / `blast_radius` / `topology_graph`）としてモデルに渡す。読むだけなので副作用が無く、Runtime に権限を足さなくてよい。Web の「トポロジ」タブも同じデータ。フェーズ 2 で graph を作ると Neptune のデータに替わり、Web から編集できる |
 | lab は別ルート・EC2 1 台 | containerlab は veth と network namespace を使うので ECS / Fargate では動かない。同じ VPC に置くが Web やエージェントとはつながず、使うときだけ起動する。lab の中のアドレスは EC2 の中の docker network に閉じて VPC には出ない |
 | state はローカル | 使う人が 1 人で、毎日 destroy して作り直す。state 用の S3 バケットとロックを別に用意しない。代わりに、apply と destroy は同じ PC で打つ |
 
@@ -162,6 +174,8 @@ OpenSearch Serverless のセキュリティポリシー・アクセスポリシ�
 - **ガードレールの判定は、東京以外の APAC のリージョンで行われることがある**（Standard 階層はクロスリージョン推論が必須）。行き先は ap-northeast-1 / ap-northeast-2 / ap-northeast-3 / ap-south-1 / ap-southeast-1 / ap-southeast-2（2026-09-14 に AWS の文書で確認）。データを国内に留める決まりがある場合は使えない。
 - イメージのビルドは、インターネットに出られる端末で行う（Docker と buildx）。
 - **Session Manager の設定（アカウント単位）で KMS 暗号化を必須にしている場合**は、`kms` エンドポイントとインスタンスロールへの `kms:Decrypt` が別に要る。この Terraform には入れていない。
+- **フェーズ 2 は、組織の SCP / IAM で止められやすい。**`PHASE=2` は t4g.large の `ec2:RunInstances` と、Neptune の `rds:CreateDBCluster` / `rds:CreateDBInstance` が要る。`WITH_STREAM=1` はさらに MSK の `kafka:CreateCluster` / `kafka:CreateClusterV2` と、MSK Connect の `kafkaconnect:CreateCustomPlugin` / `kafkaconnect:CreateConnector` などが要る。
+  インスタンスの種類やサービスを SCP / IAM で絞っていると、apply がエラーに `explicitly denied` / `explicit deny` と出して止まる。管理者に許可を頼むか、`deploy.env` の `SKIP_LAB=1` / `SKIP_GRAPH=1` で止められた部分を外す（「うまくいかないとき」）。フェーズ 1 だけなら要らない。
 
 ### 利用者の PC 側
 
@@ -319,38 +333,45 @@ ECR のレイヤー置き場（Runtime のイメージ取得）、AL2023 の dnf
 
 ### 毎日の起動と片付けをスクリプトで打つ
 
-業務終了後に全部消し、翌朝また作る運用なら、この 2 本を使う。**`ops/up.sh` は環境変数 `PHASE` で指定したフェーズまでを 1 本で作る**: 既定の `PHASE=1` は手順 1〜5・7、`PHASE=2` はそれに lab とフェーズ 2（stream / graph と Neptune への投入）を足したもの。
+業務終了後に全部消し、翌朝また作る運用なら、この 2 本を使う。**`ops/up.sh` は `deploy.env` の `PHASE` で指定したフェーズまでを 1 本で作る**: 既定の `PHASE=1`（LLM + RAG の対話）は手順 1〜5・7、`PHASE=2`（lab とトポロジの操作）はそれに lab と graph（Neptune と静的トポロジの投入）を足したもの。`PHASE=2` に `WITH_STREAM=1` を書くと、stream（MSK → detector → DynamoDB の「異常一覧」）も足す。
 中身は下の手順のコマンドそのもので、**できているものは飛ばす**（Terraform は差分だけ作る、ECR に同じタグのイメージがあればビルドしない、`wheels/`・rpm・zip が手元にあれば取り直さない、Neptune に機器が入っていれば投入しない）ので、途中で落ちても同じコマンドを打ち直せばよい。
 手順 0 の環境変数は要らない（スクリプトが認証情報と Terraform の出力から取る）。**aws-vault の人は 0-1 の `--no-session` のサブシェルの中で打つ**（一時セッションで入っていると、その旨を出して止まる）。社内 PC は「社内 PC で使うとき」の設定を入れたターミナルで打つ。
 
-**`PHASE=2` は、フェーズ 1 に加えて stream（MSK / MSK Connect）と graph（Neptune）の約 $0.43/h がかかる**（「1 時間起動したときの試算」）。**使い終わったら当日中に `ops/down.sh` を打つ。**
+**`PHASE=2` は、フェーズ 1 に加えて lab（t4g.large）と graph（Neptune）の約 $0.23/h がかかる。`WITH_STREAM=1` はさらに stream（MSK / MSK Connect）の約 $0.29/h**（「1 時間起動したときの試算」。`ops/up.sh` も手順 0 で目安を出す）。**使い終わったら当日中に `ops/down.sh` を打つ。**
 
-フェーズ 1 だけ作る（`PHASE` を付けなければこれ）:
+初回だけ、設定のファイルを写す（`deploy.env` は gitignore 済み）:
+
+```bash
+cp deploy.env.example deploy.env
+```
+
+フェーズ 2 まで作る日は `deploy.env` の `PHASE=1` を `PHASE=2` に書き換え、異常一覧も使うなら `#WITH_STREAM=1` の行頭の `#` を外してから打つ。`deploy.env` が無ければフェーズ 1 を作る:
 
 ```bash
 ops/up.sh
 ```
 
-フェーズ 2 まで作る。初回は 40〜60 分かかる（MSK の作成だけで 20〜30 分）:
+初回は `PHASE=2` で 30〜40 分、`WITH_STREAM=1` も書くと 40〜60 分かかる（MSK の作成だけで 20〜30 分）。
+`deploy.env` を書き換えずにその回だけ変えるなら、同じ名前の環境変数を付けて打つ（空でない環境変数が `deploy.env` より優先）:
 
 ```bash
 PHASE=2 ops/up.sh
 ```
 
-`PHASE` に指定できるのは `1` と `2` だけ。2B / 5A / 5B はまだ Terraform が無いので、指定すると止まる（`docs/phases.md`）。
-**`PHASE` を下げて打っても、前に作ったルートは消さない。**`PHASE=2` で作った翌日に `ops/up.sh` だけ打つと、stream / graph は残ったまま課金が続く。消すのは `ops/down.sh`。
+`PHASE` に指定できるのは `1` と `2` だけ。2B / 5A / 5B はまだ Terraform が無いので、指定すると何も作らずに止まる（`docs/phases.md`）。ほかに書けるものは下の「`deploy.env` に書けるもの」の表。
+**`PHASE` を下げて打っても、前に作ったルートは消さない。**`PHASE=2` で作った翌日に `PHASE=1` で打つと、lab / graph（と stream）は残ったまま課金が続く。消すのは `ops/down.sh`。
 
 | 順 | 何をする | 対応する手順 |
 |---|---|---|
-| 0 | `aws` / `terraform` / `python3`（無ければ `uv`）/ `curl` / `docker` と `docker buildx` / `session-manager-plugin`（`NO_PORTFORWARD` が空のとき）があるか、認証が通っているかを確かめる。aws-vault の一時セッションなら止まる。鍵が環境変数に無ければ（`aws login` など）、Terraform には AWS CLI 経由（`credential_process`）で認証情報を渡す（0-1 の「`aws login` で入っているとき」を一時ファイルで行う）。CloudFormation 版のスタック（`fukuda-nwc-poc*`）が残っていれば止まる（「CloudFormation 版から移るとき」）。`PHASE` と作るルートを表示する（`PHASE` が `1` / `2` 以外なら止まる） | 0 |
+| 0 | `deploy.env` を読む（無ければ環境変数と既定値で動く。知らないキーや値の誤りがあれば止まる）。`aws` / `terraform` / `python3`（無ければ `uv`）/ `curl` / `docker` と `docker buildx` / `session-manager-plugin`（`NO_PORTFORWARD` が空のとき）があるか、認証が通っているかを確かめる。aws-vault の一時セッションなら止まる。鍵が環境変数に無ければ（`aws login` など）、Terraform には AWS CLI 経由（`credential_process`）で認証情報を渡す（0-1 の「`aws login` で入っているとき」を一時ファイルで行う）。CloudFormation 版のスタック（`fukuda-nwc-poc*`）が残っていれば止まる（「CloudFormation 版から移るとき」）。`PHASE` と作るルートと、待機の時間課金の目安を表示する（`PHASE` が `1` / `2` 以外、`PHASE=1` で `WITH_STREAM=1`、`WITH_STREAM=1` で `SKIP_LAB=1` のときは、何も作らずに止まる） | 0 |
 | 1 | `terraform/ecr` を init / apply | 1 |
 | 2 | ECR に**無いタグだけ** arm64 でビルドして push する（エージェント。lab を作るときは lab の frr / multitool / snmpd も）。PC の `docker buildx` で作る（dockerd が動いていないとき、agent か snmpd を作るのに `docker buildx ls` に `linux/arm64` が無いときは止まる） | 2 / lab-1 |
-| 3 | `terraform/main` を init / apply（初回 10〜20 分）。`PHASE=2` なら、終わったら `terraform/graph` の apply を**裏で**始める（10〜15 分。ログは `ops/logs/graph-apply.log`） | 3 / g-1 |
+| 3 | `terraform/main` を init / apply（初回 10〜20 分）。graph を作るとき（`PHASE=2` で `SKIP_GRAPH` が空）は、終わったら `terraform/graph` の apply を**裏で**始める（10〜15 分。ログは `ops/logs/graph-apply.log`） | 3 / g-1 |
 | 4 | wheel を取り（`wheels/` が空のときだけ）、Web の部品と手順書を S3 に置き、取り込みが `COMPLETE` になるまで待つ。EC2 の初回の user_data が終わるのを待ってから再起動し、Web のサービスが `active` になるまで待つ | 4 |
-| 5 | **lab を作るときだけ**（`PHASE=2` か `WITH_LAB=1`）。containerlab の rpm（`PHASE=2` なら Telegraf の rpm と S3 sink の zip も）をリポジトリの直下に取り（無いときだけ）、lab の設定と一緒に S3 に置く。lab の EC2 を作る前に置くので、Telegraf まで最初の起動で入る | lab-2 / s-1 |
+| 5 | **lab を作るときだけ**（`PHASE=2` で `SKIP_LAB` が空）。containerlab の rpm（`WITH_STREAM=1` なら Telegraf の rpm と S3 sink の zip も。`CREATE_S3_SINK=0` なら zip は取らない）をリポジトリの直下に取り（無いときだけ）、lab の設定と一緒に S3 に置く。lab の EC2 を作る前に置くので、Telegraf まで最初の起動で入る | lab-2 / s-1 |
 | 6 | **lab を作るときだけ。**`terraform/lab` を init / apply | lab-3 |
-| 7 | **`PHASE=2` のときだけ。**`terraform/stream` を init / apply（MSK の作成に 20〜30 分）。lab が前の実行から残っていて Telegraf が入っていなければ、lab の EC2 を再起動する | s-2 / s-3 |
-| 8 | **`PHASE=2` のときだけ。**graph の apply が終わるのを待ち、Neptune が空なら静的トポロジを入れる（`ops/seed_graph.py` を Web の EC2 の上で打つ。GUI の「静的データを投入」と同じ）。Web を再起動して `active` になるまで待つ | g-2 |
+| 7 | **`WITH_STREAM=1` のときだけ。**`terraform/stream` を init / apply（MSK の作成に 20〜30 分）。lab が前の実行から残っていて Telegraf が入っていなければ、lab の EC2 を再起動する | s-2 / s-3 |
+| 8 | **graph を作るときだけ。**graph の apply が終わるのを待ち、Neptune が空なら静的トポロジを入れる（`ops/seed_graph.py` を Web の EC2 の上で打つ。GUI の「静的データを投入」と同じ）。graph か stream を作ったときは、Web を再起動して `active` になるまで待つ（起動時に異常テーブルと Neptune の場所を読むため） | g-2 |
 | 9 | Runtime のロググループに保持 7 日とタグ。まだ無ければ先に同じ名前で作る（AgentCore が既存のロググループをそのまま使うかは 2026-09-15 時点で未確認。使わず別名で作った場合は手順 5 を手で打つ） | 5 |
 | 10 | 利用者に配る `start_session_command`（lab を作ったら lab に入るコマンドも）を表示し、ポートフォワーディングを開いたまま止まる（`Ctrl+C` で閉じる） | 7 |
 
@@ -359,36 +380,44 @@ Terraform の確認プロンプトは出さずに進む（スクリプトの中�
 途中で落ちたときは、裏の graph の apply が動いていればそれが終わるまで待ってから止まる（打ち直したときに state のロックでぶつからないように）。その間ターミナルを閉じない。
 
 **S3 sink の zip が取れないとき。**zip は Confluent Hub から取り、ダウンロードに利用条件への同意が要ることがある。zip でないものが返ったら、`ops/up.sh` は案内を出して止まる。
-ブラウザで s-1 の URL から取ってリポジトリの直下に同じ名前（`confluentinc-kafka-connect-s3-12.1.11.zip`）で置いて打ち直すか、S3 sink（MSK Connect）無しで `CREATE_S3_SINK=0 ops/up.sh` を打つ。
+ブラウザで s-1 の URL から取ってリポジトリの直下に同じ名前（`confluentinc-kafka-connect-s3-12.1.11.zip`）で置いて打ち直すか、S3 sink（MSK Connect）無しでよければ `deploy.env` に `CREATE_S3_SINK=0` を書いて打ち直す。
 
-環境変数で変えられるもの（全部任意）:
+`deploy.env` に書けるもの（全部任意。同じ名前の環境変数でも渡せて、空でない環境変数が `deploy.env` より優先。見本と説明は `deploy.env.example`）:
 
-| 変数 | 意味 |
+| キー | 意味 |
 |---|---|
-| `IMAGE_TAG` | エージェントのイメージのタグ。既定 `v1`。`agent/` を変えたら `IMAGE_TAG=v2 ops/up.sh`。以後も毎回同じ値を付ける（付け忘れると `v1` に戻す差分になる） |
-| `PHASE` | どのフェーズまで作るか。`1`（既定。ECR・イメージ・本体・Web）か `2`（それに lab / stream / graph を足す）。後のフェーズは前のフェーズの state を読むので、指定したフェーズまでを順に作る |
-| `WITH_LAB=1` | `PHASE=1` に lab だけ足す（`PHASE=2` では最初から作る） |
-| `SKIP_LAB=1` | `PHASE=2` で lab を作らない。stream は lab の state を読むので、stream も作らない |
-| `SKIP_STREAM=1` | `PHASE=2` で stream（MSK → detector → DynamoDB）を作らない |
-| `SKIP_GRAPH=1` | `PHASE=2` で graph（Neptune）を作らない |
-| `CREATE_S3_SINK=0` | stream の S3 sink（MSK Connect）を作らない。約 $0.14/h 下がる。`ops/down.sh` には付けなくてよい（state から読む） |
+| `PHASE` | どのフェーズまで作るか。`1`（既定。LLM + RAG の対話: ECR・イメージ・本体・Web）か `2`（lab とトポロジの操作: それに lab / graph を足す）。後のフェーズは前のフェーズの state を読むので、指定したフェーズまでを順に作る |
+| `SKIP_LAB=1` | `PHASE=2` で lab を作らない。約 $0.09/h 下がる。`WITH_STREAM=1` とは一緒に使えない（stream は lab の Telegraf から流す） |
+| `SKIP_GRAPH=1` | `PHASE=2` で graph（Neptune）を作らない。約 $0.14/h 下がる。「トポロジ」タブは静的データを出す（編集はできない） |
+| `WITH_STREAM=1` | `PHASE=2` に stream（MSK → detector → DynamoDB と、MSK Connect の S3 sink）を足し、「異常一覧」を使えるようにする。lab が要る。約 $0.29/h 上がる |
+| `CREATE_S3_SINK=0` | stream の S3 sink（MSK Connect）を作らない。約 $0.14/h 下がる。`ops/down.sh` には要らない（state から読む） |
+| `IMAGE_TAG` | エージェントのイメージのタグ。既定 `v1`。`agent/` を変えたら `v2` などに書き換える（`deploy.env` に書けば毎回付けなくてよい。行を消すと `v1` に戻す差分になる） |
 | `ADMIN_ARN` | `kb_admin_principal_arn`。自動で取れない認証の形のときだけ（スクリプトが止まって言う） |
 | `VPC_CIDR` / `CLIENT_CIDR` | 手順 3 の `vpc_cidr` / `client_cidr` |
-| `OPENSEARCH_CACERT_FILE` | 「社内 PC で使うとき」の CA の PEM。無ければ `AWS_CA_BUNDLE` を使う |
+| `AWS_CA_BUNDLE` / `OPENSEARCH_CACERT_FILE` | 「社内 PC で使うとき」の CA の PEM。`OPENSEARCH_CACERT_FILE` が無ければ `AWS_CA_BUNDLE` を使う |
+| `AWS_PROFILE` | AWS CLI のプロファイル名。aws-vault の `--no-session` のサブシェルで打つときは書かない |
 | `LOCAL_PORT` | PC 側のポート。既定 8080 |
 | `NO_PORTFORWARD=1` | ポートフォワーディングを開かずに終わる |
+| `KEEP_ECR=1` | `ops/down.sh` で ECR（イメージ）を残す（下の表。`ops/up.sh` は見ない） |
+
+- `SKIP_LAB` / `SKIP_GRAPH` / `WITH_STREAM` / `NO_PORTFORWARD` は `1` / `0` のほか `true` / `false`、`yes` / `no` でもよい。`CREATE_S3_SINK` と `KEEP_ECR` は `1` か `0` だけ。
+- `deploy.env` はシェルとして実行しない。`$HOME` や `$(…)` は展開せず、値の先頭の `~/` だけ読み替える。
+- 知らないキー（打ち間違い）や、同じキーの 2 回目があると、手順 0 で何も作らずに止まる。
+- `deploy.env` に書いた `1` をその回だけ打ち消すときは、空ではなく `0` を渡す（`WITH_STREAM=0 ops/up.sh`）。
+- 別の場所のファイルを使うときは、環境変数 `DEPLOY_ENV_FILE` にそのファイルのパスを入れて打つ（相対パスは打った場所から見る）。
+- `WITH_LAB` と `SKIP_STREAM` は 2026-09-16 に無くなった（lab はフェーズ 2 に入り、stream は `WITH_STREAM=1` で足す形になった）。`WITH_LAB` を書くと代わりの書き方を出して止まり、`SKIP_STREAM` は無視する。
 
 ```bash
 ops/down.sh
 ```
 
-「片付け」と同じ順（graph → stream → lab → main → ecr → Runtime のロググループ）で、**state にリソースが載っているルートだけ** destroy する（作っていないルートは飛ばす。`ops/up.sh` に付けた `PHASE` / `WITH_LAB` / `SKIP_*` / `CREATE_S3_SINK` は付けなくてよい）。
+「片付け」と同じ順（graph → stream → lab → main → ecr → Runtime のロググループ）で、**state にリソースが載っているルートだけ** destroy する（作っていないルートは飛ばす。`deploy.env` の `PHASE` / `SKIP_*` / `WITH_STREAM` / `CREATE_S3_SINK` は見ないので、`PHASE=1` に戻した後でも前に作った lab / graph / stream まで消す）。
 バケットは中身ごと、ECR はイメージごと消える（`KEEP_ECR=1` のときは ECR を残す）。最後に `Project=fukuda-nwc-poc` のタグが付いたものが残っていないかを出す（何も出なければ全部消えている）。
-ECR を残すか消すかは環境変数 `KEEP_ECR` で選ぶ。残すと翌朝の `ops/up.sh` がビルドを飛ばせる（保管料は月数円。Runtime はイメージが無いと作れないので、翌朝ビルドし直す時間が惜しいならこちら）。
+ECR を残すか消すかは `deploy.env` の `KEEP_ECR`（環境変数でもよい）で選ぶ。残すと翌朝の `ops/up.sh` がビルドを飛ばせる（保管料は月数円。Runtime はイメージが無いと作れないので、翌朝ビルドし直す時間が惜しいならこちら）。
 
 | `KEEP_ECR` | ECR |
 |---|---|
-| 付けない / `0` | イメージごと消す（既定） |
+| 書かない / `0` | イメージごと消す（既定） |
 | `1` | 残す |
 | それ以外（`yes` など） | 手順 0 で止まる。何も消さない |
 
@@ -796,11 +825,11 @@ Windows ではクォートの扱いが違うので、パラメータをファイ
 `carrier-pe-02 が落ちたら影響はどこまで` と聞いて、機器名を挙げた答えが返れば、トポロジのツールが動いている（Runtime のログに `tools=1` のように出る）。「トポロジ」タブには同じデータの図と表がある。
 PC の 8080 が使用中なら `localPortNumber` を変え、URL のポートも合わせる。
 
-## lab（任意）: containerlab + FRR を EC2 で動かす
+## lab（フェーズ 2）: containerlab + FRR を EC2 で動かす
 
 ローカル PoC の `wvs2` lab（本社・DC・支店 2 か所の CE、キャリア PE 2 台、snmpd、ホスト。すべて架空のアドレス）を、同じ VPC の EC2 1 台で動かす。
 BGP の主副切替と SNMP の見え方を手で確かめるためのもので、**Web やエージェントとはつながっていない。**使わないときは止める。
-`PHASE=2 ops/up.sh`（フェーズ 1 に lab だけ足すなら `WITH_LAB=1 ops/up.sh`）は lab-1〜lab-3 を打つ（`PHASE=2` で lab を外すなら `SKIP_LAB=1`）。以下はその中身と、入ってからの使い方。
+`deploy.env` に `PHASE=2` を書いた `ops/up.sh` は lab-1〜lab-3 を打つ（lab を外すなら `SKIP_LAB=1`、lab だけ要って Neptune が要らなければ `SKIP_GRAPH=1`）。以下はその中身と、入ってからの使い方。
 
 ### lab-1. イメージを ECR に置く
 
@@ -886,14 +915,14 @@ terraform -chdir=terraform/lab destroy
 - イメージを変えたら新しいタグで push し、`-var frr_image_tag=…`（`snmpd_image_tag` / `multitool_image_tag` も同じ）を付けて apply し直す。
 - 止めたインスタンスに apply しても、user_data が変わる差分（イメージのタグや Telegraf の版を変えたとき）はインスタンスの作り直しになる。インスタンス ID が変わるので、lab-4 の 1 行目から取り直す。
 
-## フェーズ 2（任意）: lab → MSK → DynamoDB と、Neptune のトポロジ
+## stream（WITH_STREAM=1）と graph（フェーズ 2）: lab → MSK → DynamoDB と、Neptune のトポロジ
 
-lab の SNMP（ポーリングと trap）を MSK に流し、detector Lambda が `link_down` を DynamoDB に書く。Web の「異常一覧」とエージェントの `list_anomalies` がそれを読む。
-トポロジは Neptune に置き、Web から編集できる。**どちらも時間課金なので、使う日に作って当日中に消す**（下の試算）。
-`terraform/main` と `terraform/lab` はそのまま使う。
+graph（`PHASE=2`）はトポロジを Neptune に置く。Web の「トポロジ」タブから編集でき、エージェントのトポロジのツールもそこを読む。
+stream（`PHASE=2` に `WITH_STREAM=1` を足したときだけ）は lab の SNMP（ポーリングと trap）を MSK に流し、detector Lambda が `link_down` を DynamoDB に書く。Web の「異常一覧」とエージェントの `list_anomalies` がそれを読む。
+**どちらも時間課金なので、使う日に作って当日中に消す**（下の試算）。`terraform/main` はそのまま使い、stream は `terraform/lab` も使う。
 
 順番: s-1 で rpm と zip を置く → `terraform/stream` → lab EC2 の Telegraf を起動（再起動）→ `terraform/graph` → Web の再起動と投入。
-`PHASE=2 ops/up.sh` は s-1〜g-2 を全部打つ（`SKIP_STREAM=1` / `SKIP_GRAPH=1` で外す）。以下はその中身と、動いてからの確かめ方。
+`ops/up.sh` は、`PHASE=2` なら g-1・g-2 を打ち（`SKIP_GRAPH=1` で外す）、`WITH_STREAM=1` も書けば s-1〜s-3 も打つ。以下はその中身と、動いてからの確かめ方。
 
 ### s-1. Telegraf の rpm と S3 sink のプラグインを S3 に置く
 
@@ -1035,6 +1064,8 @@ aws s3 rm "s3://$KB_BUCKET/stream/" --recursive
 | `retrieve failed` のエラーがリランクの `AccessDeniedException` | ナレッジベースのロールに `bedrock:Rerank` / リランクモデルへの `bedrock:InvokeModel` が無いか、組織の SCP などでリランクモデルの呼び出しが止められている。急ぐなら `-var rerank_model_id=` （空）を付けて apply すると、リランクなしで動く |
 | 普通の質問がガードレールの定型文で返る | 誤検知。Runtime のログの `stop=guardrail_intervened` で確かめ、`terraform/main/kb.tf` の `aws_bedrock_guardrail.this` の該当フィルタの強さを下げて、ガードレールの版を作り直す（「変更するとき」） |
 | destroy が SG やサブネットで `DependencyViolation` になって止まる | Runtime の ENI が残っている（削除後も最大 8 時間）。時間をおいて同じ destroy（か `ops/down.sh`）を打ち直す。手で足した ENI / SG が残っていないかも見る |
+| `PHASE=2` / `WITH_STREAM=1` の apply が `explicitly denied` / `explicit deny` で止まる（`ec2:RunInstances`、`rds:CreateDBCluster`、`kafka:CreateCluster` など） | 組織の SCP / IAM が、t4g.large・Neptune・MSK などの作成を止めている（「前提」の「AWS 側」）。管理者に許可を頼むか、`deploy.env` で止められた部分を外す（lab なら `SKIP_LAB=1`、Neptune なら `SKIP_GRAPH=1`、MSK なら `WITH_STREAM=1` の行を消す）。途中まで作られたものは課金が続くので、打ち直さないなら `ops/down.sh` を打つ |
+| `ops/up.sh` が手順 0 で `… 行目のキー「…」は使えない` / `が 2 回ある` / `WITH_LAB は無くなった` / `は 1 か 0` と出して止まる | `deploy.env` の書き間違い。まだ何も作っていない。出た行番号の行を `deploy.env.example` と見比べて直す（「`deploy.env` に書けるもの」） |
 
 ## CloudFormation 版から移るとき
 
@@ -1042,7 +1073,7 @@ aws s3 rm "s3://$KB_BUCKET/stream/" --recursive
 先に CloudFormation 版を全部消す。手順 0 の `$ACCOUNT_ID` が入ったターミナルで、上から順に打つ。作っていないスタックの行は、無いものを消そうとするだけで何も起きずに通る（`wait` もすぐ返る）。
 
 ```bash
-# 1. フェーズ 2（作っていれば）
+# 1. stream / graph（作っていれば）
 aws cloudformation delete-stack --region ap-northeast-1 --stack-name fukuda-nwc-poc-graph
 aws cloudformation delete-stack --region ap-northeast-1 --stack-name fukuda-nwc-poc-stream
 aws cloudformation wait stack-delete-complete --region ap-northeast-1 --stack-name fukuda-nwc-poc-graph
@@ -1152,23 +1183,32 @@ aws logs delete-log-group --region ap-northeast-1 --log-group-name "$LOG_GROUP"
 | CloudWatch Logs | 取り込み $0.76/GB | 数 MB | 約 $0.005 |
 | **合計** | | | **約 $0.82（約 123 円）** |
 
-lab（`terraform/lab`）は上に含めていない。**起動している間だけ**、t4g.large（$0.0864/h、約 13 円）と gp3 16 GB（月 $1.5）がかかる。
-止めれば EBS の月 $1.5 だけ。**1 か月起動したままだと約 $65（約 9,700 円）**なので、使ったら止める。t4g.large の単価は 2026-09-15 に Price List API で確認した。
+フェーズ 2（`PHASE=2`）と stream（`WITH_STREAM=1`）は上に含めていない。単価は東京リージョンの税抜で、2026-09-15 に AWS Price List API で確認した。
 
-フェーズ 2 は上に含めていない。**stream と graph を両方立てると約 $0.43/h（約 65 円）、1 か月置くと約 $317（約 47,600 円）**なので、使う日に作って当日中に消す。単価は東京リージョンの税抜で、2026-09-15 に AWS Price List API で確認した。
+**フェーズ 2（lab + graph）は約 $0.23/h（約 35 円）、1 か月置くと約 $169（約 25,300 円）**なので、使う日に作って当日中に消す。
 
 | フェーズ 2 の項目 | 単価 | 1 時間 |
+|---|---|---|
+| lab の EC2 t4g.large | $0.0864/h | $0.086 |
+| lab の gp3 16 GB | $0.096/GB 月 | $0.002 |
+| Neptune db.t4g.medium × 1 | $0.1424/h（Standard。I/O 最適化は $0.192） | $0.142 |
+| Neptune ストレージ・I/O | $0.12/GB 月、$0.24/100 万 I/O | 約 $0 |
+| **合計** | | **約 $0.23（約 35 円）** |
+
+lab は止めれば EBS の月 $1.5 だけ。lab だけを 1 か月起動したままだと約 $65（約 9,700 円）。`SKIP_LAB=1` なら約 $0.14/h、`SKIP_GRAPH=1` なら約 $0.09/h。
+
+**stream（`WITH_STREAM=1`）はさらに約 $0.29/h（約 44 円）、1 か月置くと約 $213（約 32,000 円）。**
+
+| stream の項目 | 単価 | 1 時間 |
 |---|---|---|
 | MSK kafka.t3.small × 2 | $0.0596/h/ブローカー | $0.119 |
 | MSK ストレージ 10 GB × 2 | $0.114/GB 月 | $0.003 |
 | MSK Connect 1 MCU | $0.142/MCU 時間 | $0.142 |
 | インターフェイスエンドポイント lambda / sts × 1 AZ | $0.014/h/AZ | $0.028 |
 | Lambda / DynamoDB（オンデマンド）/ SSM / S3 | 数百万リクエストまでほぼ無料枠 | 約 $0 |
-| Neptune db.t4g.medium × 1 | $0.1424/h（Standard。I/O 最適化は $0.192） | $0.142 |
-| Neptune ストレージ・I/O | $0.12/GB 月、$0.24/100 万 I/O | 約 $0 |
-| **合計** | | **約 $0.43（約 65 円）** |
+| **合計** | | **約 $0.29（約 44 円）** |
 
-MSK Connect を作らなければ（`create_s3_sink = false`）約 $0.29/h（約 44 円）。
+MSK Connect を作らなければ（`CREATE_S3_SINK=0`）stream は約 $0.15/h（約 23 円）、1 か月で約 $110（約 16,500 円）。
 
 | パターン | 1 時間 | 1 か月（730 時間） |
 |---|---|---|
@@ -1192,7 +1232,7 @@ MSK Connect を作らなければ（`create_s3_sink = false`）約 $0.29/h（約
 - 会話の永続化。履歴は Runtime のセッション（microVM）の中にだけあり、アイドル 5 分か 1 時間、または画面の再読み込みで消える。
 - チャット Web のログの CloudWatch Logs 転送（CloudWatch エージェント）。必要なら AL2023 の `amazon-cloudwatch-agent` を入れる。logs エンドポイントは Runtime 用に作ったものが VPC 全体で使える。
 - 複数人の同時利用を想定した作り。t4g.small で数人程度まで（Gradio の同時実行は 4）。
-- BGP の状態の監視。フェーズ 2 で入るのはインタフェースの up/down（ポーリングと trap）だけで、BGP の隣接や経路の変化は異常にならない。
+- BGP の状態の監視。stream（`WITH_STREAM=1`）で入るのはインタフェースの up/down（ポーリングと trap）だけで、BGP の隣接や経路の変化は異常にならない。
 - エージェントの調査ワークフロー（フェーズ 5A。Temporal を ECS on Fargate に置く）と、そこから出た案を人が承認して直す流れ（フェーズ 5B）。Grafana などの可視化は保留。異常一覧は DynamoDB の表をそのまま出す。
 - Neptune のトポロジと lab の実配線の同期。Neptune は手で編集するもので、lab を変えても追随しない。
 - 手順書の自動取り込み。S3 のイベントで取り込みジョブを流す仕組みは入れていない。
@@ -1302,11 +1342,12 @@ uv run python web/app.py
 
 ## 確認したこと・確認できていないこと
 
-確認したこと（2026-09-14、フェーズ 2 は 2026-09-15、Terraform への移行は 2026-09-16）。
+確認したこと（2026-09-14、lab・graph・stream は 2026-09-15、Terraform への移行と `deploy.env` によるフェーズの選び方は 2026-09-16）。
 
 - `ops/check.sh` が最後まで `すべて通過` で終わる（2026-09-16）。中身は次の 2 つと `bash -n`。
+- `deploy.env` の読み込みとフェーズの分け方を、偽の `aws` / `terraform` で `ops/up.sh` の手順 0 まで流した（2026-09-16）。ファイル無しでフェーズ 1、`PHASE=2` で lab + graph、`WITH_STREAM=1` で stream が足され、`SKIP_LAB` / `SKIP_GRAPH` で外れること。`PHASE=1` + `WITH_STREAM=1`、`SKIP_LAB=1` + `WITH_STREAM=1`、`WITH_LAB`、値の誤り、`PHASE=5A` で何も作らずに止まること。環境変数がファイルより優先されること。`ops/down.sh` がファイルの `KEEP_ECR` を読むこと。
 - 5 つのルート（`ecr` / `main` / `lab` / `stream` / `graph`）で `terraform init -backend=false` と `terraform validate` が通り、`terraform fmt -check -recursive` に差分が無い（Terraform 1.16.0、hashicorp/aws 6.64.0、opensearch-project/opensearch 2.6.0、hashicorp/time 0.14.2、hashicorp/archive 2.8.1。2026-09-16）。
-- フェーズ 2 の模擬テスト。`tests/test_stream.py`（23 項目: `terraform/stream` の `archive_file` が `stream/detector.py` を `index.py` として zip する配線、機器名の引き方、ポーリングの open / resolved、`first_seen` を保つ、解消済みへの up を数えない、MIB 無しの trap から ifDescr を取る、linkUp で resolved、壊れたレコードを飛ばす）、`tests/test_graph.py`（18 項目: SSM 未設定なら静的、GraphSON の読み替え、Neptune からの組み立て、失敗時と空のときの静的への切り戻し、`add_link` の正規化と重複拒否、`remove_link` / `add_device` / `seed` の Gremlin）。
+- stream と graph の模擬テスト。`tests/test_stream.py`（23 項目: `terraform/stream` の `archive_file` が `stream/detector.py` を `index.py` として zip する配線、機器名の引き方、ポーリングの open / resolved、`first_seen` を保つ、解消済みへの up を数えない、MIB 無しの trap から ifDescr を取る、linkUp で resolved、壊れたレコードを飛ばす）、`tests/test_graph.py`（18 項目: SSM 未設定なら静的、GraphSON の読み替え、Neptune からの組み立て、失敗時と空のときの静的への切り戻し、`add_link` の正規化と重複拒否、`remove_link` / `add_device` / `seed` の Gremlin）。
 - Telegraf の `inputs.snmp` は数値 OID とフィールド名を明示すれば MIB 無しで動き、`inputs.snmp_trap` は v2c を MIB 無しで受ける（varbind の名前は数値 OID）。`agent_host` タグは `source` に替わっている。net-snmp の `monitor` には `iquerySecName` と内部ユーザーが要る。
 - MSK の推奨バージョンが 3.9.x、Neptune の最新が 1.4.8.0、Neptune の IAM アクションが `neptune-db:*DataViaQuery`、`aws_msk_configuration` の版を `latest_revision` で渡すこと、Lambda の MSK イベントソースが NAT 無しの VPC では lambda と sts のエンドポイントを要ること、MSK Connect の信頼先が `kafkaconnect.amazonaws.com` であること。
 - `agent/app.py` と `agent/topology.py` を、boto3 と SDK を差し替えた模擬テスト（`tests/test_app.py`）で確かめた。41 項目: ハイブリッド検索の指定、リランクの有無で `rerankingConfiguration` を付け外しする、質問だけを `guardContent` に入れる、ガードレールで止めた往復を履歴に残さない、参照元の付け方、検索とモデルの失敗、履歴の長さ、ツールの仕様が `toolConfig` に載ること、`toolUse` → `toolResult` の往復、往復の上限（5 回）、無い機器の扱い、トポロジ関数の結果、ツールが 5 つ、`list_anomalies` が未配備で error を返す、振り分け。
@@ -1326,7 +1367,7 @@ uv run python web/app.py
 
 確認できていないこと。
 
-- **実環境への apply。**上はすべて手元の静的検査と模擬テストで、Terraform 版は AWS 上で apply していない（CloudFormation 版も実環境で通しきっていない）。フェーズ 2 も同じで、Telegraf → MSK の IAM 認証、detector の受信、MSK Connect、Neptune への Gremlin は実環境で通していない。
+- **実環境への apply。**上はすべて手元の静的検査と模擬テストで、Terraform 版は AWS 上で apply していない（CloudFormation 版も実環境で通しきっていない）。フェーズ 2（lab / graph）と stream も同じで、lab の起動、Telegraf → MSK の IAM 認証、detector の受信、MSK Connect、Neptune への Gremlin は実環境で通していない。
 - `templatefile` で展開した user_data（`web_user_data.sh.tftpl` / `lab_user_data.sh.tftpl`）が `bash -n` を通るか。展開後のシェルを手元で取り出して確かめていない。
 - `aws_mskconnect_connector` の `kafkaconnect_version` に `2.7.1` が入るか（許される値の一覧を文書で確認できていない）。MSK Connect が S3 とログに届くのに、S3 ゲートウェイと logs エンドポイント以外の経路が要るか。
 - Telegraf 1.40.0 の `outputs.kafka` の `AWS-MSK-IAM` が、インスタンスロール（IMDS）の資格情報で動くか。もっと古い版で使えるかも未確認。

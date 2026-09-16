@@ -6,10 +6,13 @@
 #   ops/down.sh              # 全部消す（graph → stream → lab → main → ecr → Runtime のロググループ）。KEEP_ECR=0 と同じ
 #   KEEP_ECR=1 ops/down.sh   # ECR（イメージ）だけ残す。翌日の ops/up.sh でビルドを飛ばせる（保管料は月数円）
 #
-# 環境変数で変えられるもの（任意）:
+# ops/up.sh と同じ deploy.env（DEPLOY_ENV_FILE=<パス> で別のファイル）を読む。環境変数はファイルより優先。
+# ここで使うキー（任意）:
 #   KEEP_ECR   ECR を残すか。1 = 残す、0 = 消す（既定）。それ以外の値は何も消さずに止まる
+#   AWS_PROFILE / AWS_CA_BUNDLE / OPENSEARCH_CACERT_FILE  ops/up.sh と同じ
 #
-# ops/up.sh の PHASE / WITH_LAB / SKIP_* / CREATE_S3_SINK は渡さなくてよい（作っていないルートは飛ばし、S3 sink の有無は state から読む）。
+# PHASE / SKIP_* / WITH_STREAM / CREATE_S3_SINK は見ない。PHASE に関係なく、state にリソースが載っているルートを全部消す
+# （作っていないルートは飛ばし、S3 sink の有無は state から読む）。
 #
 # 社内の SSL 検査がある PC では ops/up.sh と同じく AWS_CA_BUNDLE（または OPENSEARCH_CACERT_FILE）を入れてから打つ。
 # terraform/main の destroy はベクトルインデックスを消すために OpenSearch Serverless のエンドポイントへ HTTPS でつなぐ。
@@ -18,6 +21,8 @@ set -uo pipefail
 REGION=ap-northeast-1
 PREFIX=fukuda-nwc-poc
 OWNER=fukuda
+. "$(dirname "$0")/deploy-env.sh"
+resolve_deploy_env_file  # DEPLOY_ENV_FILE の相対パスは、下の cd の前の場所から見る
 cd "$(dirname "$0")/.."
 
 log()  { printf '\n\033[1;34m== %s\033[0m\n' "$*"; }
@@ -60,7 +65,8 @@ destroy_root() {  # destroy_root <ルート> [-var 名前=値 …]
   echo "terraform/$root: 消えた"
 }
 
-log "0. 道具と認証"
+log "0. 設定と道具と認証"
+load_deploy_env
 KEEP_ECR="${KEEP_ECR:-0}"
 case "$KEEP_ECR" in
   0) echo "KEEP_ECR=0: ECR もイメージごと消す（残すなら KEEP_ECR=1）" ;;
@@ -76,7 +82,7 @@ CACERT="${OPENSEARCH_CACERT_FILE:-${AWS_CA_BUNDLE:-}}"
 MAIN_VARS=()
 if [ -n "$CACERT" ]; then MAIN_VARS+=(-var "opensearch_cacert_file=$CACERT"); fi
 
-log "1. フェーズ 2（graph → stream。stream は lab の state を読むので lab より先）"
+log "1. graph → stream（stream は lab の state を読むので lab より先）"
 destroy_root graph
 STREAM_VARS=()
 # S3 sink 無しで作った stream（CREATE_S3_SINK=0 ops/up.sh）は、既定の create_s3_sink=true のまま destroy すると zip の有無を確かめに行って止まる

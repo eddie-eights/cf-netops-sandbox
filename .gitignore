@@ -5,6 +5,8 @@ __pycache__/
 .env.*
 # 環境変数の一覧は残す（値は書かない）
 !.env.example
+# ops/up.sh・ops/down.sh の設定（deploy.env.example をコピーして書く）
+deploy.env
 # pip download の置き場（README の手順 4）
 wheels/
 lab/wvs2.clab.yml
