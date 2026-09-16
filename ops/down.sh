@@ -3,7 +3,7 @@
 # state（terraform/<ルート>/terraform.tfstate）にリソースが載っているルートだけを消す。作っていないルートは飛ばす。
 #
 # 使い方（リポジトリの直下で。aws-vault なら `aws-vault exec <プロファイル> --no-session` のサブシェルの中で）:
-#   ops/down.sh              # 全部消す（graph → stream → lab → main → ecr → build → Runtime のロググループ）
+#   ops/down.sh              # 全部消す（graph → stream → lab → main → ecr → Runtime のロググループ）
 #   KEEP_ECR=1 ops/down.sh   # ECR（イメージ）だけ残す。翌日の ops/up.sh でビルドを飛ばせる（保管料は月数円）
 #
 # ops/up.sh の SKIP_* / CREATE_S3_SINK は渡さなくてよい（作っていないルートは飛ばし、S3 sink の有無は state から読む）。
@@ -71,17 +71,14 @@ else
   destroy_root ecr
 fi
 
-log "5. build（作っていれば）"
-destroy_root build
-
-log "6. Runtime のロググループ（AgentCore が作るもので Terraform の管理外）"
+log "5. Runtime のロググループ（AgentCore が作るもので Terraform の管理外）"
 if [ -n "$LOG_GROUP" ]; then
   aws logs delete-log-group --region "$REGION" --log-group-name "$LOG_GROUP" 2>/dev/null && echo "$LOG_GROUP: 消した" || echo "$LOG_GROUP: 無い"
 else
   echo "本体の state が無かったので名前が取れない。残っていれば: aws logs describe-log-groups --region $REGION --log-group-name-prefix /aws/bedrock-agentcore/runtimes/${PREFIX//-/_}"
 fi
 
-log "7. 残っていないか（Project=$PREFIX のタグ）"
+log "6. 残っていないか（Project=$PREFIX のタグ）"
 aws resourcegroupstaggingapi get-resources --region "$REGION" --tag-filters "Key=Project,Values=$PREFIX" \
   --query 'ResourceTagMappingList[].ResourceARN' --output text | tr '\t' '\n' | sed '/^$/d' || true
 echo "（何も出なければ全部消えている。ecr を残したときはリポジトリが出る。消した直後の数分は消えたものが出ることがある）"

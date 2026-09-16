@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 全部を 1 本で起こす。README の手順 1〜5・7 に、2-b（Docker が無いとき）、lab、フェーズ 2（stream / graph と投入）を足したもの。
+# 全部を 1 本で起こす。README の手順 1〜5・7 に、lab、フェーズ 2（stream / graph と投入）を足したもの。
 # 毎日全部消す運用向け。何度打っても同じ状態に収束する（できているものは Terraform が差分なしで飛ばし、ECR にあるタグはビルドしない）。
 # Terraform の state はこの PC のリポジトリの中（terraform/<ルート>/terraform.tfstate）に置く。消すのは ops/down.sh。
 #
@@ -11,8 +11,7 @@
 # stream（MSK / MSK Connect）と graph（Neptune）は時間課金。使い終わったら当日中に ops/down.sh を打つ（README「1 時間起動したときの試算」）。
 #
 # 環境変数で変えられるもの（全部任意）:
-#   IMAGE_TAG               エージェントのイメージのタグ。既定 v1。ECR にそのタグが無いときだけビルドして push する（タグは上書きできない）
-#   USE_CODEBUILD=1         イメージを PC の Docker ではなく CodeBuild（terraform/build）で作る。docker / buildx が無ければ付けなくてもこちら
+#   IMAGE_TAG               エージェントのイメージのタグ。既定 v1。ECR にそのタグが無いときだけ PC の docker buildx でビルドして push する（タグは上書きできない）
 #   SKIP_LAB=1              lab を作らない（stream は lab の state を読むので、stream も作らない）
 #   SKIP_STREAM=1           stream（MSK → detector → DynamoDB）を作らない
 #   SKIP_GRAPH=1            graph（Neptune）を作らない
@@ -34,7 +33,7 @@ OWNER=fukuda
 IMAGE_TAG="${IMAGE_TAG:-v1}"
 LOCAL_PORT="${LOCAL_PORT:-8080}"
 # 下の 5 つは Terraform の変数の既定値に合わせてある（terraform/lab の *_image_tag / containerlab_version / telegraf_version、
-# terraform/build の FRR_TAG / MULTITOOL_TAG、terraform/stream の s3_sink_plugin_key）。変えるときは両方を変える
+# terraform/stream の s3_sink_plugin_key）。変えるときは両方を変える
 FRR_TAG=10.2.1
 MULTITOOL_TAG=v0.10.0
 SNMPD_TAG=v1
@@ -126,24 +125,6 @@ fetch() {  # fetch <URL> <ファイル名>  リポジトリの直下（gitignore
 is_zip() {  # is_zip <ファイル>
   "${PY[@]}" -c 'import sys, zipfile; sys.exit(0 if zipfile.is_zipfile(sys.argv[1]) else 1)' "$1"
 }
-make_src_zip() {  # agent/ と lab/snmpd/ を src.zip にする（README の 2-b。社内の証明書と __pycache__ は入れない）
-  rm -f src.zip
-  "${PY[@]}" - <<'PY'
-import os
-import zipfile
-
-with zipfile.ZipFile("src.zip", "w", zipfile.ZIP_DEFLATED) as z:
-    for top in ("agent", "lab/snmpd"):
-        for root, dirs, files in os.walk(top):
-            dirs[:] = [d for d in dirs if d != "__pycache__"]
-            z.write(root)  # フォルダも入れる。lab/snmpd/certs は空でも Dockerfile が bind するので要る
-            for name in files:
-                if os.path.basename(root) == "certs" and name.endswith((".crt", ".pem")):
-                    continue
-                z.write(os.path.join(root, name))
-PY
-}
-
 GRAPH_PID=""
 GRAPH_LOG=ops/logs/graph-apply.log
 on_exit() {  # 途中で止まっても、バックグラウンドの graph の apply は終わるまで待つ（打ち直したときに state のロックでぶつからないように）
@@ -162,6 +143,8 @@ if command -v python3 >/dev/null; then PY=(python3)
 elif command -v uv >/dev/null; then PY=(uv run --python 3.13 python)
 else die "python3 も uv も無い（README「WSL2 の準備」）"; fi
 if [ -z "$SKIP_LAB" ]; then command -v curl >/dev/null || die "curl が無い（lab の rpm を取るのに使う。sudo apt install curl）"; fi
+command -v docker >/dev/null || die "docker が無い（イメージのビルドに使う。README「WSL2 の準備」）"
+docker buildx version >/dev/null 2>&1 || die "docker buildx が無い（Ubuntu の docker.io には入っていない。README「WSL2 の準備」）"
 CALLER_ARN=$(aws sts get-caller-identity --query Arn --output text) || die "認証が通っていない（aws-vault なら --no-session のサブシェルの中で打つ）"
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 case "$CALLER_ARN" in
@@ -209,56 +192,27 @@ if [ -z "$SKIP_LAB" ]; then
 fi
 NEED_LAB="$NEED_FRR$NEED_MULTITOOL$NEED_SNMPD"
 if [ -n "$NEED_AGENT$NEED_LAB" ]; then
-  if [ -z "${USE_CODEBUILD:-}" ] && { ! command -v docker >/dev/null || ! docker buildx version >/dev/null 2>&1; }; then
-    echo "docker か docker buildx が無いので CodeBuild で作る（README の 2-b）"
-    USE_CODEBUILD=1
+  docker info >/dev/null 2>&1 || die "dockerd に接続できない（WSL なら sudo service docker start。README「WSL2 の準備」）"
+  # agent と snmpd は RUN があるので、x86_64 の PC では QEMU（binfmt）が要る
+  if [ -n "$NEED_AGENT$NEED_SNMPD" ] && ! docker buildx ls | grep -q 'linux/arm64'; then
+    die "docker buildx ls の Platforms に linux/arm64 が無い（README「WSL2 の準備」の docker の行）"
   fi
-  if [ -n "${USE_CODEBUILD:-}" ]; then
-    log "2-b. CodeBuild でビルドする（terraform/build。1 本 3〜5 分）"
-    tf_apply build
-    BUILD_BUCKET=$(tf build output -raw source_bucket_name)
-    BUILD_PROJECT=$(tf build output -raw project_name)
-    make_src_zip
-    aws s3 cp src.zip "s3://$BUILD_BUCKET/src.zip"
-    BUILD_IDS=(); BUILDS=()
-    if [ -n "$NEED_AGENT" ]; then BUILDS+=("agent=$IMAGE_TAG"); fi
-    # TARGET=lab は frr / multitool / snmpd のうち ECR に無いタグだけを作る（buildspec 側で確かめる）。IMAGE_TAG は snmpd のタグ
-    if [ -n "$NEED_LAB" ]; then BUILDS+=("lab=$SNMPD_TAG"); fi
-    for b in "${BUILDS[@]}"; do
-      id=$(aws codebuild start-build --region "$REGION" --project-name "$BUILD_PROJECT" \
-        --environment-variables-override "name=TARGET,value=${b%%=*}" "name=IMAGE_TAG,value=${b#*=}" \
-        --query build.id --output text)
-      echo "ビルド開始: TARGET=${b%%=*} IMAGE_TAG=${b#*=}（$id）"
-      BUILD_IDS+=("$id")
-    done
-    for id in "${BUILD_IDS[@]}"; do
-      while :; do
-        st=$(aws codebuild batch-get-builds --region "$REGION" --ids "$id" --query 'builds[0].buildStatus' --output text)
-        case "$st" in
-          SUCCEEDED) echo "$id: 成功"; break ;;
-          IN_PROGRESS) sleep 20 ;;
-          *) die "CodeBuild のビルド $id が $st。ログは aws logs tail /aws/codebuild/$PREFIX-build --region $REGION --since 1h（docker pull の toomanyrequests なら時間を置いて打ち直す）" ;;
-        esac
-      done
-    done
-  else
-    aws ecr get-login-password --region "$REGION" | docker login --username AWS --password-stdin "$REG"
-    if [ -n "$NEED_AGENT" ]; then
-      docker buildx build --platform linux/arm64 -t "$REPO:$IMAGE_TAG" --push agent/
-    fi
-    if [ -n "$NEED_FRR" ]; then
-      docker pull --platform linux/arm64 "quay.io/frrouting/frr:$FRR_TAG"
-      docker tag "quay.io/frrouting/frr:$FRR_TAG" "$REG/$PREFIX-lab-frr:$FRR_TAG"
-      docker push "$REG/$PREFIX-lab-frr:$FRR_TAG"
-    fi
-    if [ -n "$NEED_MULTITOOL" ]; then
-      docker pull --platform linux/arm64 "wbitt/network-multitool:$MULTITOOL_TAG"
-      docker tag "wbitt/network-multitool:$MULTITOOL_TAG" "$REG/$PREFIX-lab-multitool:$MULTITOOL_TAG"
-      docker push "$REG/$PREFIX-lab-multitool:$MULTITOOL_TAG"
-    fi
-    if [ -n "$NEED_SNMPD" ]; then
-      docker buildx build --platform linux/arm64 -t "$REG/$PREFIX-lab-snmpd:$SNMPD_TAG" --push lab/snmpd/
-    fi
+  aws ecr get-login-password --region "$REGION" | docker login --username AWS --password-stdin "$REG"
+  if [ -n "$NEED_AGENT" ]; then
+    docker buildx build --platform linux/arm64 -t "$REPO:$IMAGE_TAG" --push agent/
+  fi
+  if [ -n "$NEED_FRR" ]; then
+    docker pull --platform linux/arm64 "quay.io/frrouting/frr:$FRR_TAG"
+    docker tag "quay.io/frrouting/frr:$FRR_TAG" "$REG/$PREFIX-lab-frr:$FRR_TAG"
+    docker push "$REG/$PREFIX-lab-frr:$FRR_TAG"
+  fi
+  if [ -n "$NEED_MULTITOOL" ]; then
+    docker pull --platform linux/arm64 "wbitt/network-multitool:$MULTITOOL_TAG"
+    docker tag "wbitt/network-multitool:$MULTITOOL_TAG" "$REG/$PREFIX-lab-multitool:$MULTITOOL_TAG"
+    docker push "$REG/$PREFIX-lab-multitool:$MULTITOOL_TAG"
+  fi
+  if [ -n "$NEED_SNMPD" ]; then
+    docker buildx build --platform linux/arm64 -t "$REG/$PREFIX-lab-snmpd:$SNMPD_TAG" --push lab/snmpd/
   fi
 fi
 

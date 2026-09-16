@@ -24,8 +24,7 @@ lab/snmpd/certs/*.pem
 *.tfvars
 !*.tfvars.example
 terraform/**/.build/
-# 手順 2-b と s-1 で作る・取るファイル
-src.zip
+# 手順 s-1 で取るファイル
 confluentinc-*.zip
 ops/logs/
 *.part

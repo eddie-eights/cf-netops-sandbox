@@ -57,7 +57,6 @@ lab（任意、terraform/lab、別ルート）: 同じ VPC の EC2 1 台で cont
 | ファイル | 中身 |
 |---|---|
 | `terraform/ecr/` | エージェントと lab のイメージの ECR リポジトリ（タグは上書き不可、destroy でイメージごと消える）。**最初に apply する。**`terraform/main` がリポジトリの URL をこのルートの state から読む |
-| `terraform/build/` | 任意。PC でイメージをビルドできないとき、S3 に置いた zip から CodeBuild（arm64）でビルドして ECR に push する（手順 2-b。`buildspec.yml`）。待機中 0 円 |
 | `terraform/main/` | 本体。`network.tf`（VPC・サブネット 2 つ・VPC エンドポイント・SG）/ `kb.tf`（S3・OpenSearch Serverless・インデックス・ナレッジベース・ガードレール）/ `runtime.tf`（AgentCore Runtime と IAM）/ `web.tf`（EC2）/ `templates/web_user_data.sh.tftpl`（起動時に S3 から Web を取って入れる）/ `locals.tf` |
 | `terraform/lab/` | 任意。containerlab + FRR の lab を動かす EC2 1 台（`templates/lab_user_data.sh.tftpl`）。VPC / サブネット / SG / バケットは `terraform/main` の state から読む。フェーズ 2 では Telegraf も入れる |
 | `terraform/stream/` | フェーズ 2。`network.tf`（SG と lambda・sts・dynamodb エンドポイント）/ `msk.tf`（MSK。2 ブローカー、IAM 認証）/ `anomalies.tf`（DynamoDB の異常テーブル）/ `detector.tf`（detector Lambda）/ `sink.tf`（MSK Connect の S3 sink）/ `access.tf`（`terraform/main` と `terraform/lab` のロールに足す権限）/ `locals.tf`。`terraform/main` と `terraform/lab` の state を読む |
@@ -70,7 +69,7 @@ lab（任意、terraform/lab、別ルート）: 同じ VPC の EC2 1 台で cont
 | `.env.example` | 環境変数の一覧（Web / エージェント / lab。意味と AWS 上で誰が入れるか）。AWS 上では Terraform（user_data と Runtime の環境変数）が書くので手で用意しない。EC2 で Web が立たないときの見比べ先で、手元で `web/app.py` を動かすときは `.env` に写して使う（「Web を手元で動かす」） |
 | `lab/` | lab の材料。`wvs2.clab.yml.in`（containerlab の定義。イメージ名は起動時に埋める）、`frr/`、`snmpd/`（Dockerfile と設定。trap の送信も）、`telegraf.conf.in`（ポーリングと trap 受信 → MSK）、`lab.sh` |
 | `kb-docs/` | ナレッジベースに入れる手順書の例（架空の md 3 つ） |
-| `ops/` | `up.sh`（手順 1〜7、2-b、lab、フェーズ 2 までを 1 本で打つ）と `down.sh`（片付けをまとめて打つ）。毎日消して作り直す運用向け（「毎日の起動と片付けをスクリプトで打つ」）。`seed_graph.py` は `up.sh` が Web の EC2 の上で打つ Neptune への投入。`check.sh` は AWS に触らない検査をまとめて打つ（「手元で確かめる」）。`vscode-setup.sh` は VS Code の設定を入れる（「VS Code の設定」） |
+| `ops/` | `up.sh`（手順 1〜7、lab、フェーズ 2 までを 1 本で打つ）と `down.sh`（片付けをまとめて打つ）。毎日消して作り直す運用向け（「毎日の起動と片付けをスクリプトで打つ」）。`seed_graph.py` は `up.sh` が Web の EC2 の上で打つ Neptune への投入。`check.sh` は AWS に触らない検査をまとめて打つ（「手元で確かめる」）。`vscode-setup.sh` は VS Code の設定を入れる（「VS Code の設定」） |
 | `tests/` | 模擬テスト（AWS に触れない。打ち方は「手元で確かめる」）。`test_app.py`（エージェント）、`test_graph.py`（Neptune の読み書きと静的への切り戻し）、`test_stream.py`（detector と、`terraform/stream` の `archive_file` の配線） |
 
 ## なぜこの形にしたか
@@ -161,7 +160,7 @@ OpenSearch Serverless のセキュリティポリシー・アクセスポリシ�
   既定では Terraform が認証情報から自動で入れる（`data.aws_iam_session_context` の `issuer_arn`。IAM ユーザーならその ARN、ロールを assume しているなら元のロールの ARN）。自動で取れない形のときだけ変数 `kb_admin_principal_arn` に渡す（手順 0-3）。
   **apply と destroy は同じ人（同じロール）で打つ。**別の人が destroy すると、インデックスを消すところで 403 になる。
 - **ガードレールの判定は、東京以外の APAC のリージョンで行われることがある**（Standard 階層はクロスリージョン推論が必須）。行き先は ap-northeast-1 / ap-northeast-2 / ap-northeast-3 / ap-south-1 / ap-southeast-1 / ap-southeast-2（2026-09-14 に AWS の文書で確認）。データを国内に留める決まりがある場合は使えない。
-- イメージのビルドは、インターネットに出られる端末で行う（Docker と buildx）。出られなければ手順 2-b。
+- イメージのビルドは、インターネットに出られる端末で行う（Docker と buildx）。
 - **Session Manager の設定（アカウント単位）で KMS 暗号化を必須にしている場合**は、`kms` エンドポイントとインスタンスロールへの `kms:Decrypt` が別に要る。この Terraform には入れていない。
 
 ### 利用者の PC 側
@@ -200,7 +199,7 @@ ENI にタグが付かず上で何も出ないときは、`aws ec2 describe-vpc-
 |---|---|
 | AWS CLI v2 と Session Manager plugin が **WSL 側**に入っている | `aws --version` と `session-manager-plugin` を WSL のシェルで打つ。Windows 側にだけ入れても WSL の `aws ssm start-session` からは見えない（Linux 版の deb / rpm を WSL に入れる） |
 | Terraform 1.11 以上が **WSL 側**に入っている | `terraform version`。入っていなければ下の HashiCorp の apt リポジトリから入れる |
-| docker で arm64 のビルドができる | `docker buildx ls` の `Platforms` に `linux/arm64` があること。Docker Desktop（WSL2 backend）なら最初からある。**WSL に直接 Docker Engine を入れる場合**は下の 3 点。Docker が入れられなければ手順 2-b |
+| docker で arm64 のビルドができる | `docker buildx ls` の `Platforms` に `linux/arm64` があること。Docker Desktop（WSL2 backend）なら最初からある。**WSL に直接 Docker Engine を入れる場合**は下の 3 点 |
 | 改行が LF のまま | `lab/lab.sh` と `web/app.py` は EC2 の Linux で動くので、CRLF になっていると `set -euo pipefail\r` で落ちる。リポジトリは **WSL の中で clone** し（`/mnt/c` 配下でなく `~` 配下）、`git config core.autocrlf` が `true` なら `false` にする。`file lab/lab.sh` に `CRLF` が出なければよい |
 | （Docker Engine を WSL に直接入れるとき）docker.com の apt リポジトリから入れる | Ubuntu 標準の `docker.io` には buildx が無い。`docker-ce docker-ce-cli containerd.io docker-buildx-plugin` を入れ、`sudo usermod -aG docker $USER` の後にシェルを開き直す |
 | （同）dockerd が起動している | `/etc/wsl.conf` に `[boot]` `systemd=true` を書いて `wsl --shutdown` で入り直すと `systemctl enable --now docker` が使える。systemd を使わないなら毎回 `sudo service docker start` |
@@ -301,7 +300,7 @@ ECR のレイヤー置き場（Runtime のイメージ取得）、AL2023 の dnf
 
 ### 毎日の起動と片付けをスクリプトで打つ
 
-業務終了後に全部消し、翌朝また作る運用なら、この 2 本を使う。**`ops/up.sh` 1 本で全部作る**: 手順 1〜5・7 に加えて、2-b（PC に Docker が無いとき）、lab、フェーズ 2（stream / graph と Neptune への投入）まで。
+業務終了後に全部消し、翌朝また作る運用なら、この 2 本を使う。**`ops/up.sh` 1 本で全部作る**: 手順 1〜5・7 に加えて、lab、フェーズ 2（stream / graph と Neptune への投入）まで。
 中身は下の手順のコマンドそのもので、**できているものは飛ばす**（Terraform は差分だけ作る、ECR に同じタグのイメージがあればビルドしない、`wheels/`・rpm・zip が手元にあれば取り直さない、Neptune に機器が入っていれば投入しない）ので、途中で落ちても同じコマンドを打ち直せばよい。
 手順 0 の環境変数は要らない（スクリプトが認証情報と Terraform の出力から取る）。**aws-vault の人は 0-1 の `--no-session` のサブシェルの中で打つ**（一時セッションで入っていると、その旨を出して止まる）。社内 PC は「社内 PC で使うとき」の設定を入れたターミナルで打つ。
 
@@ -314,9 +313,9 @@ ops/up.sh
 
 | 順 | 何をする | 対応する手順 |
 |---|---|---|
-| 0 | `aws` / `terraform` / `python3`（無ければ `uv`）/ `curl` があるか、認証が通っているかを確かめる。aws-vault の一時セッションなら止まる。CloudFormation 版のスタック（`fukuda-nwc-poc*`）が残っていれば止まる（「CloudFormation 版から移るとき」）。作るルートを表示する | 0 |
+| 0 | `aws` / `terraform` / `python3`（無ければ `uv`）/ `curl` / `docker` と `docker buildx` があるか、認証が通っているかを確かめる。aws-vault の一時セッションなら止まる。CloudFormation 版のスタック（`fukuda-nwc-poc*`）が残っていれば止まる（「CloudFormation 版から移るとき」）。作るルートを表示する | 0 |
 | 1 | `terraform/ecr` を init / apply | 1 |
-| 2 | ECR に**無いタグだけ** arm64 でビルドして push する（エージェント、lab の frr / multitool / snmpd）。`docker` と `docker buildx` があれば PC で、無ければ `terraform/build` を apply して CodeBuild で作る（`USE_CODEBUILD=1` で CodeBuild に固定） | 2 / 2-b / lab-1 |
+| 2 | ECR に**無いタグだけ** arm64 でビルドして push する（エージェント、lab の frr / multitool / snmpd）。PC の `docker buildx` で作る（dockerd が動いていないとき、agent か snmpd を作るのに `docker buildx ls` に `linux/arm64` が無いときは止まる） | 2 / lab-1 |
 | 3 | `terraform/main` を init / apply（初回 10〜20 分）。終わったら `terraform/graph` の apply を**裏で**始める（10〜15 分。ログは `ops/logs/graph-apply.log`） | 3 / g-1 |
 | 4 | wheel を取り（`wheels/` が空のときだけ）、Web の部品と手順書を S3 に置き、取り込みが `COMPLETE` になるまで待つ。EC2 の初回の user_data が終わるのを待ってから再起動し、Web のサービスが `active` になるまで待つ | 4 |
 | 5 | containerlab と Telegraf の rpm、S3 sink の zip をリポジトリの直下に取り（無いときだけ）、lab の設定と一緒に S3 に置く。lab の EC2 を作る前に置くので、Telegraf まで最初の起動で入る | lab-2 / s-1 |
@@ -343,7 +342,6 @@ Terraform の確認プロンプトは出さずに進む（スクリプトの中�
 | `SKIP_STREAM=1` | stream（MSK → detector → DynamoDB）を作らない |
 | `SKIP_GRAPH=1` | graph（Neptune）を作らない |
 | `CREATE_S3_SINK=0` | stream の S3 sink（MSK Connect）を作らない。約 $0.14/h 下がる。`ops/down.sh` には付けなくてよい（state から読む） |
-| `USE_CODEBUILD=1` | PC に Docker があっても CodeBuild でビルドする |
 | `ADMIN_ARN` | `kb_admin_principal_arn`。自動で取れない認証の形のときだけ（スクリプトが止まって言う） |
 | `VPC_CIDR` / `CLIENT_CIDR` | 手順 3 の `vpc_cidr` / `client_cidr` |
 | `OPENSEARCH_CACERT_FILE` | 「社内 PC で使うとき」の CA の PEM。無ければ `AWS_CA_BUNDLE` を使う |
@@ -354,7 +352,7 @@ Terraform の確認プロンプトは出さずに進む（スクリプトの中�
 ops/down.sh
 ```
 
-「片付け」と同じ順（graph → stream → lab → main → ecr → build → Runtime のロググループ）で、**state にリソースが載っているルートだけ** destroy する（作っていないルートは飛ばす。`ops/up.sh` に付けた `SKIP_*` / `CREATE_S3_SINK` は付けなくてよい）。
+「片付け」と同じ順（graph → stream → lab → main → ecr → Runtime のロググループ）で、**state にリソースが載っているルートだけ** destroy する（作っていないルートは飛ばす。`ops/up.sh` に付けた `SKIP_*` / `CREATE_S3_SINK` は付けなくてよい）。
 バケットは中身ごと、ECR はイメージごと消える。最後に `Project=fukuda-nwc-poc` のタグが付いたものが残っていないかを出す（何も出なければ全部消えている）。
 `KEEP_ECR=1 ops/down.sh` で ECR（イメージ）だけ残せる。残すと翌朝の `ops/up.sh` がビルドを飛ばせる（保管料は月数円。Runtime はイメージが無いと作れないので、翌朝ビルドし直す時間が惜しいならこちら）。
 
@@ -530,50 +528,6 @@ docker buildx build --platform linux/arm64 -t "$REPO:v1" --push agent/
 `agent/Dockerfile` は PyPI の 3 ホスト（`pypi.org` / `files.pythonhosted.org` / `pypi.python.org`）を `--trusted-host` にしてあるので、上のコマンドをそのまま打てば通る。
 `ReadTimeoutError` は QEMU の arm64 エミュレーションで遅いだけなので、そのまま打ち直す（`PIP_DEFAULT_TIMEOUT=100` で既に長めにしてある）。
 
-### 2-b. PC でビルドできないとき: AWS の中でビルドする（`terraform/build`）
-
-`ops/up.sh` は、PC に `docker` か `docker buildx` が無ければここを自分で打つ（`USE_CODEBUILD=1` で常にこちら）。以下はその中身。
-
-会社の PC に Docker が入れられない、というときは
-CodeBuild にビルドさせる。`terraform/build` は S3 バケット 1 つと CodeBuild のプロジェクト 1 つで、**バケットに置いた zip**（`agent/` と `lab/snmpd/`）を
-**arm64 のビルド環境**で `docker build` して push する（`buildspec.yml`）。ネイティブ arm64 なので QEMU も buildx も要らず、社内ネットワークの証明書も関係ない。
-GitHub には繋がない（zip は手元のファイルから作る）。
-**待機中は 0 円**（zip は 7 日で自動で消える）、ビルド中だけ分課金（`arm1.small` は $0.00425/分。東京。2026-09-15 に Price List API で検証。
-エージェントのビルドは 3〜5 分なので 1 回 2〜3 円。加えて月 100 分の無料枠がある）。`terraform/ecr` の後ならいつ作ってもよい。
-
-CLI なら次。最後の行（ビルドの開始）は出力 `start_agent_build_command` と同じで、lab のイメージは `start_lab_build_command`。
-
-```bash
-terraform -chdir=terraform/build init
-```
-
-```bash
-terraform -chdir=terraform/build apply
-```
-
-```bash
-zip -r src.zip agent lab/snmpd -x 'lab/snmpd/certs/*.crt' 'lab/snmpd/certs/*.pem'
-BUCKET=$(terraform -chdir=terraform/build output -raw source_bucket_name); echo "$BUCKET"
-aws s3 cp src.zip "s3://$BUCKET/src.zip"
-aws codebuild start-build --region ap-northeast-1 --project-name fukuda-nwc-poc-build --environment-variables-override name=TARGET,value=agent name=IMAGE_TAG,value=v1
-```
-
-zip を置くのとビルドの開始は、`terraform/build` を apply した後ならコンソールでもできる。
-
-| 順 | 操作 |
-|---|---|
-| 1 | 上の `terraform -chdir=terraform/build` の 2 つ（init と apply）を打つ |
-| 2 | 手元でこのリポジトリのフォルダを zip にする。Windows ならフォルダを右クリック → 送る → 圧縮 (zip 形式) フォルダー。zip の中に `agent/` と `lab/snmpd/` が入っていればよく、1 段フォルダが挟まっていてもよい |
-| 3 | S3 → `fukuda-nwc-poc-build-<アカウント ID>`（出力 `source_bucket_name` に実名が出る）→ アップロード → 名前を **`src.zip`** にして置く |
-| 4 | CodeBuild → ビルドプロジェクト → `fukuda-nwc-poc-build` → **ビルドの開始（上書きあり）** → 環境変数の上書きで `TARGET` = `agent`、`IMAGE_TAG` = 手順 3 の `agent_image_tag` と同じ値（初回は `v1`）→ **ビルドの開始** |
-| 5 | ビルドの状態が **成功** になれば ECR に入っている。ECR → `fukuda-nwc-poc-agent` にタグが見える。ログに `agent:v1 はもうあるので飛ばす` と出たら、そのタグは前から入っていて何も作っていない |
-| 6 | lab を使うなら `TARGET` = `lab` でもう 1 回（frr / multitool を取って push し、snmpd をビルドする。ECR にもうあるタグは飛ばす。lab-1 の代わり） |
-
-- タグは上書きできない（`terraform/ecr` の `IMMUTABLE`）。ビルドは ECR にもうあるタグを飛ばすので、`agent/` を変えたら zip を置き直し、`IMAGE_TAG` を変えて打ち直し、手順 3 の `agent_image_tag` も合わせる。
-- `TARGET=lab` の `docker pull` は Docker Hub / quay.io の匿名取得なので、`toomanyrequests` で落ちたら時間を置いて打ち直す。
-- CloudShell でもビルドできそうに見えるが、CloudShell の環境は x86_64（1 vCPU / 2 GiB / 保存領域 1 GB）で、arm64 を作るには QEMU の登録（`--privileged` のコンテナ）が要る。CloudShell でそれが通るかは確認できていないので、この README では CodeBuild にしている。
-- 消すときは `terraform -chdir=terraform/build destroy` をいつ打ってもよい（他のルートは参照していない。残しても 0 円）。バケットは zip ごと消える。
-
 ### 3. 本体を apply する
 
 ```bash
@@ -600,7 +554,7 @@ OpenSearch Serverless のコレクションと Runtime の作成で、全体で 
 - 別のリポジトリのイメージを使うときだけ `-var agent_image_uri=<URI:タグ>` を足す（そのときは `terraform/ecr` の state を読まない）。
 - `terraform/lab` / `terraform/stream` / `terraform/graph` は、`terraform/main` の state から VPC ID・サブネット・SG・バケット名・ロール名を読むので、それらのルートにネットワークの値は渡さない。
   **消す順番は `graph` → `stream` → `lab` → `main` → `ecr`**（「片付け」）。先に `main` を消すと、後のルートが state から値を読めずに destroy の途中で止まる。
-- `agent_image_tag` は手順 2（か 2-b）で push したタグそのもの（初回は `v1`）。`agent/` を直して push し直したときは、新しいタグ（`v2` など。タグは上書きできない設定なので同じ名前は使えない）を push してから、ここを新しいタグにして同じコマンドを打ち直す。
+- `agent_image_tag` は手順 2 で push したタグそのもの（初回は `v1`）。`agent/` を直して push し直したときは、新しいタグ（`v2` など。タグは上書きできない設定なので同じ名前は使えない）を push してから、ここを新しいタグにして同じコマンドを打ち直す。
 
 できたら出力を一覧で見る。
 
@@ -791,7 +745,7 @@ BGP の主副切替と SNMP の見え方を手で確かめるためのもので�
 ### lab-1. イメージを ECR に置く
 
 手順 1 の `terraform/ecr` は既定（変数 `create_lab_repositories = true`）で `fukuda-nwc-poc-lab-frr` / `-lab-snmpd` / `-lab-multitool` も作っているので、ECR 側の準備は要らない。
-インターネットに出られる端末で、**arm64 のイメージ**を取って push する。snmpd だけはビルドする。Docker が使えなければ手順 2-b の `TARGET=lab` で代わりになる。
+インターネットに出られる端末で、**arm64 のイメージ**を取って push する。snmpd だけはビルドする。
 
 ```bash
 REG="$ACCOUNT_ID.dkr.ecr.ap-northeast-1.amazonaws.com"
@@ -1097,10 +1051,6 @@ terraform -chdir=terraform/main destroy
 terraform -chdir=terraform/ecr destroy
 ```
 
-```bash
-terraform -chdir=terraform/build destroy
-```
-
 最後に、Terraform の外にある Runtime のロググループ（手順 5 で作られていれば）。
 
 ```bash
@@ -1292,7 +1242,7 @@ uv run python web/app.py
 確認したこと（2026-09-14、フェーズ 2 は 2026-09-15、Terraform への移行は 2026-09-16）。
 
 - `ops/check.sh` が最後まで `すべて通過` で終わる（2026-09-16）。中身は次の 2 つと `bash -n`。
-- 6 つのルート（`ecr` / `build` / `main` / `lab` / `stream` / `graph`）で `terraform init -backend=false` と `terraform validate` が通り、`terraform fmt -check -recursive` に差分が無い（Terraform 1.16.0、hashicorp/aws 6.64.0、opensearch-project/opensearch 2.6.0、hashicorp/time 0.14.2、hashicorp/archive 2.8.1。2026-09-16）。
+- 5 つのルート（`ecr` / `main` / `lab` / `stream` / `graph`）で `terraform init -backend=false` と `terraform validate` が通り、`terraform fmt -check -recursive` に差分が無い（Terraform 1.16.0、hashicorp/aws 6.64.0、opensearch-project/opensearch 2.6.0、hashicorp/time 0.14.2、hashicorp/archive 2.8.1。2026-09-16）。
 - フェーズ 2 の模擬テスト。`tests/test_stream.py`（23 項目: `terraform/stream` の `archive_file` が `stream/detector.py` を `index.py` として zip する配線、機器名の引き方、ポーリングの open / resolved、`first_seen` を保つ、解消済みへの up を数えない、MIB 無しの trap から ifDescr を取る、linkUp で resolved、壊れたレコードを飛ばす）、`tests/test_graph.py`（18 項目: SSM 未設定なら静的、GraphSON の読み替え、Neptune からの組み立て、失敗時と空のときの静的への切り戻し、`add_link` の正規化と重複拒否、`remove_link` / `add_device` / `seed` の Gremlin）。
 - Telegraf の `inputs.snmp` は数値 OID とフィールド名を明示すれば MIB 無しで動き、`inputs.snmp_trap` は v2c を MIB 無しで受ける（varbind の名前は数値 OID）。`agent_host` タグは `source` に替わっている。net-snmp の `monitor` には `iquerySecName` と内部ユーザーが要る。
 - MSK の推奨バージョンが 3.9.x、Neptune の最新が 1.4.8.0、Neptune の IAM アクションが `neptune-db:*DataViaQuery`、`aws_msk_configuration` の版を `latest_revision` で渡すこと、Lambda の MSK イベントソースが NAT 無しの VPC では lambda と sts のエンドポイントを要ること、MSK Connect の信頼先が `kafkaconnect.amazonaws.com` であること。

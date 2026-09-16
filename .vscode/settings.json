@@ -24,8 +24,7 @@
   "files.associations": {
     "*.sh.tftpl": "shellscript",
     "**/telegraf.conf.in": "toml",
-    "**/*.clab.yml.in": "yaml",
-    "buildspec.yml": "yaml"
+    "**/*.clab.yml.in": "yaml"
   },
 
   "python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python",

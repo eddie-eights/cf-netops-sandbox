@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # fukuda-nwc-poc - AWS に触らずに打てる検査をまとめて打つ。README の「手元で確かめる」と同じ内容。
 #   1. terraform fmt -check -recursive
-#   2. 6 つのルートで init -backend=false + validate（provider を取るだけで state には触らない）
+#   2. 5 つのルートで init -backend=false + validate（provider を取るだけで state には触らない）
 #   3. ops スクリプトの構文（bash -n と、EC2 の上で打つ ops/seed_graph.py）
 #   4. 模擬テスト 3 本（AWS に触れない）
 # 最後の行が「すべて通過」なら健全。途中で落ちたらそこで止まる。
@@ -9,7 +9,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-ROOTS=(ecr build main lab stream graph)
+ROOTS=(ecr main lab stream graph)
 
 log() { printf '\n== %s\n' "$*"; }
 die() {
@@ -23,7 +23,7 @@ log "1. terraform fmt -check -recursive terraform"
 terraform fmt -check -recursive terraform || die "整形されていないファイルがある。terraform fmt -recursive terraform で直す"
 echo "差分なし"
 
-log "2. 6 つのルートの validate"
+log "2. 5 つのルートの validate"
 for r in "${ROOTS[@]}"; do
   terraform -chdir="terraform/$r" init -backend=false -input=false >/dev/null || die "terraform/$r の init が失敗した"
   terraform -chdir="terraform/$r" validate >/dev/null || die "terraform/$r の validate が失敗した（terraform -chdir=terraform/$r validate で中身を見る）"
