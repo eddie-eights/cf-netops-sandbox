@@ -185,6 +185,11 @@
 | 足りないエンドポイント | **4〜5 個足りない。**この VPC には IGW も NAT も無い。AWS の文書（閉域クラスタの作り方、2026-09-16 確認）が挙げるのは `ec2` / `ecr.api` / `ecr.dkr` / `s3`（ゲートウェイ）/ `elasticloadbalancing` / `logs` / `sts` / `oidc-eks`（IRSA）/ `eks-auth`（Pod Identity）/ `eks` / `ssm`（任意）/ `xray`（任意）。main 側にあるのは `ecr.api` / `ecr.dkr` / `logs` / `ssm` / `ssmmessages` と S3 ゲートウェイだけなので、**`ec2` / `sts` / `eks` と、`oidc-eks` か `eks-auth` のどちらかが足りない**（ロードバランサを使うなら `elasticloadbalancing` も）。**1 AZ で月 ≒ $40〜$50、2 AZ で月 ≒ $80〜$100** |
 
 - 閉域で EKS を動かす条件は 2 つ（同じ文書）。**クラスタのエンドポイントを private にする**ことと、**イメージを VPC 内の ECR から引く**こと。どちらもこのリポジトリの作りに合う。
+- **足りないのが 4〜5 個で済むのは、このリポジトリが VPC を 1 つしか持たないから。**`terraform/stream` も `terraform/graph` も
+  `data.terraform_remote_state.main.outputs.vpc_id` で **main の VPC を使い回している**ので、5A のルートも同じ VPC に入れれば
+  `ecr.api` / `ecr.dkr` / `logs` / `ssm` と S3 ゲートウェイをそのまま使える。**新しい VPC を作ると 7〜8 個を一から並べることになる。**
+- **同じ VPC に同じサービスのエンドポイントを 2 つ作らない**（そのぶん二重に課金される）。`sts` は `terraform/stream` が持っているので、
+  5A から使うなら remote state で参照するか、どちらか一方だけが作る形にする。**どちらが作るかは着手時に決める。**
 - **この構成では、クラスタ本体（月 ≒ $73）よりエンドポイント（月 ≒ $40〜$100）のほうが効く可能性がある。**
   それでも閉域を外す（NAT を置く）話にはしない。NAT も時間課金 + 転送量がかかり安くなるとは限らないうえ、**閉域という前提そのものを崩す**（単価は未確認）。
 - 毎日 `ops/down.sh` で消す運用なので、**EKS も「使う日に作って当日中に消す」側に入れる。**
