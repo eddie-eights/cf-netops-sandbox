@@ -1,25 +1,27 @@
 #!/usr/bin/env bash
 # deploy.env の PHASE で指定したフェーズまでを 1 本で起こす。
 #   フェーズ 1（既定）  LLM + RAG で対話する。ECR・イメージ・本体・Web（README の手順 1〜5・7）
-#   フェーズ 2          フェーズ 1 に、lab（containerlab の擬似トポロジ）と graph（Neptune のトポロジと投入）を足す
-#   WITH_STREAM=1       フェーズ 2 の任意。stream（lab → MSK → detector → DynamoDB の異常一覧）を足す
+#   フェーズ 2          フェーズ 1 に、データパイプライン lab（containerlab + Telegraf）→ stream（MSK → detector → DynamoDB）
+#                       → analytics（Spark on EMR Serverless → S3 Tables）と、graph（Neptune のトポロジと投入）を足す
+#   フェーズ 3          Temporal でエージェントが原因を調べ、人が承認する。まだ Terraform が無い（docs/phases.md）
 # 毎日全部消す運用向け。何度打っても同じ状態に収束する（できているものは Terraform が差分なしで飛ばし、ECR にあるタグはビルドしない）。
 # Terraform の state はこの PC のリポジトリの中（terraform/<ルート>/terraform.tfstate）に置く。消すのは ops/down.sh。
 #
 # 使い方（リポジトリの直下で。aws-vault なら `aws-vault exec <プロファイル> --no-session` のサブシェルの中で）:
 #   cp deploy.env.example deploy.env  # 初回だけ。どこまで作るかを deploy.env に書く（無ければ既定のフェーズ 1 で動く）
 #   ops/up.sh                         # deploy.env のとおりに作る。最後にポートフォワーディングを開いたまま止まる（Ctrl+C で閉じる）
-#   PHASE=2 ops/up.sh                 # その回だけ変える（環境変数は deploy.env より優先）。初回はフェーズ 2 で 30〜40 分、WITH_STREAM=1 で 40〜60 分
+#   PHASE=2 ops/up.sh                 # その回だけ変える（環境変数は deploy.env より優先）。初回はフェーズ 2 で 40〜60 分（MSK の作成が長い）
 #   DEPLOY_ENV_FILE=<パス> ops/up.sh  # 別の設定ファイルを読む
 #
 # どのフェーズも時間課金（試算は README「1 時間起動したときの試算」）。使い終わったら当日中に ops/down.sh を打つ。
 # PHASE を下げて打っても、前に作ったルートは消さない（消すのは ops/down.sh）。
 #
 # 設定できるキー（deploy.env か環境変数。全部任意。意味は deploy.env.example、読み方は ops/deploy-env.sh）:
-#   PHASE                   どこまで作るか。1（既定）か 2。2B / 5A / 5B はまだ Terraform が無いので止まる（docs/phases.md）
-#   SKIP_LAB=1              PHASE=2 で lab を作らない（WITH_STREAM=1 とは一緒に使えない）
+#   PHASE                   どこまで作るか。1（既定）か 2。3 はまだ Terraform が無いので止まる（docs/phases.md）
+#   SKIP_LAB=1              PHASE=2 で lab を作らない（stream は lab が要るので SKIP_STREAM=1 も要る）
+#   SKIP_STREAM=1           PHASE=2 で stream と analytics（stream の Kafka を読む）を作らない
+#   SKIP_ANALYTICS=1        PHASE=2 で analytics（Spark → S3 Tables）を作らない
 #   SKIP_GRAPH=1            PHASE=2 で graph（Neptune）を作らない
-#   WITH_STREAM=1           PHASE=2 に stream を足す。lab が要る
 #   CREATE_S3_SINK=0        MSK Connect の S3 sink を作らない（Confluent の zip が取れないとき。ops/down.sh は state を見て合わせる）
 #   IMAGE_TAG               エージェントのイメージのタグ。既定 v1。ECR にそのタグが無いときだけ PC の docker buildx でビルドして push する（タグは上書きできない）
 #   ADMIN_ARN               terraform/main の kb_admin_principal_arn。既定は空（Terraform が今の認証情報から決める）
@@ -29,8 +31,8 @@
 #   LOCAL_PORT              PC 側のポート。既定 8080
 #   NO_PORTFORWARD=1        ポートフォワーディングを開かずに終わる
 #   AWS_PROFILE / AWS_CA_BUNDLE  AWS CLI と terraform がそのまま読む
-# SKIP_LAB / SKIP_GRAPH / WITH_STREAM / NO_PORTFORWARD は 1 / 0 のほか true / false、yes / no でも書ける（CREATE_S3_SINK と ops/down.sh の KEEP_ECR は 1 か 0 だけ）。
-# WITH_LAB と SKIP_STREAM は 2026-09-16 に無くなった（lab はフェーズ 2 に入り、stream は WITH_STREAM=1 で足す形になった）。
+# SKIP_LAB / SKIP_STREAM / SKIP_ANALYTICS / SKIP_GRAPH / NO_PORTFORWARD は 1 / 0 のほか true / false、yes / no でも書ける（CREATE_S3_SINK と ops/down.sh の KEEP_ECR は 1 か 0 だけ）。
+# WITH_LAB は 2026-09-16 に、WITH_STREAM は 2026-09-17 に無くなった（lab も stream もフェーズ 2 に入り、外すときは SKIP_* で書く）。
 #
 # 手順 6（利用者への権限）は人に渡す作業なので入れていない。
 set -euo pipefail
@@ -49,6 +51,20 @@ CONTAINERLAB_RPM="containerlab_${CONTAINERLAB_VERSION}_linux_arm64.rpm"
 TELEGRAF_RPM="telegraf-${TELEGRAF_VERSION}-1.aarch64.rpm"
 S3_SINK_ZIP=confluentinc-kafka-connect-s3-12.1.11.zip
 S3_SINK_URL="https://hub-downloads.confluent.io/api/plugins/confluentinc/kafka-connect-s3/versions/12.1.11/$S3_SINK_ZIP"
+# analytics の Spark ジョブに足す jar（Maven Central。2026-09-17 に 6 本とも取れることを確認）。EMR Serverless 7.13.0 の Spark 3.5.6 に合わせてある。
+# terraform/analytics の emr_release_label を変えるときは spark-sql-kafka とその依存（kafka-clients / commons-pool2 は spark-sql-kafka の pom の版）も変える
+JARS_DIR=jars
+MAVEN=https://repo1.maven.org/maven2
+SPARK_VERSION=3.5.6
+JAR_URLS=(
+  "$MAVEN/org/apache/spark/spark-sql-kafka-0-10_2.12/$SPARK_VERSION/spark-sql-kafka-0-10_2.12-$SPARK_VERSION.jar"
+  "$MAVEN/org/apache/spark/spark-token-provider-kafka-0-10_2.12/$SPARK_VERSION/spark-token-provider-kafka-0-10_2.12-$SPARK_VERSION.jar"
+  "$MAVEN/org/apache/kafka/kafka-clients/3.4.1/kafka-clients-3.4.1.jar"
+  "$MAVEN/org/apache/commons/commons-pool2/2.11.1/commons-pool2-2.11.1.jar"
+  "$MAVEN/software/amazon/msk/aws-msk-iam-auth/2.3.2/aws-msk-iam-auth-2.3.2-all.jar"
+  "$MAVEN/software/amazon/s3tables/s3-tables-catalog-for-iceberg-runtime/0.1.8/s3-tables-catalog-for-iceberg-runtime-0.1.8.jar"
+)
+SPARK_SCRIPT=spark/snmp_to_iceberg.py
 
 . "$(dirname "$0")/deploy-env.sh"
 resolve_deploy_env_file  # DEPLOY_ENV_FILE の相対パスは、下の cd の前の場所から見る
@@ -167,37 +183,40 @@ case "$CREATE_S3_SINK" in
   *) die "CREATE_S3_SINK は 1（作る。既定）か 0（作らない）（いまは「$CREATE_S3_SINK」）。まだ何も作っていない" ;;
 esac
 if [ -n "${WITH_LAB:-}" ]; then
-  die "WITH_LAB は無くなった（lab はフェーズ 2 に入った）。lab だけ作るなら PHASE=2 と SKIP_GRAPH=1。まだ何も作っていない"
+  die "WITH_LAB は無くなった（lab はフェーズ 2 に入った）。lab だけ作るなら PHASE=2 と SKIP_STREAM=1 と SKIP_GRAPH=1。まだ何も作っていない"
 fi
-if [ -n "${SKIP_STREAM:-}" ]; then
-  echo "SKIP_STREAM は無くなったので無視する（stream は WITH_STREAM=1 のときだけ作る）"
+if [ -n "${WITH_STREAM:-}" ]; then
+  die "WITH_STREAM は無くなった（2026-09-17。stream はフェーズ 2 に入った）。PHASE=2 で作り、要らないときは SKIP_STREAM=1 を書く。まだ何も作っていない"
 fi
-flag_value SKIP_LAB; flag_value SKIP_GRAPH; flag_value WITH_STREAM; flag_value NO_PORTFORWARD
+flag_value SKIP_LAB; flag_value SKIP_STREAM; flag_value SKIP_ANALYTICS; flag_value SKIP_GRAPH; flag_value NO_PORTFORWARD
 # どこまで作るか。後のフェーズは前のフェーズの state を読むので、指定したフェーズまでを順に作る
 PHASE="${PHASE:-1}"
 case "$PHASE" in
   1)
-    [ -z "$WITH_STREAM" ] || die "WITH_STREAM=1 はフェーズ 2 の任意（lab が要る）。PHASE=2 と一緒に書く。まだ何も作っていない"
-    SKIP_LAB=1; SKIP_GRAPH=1 ;;
+    SKIP_LAB=1; SKIP_STREAM=1; SKIP_ANALYTICS=1; SKIP_GRAPH=1 ;;
   2)
-    if [ -n "$WITH_STREAM" ] && [ -n "$SKIP_LAB" ]; then
-      die "WITH_STREAM=1 は lab が要る（Telegraf が lab の EC2 で動き、terraform/stream は lab の state から SG とロールを読む）。SKIP_LAB を外す。まだ何も作っていない"
+    if [ -n "$SKIP_LAB" ] && [ -z "$SKIP_STREAM" ]; then
+      die "stream は lab が要る（Telegraf が lab の EC2 で動き、terraform/stream は lab の state から SG とロールを読む）。SKIP_LAB を外すか SKIP_STREAM=1 も書く。まだ何も作っていない"
+    fi
+    if [ -n "$SKIP_STREAM" ] && [ -z "$SKIP_ANALYTICS" ]; then
+      echo "SKIP_STREAM=1 なので analytics も作らない（読む Kafka が無い）"
+      SKIP_ANALYTICS=1
     fi
     if [ -n "$SKIP_LAB" ] && [ -n "$SKIP_GRAPH" ]; then
-      echo "SKIP_LAB と SKIP_GRAPH の両方があるので、フェーズ 1 と同じものだけ作る"
+      echo "SKIP_LAB と SKIP_STREAM と SKIP_GRAPH があるので、フェーズ 1 と同じものだけ作る"
     fi ;;
-  2B|2b|5A|5a|5B|5b) die "フェーズ $PHASE はまだ Terraform が無い（docs/phases.md）。いま作れるのは PHASE=1 か PHASE=2（stream は WITH_STREAM=1）" ;;
-  3|4) die "フェーズ $PHASE は無い（3 は欠番、4 はフェーズ 1 に取り込み済み。docs/phases.md）。PHASE=1 か PHASE=2 にする" ;;
+  3) die "フェーズ 3（Temporal の調査と承認）はまだ Terraform が無い（docs/phases.md）。いま作れるのは PHASE=1 か PHASE=2" ;;
+  2B|2b) die "フェーズ 2B は 2026-09-17 にフェーズ 2 に入った（Spark → S3 Tables は PHASE=2 の analytics）。PHASE=2 にする" ;;
+  5A|5a|5B|5b) die "フェーズ $PHASE は 2026-09-17 にフェーズ 3 にまとまった（docs/phases.md）。まだ Terraform が無い。いま作れるのは PHASE=1 か PHASE=2" ;;
+  4) die "フェーズ 4 は無い（フェーズ 1 に取り込み済み。docs/phases.md）。PHASE=1 か PHASE=2 にする" ;;
   *) die "PHASE は 1 か 2（いまは「$PHASE」）" ;;
 esac
-SKIP_STREAM=1
-if [ -n "$WITH_STREAM" ]; then SKIP_STREAM=""; fi
 command -v aws >/dev/null || die "aws CLI が無い（README「WSL2 の準備」）"
 command -v terraform >/dev/null || die "terraform が無い（README「WSL2 の準備」。1.11 以上）"
 if command -v python3 >/dev/null; then PY=(python3)
 elif command -v uv >/dev/null; then PY=(uv run --python 3.13 python)
 else die "python3 も uv も無い（README「WSL2 の準備」）"; fi
-if [ -z "$SKIP_LAB" ]; then command -v curl >/dev/null || die "curl が無い（lab の rpm を取るのに使う。sudo apt install curl）"; fi
+if [ -z "$SKIP_LAB" ]; then command -v curl >/dev/null || die "curl が無い（lab の rpm と analytics の jar を取るのに使う。sudo apt install curl）"; fi
 command -v docker >/dev/null || die "docker が無い（イメージのビルドに使う。README「WSL2 の準備」）"
 docker buildx version >/dev/null 2>&1 || die "docker buildx が無い（Ubuntu の docker.io には入っていない。README「WSL2 の準備」）"
 # 最後のポートフォワーディング（手順 10）で要る。40〜60 分かけた後で落ちないよう、ここで見る
@@ -226,6 +245,7 @@ CACERT="${OPENSEARCH_CACERT_FILE:-${AWS_CA_BUNDLE:-}}"
 ROOTS="ecr main"
 if [ -z "$SKIP_LAB" ]; then ROOTS="$ROOTS lab"; fi
 if [ -z "$SKIP_STREAM" ]; then ROOTS="$ROOTS stream"; fi
+if [ -z "$SKIP_ANALYTICS" ]; then ROOTS="$ROOTS analytics"; fi
 if [ -z "$SKIP_GRAPH" ]; then ROOTS="$ROOTS graph"; fi
 echo "ACCOUNT_ID=$ACCOUNT_ID"
 echo "CALLER_ARN=$CALLER_ARN"
@@ -233,7 +253,8 @@ echo "IMAGE_TAG=$IMAGE_TAG"
 echo "PHASE=$PHASE"
 echo "作るルート: $ROOTS"
 # 待機時の 1 時間あたりの目安（セント。東京リージョンの税抜。単価は 2026-09-14〜15 に Price List API で確認。内訳は README「1 時間起動したときの試算」）。
-# フェーズ 1 = 52（Interface エンドポイント・OpenSearch Serverless・Web の EC2）、lab = 9、graph = 14、stream = 29（S3 sink 無しなら 15）。
+# フェーズ 1 = 52（Interface エンドポイント・OpenSearch Serverless・Web の EC2）、lab = 9、graph = 14、stream = 29（S3 sink 無しなら 15）、
+# analytics = 17（ストリーミングのジョブが動いている間の EMR Serverless の 2 vCPU + s3tables のエンドポイント 2 本。単価は 2026-09-17 に確認）。
 # README の試算を変えたらここも変える
 COST_CENTS=52
 if [ -z "$SKIP_LAB" ]; then COST_CENTS=$((COST_CENTS + 9)); fi
@@ -241,6 +262,7 @@ if [ -z "$SKIP_GRAPH" ]; then COST_CENTS=$((COST_CENTS + 14)); fi
 if [ -z "$SKIP_STREAM" ]; then
   if [ "$CREATE_S3_SINK" = 1 ]; then COST_CENTS=$((COST_CENTS + 29)); else COST_CENTS=$((COST_CENTS + 15)); fi
 fi
+if [ -z "$SKIP_ANALYTICS" ]; then COST_CENTS=$((COST_CENTS + 17)); fi
 COST_NOTE=$(printf '待機だけで約 $%d.%02d/h（約 %d 円/h。チャットの分は別）の時間課金。使い終わったら当日中に ops/down.sh を打つ' \
   $((COST_CENTS / 100)) $((COST_CENTS % 100)) $(((COST_CENTS * 150 + 50) / 100)))
 printf '\033[1;33m%s\033[0m\n' "$COST_NOTE"
@@ -360,7 +382,7 @@ echo "Web が動いている"
 # ---- 5. lab と stream の材料 --------------------------------------------------------
 # lab の EC2 は起動のたびに s3://<バケット>/lab/ を読む。apply より前に置けば、Telegraf まで最初の起動で入る（再起動が要らない）
 if [ -z "$SKIP_LAB" ]; then
-  log "5-1. lab の材料（containerlab の rpm とトポロジ。WITH_STREAM=1 なら Telegraf の rpm も）を s3://$KB_BUCKET/lab/ に置く（README の lab-2 と s-1）"
+  log "5-1. lab の材料（containerlab の rpm とトポロジ。stream を作るなら Telegraf の rpm も）を s3://$KB_BUCKET/lab/ に置く（README の lab-2 と s-1）"
   fetch "https://github.com/srl-labs/containerlab/releases/download/v$CONTAINERLAB_VERSION/$CONTAINERLAB_RPM" "$CONTAINERLAB_RPM" \
     || die "containerlab の rpm が取れない（README の lab-2。社内 PC なら「社内 PC で使うとき」の証明書）"
   aws s3 sync lab/ "s3://$KB_BUCKET/lab/" --exclude "wvs2.clab.yml" --exclude "snmpd/certs/*"
@@ -383,6 +405,16 @@ if [ -z "$SKIP_STREAM" ]; then
     fi
     aws s3 cp "$S3_SINK_ZIP" "s3://$KB_BUCKET/stream/$S3_SINK_ZIP"
   fi
+fi
+if [ -z "$SKIP_ANALYTICS" ]; then
+  log "5-3. Spark のスクリプトと jar（Kafka / MSK IAM / S3 Tables カタログ）を s3://$KB_BUCKET/analytics/ に置く（README の a-1）"
+  mkdir -p "$JARS_DIR"
+  for url in "${JAR_URLS[@]}"; do
+    fetch "$url" "$JARS_DIR/${url##*/}" || die "jar が取れない: $url （README の a-1。社内 PC なら「社内 PC で使うとき」の証明書）"
+  done
+  "${PY[@]}" -c 'import ast, sys; ast.parse(open(sys.argv[1]).read(), sys.argv[1])' "$SPARK_SCRIPT" || die "$SPARK_SCRIPT が Python として読めない"
+  aws s3 cp "$SPARK_SCRIPT" "s3://$KB_BUCKET/analytics/"
+  aws s3 sync "$JARS_DIR/" "s3://$KB_BUCKET/analytics/jars/" --exclude "*" --include "*.jar"
 fi
 
 # ---- 6. lab ---------------------------------------------------------------------
@@ -410,6 +442,28 @@ if [ -z "$SKIP_STREAM" ]; then
       aws ec2 reboot-instances --region "$REGION" --instance-ids "$LAB_INSTANCE_ID"
       echo "Telegraf が無かったので lab の EC2 を再起動した（起動時に rpm を入れる。数分）"
     fi
+  fi
+fi
+
+# ---- 7-3. analytics ------------------------------------------------------------------
+if [ -z "$SKIP_ANALYTICS" ]; then
+  log "7-3. analytics（terraform/analytics。S3 Tables と EMR Serverless。数分）"
+  tf_apply analytics
+  APP_ID=$(tf analytics output -raw application_id); echo "APP_ID=$APP_ID"
+  log "7-4. Spark のストリーミングジョブ（Kafka → S3 Tables）を起こす（README の a-3。動いていれば何もしない）"
+  RUNNING=$(aws emr-serverless list-job-runs --region "$REGION" --application-id "$APP_ID" \
+    --states SUBMITTED PENDING SCHEDULED RUNNING --query 'jobRuns[].id' --output text)
+  if [ -n "$RUNNING" ] && [ "$RUNNING" != None ]; then
+    echo "ジョブが動いている（$RUNNING）"
+  else
+    JOB_RUN_ID=$(aws emr-serverless start-job-run --region "$REGION" --application-id "$APP_ID" \
+      --execution-role-arn "$(tf analytics output -raw runtime_role_arn)" \
+      --name snmp-to-iceberg --mode STREAMING \
+      --job-driver "$(tf analytics output -raw job_driver_json)" \
+      --configuration-overrides "$(tf analytics output -raw configuration_overrides_json)" \
+      --tags "Project=$PREFIX,owner=$OWNER" \
+      --query jobRunId --output text)
+    echo "JOB_RUN_ID=$JOB_RUN_ID （起動に 2〜5 分。様子は: $(tf analytics output -raw list_job_runs_command)）"
   fi
 fi
 

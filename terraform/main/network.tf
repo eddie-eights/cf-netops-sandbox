@@ -182,8 +182,10 @@ resource "aws_vpc_endpoint" "bedrock_agent_runtime" {
   tags = { Name = "${var.name_prefix}-bedrock-agent-runtime" }
 }
 
-# VPC の中から S3 に出る経路はこれだけ。許すのは 3 つ: この root module のバケット（EC2 が web/ を取る、lab が lab/ を取る、
-# MSK Connect が stream/ に書く）、ECR のレイヤー置き場（Runtime のイメージ取得）、AL2023 の dnf リポジトリ（EC2 に python3.13 を入れる）。
+# VPC の中から S3 に出る経路はこれだけ。許すのは 4 つ: この root module のバケット（EC2 が web/ を取る、lab が lab/ を取る、
+# MSK Connect が stream/ に書き、Spark が analytics/ を読み書きする）、ECR のレイヤー置き場（Runtime のイメージ取得）、
+# AL2023 の dnf リポジトリ（EC2 に python3.13 を入れる）、S3 Tables のデータ置き場（terraform/analytics の Spark が parquet を書く。
+# S3 Tables のテーブルバケットのデータは `<uuid>--table-s3` という名前の S3 バケットに置かれ、S3 の API で読み書きする。2026-09-17 確認）。
 # バケットへの操作の絞り込みは各ロールの IAM ポリシーで行う（ここで絞ると 2026-09-15 のように ListBucket が落ちて web/ の取得が失敗する）。
 # VPC ごとこの root module のものなので、他のワークロードには影響しない
 resource "aws_vpc_endpoint" "s3" {
@@ -217,6 +219,13 @@ resource "aws_vpc_endpoint" "s3" {
         Principal = "*"
         Action    = "s3:GetObject"
         Resource  = "arn:${local.partition}:s3:::al2023-repos-${var.region}-de612dc2/*"
+      },
+      {
+        Sid       = "AllowS3TablesData"
+        Effect    = "Allow"
+        Principal = "*"
+        Action    = "s3:*"
+        Resource  = ["arn:${local.partition}:s3:::*--table-s3", "arn:${local.partition}:s3:::*--table-s3/*"]
       },
     ]
   })

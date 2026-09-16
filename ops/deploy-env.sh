@@ -8,13 +8,13 @@
 #   - $HOME や $(…) は展開しない。値の先頭の ~/ だけ $HOME/ に読み替える
 #   - 値が空の行（`IMAGE_TAG=`）は書いていないのと同じ（既定値のまま。空の AWS_PROFILE などを環境に入れない）
 #   - 同じ名前の環境変数が空でなければ、ファイルの値は使わない（`PHASE=2 ops/up.sh` はファイルの PHASE より優先）。
-#     ファイルの 1 を環境変数で打ち消すときは空ではなく 0 を渡す（`WITH_STREAM=0 ops/up.sh`）
+#     ファイルの 1 を環境変数で打ち消すときは空ではなく 0 を渡す（`SKIP_GRAPH=0 ops/up.sh`）
 #   - 知らないキーと、同じキーの 2 回目は止まる（打ち間違いで違うフェーズを作らないため）
 # ファイルの場所は既定でリポジトリ直下の deploy.env。DEPLOY_ENV_FILE=<パス> で変えられる（相対パスは打った場所から）。
 
-# 読めるキー。WITH_LAB / SKIP_STREAM は 2026-09-16 に無くなったキーで、ops/up.sh が案内を出す
-DEPLOY_ENV_KEYS="PHASE WITH_STREAM SKIP_LAB SKIP_GRAPH CREATE_S3_SINK IMAGE_TAG ADMIN_ARN VPC_CIDR CLIENT_CIDR
-OPENSEARCH_CACERT_FILE LOCAL_PORT NO_PORTFORWARD KEEP_ECR AWS_PROFILE AWS_CA_BUNDLE WITH_LAB SKIP_STREAM"
+# 読めるキー。WITH_LAB（2026-09-16）と WITH_STREAM（2026-09-17）は無くなったキーで、ops/up.sh が案内を出して止まる
+DEPLOY_ENV_KEYS="PHASE SKIP_LAB SKIP_STREAM SKIP_ANALYTICS SKIP_GRAPH CREATE_S3_SINK IMAGE_TAG ADMIN_ARN VPC_CIDR CLIENT_CIDR
+OPENSEARCH_CACERT_FILE LOCAL_PORT NO_PORTFORWARD KEEP_ECR AWS_PROFILE AWS_CA_BUNDLE WITH_LAB WITH_STREAM"
 
 # DEPLOY_ENV_FILE の相対パスを、cd する前の場所から見た絶対パスにする。呼ぶ側が cd の前に打つ
 resolve_deploy_env_file() {

@@ -40,7 +40,7 @@
     <li><a href="#points">検索とガードレールの決めごと</a></li>
     <li><a href="#cost">費用</a></li>
     <li><a href="#deploy">デプロイから会話まで</a></li>
-    <li><a href="#phase2">フェーズ 2: lab の SNMP を異常一覧に、トポロジを Neptune に</a></li>
+    <li><a href="#phase2">フェーズ 2: containerlab → Telegraf → Kafka → Spark → S3 Tables と、トポロジの Neptune</a></li>
     <li><a href="#limits">確認できていないこと</a></li>
   </ol>
 </nav>
@@ -185,7 +185,7 @@
 <ol>
   <li><code>terraform/ecr</code> を apply して ECR リポジトリを作る</li>
   <li>arm64 のエージェントイメージ（トポロジのツールと静的データ入り）をビルドして push する</li>
-  <li><code>terraform/main</code> を apply する。VPC / サブネット / ルートテーブルを作り、push したタグ <code>agent_image_tag</code> を渡す（OpenSearch の管理者は apply した人の認証情報から自動で取る）。VPC ID・サブネット・SG・バケット名は出力に出し、<code>terraform/lab</code> / <code>terraform/stream</code> / <code>terraform/graph</code> はローカルの state（<code>terraform_remote_state</code>）から読む</li>
+  <li><code>terraform/main</code> を apply する。VPC / サブネット / ルートテーブルを作り、push したタグ <code>agent_image_tag</code> を渡す（OpenSearch の管理者は apply した人の認証情報から自動で取る）。VPC ID・サブネット・SG・バケット名は出力に出し、<code>terraform/lab</code> / <code>terraform/stream</code> / <code>terraform/analytics</code> / <code>terraform/graph</code> はローカルの state（<code>terraform_remote_state</code>）から読む</li>
   <li>Gradio の画面と wheel（arm64 / cp313）を S3 の <code>web/</code> に置いて EC2 を再起動し、<code>kb-docs/</code> の md を S3 に置いて取り込みジョブを流す</li>
   <li>Runtime のロググループに保持期間とタグを付け、利用者に <code>ssm:StartSession</code> の権限を渡す</li>
   <li>PC でポートフォワーディングを始め、ブラウザで <code>http://localhost:8080/</code> を開く</li>
@@ -201,19 +201,20 @@
 各手順のコマンドは、<a href="https://github.com/eddie-eights/cf-netops-sandbox" target="_blank" rel="noopener">リポジトリの README</a> にあります。
 </p>
 
-<h2 id="phase2">フェーズ 2: lab の SNMP を異常一覧に、トポロジを Neptune に</h2>
+<h2 id="phase2">フェーズ 2: containerlab → Telegraf → Kafka → Spark → S3 Tables と、トポロジの Neptune</h2>
 
 <p>
 フェーズ 1 では lab と Web はつながっておらず、トポロジもコンテナに焼いた静的データでした。
-フェーズ 2 は 2 つの別ルート（<code>terraform/stream</code> / <code>terraform/graph</code>）を足して、これをつなぎます。
-どちらも時間課金なので、<strong>使う日に作って当日中に消す</strong>前提です。
+フェーズ 2 は 4 つのルート（<code>terraform/lab</code> → <code>terraform/stream</code> → <code>terraform/analytics</code> と <code>terraform/graph</code>）を足して、lab の SNMP を Kafka に流し、Spark で S3 Tables（Iceberg）に溜め、トポロジを Neptune に置きます（2026-09-17 のユーザー決定でフェーズ 2 の範囲をここまでにし、旧 2B を取り込みました。フェーズ 3 は Temporal でエージェントが原因を調査し人が承認するまで。<code>docs/phases.md</code>）。
+どれも時間課金なので、<strong>使う日に作って当日中に消す</strong>前提です。
 </p>
 
 <pre><code>lab EC2 の Telegraf ── SNMP ポーリング（10 秒）+ SNMP trap（linkUp / linkDown）
       │ Kafka（IAM 認証）
       ▼
-MSK（2 ブローカー）──┬─▶ detector Lambda ──▶ DynamoDB の異常テーブル ──▶ Web「異常一覧」/ エージェントの list_anomalies
-                     └─▶ MSK Connect（S3 sink）──▶ S3 の stream/（生データ）
+MSK（2 ブローカー）──┬─▶ detector Lambda ──▶ DynamoDB の異常テーブル ──▶ Web「異常一覧」/ エージェントの list_anomalies（「いま」）
+                     ├─▶ MSK Connect（S3 sink）──▶ S3 の stream/（任意。CREATE_S3_SINK=0 で外す）
+                     └─▶ Spark（EMR Serverless、60 秒トリガー）──▶ S3 Tables（Iceberg）の netops.snmp_metrics（履歴の正本）
 
 Neptune ── Gremlin ──▶ エージェントのトポロジツール / Web「トポロジ」タブ（図・表・リンクの追加削除）</code></pre>
 
@@ -222,13 +223,14 @@ Neptune ── Gremlin ──▶ エージェントのトポロジツール / We
   <li><strong>trap とポーリングの両方を持つのは、速さと確実さのため。</strong>trap は 5 秒以内に届きますが取りこぼすことがあり、ポーリングは 10 秒周期ですが必ず追いつきます。detector は同じ機器・同じインタフェースを 1 件にまとめます。</li>
   <li><strong>Web とエージェントは、同じ 3 つのモジュールでトポロジと異常を読みます。</strong>Neptune と DynamoDB の場所は SSM のパラメータから引き、無ければ静的データに戻る（60 秒キャッシュ）ので、フェーズ 2 を destroy してもフェーズ 1 のまま動きます。</li>
   <li><strong>Neptune の中身は Web から手で編集します。</strong>「静的データを投入」で 10 台と 10 本を入れ、以後リンクの追加・削除ができます。lab の実配線とは同期しません。</li>
-  <li><strong>費用はフェーズ 2（lab + graph）で 1 時間 ≈ $0.23（約 35 円）、stream（WITH_STREAM=1）でさらに ≈ $0.29（約 44 円）。</strong>lab の t4g.large が $0.09、Neptune db.t4g.medium が $0.14、MSK kafka.t3.small × 2 が $0.12、MSK Connect 1 MCU が $0.14、lambda / sts のエンドポイントが $0.03。1 か月置くとフェーズ 2 が ≈ $169（約 25,300 円）、stream が ≈ $213（約 32,000 円）。東京の税抜単価で、2026-09-15 に AWS Price List API で確認。</li>
+  <li><strong>Spark は EMR Serverless（ARM64、emr-7.13.0 = Spark 3.5.6）で、ジョブが動いている間だけ課金。</strong>Telegraf の JSON をそのまま行（ts / topic / measurement / agent_host / host / tags_json / fields_json / ingested_at）にして追記します。閉域なので S3 Tables の API は <code>s3tables</code> の interface エンドポイント（2 AZ）経由。Kafka / MSK IAM / S3 Tables カタログの jar 6 本は <code>ops/up.sh</code> が Maven Central から取って S3 に置きます。</li>
+  <li><strong>費用はフェーズ 2 の 4 ルートで 1 時間 ≈ $0.69（約 104 円）。</strong>lab の t4g.large が $0.09、MSK kafka.t3.small × 2 が $0.12、MSK Connect 1 MCU が $0.14、lambda / sts のエンドポイントが $0.03、EMR Serverless の 2 vCPU が ≈ $0.15、s3tables のエンドポイント 2 AZ が $0.03、Neptune db.t4g.medium が $0.14。1 か月置くと ≈ $504（約 75,600 円）。東京の税抜単価で、2026-09-15（analytics は 2026-09-17）に AWS Price List API と料金ページで確認。</li>
 </ul>
 
 <h2 id="limits">確認できていないこと</h2>
 
 <p>
-Terraform の 5 ルートは <code>terraform validate</code> と <code>terraform fmt</code> を通し、エージェントと detector と Neptune の読み書きは boto3 を差し替えた模擬テスト（41 / 23 / 18 項目）を通しました。
+Terraform の 6 ルートは <code>terraform validate</code> と <code>terraform fmt</code> を通し、エージェントと detector と Neptune の読み書きは boto3 を差し替えた模擬テスト（41 / 23 / 18 項目）、analytics は Terraform と Spark スクリプトの整合の静的テスト（81 項目）を通しました。
 Gradio の画面はフェーズ 1 の版は手元で起動し、フェーズ 2 の 3 タブ版は構文検査までです。AWS 上にはまだデプロイしていません。次の点は実環境で確かめる必要があります。
 </p>
 
@@ -241,6 +243,7 @@ Gradio の画面はフェーズ 1 の版は手元で起動し、フェーズ 2 �
   <li>VPC モードの Runtime が、イメージの取得に VPC 内の ECR / S3 エンドポイントを使うか</li>
   <li>（フェーズ 2）Telegraf 1.40.0 の <code>outputs.kafka</code> が、インスタンスロールの資格情報で MSK の IAM 認証を通るか。MSK Connect の <code>KafkaConnectVersion</code> に <code>2.7.1</code> が入るか。Confluent の S3 sink 12.1.11 をプラグインとして登録できるか</li>
   <li>（フェーズ 2）VPC モードの Runtime から Neptune のクラスター名が引けるか（プライベート DNS）</li>
+  <li>（フェーズ 2）EMR Serverless の emr-7.13.0 に S3 Tables カタログの jar が同梱されているか（同梱なら足した jar と衝突する可能性）。Kafka の jar 6 本の組み合わせで Structured Streaming の Kafka ソースが動くか。閉域から S3 Tables に届くか（interface エンドポイント + S3 ゲートウェイの <code>*--table-s3</code>）。Lake Formation の設定が要るか。組織の SCP / IAM が EMR Serverless / S3 Tables を止めていないか</li>
 </ul>
 
 </div><!-- /.mb-main -->

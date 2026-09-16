@@ -1,0 +1,7 @@
+# terraform/analytics の変数の見本。ops/up.sh は -var owner=… で渡すので、手で apply するときだけ terraform.tfvars にコピーして書く
+owner = "fukuda"
+
+# 変えないのが既定。変えるときは README「stream / analytics / graph」を読む
+# emr_release_label = "emr-7.13.0"
+# namespace         = "netops"
+# table_name        = "snmp_metrics"

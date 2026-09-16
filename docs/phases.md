@@ -1,39 +1,40 @@
-# フェーズごとの概要（2026-09-16 時点）
+# フェーズごとの概要（2026-09-17 時点）
 
 いま決まっている範囲だけを書く。**決まっていないことは「未定」と書いてある。**
 手順とコマンドの正本は [`../README.md`](../README.md)、構成図は [`20260914-fukuda-nwc-poc-architecture.html`](20260914-fukuda-nwc-poc-architecture.html)。
 ここはその手前の「どこまで作ってあって、次に何が残っているか」だけを見るための頁。
 
-番号は **1 / 2 / 2B / 5A / 5B** を使う。3 は欠番、4（設定履歴・手順書のベクトル + 全文検索）は**フェーズ 1 に取り込んだ**ので単独では存在しない。
-このリポジトリは最初からナレッジベース（OpenSearch Serverless）を含む形で作ってあるため。
+番号は **1 / 2 / 3** の 3 つ（2026-09-17 ユーザー決定）。
 
-**2026-09-16 に構成の見直しが正本になった。**データ経路の骨格は
-**Telegraf → Kafka（MSK）→ Spark → S3 Tables（Iceberg）+ OpenSearch**。
-これに合わせて **2B（保存層と分析）を足した**。
+| フェーズ | 一言で |
+|---|---|
+| 1 | LLM + RAG で対話する |
+| 2 | **データパイプライン**: containerlab → Telegraf → Kafka → Spark → S3 Tables。トポロジは Neptune |
+| 3 | **Temporal でエージェントが原因を調査し、人が修復を承認するまで** |
 
-**同日、フェーズ 5 を 5A と 5B に分けた。**「調べる」のと「直す」のは別の段だから。
+古い番号との対応（2026-09-17 に付け直した。古い番号を `deploy.env` の `PHASE` に書くと `ops/up.sh` が案内を出して止まる）:
 
-- **5A = 調べる。**検知 → 原因調査 → 修復案までを **AI エージェントが Temporal のワークフローで回す**（**ECS on Fargate 上**）。**pending ではない。**
-- **5B = 直す。人が承認してから打つ。**pending なのは**承認を外すこと（Zero-Touch）**であって、5A ではない。
+| 古い番号 | いまの居場所 |
+|---|---|
+| 2（lab + graph）と 2 の任意（`WITH_STREAM=1`） | **2** に入った。stream は任意ではなく、フェーズ 2 の本体（外すなら `SKIP_STREAM=1`） |
+| 2B（Kafka → Spark → Iceberg） | **2** の `terraform/analytics`。データパイプラインの最後の段なのでフェーズ 2 に入る |
+| 3（欠番）/ 4（ベクトル + 全文検索） | 4 はフェーズ 1 に取り込み済み（ナレッジベースの検索）。番号は使わない |
+| 5A（エージェントの調査ワークフロー）+ 5B（人が承認して直す） | **3** にまとめた |
 
-**まだ作っていないのは 2B / 5A / 5B の 3 つで、どれも下に「決まっていないこと」を書いてある。**
+**まだ作っていないのはフェーズ 3 だけ。**フェーズ 2 は Terraform とスクリプトがあり、AWS 上の apply は未確認（下の「決まっていないこと」）。
 
 ## 全体
 
 | フェーズ | 到達点 | 作る Terraform ルート | 立てている間の費用（東京・税抜・$1 = 150 円） | 状態 |
 |---|---|---|---|---|
 | 1（`PHASE=1`、既定） | LLM + RAG で対話する。閉域の VPC でチャットし、手順書を引いて答える | `terraform/ecr` → `terraform/main` | 置いておくだけ 約 $0.52/h（約 79 円） | **動く**（このリポジトリの本体） |
-| 2（`PHASE=2`） | lab とトポロジの操作。FRR 6 台の疑似ネットワークを EC2 の中に作り、トポロジを Neptune で持って Web から編集する | `terraform/lab` / `terraform/graph` | 約 $0.23/h（約 35 円） | 作ってある（使う日だけ作る。AWS 上の apply は未確認） |
-| 2 の任意（`WITH_STREAM=1`） | SNMP の異常が一覧に出る | `terraform/stream` | 約 $0.29/h（約 44 円） | 作ってある（使う日だけ作る。AWS 上の apply は未確認） |
-| 2B | Kafka から Spark で読んで Iceberg のテーブルにし、OpenSearch から引く | 未着手（`terraform/stream` の後ろに足す） | **未試算**（下の「決まっていないこと」次第） | **決まったのは道具だけ** |
-| 3 | 欠番（番号だけ残す） | 無し | — | — |
-| 4 | フェーズ 1 に取り込み済み（ナレッジベースの検索） | 無し | — | 済 |
-| 5A | 検知 → 原因調査 → 修復案を、エージェントが Temporal のワークフローで回す（ECS on Fargate 上） | 未着手（`terraform/` に新しいルートを足す） | 約 $0.05/h（サーバーとワーカーで 1 vCPU / 2 GB を ARM で動かす例。クラスタ料金も足すエンドポイントも無い） | **道具は決まった**（Temporal / ECS on Fargate）。pending ではない |
-| 5B | 修復案を**人が承認**してから打ち、直ったか確かめる | 未着手 | 未試算 | 承認は人が行う。**自動化（Zero-Touch）が pending**（2026-09-16 決定） |
+| 2（`PHASE=2`） | データパイプライン。EC2 の中の疑似ネットワーク（containerlab）の SNMP を Telegraf が Kafka に流し、Spark が S3 Tables（Iceberg）に追記し続ける。異常は DynamoDB の一覧に出る。トポロジは Neptune で持って Web から編集する | フェーズ 1 に `terraform/lab` → `terraform/stream` → `terraform/analytics`、並行して `terraform/graph` | さらに約 $0.69/h（約 104 円。lab 0.09 + stream 0.29 + analytics 0.17 + graph 0.14） | 作ってある（使う日だけ作る。**AWS 上の apply は未確認**） |
+| 3（`PHASE=3`） | 異常の検知 → 原因調査 → 修復案を、エージェントが Temporal のワークフローで回し、**人が承認**してから直す | 未着手（`terraform/` に新しいルートを足す） | 約 $0.05/h（Temporal のサーバーとワーカーを ECS on Fargate の 1 タスクで動かす例） | **道具は決まった**（Temporal / ECS on Fargate）。`PHASE=3` はまだ止まる |
 
-費用は 1 時間立てたときの目安。内訳と前提は README の「1 時間起動したときの試算」にある（単価はフェーズ 1 が 2026-09-14、lab・graph・stream が 2026-09-15 に AWS Price List API で確認した値）。どこまで作るかは `deploy.env` の `PHASE` で選ぶ（README の「毎日の起動と片付けをスクリプトで打つ」）。
+費用は 1 時間立てたときの目安。内訳と前提は README の「1 時間起動したときの試算」にある（単価はフェーズ 1 が 2026-09-14、lab・graph・stream が 2026-09-15、analytics が 2026-09-17 に AWS Price List API と料金ページで確認した値）。
+どこまで作るかは `deploy.env` の `PHASE` で選ぶ（README の「毎日の起動と片付けをスクリプトで打つ」）。フェーズ 2 の一部だけ要らないときは `SKIP_LAB` / `SKIP_STREAM` / `SKIP_ANALYTICS` / `SKIP_GRAPH`。
 
-**時間課金のものは使う日に作って当日中に消す。**フェーズ 1 を 1 か月置くと約 $383（約 57,400 円）、フェーズ 2（lab + graph）は約 $169（約 25,300 円）、stream は約 $213（約 32,000 円）で、
+**時間課金のものは使う日に作って当日中に消す。**フェーズ 1 を 1 か月置くと約 $383（約 57,400 円）、フェーズ 2 の 4 ルートは約 $504（約 75,600 円）で、
 置いておくだけの費用の 6 割強は OpenSearch Serverless の最小 OCU（月約 $240）。**EC2 を止めてもほとんど減らない。**
 
 ---
@@ -72,124 +73,96 @@
 - チャット Web のログを CloudWatch Logs に送ること（CloudWatch エージェントを入れていない）。
 - **MCP でツールを出すこと。**いまはエージェントが Runtime の中の Python 関数を直接呼んでいる。
   2026-09-16 の「道具を揃える」決定に MCP が入っているが、**どこに置くか**（AgentCore Gateway か、lab の EC2 に立てるか）は未定。
-  閉域なので、置き場によっては VPC エンドポイントが要る（2B と同じ話）。
+  閉域なので、置き場によっては VPC エンドポイントが要る。
 
 ---
 
-## フェーズ 2 — lab とトポロジの操作（lab + graph）
+## フェーズ 2 — データパイプライン（lab → stream → analytics）とトポロジ（graph）
 
-**2026-09-16 のユーザー決定で、フェーズ 1 = LLM + RAG の対話、フェーズ 2 = lab とトポロジの操作、と分け直した。**`deploy.env` に `PHASE=2` と書くと作る。
-**使う日に作って当日中に消す。**`terraform/main` はそのまま使う。lab だけ要らなければ `SKIP_LAB=1`、Neptune が要らなければ `SKIP_GRAPH=1`。
+**2026-09-17 のユーザー決定: フェーズ 2 = containerlab → Telegraf → Kafka → Spark → S3 Tables のデータパイプライン構築。**
+それまで「2 の任意（`WITH_STREAM=1`）」だった stream と、「2B」だった analytics がフェーズ 2 の本体になった。トポロジの Neptune（graph）もこのフェーズのまま。
+`deploy.env` に `PHASE=2` と書くと 4 ルートを作る。**使う日に作って当日中に消す。**`terraform/main` はそのまま使う。
+
+```
+lab（EC2 の containerlab: FRR × 6 + snmpd × 4 + ホスト × 4）
+  └─ Telegraf（SNMP 10 秒ポーリング + trap）─▶ stream（MSK、トピック metrics / traps）
+                                                 ├─▶ detector Lambda ─▶ DynamoDB の異常一覧（Web とエージェントが読む「いま」）
+                                                 ├─▶ MSK Connect（S3 sink）─▶ S3 の stream/（任意。CREATE_S3_SINK=0 で外す）
+                                                 └─▶ analytics（Spark on EMR Serverless）─▶ S3 Tables（Iceberg）の snmp_metrics（履歴の正本）
+graph（Neptune のトポロジ。Web の「トポロジ」タブから編集）
+```
+
+作る順は `lab` → `stream` → `analytics`（stream の Kafka を読む）。`graph` は独立なので `ops/up.sh` は main の直後に裏で始める。
+消す順は `analytics`（Spark のジョブを止めてから）→ `graph` → `stream` → `lab`（`ops/down.sh` がこの順で消す）。
+
+一部だけ要らないとき: `SKIP_LAB=1`（stream は lab の SNMP が要るので `SKIP_STREAM=1` も書く）、`SKIP_STREAM=1`（analytics も作らない。読む Kafka が無い）、`SKIP_ANALYTICS=1`、`SKIP_GRAPH=1`。
 
 ### 何ができる
 
-- EC2 1 台の中に **FRR × 6 + snmpd × 4 + ホスト × 4** の疑似ネットワークを作る（lab）。
-- SSM で入って `sudo lab check` / `sudo lab failover` / `sudo lab heal-main` を打つと、主回線の切り替えを再現できる。
+- EC2 1 台の中に **FRR × 6 + snmpd × 4 + ホスト × 4** の疑似ネットワークを作る（lab）。SSM で入って `sudo lab check` / `sudo lab failover` / `sudo lab heal-main` を打つと、主回線の切り替えを再現できる。
+- lab の SNMP（10 秒ポーリング + linkUp/linkDown の trap）を Telegraf が MSK に流す（stream）。detector Lambda が `link_down` を DynamoDB に書き、Web の「異常一覧」タブとエージェントの `list_anomalies` がその表を読む。チャットで「今の異常は？」と聞ける。
+- 同じトピックを **Spark（EMR Serverless）のストリーミングジョブ**が 60 秒ごとに **S3 Tables の Iceberg テーブル `snmp_metrics`** に追記し続ける（analytics）。Telegraf の JSON をそのまま行にする（`ts` / `topic` / `measurement` / `agent_host` / `host` / `tags_json` / `fields_json` / `ingested_at`）。
 - トポロジを **Neptune** に載せ（graph）、Web の「トポロジ」タブからリンクの追加・削除ができる。エージェントの答えにも反映される。
-- `WITH_STREAM=1` を足すと、この lab が SNMP の出どころになる（下）。
 
 ### 決まっていること
-
-- 機器のアドレスは **RFC 5737 の文書用アドレス**（`203.0.113.0/24`）。実機の値は写さない。
-- イメージは `terraform/ecr`、設定と rpm は S3 の `lab/` に置く。
-- Neptune は Gremlin を boto3 の `neptunedata` から IAM 認証で呼ぶ。`ops/up.sh` は graph の apply を `terraform/main` の直後に裏で始め、最後に静的トポロジを投入して Web を再起動する。
-- **費用は約 $0.23/h（約 35 円）**: lab の t4g.large 約 $0.0864/h + gp3 16 GB 月 $1.5、Neptune db.t4g.medium 約 $0.1424/h。1 か月置くと約 $169（約 25,300 円）。lab は止めれば EBS の月 $1.5 だけ（lab だけ 1 か月起動したままだと約 $65、約 9,700 円）。
-- 組織の SCP / IAM で t4g.large や Neptune の作成が止められていることがある（README の「前提」→「AWS 側」）。
-
-### 決まっていないこと
-
-- lab の配線と Neptune のトポロジの同期（Neptune は手で編集するもので、lab を変えても追随しない）。
-
-### `WITH_STREAM=1`（フェーズ 2 の任意）— 異常一覧
-
-`deploy.env` に `PHASE=2` と `WITH_STREAM=1` を書くと `terraform/stream` も作る。lab が要る（`SKIP_LAB=1` とは一緒に使えない）。**使う日に作って当日中に消す。**
-
-#### 何ができる
-
-- lab の SNMP（10 秒ポーリング + linkUp/linkDown の trap）を Telegraf が MSK に流し、detector Lambda が `link_down` を DynamoDB に書く。
-- Web の「異常一覧」タブと、エージェントの `list_anomalies` がその表を読む。チャットで「今の異常は？」と聞ける。
-- 同じトピックを **MSK Connect（S3 sink）** が 1 分ごとに S3 の `stream/` に落とす（生データの保管）。
-
-#### 決まっていること
 
 | 項目 | 決めたこと |
 |---|---|
-| 順番 | s-1（rpm と zip を置く。lab の EC2 を作る前）→ `terraform/lab` → `terraform/stream` → Telegraf が無ければ lab を再起動 → Web の再起動 |
-| 消す順番 | `graph` → `stream`（MSK Connect → MSK の順で 15 分ほどかかる）→ `lab` |
-| 認証 | MSK は IAM 認証（9098） |
-| 異常の置き場 | **DynamoDB**（オンデマンド）。ブローカーとテーブル名は SSM パラメータ経由で lab と Web に渡す |
-| S3 sink | 任意。`CREATE_S3_SINK=0` にすると MSK Connect を作らず 約 $0.15/h（約 23 円）に下がる |
-| 費用 | 約 $0.29/h（約 44 円）。1 か月置くと 約 $213（約 32,000 円）。フェーズ 2 と合わせると約 $0.52/h |
+| lab | 機器のアドレスは **RFC 5737 の文書用アドレス**（`203.0.113.0/24`）。実機の値は写さない。イメージは `terraform/ecr`、設定と rpm は S3 の `lab/` に置く |
+| stream | MSK は IAM 認証（9098）。異常の「いま」は **DynamoDB**（オンデマンド）。ブローカーとテーブル名は SSM パラメータ経由で lab と Web に渡す |
+| S3 sink | 任意。`CREATE_S3_SINK=0` にすると MSK Connect を作らず約 $0.14/h 下がる。履歴の正本は analytics の S3 Tables なので、外してもデータは残る |
+| analytics の実体 | **EMR Serverless**（Glue ではない。ジョブが無ければ 0、アプリケーションは器だけ）。ARM64、release `emr-7.13.0`（Spark 3.5.6。S3 Tables は 7.5.0 以上。2026-09-17 確認） |
+| analytics のテーブル | **S3 Tables（Iceberg）**。テーブルバケット `<prefix>-tables`、namespace `netops`、テーブル `snmp_metrics`（namespace とテーブル名はアンダースコアだけ。ハイフン不可）。テーブルは Terraform で作る（destroy でバケットまで消せるように） |
+| analytics のジョブ | Structured Streaming、`--mode STREAMING`、60 秒トリガー、driver 1 + executor 1 の 2 vCPU。Kafka / MSK IAM / S3 Tables カタログの jar 6 本は `ops/up.sh` が Maven Central から取って `s3://<バケット>/analytics/jars/` に置く。起動は `ops/up.sh` の start-job-run（動いていれば起こさない） |
+| analytics のネットワーク | NAT が無いので S3 Tables の API は **interface エンドポイント `s3tables`（2 AZ）**、データ本体は main の S3 ゲートウェイエンドポイント。EMR の SG は inbound を自分自身からだけにする（0.0.0.0/0 の inbound があると EMR Serverless が拒否する） |
+| graph | Neptune は Gremlin を boto3 の `neptunedata` から IAM 認証で呼ぶ。`ops/up.sh` は最後に静的トポロジを投入して Web を再起動する |
+| 費用 | 約 $0.69/h（約 104 円）: lab 0.09（t4g.large + gp3）、stream 0.29（MSK 2 ブローカー + MSK Connect。sink 無しで 0.15）、analytics 0.17（2 vCPU / 8 GB のジョブ ≒ 0.15 + s3tables EP 2 AZ 0.028）、graph 0.14（db.t4g.medium）。1 か月置くと約 $504（約 75,600 円） |
+| 権限 | 組織の SCP / IAM で t4g.large・MSK・Neptune・EMR Serverless・S3 Tables の作成が止められていることがある（README の「前提」→「AWS 側」） |
 
-#### 決まっていないこと・入れていないこと
+### 決まっていないこと（着手前・初回の apply で確かめる）
 
+- **AWS 上の apply は未確認**（4 ルートとも。手元の validate と模擬テストまで）。
+- analytics は特に未検証が多い（README「未確認のもの」にも同じ一覧）:
+  - EMR Serverless 7.13.0 に S3 Tables カタログの jar が同梱されているか（同梱なら `s3-tables-catalog-for-iceberg-runtime` を足すと衝突する可能性）。
+  - Kafka の jar 6 本の組み合わせで Structured Streaming の Kafka ソースが動くか。
+  - 閉域から S3 Tables に届くか（interface エンドポイント + S3 ゲートウェイエンドポイントの `*--table-s3` の許可）。Lake Formation の設定が要るか。
+  - EMR Serverless / S3 Tables が組織の SCP / IAM で止められていないか。
+- lab の配線と Neptune のトポロジの同期（Neptune は手で編集するもので、lab を変えても追随しない）。
 - **BGP の状態の監視。**拾うのはインタフェースの up/down（ポーリングと trap）だけで、隣接や経路の変化は異常にならない。
 - Grafana などの可視化（**保留**）。異常一覧は DynamoDB の表をそのまま出す。
-- 異常の重み付けや相関（同時に落ちた複数のリンクを 1 件にまとめる、など）。
-- 生データ（S3 の `stream/`）の使い道は **2B に移した**。stream の範囲では置くところまでで、分析はしていない。
-
----
-
-## フェーズ 2B（未着手）— Kafka から Spark で読んで Iceberg に落とす
-
-**2026-09-16 の見直しで足した段。**stream（`WITH_STREAM=1`）が Kafka に流している生データの行き先をここで決める。
-
-### 決まっていること
-
-- 経路は **Telegraf → Kafka（MSK）→ Spark → S3 Tables（Iceberg）+ OpenSearch**。
-- 集計は **Spark**（Flink ではない）。実体は EMR Serverless か Glue のどちらか。
-- テーブルは **S3 Tables（Iceberg）**。
-
-### 決まっていないこと（着手前に確かめる）
-
-- **閉域から呼べるか。これが最初の確認事項。**この VPC には IGW も NAT も無く、外に出る経路は VPC エンドポイントだけ。
-  **3 つともインターフェースエンドポイントは用意されている**（`com.amazonaws.<リージョン>.s3tables` /
-  `.emr-serverless` / `.glue`。AWS PrivateLink の対応表で 2026-09-16 に確認）。
-  東京に実際にあることも `aws ec2 describe-vpc-endpoint-services` で確かめた（2026-09-16。3 つとも 3 AZ）。
-- **エンドポイントが要る場合の固定費。**インターフェースエンドポイントは 1 つにつき $0.014/h/AZ（1 AZ で月 ≒ $10、2 AZ で月 ≒ $20）。
-  上の 3 つを足すと **1 AZ で月 ≒ $30、2 AZ で月 ≒ $60**。いまでもエンドポイントだけで 15 AZ 時間 = $0.21/h（月 ≒ $153）出ている。
-  **「従量だから置いても 0」はこの構成では成り立たない。**
-- **OpenSearch をどこに置くか。**フェーズ 1 のナレッジベースが使っている OpenSearch Serverless に相乗りするのか、別のコレクションを立てるのか。
-  **別に立てると最小 OCU（月 ≒ $240）がもう 1 セット出る可能性がある。未確認。**置いておくだけの費用の 6 割強がすでにここなので、
-  **この 1 点で 2B の費用が決まる。**
-  **フェーズ 1 のコレクションにログを入れる形は取れない見込み。**フェーズ 1 は `VECTORSEARCH` 型で、型は作った後に変えられない。
-  ID を指定した書き込み（`PUT <index>/_doc/<id>`）・`_create`・`_update` は `SEARCH` 型だけ、`TIMESERIES` 型は upsert ができない
+- 異常の重み付けや相関（同時に落ちた複数のリンクを 1 件にまとめる、など）。detector Lambda（閾値判定 → DynamoDB）を残すか、Spark 側に寄せるか。
+- **OpenSearch の全文検索**（2026-09-16 の見直しの矢印にある「+ OpenSearch」）。フェーズ 1 のコレクションは `VECTORSEARCH` 型で、ID 指定の書き込み・`_update` は `SEARCH` 型だけ、`TIMESERIES` 型は upsert ができない
   （[Supported operations](https://docs.aws.amazon.com/opensearch-service/latest/developerguide/serverless-genref.html)、
-  [Choosing a collection type](https://docs.aws.amazon.com/opensearch-service/latest/developerguide/serverless-overview.html)。2026-09-16 に確認）。
-  コレクショングループに入らない Classic のコレクションは、KMS キーが同じなら OCU を共有できる
-  （[Managing capacity limits](https://docs.aws.amazon.com/opensearch-service/latest/developerguide/serverless-scaling.html)）。**型が違っても共有されるかは未確認。**
-- **MSK Connect の S3 sink を残すか。**正本の矢印は Kafka から Spark が直接読む形なので、生データを S3 に落とす sink とは役割が重なる。
-  落とせば $0.142/MCU 時間（月 ≒ $104）が浮く（`create_s3_sink = false` で切れる作りになっている）。
-- **Spark の実体**（EMR Serverless / Glue）。単価は EMR Serverless が ARM $0.052585/vCPU 時間 + $0.005746/GB 時間、
-  Glue が $0.308/DPU 時間（東京・2026-09-16 に AWS Price List の公開 JSON で確認）。どちらもジョブが無ければ 0。
-- いまの detector Lambda（閾値判定 → DynamoDB）をどうするか。残すのか、Spark 側に寄せるのか。
-- **異常の置き場を DynamoDB から OpenSearch に寄せるか**（2026-09-16 にユーザーから「DynamoDB は要らないのでは」）。2B の OpenSearch の置き場と一緒に決める。
-  寄せるときに効くのは 3 つ: 異常は open → resolved と書き換えるので `SEARCH` 型のコレクションが要る（反映は約 10 秒遅れ）。
-  Web の EC2 と Runtime は NAT の無いサブネットにいて、いまは DynamoDB のゲートウェイエンドポイント（無料）で届いているので、OpenSearch Serverless 用の VPC エンドポイント（時間課金。単価は未確認）が要る。
-  detector・エージェント・Web の読み書きを SigV4 の HTTP に書き換える。
-- S3 Tables の保守（compaction）と、書き込みの粒度・パーティションの切り方。
+  [Choosing a collection type](https://docs.aws.amazon.com/opensearch-service/latest/developerguide/serverless-overview.html)。2026-09-16 に確認）ので相乗りはできない見込み。
+  **別に立てると最小 OCU（月 ≒ $240）がもう 1 セット出る可能性がある**（コレクショングループに入らない Classic のコレクションは KMS キーが同じなら OCU を共有できるが、型が違っても共有されるかは未確認）。
+  お金の判断なので**入れていない**。異常の置き場を DynamoDB から OpenSearch に寄せるか（2026-09-16「DynamoDB は要らないのでは」）も、これと一緒に決める。
+- S3 Tables の保守（compaction は S3 Tables が自動で行う。書き込みの粒度・パーティションの切り方は未定）。
+- S3 sink（MSK Connect）を既定で作るか。Spark が Kafka を直接読むので役割が重なり、外せば $0.142/MCU 時間（月 ≒ $104）が浮く。いまの既定は作る（`CREATE_S3_SINK=1`）。
 
 ---
 
-## フェーズ 5A — エージェントが調べる（Temporal on ECS Fargate）
+## フェーズ 3 — Temporal でエージェントが調査し、人が承認して直す
 
-**このリポジトリには入っていない。**コードも Terraform も無い。**pending ではない。**
-**2026-09-16 のユーザー決定**「原因調査は AI エージェントがする。人がするのは修復を実行する承認だけ」で、
-**Temporal は修復の道具ではなく、調査ワークフローの道具**という位置づけになった。
+**このリポジトリには入っていない。**コードも Terraform も無い（`PHASE=3` は `ops/up.sh` が止まる）。**pending ではない。**
+**2026-09-16 のユーザー決定**「原因調査は AI エージェントがする。人がするのは修復を実行する承認だけ」、
+**2026-09-17 のユーザー決定**「フェーズ 3 は Temporal でエージェントが原因調査して人間が承認するまで」で、
+旧 5A（調べる）と旧 5B（人が承認して直す）を 1 つのフェーズにまとめた。
 
 ### 決まっていること
 
-- **異常の検知 → 原因の調査 → 修復案の提示**までを、1 本のワークフローとして **Temporal** で回す。
+- **異常の検知 → 原因の調査 → 修復案の提示 → 人の承認 → 修復 → 検証**を、1 本のワークフローとして **Temporal** で回す。
+- 調査の中身はエージェントが行う。**承認までは何も直さない。**
+- **承認は人が行う（HITL）。**承認を外すこと（Zero-Touch）は **pending**（2026-09-16 決定）。
+- 承認の後の段は 3 つ: AwaitApproval（承認待ち。却下と時間切れで終わる）→ Apply（直す）→ Verify（直ったか確かめる。数回まで）。**ロールバックは作らない。**
 - Temporal の置き場は **ECS on Fargate**（2026-09-16 ユーザー決定「一旦 ECS にしようか」）。
   - 最初は **EKS** だった（AgentCore と連携させたいため）。ところが AgentCore は API（`InvokeAgentRuntime`）で呼ぶので、**呼ぶ側が EKS でも ECS でも変わらない。**
   - EKS にすると、クラスタとエンドポイントで**月 ≒ $153〜$173 が上乗せ**になる。ECS ならどちらも 0 なので、ECS に変えた。
   - 「一旦」なので、Kubernetes の形で試す必要が出たら EKS に戻す。そのときの費用は下の「EKS に戻すとき」にある。
-- 調査の中身はエージェントが行う。**この段では何も直さない。**出すのは修復案まで。
 - **チャットはワークフローに載せない。**同期のチャットを載せると 1 往復ごとに実行が要る。
 
 ### 着手できる時期
 
-**stream（`WITH_STREAM=1`）が動いていること**（異常が DynamoDB に出ること）が前提。**2B の完成は待たない。**
+**フェーズ 2 の stream が動いていること**（異常が DynamoDB に出ること）が前提。**analytics の完成は待たない。**
 調査の材料が増えるほど質は上がるが、閾値で出た異常だけでもワークフローは回せる。
 
 ### 入れるときに効く費用と前提
@@ -201,7 +174,7 @@
 | エンドポイント | **足すものは 0 個。**Fargate のタスクは ECS 用のエンドポイント（`ecs` / `ecs-agent` / `ecs-telemetry`）を要らない（ECS の文書、2026-09-16 確認）。要るのは ECR（イメージ）と CloudWatch Logs（`awslogs`）で、**どちらも main にある**。AgentCore は main の `bedrock-agentcore` で呼ぶ |
 | Temporal のデータ | 保存先に PostgreSQL / MySQL / SQLite を使え、**Elasticsearch は必須ではない**（Temporal の文書、2026-09-16 確認）。**PoC の規模なら SQLite で足りるので、DB を別に立てずに始められる。**ただしタスクを止めると SQLite ごと消える（毎日 down する運用なので困りにくい）。実行件数が増えたら OpenSearch か Elasticsearch が推奨されている |
 
-- **VPC は main を使い回す。**`terraform/stream` / `terraform/graph` と同じく `data.terraform_remote_state.main.outputs.vpc_id` で入れる。新しい VPC を作ると ECR や Logs のエンドポイントを一から並べることになる。
+- **VPC は main を使い回す。**`terraform/stream` / `terraform/graph` / `terraform/analytics` と同じく `data.terraform_remote_state.main.outputs.vpc_id` で入れる。新しい VPC を作ると ECR や Logs のエンドポイントを一から並べることになる。
 - **サーバーとワーカーは、まず 1 つのタスクに同居させる。**同じタスクなら `localhost` で繋がり、ロードバランサもサービス検出も要らない。
   別々のタスクに分けて **Service Connect を使うなら `ecs-agent` エンドポイントが要る**（Envoy の管理がこれを使う。同じ ECS の文書）。
 - イメージは VPC 内の ECR から引く（フェーズ 1 と同じ）。Temporal のイメージが arm64 を持つかは着手時に確かめる。
@@ -221,26 +194,8 @@
 - Temporal の Web UI をどう見るか（閉域なので、ブラウザから直接は届かない）。
 - ワークフローの粒度（異常 1 件に 1 実行か、まとめるか）。
 - エージェントをどこから呼ぶか（AgentCore Runtime を Temporal のアクティビティから呼ぶ形か、別か）。
-- 調査に何を読ませるか（DynamoDB の異常、Neptune のトポロジ、2B のテーブル、ナレッジベース）。
-
----
-
-## フェーズ 5B — 人が承認して直す
-
-**このリポジトリには入っていない。**コードも Terraform も無い。
-
-### 決まっていること
-
-- 5A が出した修復案を **人が承認** → 修復 → 検証、の順に進む。**自動では直さない。**
-- **2026-09-16 のユーザー決定で、承認を外すこと（Zero-Touch）は pending。**当面は**人が承認する（HITL）**形のままにする。
-- 段は 3 つ: AwaitApproval（承認待ち。却下と時間切れで終わる）→ Apply（直す）→ Verify（直ったか確かめる。数回まで）。
-- **ロールバックは作らない。**
-
-### 決まっていないこと
-
-- 承認の画面（Web のタブか、別の仕組みか）。
-- 承認待ちの上限時間、Verify の回数と間隔。
-- 費用の試算。
+- 調査に何を読ませるか（DynamoDB の異常、Neptune のトポロジ、S3 Tables の `snmp_metrics`、ナレッジベース）。
+- 承認の画面（Web のタブか、別の仕組みか）。承認待ちの上限時間、Verify の回数と間隔。
 - 実機に対して何をどこまで打たせるか。**lab 以外に打つ話は何も決まっていない。**
 - **Zero-Touch にする時期（pending）。**
 

@@ -3,7 +3,7 @@
 # state（terraform/<ルート>/terraform.tfstate）にリソースが載っているルートだけを消す。作っていないルートは飛ばす。
 #
 # 使い方（リポジトリの直下で。aws-vault なら `aws-vault exec <プロファイル> --no-session` のサブシェルの中で）:
-#   ops/down.sh              # 全部消す（graph → stream → lab → main → ecr → Runtime のロググループ）。KEEP_ECR=0 と同じ
+#   ops/down.sh              # 全部消す（analytics → graph → stream → lab → main → ecr → Runtime のロググループ）。KEEP_ECR=0 と同じ
 #   KEEP_ECR=1 ops/down.sh   # ECR（イメージ）だけ残す。翌日の ops/up.sh でビルドを飛ばせる（保管料は月数円）
 #
 # ops/up.sh と同じ deploy.env（DEPLOY_ENV_FILE=<パス> で別のファイル）を読む。環境変数はファイルより優先。
@@ -11,8 +11,8 @@
 #   KEEP_ECR   ECR を残すか。1 = 残す、0 = 消す（既定）。それ以外の値は何も消さずに止まる
 #   AWS_PROFILE / AWS_CA_BUNDLE / OPENSEARCH_CACERT_FILE  ops/up.sh と同じ
 #
-# PHASE / SKIP_* / WITH_STREAM / CREATE_S3_SINK は見ない。PHASE に関係なく、state にリソースが載っているルートを全部消す
-# （作っていないルートは飛ばし、S3 sink の有無は state から読む）。
+# PHASE / SKIP_* / CREATE_S3_SINK は見ない。PHASE に関係なく、state にリソースが載っているルートを全部消す
+# （作っていないルートは飛ばし、S3 sink の有無は state から読む）。analytics は Spark のジョブを止めてから消す。
 #
 # 社内の SSL 検査がある PC では ops/up.sh と同じく AWS_CA_BUNDLE（または OPENSEARCH_CACERT_FILE）を入れてから打つ。
 # terraform/main の destroy はベクトルインデックスを消すために OpenSearch Serverless のエンドポイントへ HTTPS でつなぐ。
@@ -82,7 +82,34 @@ CACERT="${OPENSEARCH_CACERT_FILE:-${AWS_CA_BUNDLE:-}}"
 MAIN_VARS=()
 if [ -n "$CACERT" ]; then MAIN_VARS+=(-var "opensearch_cacert_file=$CACERT"); fi
 
-log "1. graph → stream（stream は lab の state を読むので lab より先）"
+log "1. analytics → graph → stream（analytics は stream の Kafka を読み、stream は lab の state を読むので、この順）"
+# EMR Serverless のアプリケーションは、ジョブが動いているか STARTED のままだと destroy が落ちる。先にジョブを止め、アプリケーションを止める
+if has_resources analytics; then
+  APP_ID=$(tf analytics output -raw application_id 2>/dev/null || true)
+  if [ -n "$APP_ID" ]; then
+    RUNNING=$(aws emr-serverless list-job-runs --region "$REGION" --application-id "$APP_ID" \
+      --states SUBMITTED PENDING SCHEDULED RUNNING --query 'jobRuns[].id' --output text 2>/dev/null || true)
+    if [ -n "$RUNNING" ] && [ "$RUNNING" != None ]; then
+      for id in $RUNNING; do
+        echo "Spark のジョブ $id を止める"
+        aws emr-serverless cancel-job-run --region "$REGION" --application-id "$APP_ID" --job-run-id "$id" >/dev/null || true
+      done
+      for i in $(seq 1 24); do  # 止まるまで最大 2 分
+        LEFT=$(aws emr-serverless list-job-runs --region "$REGION" --application-id "$APP_ID" \
+          --states SUBMITTED PENDING SCHEDULED RUNNING CANCELLING --query 'jobRuns[].id' --output text 2>/dev/null || true)
+        if [ -z "$LEFT" ] || [ "$LEFT" = None ]; then break; fi
+        sleep 5
+      done
+    fi
+    aws emr-serverless stop-application --region "$REGION" --application-id "$APP_ID" >/dev/null 2>&1 || true
+    for i in $(seq 1 24); do  # STOPPED になるまで最大 2 分
+      STATE=$(aws emr-serverless get-application --region "$REGION" --application-id "$APP_ID" --query application.state --output text 2>/dev/null || echo "")
+      case "$STATE" in STOPPED|CREATED|"") break ;; esac
+      sleep 5
+    done
+  fi
+fi
+destroy_root analytics
 destroy_root graph
 STREAM_VARS=()
 # S3 sink 無しで作った stream（CREATE_S3_SINK=0 ops/up.sh）は、既定の create_s3_sink=true のまま destroy すると zip の有無を確かめに行って止まる

@@ -30,3 +30,5 @@ terraform/**/.build/
 confluentinc-*.zip
 ops/logs/
 *.part
+# ops/up.sh の手順 5-3 で取る Spark の jar
+jars/

@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 # fukuda-nwc-poc - AWS に触らずに打てる検査をまとめて打つ。README の「手元で確かめる」と同じ内容。
 #   1. terraform fmt -check -recursive
-#   2. 5 つのルートで init -backend=false + validate（provider を取るだけで state には触らない）
-#   3. ops スクリプトの構文（bash -n と、EC2 の上で打つ ops/seed_graph.py）
-#   4. 模擬テスト 3 本（AWS に触れない）
+#   2. 6 つのルートで init -backend=false + validate（provider を取るだけで state には触らない）
+#   3. ops スクリプトの構文（bash -n と、EC2 の上で打つ ops/seed_graph.py、EMR Serverless で打つ spark/snmp_to_iceberg.py）
+#   4. 模擬テスト 4 本（AWS に触れない）
 # 最後の行が「すべて通過」なら健全。途中で落ちたらそこで止まる。
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-ROOTS=(ecr main lab stream graph)
+ROOTS=(ecr main lab stream analytics graph)
 
 log() { printf '\n== %s\n' "$*"; }
 die() {
@@ -23,7 +23,7 @@ log "1. terraform fmt -check -recursive terraform"
 terraform fmt -check -recursive terraform || die "整形されていないファイルがある。terraform fmt -recursive terraform で直す"
 echo "差分なし"
 
-log "2. 5 つのルートの validate"
+log "2. 6 つのルートの validate"
 for r in "${ROOTS[@]}"; do
   terraform -chdir="terraform/$r" init -backend=false -input=false >/dev/null || die "terraform/$r の init が失敗した"
   terraform -chdir="terraform/$r" validate >/dev/null || die "terraform/$r の validate が失敗した（terraform -chdir=terraform/$r validate で中身を見る）"
@@ -33,12 +33,14 @@ done
 log "3. ops スクリプトの構文"
 bash -n ops/up.sh ops/down.sh ops/deploy-env.sh ops/check.sh ops/vscode-setup.sh
 if command -v python3 >/dev/null; then PY=(python3); else PY=(uv run --python 3.13 python); fi
-"${PY[@]}" -c 'import ast, sys; ast.parse(open(sys.argv[1], encoding="utf-8").read(), sys.argv[1])' ops/seed_graph.py
+for p in ops/seed_graph.py spark/snmp_to_iceberg.py; do
+  "${PY[@]}" -c 'import ast, sys; ast.parse(open(sys.argv[1], encoding="utf-8").read(), sys.argv[1])' "$p"
+done
 echo "構文エラーなし"
 
 log "4. 模擬テスト"
 if command -v uv >/dev/null; then
-  for t in tests/test_app.py tests/test_graph.py tests/test_stream.py; do
+  for t in tests/test_app.py tests/test_graph.py tests/test_stream.py tests/test_analytics.py; do
     uv run --group dev python "$t" || die "$t が失敗した"
   done
 else
