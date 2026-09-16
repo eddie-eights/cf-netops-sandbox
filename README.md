@@ -1157,6 +1157,50 @@ MSK Connect を作らなければ（`create_s3_sink = false`）約 $0.29/h（約
 - OpenSearch Serverless の閉域化。ネットワークポリシーは公開で、中身に触れるのはデータアクセスポリシーの 2 つ（ナレッジベースのロールと apply した人）だけ。閉域にすると、Terraform のインデックス作成が PC から届かなくなる。
 - state の共有（S3 バックエンドとロック）。1 人が 1 台の PC で打つ前提。
 
+## VS Code の設定（任意）
+
+手元の PC の VS Code と同じ設定・拡張を社用 PC に入れるためのファイルを置いてある。AWS には触らないので、飛ばしてもよい。
+
+| ファイル | 中身 | どう使うか |
+|---|---|---|
+| `.vscode/settings.json` | このリポジトリを開いたときだけ効く設定（改行 LF、保存で terraform fmt、`.terraform` を検索から外す） | 何もしなくてよい。フォルダを開けば効く |
+| `.vscode/extensions.json` | このリポジトリに要る拡張の推奨 | フォルダを開くと「推奨する拡張機能をインストールしますか」と出る |
+| `docs/vscode/user-settings.json` | 手元の PC のユーザー設定 | 中身を貼る（下の 2） |
+| `docs/vscode/keybindings.json` | ターミナルで Shift+Enter を改行にするキー割り当て | 中身を貼る（下の 3） |
+| `docs/vscode/extensions.txt` | 拡張の一覧。`[repo]` がこのリポジトリ用、`[extra]` は手元の PC に入れている残り | `ops/vscode-setup.sh` が読む |
+| `ops/vscode-setup.sh` | 一覧を読んで `code --install-extension` を回すだけのスクリプト | 下の 1 |
+
+1. 拡張を入れる（WSL のターミナルで打つ）。`code` が無いと言われたら、VS Code で WSL のフォルダを開いてから、その中のターミナルで打つ。
+
+```bash
+bash ops/vscode-setup.sh
+```
+
+手元の PC と同じものを全部入れるなら（PHP や Azure など、このリポジトリに要らないものも入る）:
+
+```bash
+ALL=1 bash ops/vscode-setup.sh
+```
+
+2. ユーザー設定: VS Code で Ctrl+Shift+P →「基本設定: ユーザー設定を開く (JSON)」→ `docs/vscode/user-settings.json` の中身を貼る。既に設定があるなら、丸ごと上書きせず要るところだけ足す。
+
+3. キー割り当て: Ctrl+Shift+P →「基本設定: キーボードショートカットを開く (JSON)」→ `docs/vscode/keybindings.json` の中身を貼る。
+
+**手元では入れているが、この控えから外した設定。**社用 PC に既定で持ち込むものではないと判断した。要るなら自分で足す。
+
+| 設定 | 外した理由 |
+|---|---|
+| `claudeCode.allowDangerouslySkipPermissions` | 実行前の確認を飛ばす設定 |
+| `security.workspace.trust.untrustedFiles` を `open` | 信頼していないフォルダのファイルをそのまま開く設定 |
+| `security.promptForLocalFileProtocolHandling` を `false` | ローカルファイルを開くときの確認を消す設定 |
+| `claudeCode.claudeProcessWrapper` | 手元の PC の絶対パス。このリポジトリは public なので置かない |
+
+注意:
+
+- テーマ `One Dark Modern Classic` を出す拡張は、手元の拡張一覧に見当たらなかった（`code --list-extensions` に出ない形で入っているらしい）。同じ見た目にしたいなら Marketplace で名前で探して入れる。入っていなくても既定のテーマになるだけで、壊れはしない。
+- WSL では拡張が 2 か所に分かれる。Python や Terraform のように WSL 側に入るものと、テーマ・アイコン・日本語パックのように Windows 側に入るものがある。`ops/vscode-setup.sh` は WSL 側で打つ前提で、失敗したものは最後にまとめて出す。
+- SSL 検査のある回線では Marketplace のダウンロードが証明書エラーになることがある。そのときは Windows 側の VS Code から入れるか、Marketplace から `.vsix` を落として「VSIX からのインストール」を使う。
+
 ## 手元で確かめる
 
 AWS に触らずに、Terraform の構文検査と模擬テストを打てる。会社の PC（WSL2 + uv）でも Mac でも同じ。Python 3.13 は `.python-version` に書いてあり、無ければ uv が取ってくる。
@@ -1258,3 +1302,4 @@ uv run python web/app.py
 - Session Manager plugin が社内プロキシの環境変数に従うか。
 - Runtime のロググループが作られるタイミング（Runtime の作成時か、最初の呼び出し時か）。
 - `InvokeAgentRuntime` が CloudTrail の管理イベントとして既定で記録されるか。
+- VS Code の拡張が、WSL 側と Windows 側のどちらに入るか（テーマ・アイコン・日本語パックは Windows 側の想定）。SSL 検査のある回線で Marketplace からダウンロードできるか。`ops/vscode-setup.sh` は社用 PC で動かしていない。
