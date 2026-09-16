@@ -6,7 +6,7 @@
 #   ops/down.sh              # 全部消す（graph → stream → lab → main → ecr → Runtime のロググループ）
 #   KEEP_ECR=1 ops/down.sh   # ECR（イメージ）だけ残す。翌日の ops/up.sh でビルドを飛ばせる（保管料は月数円）
 #
-# ops/up.sh の SKIP_* / CREATE_S3_SINK は渡さなくてよい（作っていないルートは飛ばし、S3 sink の有無は state から読む）。
+# ops/up.sh の PHASE / WITH_LAB / SKIP_* / CREATE_S3_SINK は渡さなくてよい（作っていないルートは飛ばし、S3 sink の有無は state から読む）。
 #
 # 社内の SSL 検査がある PC では ops/up.sh と同じく AWS_CA_BUNDLE（または OPENSEARCH_CACERT_FILE）を入れてから打つ。
 # terraform/main の destroy はベクトルインデックスを消すために OpenSearch Serverless のエンドポイントへ HTTPS でつなぐ。

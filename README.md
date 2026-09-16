@@ -318,28 +318,38 @@ ECR のレイヤー置き場（Runtime のイメージ取得）、AL2023 の dnf
 
 ### 毎日の起動と片付けをスクリプトで打つ
 
-業務終了後に全部消し、翌朝また作る運用なら、この 2 本を使う。**`ops/up.sh` 1 本で全部作る**: 手順 1〜5・7 に加えて、lab、フェーズ 2（stream / graph と Neptune への投入）まで。
+業務終了後に全部消し、翌朝また作る運用なら、この 2 本を使う。**`ops/up.sh` は環境変数 `PHASE` で指定したフェーズまでを 1 本で作る**: 既定の `PHASE=1` は手順 1〜5・7、`PHASE=2` はそれに lab とフェーズ 2（stream / graph と Neptune への投入）を足したもの。
 中身は下の手順のコマンドそのもので、**できているものは飛ばす**（Terraform は差分だけ作る、ECR に同じタグのイメージがあればビルドしない、`wheels/`・rpm・zip が手元にあれば取り直さない、Neptune に機器が入っていれば投入しない）ので、途中で落ちても同じコマンドを打ち直せばよい。
 手順 0 の環境変数は要らない（スクリプトが認証情報と Terraform の出力から取る）。**aws-vault の人は 0-1 の `--no-session` のサブシェルの中で打つ**（一時セッションで入っていると、その旨を出して止まる）。社内 PC は「社内 PC で使うとき」の設定を入れたターミナルで打つ。
 
-**全部作ると、フェーズ 1 に加えて stream（MSK / MSK Connect）と graph（Neptune）の約 $0.43/h がかかる**（「1 時間起動したときの試算」）。**使い終わったら当日中に `ops/down.sh` を打つ。**
-初回は 40〜60 分かかる（MSK の作成だけで 20〜30 分）。フェーズ 1 だけでよい日は `PHASE1_ONLY=1 ops/up.sh`。
+**`PHASE=2` は、フェーズ 1 に加えて stream（MSK / MSK Connect）と graph（Neptune）の約 $0.43/h がかかる**（「1 時間起動したときの試算」）。**使い終わったら当日中に `ops/down.sh` を打つ。**
+
+フェーズ 1 だけ作る（`PHASE` を付けなければこれ）:
 
 ```bash
 ops/up.sh
 ```
 
+フェーズ 2 まで作る。初回は 40〜60 分かかる（MSK の作成だけで 20〜30 分）:
+
+```bash
+PHASE=2 ops/up.sh
+```
+
+`PHASE` に指定できるのは `1` と `2` だけ。2B / 5A / 5B はまだ Terraform が無いので、指定すると止まる（`docs/phases.md`）。
+**`PHASE` を下げて打っても、前に作ったルートは消さない。**`PHASE=2` で作った翌日に `ops/up.sh` だけ打つと、stream / graph は残ったまま課金が続く。消すのは `ops/down.sh`。
+
 | 順 | 何をする | 対応する手順 |
 |---|---|---|
-| 0 | `aws` / `terraform` / `python3`（無ければ `uv`）/ `curl` / `docker` と `docker buildx` / `session-manager-plugin`（`NO_PORTFORWARD` が空のとき）があるか、認証が通っているかを確かめる。aws-vault の一時セッションなら止まる。CloudFormation 版のスタック（`fukuda-nwc-poc*`）が残っていれば止まる（「CloudFormation 版から移るとき」）。作るルートを表示する | 0 |
+| 0 | `aws` / `terraform` / `python3`（無ければ `uv`）/ `curl` / `docker` と `docker buildx` / `session-manager-plugin`（`NO_PORTFORWARD` が空のとき）があるか、認証が通っているかを確かめる。aws-vault の一時セッションなら止まる。CloudFormation 版のスタック（`fukuda-nwc-poc*`）が残っていれば止まる（「CloudFormation 版から移るとき」）。`PHASE` と作るルートを表示する（`PHASE` が `1` / `2` 以外なら止まる） | 0 |
 | 1 | `terraform/ecr` を init / apply | 1 |
-| 2 | ECR に**無いタグだけ** arm64 でビルドして push する（エージェント、lab の frr / multitool / snmpd）。PC の `docker buildx` で作る（dockerd が動いていないとき、agent か snmpd を作るのに `docker buildx ls` に `linux/arm64` が無いときは止まる） | 2 / lab-1 |
-| 3 | `terraform/main` を init / apply（初回 10〜20 分）。終わったら `terraform/graph` の apply を**裏で**始める（10〜15 分。ログは `ops/logs/graph-apply.log`） | 3 / g-1 |
+| 2 | ECR に**無いタグだけ** arm64 でビルドして push する（エージェント。lab を作るときは lab の frr / multitool / snmpd も）。PC の `docker buildx` で作る（dockerd が動いていないとき、agent か snmpd を作るのに `docker buildx ls` に `linux/arm64` が無いときは止まる） | 2 / lab-1 |
+| 3 | `terraform/main` を init / apply（初回 10〜20 分）。`PHASE=2` なら、終わったら `terraform/graph` の apply を**裏で**始める（10〜15 分。ログは `ops/logs/graph-apply.log`） | 3 / g-1 |
 | 4 | wheel を取り（`wheels/` が空のときだけ）、Web の部品と手順書を S3 に置き、取り込みが `COMPLETE` になるまで待つ。EC2 の初回の user_data が終わるのを待ってから再起動し、Web のサービスが `active` になるまで待つ | 4 |
-| 5 | containerlab と Telegraf の rpm、S3 sink の zip をリポジトリの直下に取り（無いときだけ）、lab の設定と一緒に S3 に置く。lab の EC2 を作る前に置くので、Telegraf まで最初の起動で入る | lab-2 / s-1 |
-| 6 | `terraform/lab` を init / apply | lab-3 |
-| 7 | `terraform/stream` を init / apply（MSK の作成に 20〜30 分）。lab が前の実行から残っていて Telegraf が入っていなければ、lab の EC2 を再起動する | s-2 / s-3 |
-| 8 | graph の apply が終わるのを待ち、Neptune が空なら静的トポロジを入れる（`ops/seed_graph.py` を Web の EC2 の上で打つ。GUI の「静的データを投入」と同じ）。Web を再起動して `active` になるまで待つ | g-2 |
+| 5 | **lab を作るときだけ**（`PHASE=2` か `WITH_LAB=1`）。containerlab の rpm（`PHASE=2` なら Telegraf の rpm と S3 sink の zip も）をリポジトリの直下に取り（無いときだけ）、lab の設定と一緒に S3 に置く。lab の EC2 を作る前に置くので、Telegraf まで最初の起動で入る | lab-2 / s-1 |
+| 6 | **lab を作るときだけ。**`terraform/lab` を init / apply | lab-3 |
+| 7 | **`PHASE=2` のときだけ。**`terraform/stream` を init / apply（MSK の作成に 20〜30 分）。lab が前の実行から残っていて Telegraf が入っていなければ、lab の EC2 を再起動する | s-2 / s-3 |
+| 8 | **`PHASE=2` のときだけ。**graph の apply が終わるのを待ち、Neptune が空なら静的トポロジを入れる（`ops/seed_graph.py` を Web の EC2 の上で打つ。GUI の「静的データを投入」と同じ）。Web を再起動して `active` になるまで待つ | g-2 |
 | 9 | Runtime のロググループに保持 7 日とタグ。まだ無ければ先に同じ名前で作る（AgentCore が既存のロググループをそのまま使うかは 2026-09-15 時点で未確認。使わず別名で作った場合は手順 5 を手で打つ） | 5 |
 | 10 | 利用者に配る `start_session_command`（lab を作ったら lab に入るコマンドも）を表示し、ポートフォワーディングを開いたまま止まる（`Ctrl+C` で閉じる） | 7 |
 
@@ -355,10 +365,11 @@ Terraform の確認プロンプトは出さずに進む（スクリプトの中�
 | 変数 | 意味 |
 |---|---|
 | `IMAGE_TAG` | エージェントのイメージのタグ。既定 `v1`。`agent/` を変えたら `IMAGE_TAG=v2 ops/up.sh`。以後も毎回同じ値を付ける（付け忘れると `v1` に戻す差分になる） |
-| `PHASE1_ONLY=1` | フェーズ 1 だけ作る（ECR・イメージ・本体・Web）。下の `SKIP_LAB` / `SKIP_STREAM` / `SKIP_GRAPH` を全部付けたのと同じ |
-| `SKIP_LAB=1` | lab を作らない。stream は lab の state を読むので、stream も作らない |
-| `SKIP_STREAM=1` | stream（MSK → detector → DynamoDB）を作らない |
-| `SKIP_GRAPH=1` | graph（Neptune）を作らない |
+| `PHASE` | どのフェーズまで作るか。`1`（既定。ECR・イメージ・本体・Web）か `2`（それに lab / stream / graph を足す）。後のフェーズは前のフェーズの state を読むので、指定したフェーズまでを順に作る |
+| `WITH_LAB=1` | `PHASE=1` に lab だけ足す（`PHASE=2` では最初から作る） |
+| `SKIP_LAB=1` | `PHASE=2` で lab を作らない。stream は lab の state を読むので、stream も作らない |
+| `SKIP_STREAM=1` | `PHASE=2` で stream（MSK → detector → DynamoDB）を作らない |
+| `SKIP_GRAPH=1` | `PHASE=2` で graph（Neptune）を作らない |
 | `CREATE_S3_SINK=0` | stream の S3 sink（MSK Connect）を作らない。約 $0.14/h 下がる。`ops/down.sh` には付けなくてよい（state から読む） |
 | `ADMIN_ARN` | `kb_admin_principal_arn`。自動で取れない認証の形のときだけ（スクリプトが止まって言う） |
 | `VPC_CIDR` / `CLIENT_CIDR` | 手順 3 の `vpc_cidr` / `client_cidr` |
@@ -370,7 +381,7 @@ Terraform の確認プロンプトは出さずに進む（スクリプトの中�
 ops/down.sh
 ```
 
-「片付け」と同じ順（graph → stream → lab → main → ecr → Runtime のロググループ）で、**state にリソースが載っているルートだけ** destroy する（作っていないルートは飛ばす。`ops/up.sh` に付けた `SKIP_*` / `CREATE_S3_SINK` は付けなくてよい）。
+「片付け」と同じ順（graph → stream → lab → main → ecr → Runtime のロググループ）で、**state にリソースが載っているルートだけ** destroy する（作っていないルートは飛ばす。`ops/up.sh` に付けた `PHASE` / `WITH_LAB` / `SKIP_*` / `CREATE_S3_SINK` は付けなくてよい）。
 バケットは中身ごと、ECR はイメージごと消える。最後に `Project=fukuda-nwc-poc` のタグが付いたものが残っていないかを出す（何も出なければ全部消えている）。
 `KEEP_ECR=1 ops/down.sh` で ECR（イメージ）だけ残せる。残すと翌朝の `ops/up.sh` がビルドを飛ばせる（保管料は月数円。Runtime はイメージが無いと作れないので、翌朝ビルドし直す時間が惜しいならこちら）。
 
@@ -758,7 +769,7 @@ PC の 8080 が使用中なら `localPortNumber` を変え、URL のポートも
 
 ローカル PoC の `wvs2` lab（本社・DC・支店 2 か所の CE、キャリア PE 2 台、snmpd、ホスト。すべて架空のアドレス）を、同じ VPC の EC2 1 台で動かす。
 BGP の主副切替と SNMP の見え方を手で確かめるためのもので、**Web やエージェントとはつながっていない。**使わないときは止める。
-`ops/up.sh` は lab-1〜lab-3 を打つ（`SKIP_LAB=1` で作らない）。以下はその中身と、入ってからの使い方。
+`PHASE=2 ops/up.sh`（フェーズ 1 に lab だけ足すなら `WITH_LAB=1 ops/up.sh`）は lab-1〜lab-3 を打つ（`PHASE=2` で lab を外すなら `SKIP_LAB=1`）。以下はその中身と、入ってからの使い方。
 
 ### lab-1. イメージを ECR に置く
 
@@ -851,7 +862,7 @@ lab の SNMP（ポーリングと trap）を MSK に流し、detector Lambda が
 `terraform/main` と `terraform/lab` はそのまま使う。
 
 順番: s-1 で rpm と zip を置く → `terraform/stream` → lab EC2 の Telegraf を起動（再起動）→ `terraform/graph` → Web の再起動と投入。
-`ops/up.sh` は s-1〜g-2 を全部打つ（`SKIP_STREAM=1` / `SKIP_GRAPH=1` で外す）。以下はその中身と、動いてからの確かめ方。
+`PHASE=2 ops/up.sh` は s-1〜g-2 を全部打つ（`SKIP_STREAM=1` / `SKIP_GRAPH=1` で外す）。以下はその中身と、動いてからの確かめ方。
 
 ### s-1. Telegraf の rpm と S3 sink のプラグインを S3 に置く
 

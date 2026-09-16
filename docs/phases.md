@@ -58,7 +58,7 @@
 | 画面 | Gradio を EC2（AL2023 / arm64 / t4g.small）の 127.0.0.1:8080 で動かす |
 | state | **ローカル**。ルート間は `terraform_remote_state` で読む（1 人が 1 台の PC で打つ前提） |
 | 手順書 | `kb-docs/*.md` を S3 に置いて取り込みジョブを流す。**`docs/` は取り込まない** |
-| 片付け | 毎日 `ops/down.sh` で消し、翌朝 `ops/up.sh` で作り直す |
+| 片付け | 毎日 `ops/down.sh` で消し、翌朝 `ops/up.sh`（フェーズ 2 まで要る日は `PHASE=2 ops/up.sh`）で作り直す |
 
 ### 決まっていないこと・入れていないこと
 

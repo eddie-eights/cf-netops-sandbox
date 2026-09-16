@@ -1,21 +1,24 @@
 #!/usr/bin/env bash
-# 全部を 1 本で起こす。README の手順 1〜5・7 に、lab、フェーズ 2（stream / graph と投入）を足したもの。
+# PHASE で指定したフェーズまでを 1 本で起こす。フェーズ 1 は README の手順 1〜5・7、フェーズ 2 はそれに lab と stream / graph（と投入）を足したもの。
 # 毎日全部消す運用向け。何度打っても同じ状態に収束する（できているものは Terraform が差分なしで飛ばし、ECR にあるタグはビルドしない）。
 # Terraform の state はこの PC のリポジトリの中（terraform/<ルート>/terraform.tfstate）に置く。消すのは ops/down.sh。
 #
 # 使い方（リポジトリの直下で。aws-vault なら `aws-vault exec <プロファイル> --no-session` のサブシェルの中で）:
-#   ops/up.sh                   # 全部。最後にポートフォワーディングを開いたまま止まる（Ctrl+C で閉じる）。初回は 40〜60 分
-#   PHASE1_ONLY=1 ops/up.sh     # フェーズ 1 だけ（ECR・イメージ・本体・Web）。lab / stream / graph を作らない
+#   ops/up.sh                   # フェーズ 1（ECR・イメージ・本体・Web）。最後にポートフォワーディングを開いたまま止まる（Ctrl+C で閉じる）
+#   PHASE=2 ops/up.sh           # フェーズ 2 まで（lab / stream / graph も）。初回は 40〜60 分
+#   WITH_LAB=1 ops/up.sh        # フェーズ 1 に lab だけ足す
 #   NO_PORTFORWARD=1 ops/up.sh  # ポートフォワーディングを開かずに終わる
 #
 # stream（MSK / MSK Connect）と graph（Neptune）は時間課金。使い終わったら当日中に ops/down.sh を打つ（README「1 時間起動したときの試算」）。
+# PHASE を下げて打っても、前に作ったルートは消さない（消すのは ops/down.sh）。
 #
 # 環境変数で変えられるもの（全部任意）:
 #   IMAGE_TAG               エージェントのイメージのタグ。既定 v1。ECR にそのタグが無いときだけ PC の docker buildx でビルドして push する（タグは上書きできない）
-#   SKIP_LAB=1              lab を作らない（stream は lab の state を読むので、stream も作らない）
-#   SKIP_STREAM=1           stream（MSK → detector → DynamoDB）を作らない
-#   SKIP_GRAPH=1            graph（Neptune）を作らない
-#   PHASE1_ONLY=1           上の 3 つを全部付けたのと同じ
+#   PHASE                   どこまで作るか。1（既定）か 2。2B / 5A / 5B はまだ Terraform が無いので止まる（docs/phases.md）
+#   WITH_LAB=1              PHASE=1 に lab を足す（PHASE=2 では最初から作る）
+#   SKIP_LAB=1              PHASE=2 で lab を作らない（stream は lab の state を読むので、stream も作らない）
+#   SKIP_STREAM=1           PHASE=2 で stream（MSK → detector → DynamoDB）を作らない
+#   SKIP_GRAPH=1            PHASE=2 で graph（Neptune）を作らない
 #   CREATE_S3_SINK=0        MSK Connect の S3 sink を作らない（Confluent の zip が取れないとき。ops/down.sh は state を見て合わせる）
 #   ADMIN_ARN               terraform/main の kb_admin_principal_arn。既定は空（Terraform が今の認証情報から決める）
 #   VPC_CIDR                terraform/main の vpc_cidr（社内と重なるとき）
@@ -44,12 +47,6 @@ TELEGRAF_RPM="telegraf-${TELEGRAF_VERSION}-1.aarch64.rpm"
 S3_SINK_ZIP=confluentinc-kafka-connect-s3-12.1.11.zip
 S3_SINK_URL="https://hub-downloads.confluent.io/api/plugins/confluentinc/kafka-connect-s3/versions/12.1.11/$S3_SINK_ZIP"
 
-if [ -n "${PHASE1_ONLY:-}" ]; then SKIP_LAB=1; SKIP_STREAM=1; SKIP_GRAPH=1; fi
-SKIP_LAB="${SKIP_LAB:-}"; SKIP_STREAM="${SKIP_STREAM:-}"; SKIP_GRAPH="${SKIP_GRAPH:-}"
-if [ -n "$SKIP_LAB" ] && [ -z "$SKIP_STREAM" ]; then
-  echo "SKIP_LAB なので stream も作らない（stream は lab の state から SG とロールを読む）"
-  SKIP_STREAM=1
-fi
 CREATE_S3_SINK="${CREATE_S3_SINK:-1}"
 cd "$(dirname "$0")/.."
 
@@ -137,6 +134,22 @@ trap on_exit EXIT
 
 # ---- 0. 道具と認証 -------------------------------------------------------------
 log "0. 道具と認証を確かめる"
+# どこまで作るか。後のフェーズは前のフェーズの state を読むので、指定したフェーズまでを順に作る
+PHASE="${PHASE:-1}"
+SKIP_LAB="${SKIP_LAB:-}"; SKIP_STREAM="${SKIP_STREAM:-}"; SKIP_GRAPH="${SKIP_GRAPH:-}"
+case "$PHASE" in
+  1)
+    SKIP_STREAM=1; SKIP_GRAPH=1
+    if [ -z "${WITH_LAB:-}" ]; then SKIP_LAB=1; fi ;;
+  2) ;;
+  2B|2b|5A|5a|5B|5b) die "フェーズ $PHASE はまだ Terraform が無い（docs/phases.md）。いま作れるのは PHASE=1 か PHASE=2" ;;
+  3|4) die "フェーズ $PHASE は無い（3 は欠番、4 はフェーズ 1 に取り込み済み。docs/phases.md）。PHASE=1 か PHASE=2 を付ける" ;;
+  *) die "PHASE は 1 か 2（いまは「$PHASE」）" ;;
+esac
+if [ -n "$SKIP_LAB" ] && [ -z "$SKIP_STREAM" ]; then
+  echo "SKIP_LAB なので stream も作らない（stream は lab の state から SG とロールを読む）"
+  SKIP_STREAM=1
+fi
 command -v aws >/dev/null || die "aws CLI が無い（README「WSL2 の準備」）"
 command -v terraform >/dev/null || die "terraform が無い（README「WSL2 の準備」。1.11 以上）"
 if command -v python3 >/dev/null; then PY=(python3)
@@ -174,6 +187,7 @@ if [ -z "$SKIP_GRAPH" ]; then ROOTS="$ROOTS graph"; fi
 echo "ACCOUNT_ID=$ACCOUNT_ID"
 echo "CALLER_ARN=$CALLER_ARN"
 echo "IMAGE_TAG=$IMAGE_TAG"
+echo "PHASE=$PHASE"
 echo "作るルート: $ROOTS"
 if [ -z "$SKIP_STREAM" ] || [ -z "$SKIP_GRAPH" ]; then
   printf '\033[1;33m%s\033[0m\n' "stream / graph は時間課金。使い終わったら当日中に ops/down.sh を打つ"
