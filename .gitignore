@@ -27,3 +27,5 @@ terraform/**/.build/
 # 手順 2-b と s-1 で作る・取るファイル
 src.zip
 confluentinc-*.zip
+ops/logs/
+*.part

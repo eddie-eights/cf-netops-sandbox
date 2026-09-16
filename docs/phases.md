@@ -142,18 +142,28 @@
 - **閉域から呼べるか。これが最初の確認事項。**この VPC には IGW も NAT も無く、外に出る経路は VPC エンドポイントだけ。
   **3 つともインターフェースエンドポイントは用意されている**（`com.amazonaws.<リージョン>.s3tables` /
   `.emr-serverless` / `.glue`。AWS PrivateLink の対応表で 2026-09-16 に確認）。
-  **東京に実際にあるかは未確認**（AWS の認証が切れていて `aws ec2 describe-vpc-endpoint-services` を引けていない）。
+  東京に実際にあることも `aws ec2 describe-vpc-endpoint-services` で確かめた（2026-09-16。3 つとも 3 AZ）。
 - **エンドポイントが要る場合の固定費。**インターフェースエンドポイントは 1 つにつき $0.014/h/AZ（1 AZ で月 ≒ $10、2 AZ で月 ≒ $20）。
   上の 3 つを足すと **1 AZ で月 ≒ $30、2 AZ で月 ≒ $60**。いまでもエンドポイントだけで 15 AZ 時間 = $0.21/h（月 ≒ $153）出ている。
   **「従量だから置いても 0」はこの構成では成り立たない。**
 - **OpenSearch をどこに置くか。**フェーズ 1 のナレッジベースが使っている OpenSearch Serverless に相乗りするのか、別のコレクションを立てるのか。
   **別に立てると最小 OCU（月 ≒ $240）がもう 1 セット出る可能性がある。未確認。**置いておくだけの費用の 6 割強がすでにここなので、
   **この 1 点で 2B の費用が決まる。**
+  **フェーズ 1 のコレクションにログを入れる形は取れない見込み。**フェーズ 1 は `VECTORSEARCH` 型で、型は作った後に変えられない。
+  ID を指定した書き込み（`PUT <index>/_doc/<id>`）・`_create`・`_update` は `SEARCH` 型だけ、`TIMESERIES` 型は upsert ができない
+  （[Supported operations](https://docs.aws.amazon.com/opensearch-service/latest/developerguide/serverless-genref.html)、
+  [Choosing a collection type](https://docs.aws.amazon.com/opensearch-service/latest/developerguide/serverless-overview.html)。2026-09-16 に確認）。
+  コレクショングループに入らない Classic のコレクションは、KMS キーが同じなら OCU を共有できる
+  （[Managing capacity limits](https://docs.aws.amazon.com/opensearch-service/latest/developerguide/serverless-scaling.html)）。**型が違っても共有されるかは未確認。**
 - **MSK Connect の S3 sink を残すか。**正本の矢印は Kafka から Spark が直接読む形なので、生データを S3 に落とす sink とは役割が重なる。
   落とせば $0.142/MCU 時間（月 ≒ $104）が浮く（`create_s3_sink = false` で切れる作りになっている）。
 - **Spark の実体**（EMR Serverless / Glue）。単価は EMR Serverless が ARM $0.052585/vCPU 時間 + $0.005746/GB 時間、
   Glue が $0.308/DPU 時間（東京・2026-09-16 に AWS Price List の公開 JSON で確認）。どちらもジョブが無ければ 0。
 - いまの detector Lambda（閾値判定 → DynamoDB）をどうするか。残すのか、Spark 側に寄せるのか。
+- **異常の置き場を DynamoDB から OpenSearch に寄せるか**（2026-09-16 にユーザーから「DynamoDB は要らないのでは」）。2B の OpenSearch の置き場と一緒に決める。
+  寄せるときに効くのは 3 つ: 異常は open → resolved と書き換えるので `SEARCH` 型のコレクションが要る（反映は約 10 秒遅れ）。
+  Web の EC2 と Runtime は NAT の無いサブネットにいて、いまは DynamoDB のゲートウェイエンドポイント（無料）で届いているので、OpenSearch Serverless 用の VPC エンドポイント（時間課金。単価は未確認）が要る。
+  detector・エージェント・Web の読み書きを SigV4 の HTTP に書き換える。
 - S3 Tables の保守（compaction）と、書き込みの粒度・パーティションの切り方。
 
 ---

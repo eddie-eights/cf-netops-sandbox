@@ -70,7 +70,7 @@ lab（任意、terraform/lab、別ルート）: 同じ VPC の EC2 1 台で cont
 | `.env.example` | 環境変数の一覧（Web / エージェント / lab。意味と AWS 上で誰が入れるか）。AWS 上では Terraform（user_data と Runtime の環境変数）が書くので手で用意しない。EC2 で Web が立たないときの見比べ先で、手元で `web/app.py` を動かすときは `.env` に写して使う（「Web を手元で動かす」） |
 | `lab/` | lab の材料。`wvs2.clab.yml.in`（containerlab の定義。イメージ名は起動時に埋める）、`frr/`、`snmpd/`（Dockerfile と設定。trap の送信も）、`telegraf.conf.in`（ポーリングと trap 受信 → MSK）、`lab.sh` |
 | `kb-docs/` | ナレッジベースに入れる手順書の例（架空の md 3 つ） |
-| `ops/` | `up.sh`（手順 1〜7 をまとめて打つ）と `down.sh`（片付けをまとめて打つ）。毎日消して作り直す運用向け（「毎日の起動と片付けをスクリプトで打つ」）。`check.sh` は AWS に触らない検査をまとめて打つ（「手元で確かめる」）。`vscode-setup.sh` は VS Code の設定を入れる（「VS Code の設定」） |
+| `ops/` | `up.sh`（手順 1〜7、2-b、lab、フェーズ 2 までを 1 本で打つ）と `down.sh`（片付けをまとめて打つ）。毎日消して作り直す運用向け（「毎日の起動と片付けをスクリプトで打つ」）。`seed_graph.py` は `up.sh` が Web の EC2 の上で打つ Neptune への投入。`check.sh` は AWS に触らない検査をまとめて打つ（「手元で確かめる」）。`vscode-setup.sh` は VS Code の設定を入れる（「VS Code の設定」） |
 | `tests/` | 模擬テスト（AWS に触れない。打ち方は「手元で確かめる」）。`test_app.py`（エージェント）、`test_graph.py`（Neptune の読み書きと静的への切り戻し）、`test_stream.py`（detector と、`terraform/stream` の `archive_file` の配線） |
 
 ## なぜこの形にしたか
@@ -301,9 +301,12 @@ ECR のレイヤー置き場（Runtime のイメージ取得）、AL2023 の dnf
 
 ### 毎日の起動と片付けをスクリプトで打つ
 
-業務終了後に全部消し、翌朝また作る運用なら、手順 1〜7 と「片付け」をまとめた 2 本を使う。中身は下の手順のコマンドそのもので、
-**できているものは飛ばす**（Terraform は差分だけ作る、ECR に同じタグのイメージがあればビルドしない、`wheels/` があれば取り直さない）ので、途中で落ちても同じコマンドを打ち直せばよい。
-手順 0 の環境変数は要らない（スクリプトが認証情報から取る）。**aws-vault の人は 0-1 の `--no-session` のサブシェルの中で打つ**（一時セッションで入っていると、その旨を出して止まる）。社内 PC は「社内 PC で使うとき」の設定を入れたターミナルで打つ。
+業務終了後に全部消し、翌朝また作る運用なら、この 2 本を使う。**`ops/up.sh` 1 本で全部作る**: 手順 1〜5・7 に加えて、2-b（PC に Docker が無いとき）、lab、フェーズ 2（stream / graph と Neptune への投入）まで。
+中身は下の手順のコマンドそのもので、**できているものは飛ばす**（Terraform は差分だけ作る、ECR に同じタグのイメージがあればビルドしない、`wheels/`・rpm・zip が手元にあれば取り直さない、Neptune に機器が入っていれば投入しない）ので、途中で落ちても同じコマンドを打ち直せばよい。
+手順 0 の環境変数は要らない（スクリプトが認証情報と Terraform の出力から取る）。**aws-vault の人は 0-1 の `--no-session` のサブシェルの中で打つ**（一時セッションで入っていると、その旨を出して止まる）。社内 PC は「社内 PC で使うとき」の設定を入れたターミナルで打つ。
+
+**全部作ると、フェーズ 1 に加えて stream（MSK / MSK Connect）と graph（Neptune）の約 $0.43/h がかかる**（「1 時間起動したときの試算」）。**使い終わったら当日中に `ops/down.sh` を打つ。**
+初回は 40〜60 分かかる（MSK の作成だけで 20〜30 分）。フェーズ 1 だけでよい日は `PHASE1_ONLY=1 ops/up.sh`。
 
 ```bash
 ops/up.sh
@@ -311,25 +314,47 @@ ops/up.sh
 
 | 順 | 何をする | 対応する手順 |
 |---|---|---|
-| 0 | `aws` と `terraform` があるか、認証が通っているかを確かめる。aws-vault の一時セッションなら止まる。CloudFormation 版のスタック（`fukuda-nwc-poc*`）が残っていれば止まる（「CloudFormation 版から移るとき」） | 0 |
+| 0 | `aws` / `terraform` / `python3`（無ければ `uv`）/ `curl` があるか、認証が通っているかを確かめる。aws-vault の一時セッションなら止まる。CloudFormation 版のスタック（`fukuda-nwc-poc*`）が残っていれば止まる（「CloudFormation 版から移るとき」）。作るルートを表示する | 0 |
 | 1 | `terraform/ecr` を init / apply | 1 |
-| 2 | ECR にタグ `v1` が**無いときだけ** arm64 でビルドして push（docker が無ければ 2-b を案内して止まる） | 2 |
-| 3 | `terraform/main` を init / apply（初回 10〜20 分） | 3 |
+| 2 | ECR に**無いタグだけ** arm64 でビルドして push する（エージェント、lab の frr / multitool / snmpd）。`docker` と `docker buildx` があれば PC で、無ければ `terraform/build` を apply して CodeBuild で作る（`USE_CODEBUILD=1` で CodeBuild に固定） | 2 / 2-b / lab-1 |
+| 3 | `terraform/main` を init / apply（初回 10〜20 分）。終わったら `terraform/graph` の apply を**裏で**始める（10〜15 分。ログは `ops/logs/graph-apply.log`） | 3 / g-1 |
 | 4 | wheel を取り（`wheels/` が空のときだけ）、Web の部品と手順書を S3 に置き、取り込みが `COMPLETE` になるまで待つ。EC2 の初回の user_data が終わるのを待ってから再起動し、Web のサービスが `active` になるまで待つ | 4 |
-| 5 | Runtime のロググループに保持 7 日とタグ。まだ無ければ先に同じ名前で作る（AgentCore が既存のロググループをそのまま使うかは 2026-09-15 時点で未確認。使わず別名で作った場合は手順 5 を手で打つ） | 5 |
-| 7 | 利用者に配る `start_session_command` を表示し、ポートフォワーディングを開いたまま止まる（`Ctrl+C` で閉じる） | 7 |
+| 5 | containerlab と Telegraf の rpm、S3 sink の zip をリポジトリの直下に取り（無いときだけ）、lab の設定と一緒に S3 に置く。lab の EC2 を作る前に置くので、Telegraf まで最初の起動で入る | lab-2 / s-1 |
+| 6 | `terraform/lab` を init / apply | lab-3 |
+| 7 | `terraform/stream` を init / apply（MSK の作成に 20〜30 分）。lab が前の実行から残っていて Telegraf が入っていなければ、lab の EC2 を再起動する | s-2 / s-3 |
+| 8 | graph の apply が終わるのを待ち、Neptune が空なら静的トポロジを入れる（`ops/seed_graph.py` を Web の EC2 の上で打つ。GUI の「静的データを投入」と同じ）。Web を再起動して `active` になるまで待つ | g-2 |
+| 9 | Runtime のロググループに保持 7 日とタグ。まだ無ければ先に同じ名前で作る（AgentCore が既存のロググループをそのまま使うかは 2026-09-15 時点で未確認。使わず別名で作った場合は手順 5 を手で打つ） | 5 |
+| 10 | 利用者に配る `start_session_command`（lab を作ったら lab に入るコマンドも）を表示し、ポートフォワーディングを開いたまま止まる（`Ctrl+C` で閉じる） | 7 |
 
-手順 6（利用者への権限）は人に渡す作業なので入れていない。lab / フェーズ 2（stream / graph）/ build も入れていない（使う日に手で apply する）。
+手順 6（利用者への権限）は人に渡す作業なので入れていない。
 Terraform の確認プロンプトは出さずに進む（スクリプトの中は `-auto-approve`）。手で打つ下の手順では、apply のたびに差分が出て `yes` と打つまで止まる。
+途中で落ちたときは、裏の graph の apply が動いていればそれが終わるまで待ってから止まる（打ち直したときに state のロックでぶつからないように）。その間ターミナルを閉じない。
 
-環境変数で変えられるもの: `IMAGE_TAG`（既定 `v1`。`agent/` を変えたら `IMAGE_TAG=v2 ops/up.sh`。以後も毎回同じ値を付ける。付け忘れると `v1` に戻す差分になる）、
-`ADMIN_ARN`（`kb_admin_principal_arn`。自動で取れない認証の形のときだけ）、`VPC_CIDR` / `CLIENT_CIDR`（手順 3 の `vpc_cidr` / `client_cidr`）、`OPENSEARCH_CACERT_FILE`（「社内 PC で使うとき」。無ければ `AWS_CA_BUNDLE`）、`LOCAL_PORT`（PC 側のポート。既定 8080）、`NO_PORTFORWARD=1`（手順 5 で止める）。
+**S3 sink の zip が取れないとき。**zip は Confluent Hub から取り、ダウンロードに利用条件への同意が要ることがある。zip でないものが返ったら、`ops/up.sh` は案内を出して止まる。
+ブラウザで s-1 の URL から取ってリポジトリの直下に同じ名前（`confluentinc-kafka-connect-s3-12.1.11.zip`）で置いて打ち直すか、S3 sink（MSK Connect）無しで `CREATE_S3_SINK=0 ops/up.sh` を打つ。
+
+環境変数で変えられるもの（全部任意）:
+
+| 変数 | 意味 |
+|---|---|
+| `IMAGE_TAG` | エージェントのイメージのタグ。既定 `v1`。`agent/` を変えたら `IMAGE_TAG=v2 ops/up.sh`。以後も毎回同じ値を付ける（付け忘れると `v1` に戻す差分になる） |
+| `PHASE1_ONLY=1` | フェーズ 1 だけ作る（ECR・イメージ・本体・Web）。下の `SKIP_LAB` / `SKIP_STREAM` / `SKIP_GRAPH` を全部付けたのと同じ |
+| `SKIP_LAB=1` | lab を作らない。stream は lab の state を読むので、stream も作らない |
+| `SKIP_STREAM=1` | stream（MSK → detector → DynamoDB）を作らない |
+| `SKIP_GRAPH=1` | graph（Neptune）を作らない |
+| `CREATE_S3_SINK=0` | stream の S3 sink（MSK Connect）を作らない。約 $0.14/h 下がる。`ops/down.sh` には付けなくてよい（state から読む） |
+| `USE_CODEBUILD=1` | PC に Docker があっても CodeBuild でビルドする |
+| `ADMIN_ARN` | `kb_admin_principal_arn`。自動で取れない認証の形のときだけ（スクリプトが止まって言う） |
+| `VPC_CIDR` / `CLIENT_CIDR` | 手順 3 の `vpc_cidr` / `client_cidr` |
+| `OPENSEARCH_CACERT_FILE` | 「社内 PC で使うとき」の CA の PEM。無ければ `AWS_CA_BUNDLE` を使う |
+| `LOCAL_PORT` | PC 側のポート。既定 8080 |
+| `NO_PORTFORWARD=1` | ポートフォワーディングを開かずに終わる |
 
 ```bash
 ops/down.sh
 ```
 
-「片付け」と同じ順（graph → stream → lab → main → ecr → build → Runtime のロググループ）で、**state にリソースが載っているルートだけ** destroy する（作っていないルートは飛ばす）。
+「片付け」と同じ順（graph → stream → lab → main → ecr → build → Runtime のロググループ）で、**state にリソースが載っているルートだけ** destroy する（作っていないルートは飛ばす。`ops/up.sh` に付けた `SKIP_*` / `CREATE_S3_SINK` は付けなくてよい）。
 バケットは中身ごと、ECR はイメージごと消える。最後に `Project=fukuda-nwc-poc` のタグが付いたものが残っていないかを出す（何も出なければ全部消えている）。
 `KEEP_ECR=1 ops/down.sh` で ECR（イメージ）だけ残せる。残すと翌朝の `ops/up.sh` がビルドを飛ばせる（保管料は月数円。Runtime はイメージが無いと作れないので、翌朝ビルドし直す時間が惜しいならこちら）。
 
@@ -507,6 +532,8 @@ docker buildx build --platform linux/arm64 -t "$REPO:v1" --push agent/
 
 ### 2-b. PC でビルドできないとき: AWS の中でビルドする（`terraform/build`）
 
+`ops/up.sh` は、PC に `docker` か `docker buildx` が無ければここを自分で打つ（`USE_CODEBUILD=1` で常にこちら）。以下はその中身。
+
 会社の PC に Docker が入れられない、というときは
 CodeBuild にビルドさせる。`terraform/build` は S3 バケット 1 つと CodeBuild のプロジェクト 1 つで、**バケットに置いた zip**（`agent/` と `lab/snmpd/`）を
 **arm64 のビルド環境**で `docker build` して push する（`buildspec.yml`）。ネイティブ arm64 なので QEMU も buildx も要らず、社内ネットワークの証明書も関係ない。
@@ -539,10 +566,10 @@ zip を置くのとビルドの開始は、`terraform/build` を apply した後
 | 2 | 手元でこのリポジトリのフォルダを zip にする。Windows ならフォルダを右クリック → 送る → 圧縮 (zip 形式) フォルダー。zip の中に `agent/` と `lab/snmpd/` が入っていればよく、1 段フォルダが挟まっていてもよい |
 | 3 | S3 → `fukuda-nwc-poc-build-<アカウント ID>`（出力 `source_bucket_name` に実名が出る）→ アップロード → 名前を **`src.zip`** にして置く |
 | 4 | CodeBuild → ビルドプロジェクト → `fukuda-nwc-poc-build` → **ビルドの開始（上書きあり）** → 環境変数の上書きで `TARGET` = `agent`、`IMAGE_TAG` = 手順 3 の `agent_image_tag` と同じ値（初回は `v1`）→ **ビルドの開始** |
-| 5 | ログの末尾が `pushed TARGET=agent IMAGE_TAG=v1 …` になれば ECR に入っている。ECR → `fukuda-nwc-poc-agent` にタグが見える |
-| 6 | lab を使うなら `TARGET` = `lab` でもう 1 回（frr / multitool を取り直して push し、snmpd をビルドする。lab-1 の代わり） |
+| 5 | ビルドの状態が **成功** になれば ECR に入っている。ECR → `fukuda-nwc-poc-agent` にタグが見える。ログに `agent:v1 はもうあるので飛ばす` と出たら、そのタグは前から入っていて何も作っていない |
+| 6 | lab を使うなら `TARGET` = `lab` でもう 1 回（frr / multitool を取って push し、snmpd をビルドする。ECR にもうあるタグは飛ばす。lab-1 の代わり） |
 
-- タグは上書きできない（`terraform/ecr` の `IMMUTABLE`）ので、`agent/` を変えたら zip を置き直し、`IMAGE_TAG` を変えて打ち直し、手順 3 の `agent_image_tag` も合わせる。
+- タグは上書きできない（`terraform/ecr` の `IMMUTABLE`）。ビルドは ECR にもうあるタグを飛ばすので、`agent/` を変えたら zip を置き直し、`IMAGE_TAG` を変えて打ち直し、手順 3 の `agent_image_tag` も合わせる。
 - `TARGET=lab` の `docker pull` は Docker Hub / quay.io の匿名取得なので、`toomanyrequests` で落ちたら時間を置いて打ち直す。
 - CloudShell でもビルドできそうに見えるが、CloudShell の環境は x86_64（1 vCPU / 2 GiB / 保存領域 1 GB）で、arm64 を作るには QEMU の登録（`--privileged` のコンテナ）が要る。CloudShell でそれが通るかは確認できていないので、この README では CodeBuild にしている。
 - 消すときは `terraform -chdir=terraform/build destroy` をいつ打ってもよい（他のルートは参照していない。残しても 0 円）。バケットは zip ごと消える。
@@ -759,6 +786,7 @@ PC の 8080 が使用中なら `localPortNumber` を変え、URL のポートも
 
 ローカル PoC の `wvs2` lab（本社・DC・支店 2 か所の CE、キャリア PE 2 台、snmpd、ホスト。すべて架空のアドレス）を、同じ VPC の EC2 1 台で動かす。
 BGP の主副切替と SNMP の見え方を手で確かめるためのもので、**Web やエージェントとはつながっていない。**使わないときは止める。
+`ops/up.sh` は lab-1〜lab-3 を打つ（`SKIP_LAB=1` で作らない）。以下はその中身と、入ってからの使い方。
 
 ### lab-1. イメージを ECR に置く
 
@@ -851,6 +879,7 @@ lab の SNMP（ポーリングと trap）を MSK に流し、detector Lambda が
 `terraform/main` と `terraform/lab` はそのまま使う。
 
 順番: s-1 で rpm と zip を置く → `terraform/stream` → lab EC2 の Telegraf を起動（再起動）→ `terraform/graph` → Web の再起動と投入。
+`ops/up.sh` は s-1〜g-2 を全部打つ（`SKIP_STREAM=1` / `SKIP_GRAPH=1` で外す）。以下はその中身と、動いてからの確かめ方。
 
 ### s-1. Telegraf の rpm と S3 sink のプラグインを S3 に置く
 
@@ -940,6 +969,7 @@ terraform -chdir=terraform/graph destroy
 terraform -chdir=terraform/stream destroy
 ```
 
+S3 sink 無しで立てた（`-var create_s3_sink=false`）なら、destroy にも同じ `-var` を付ける（`ops/down.sh` は state を見て自分で付ける）。
 `stream` は MSK Connect → MSK の順に消えるので 15 分ほど。DynamoDB のテーブルも一緒に消える。S3 の `stream/` に置いた生データとプラグインは残る（`terraform/main` を destroy すればバケットごと消える）。
 生データだけ消したいときは、**stream を消し終えてから**次を打つ。プラグインの zip も消えるので、次に stream を立てる前に s-1 で置き直す。
 
@@ -1230,7 +1260,7 @@ uv run python tests/test_app.py && uv run python tests/test_graph.py && uv run p
 
 健全なら `fmt` は何も出さず、`validate` は 6 回 `Success! The configuration is valid.` を出し、テストはそれぞれ最後の行が `通過 41 / 失敗 0`、`通過 18 / 失敗 0`、`通過 23 / 失敗 0` になる。
 `init -backend=false` は provider を取るだけで、state には触らない（apply 済みの PC で打ってもよい）。
-`ops/up.sh` と `ops/down.sh` は AWS に触らないと動かせないので、構文だけ `bash -n ops/up.sh ops/down.sh` で見る（何も出なければよい）。
+`ops/up.sh` と `ops/down.sh`、EC2 の上で打つ `ops/seed_graph.py` は AWS に触らないと動かせないので、`ops/check.sh` は構文だけを見る。
 `pyproject.toml` と `uv.lock` はこの確認のためだけのもので、AWS に置く依存は `agent/requirements.txt` と `web/requirements.txt`。`.venv/` は gitignore してある。
 
 ### Web を手元で動かす

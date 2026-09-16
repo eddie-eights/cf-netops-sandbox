@@ -6,6 +6,8 @@
 #   ops/down.sh              # 全部消す（graph → stream → lab → main → ecr → build → Runtime のロググループ）
 #   KEEP_ECR=1 ops/down.sh   # ECR（イメージ）だけ残す。翌日の ops/up.sh でビルドを飛ばせる（保管料は月数円）
 #
+# ops/up.sh の SKIP_* / CREATE_S3_SINK は渡さなくてよい（作っていないルートは飛ばし、S3 sink の有無は state から読む）。
+#
 # 社内の SSL 検査がある PC では ops/up.sh と同じく AWS_CA_BUNDLE（または OPENSEARCH_CACERT_FILE）を入れてから打つ。
 # terraform/main の destroy はベクトルインデックスを消すために OpenSearch Serverless のエンドポイントへ HTTPS でつなぐ。
 set -uo pipefail
@@ -45,7 +47,12 @@ if [ -n "$CACERT" ]; then MAIN_VARS+=(-var "opensearch_cacert_file=$CACERT"); fi
 
 log "1. フェーズ 2（graph → stream。stream は lab の state を読むので lab より先）"
 destroy_root graph
-destroy_root stream
+STREAM_VARS=()
+# S3 sink 無しで作った stream（CREATE_S3_SINK=0 ops/up.sh）は、既定の create_s3_sink=true のまま destroy すると zip の有無を確かめに行って止まる
+if has_resources stream && ! tf stream state list 2>/dev/null | grep -Eq '\.(connect|s3_sink)\['; then
+  STREAM_VARS+=(-var create_s3_sink=false)
+fi
+destroy_root stream ${STREAM_VARS[@]+"${STREAM_VARS[@]}"}
 
 log "2. lab"
 destroy_root lab
