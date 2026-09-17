@@ -109,6 +109,10 @@ resource "aws_ecs_task_definition" "workflow" {
       condition     = local.worker_repository_url != "" && local.temporal_repository_url != ""
       error_message = "terraform/ecr の state から worker_repository_url / temporal_repository_url が読めない。terraform/ecr を create_workflow_repositories = true で apply する。"
     }
+    precondition {
+      condition     = local.runtime_arn != ""
+      error_message = "terraform/agent の state から agent_runtime_arn が読めない。terraform/agent を先に apply する（deploy.env の AGENT=1）。"
+    }
   }
 }
 

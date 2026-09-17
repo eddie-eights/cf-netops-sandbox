@@ -1,8 +1,9 @@
-"""AgentCore Runtime に載せるチャットエージェント（フェーズ 1 相当 + ナレッジベース + ガードレール + トポロジのツール）。
+"""AgentCore Runtime に載せるチャットエージェント（機能 agent。ガードレール + トポロジ / 異常のツール + 任意でナレッジベース）。
 
 1 回の質問でやること:
-  1. Bedrock Knowledge Base の Retrieve をハイブリッド検索（ベクトル + キーワード）で呼び、候補を取る。
-     RERANK_MODEL_ARN があれば、同じ Retrieve の中でリランクモデルが候補を並べ替えて上位だけを返す
+  1. KNOWLEDGE_BASE_ID があれば Bedrock Knowledge Base の Retrieve をハイブリッド検索（ベクトル + キーワード）で呼び、候補を取る。
+     RERANK_MODEL_ARN があれば、同じ Retrieve の中でリランクモデルが候補を並べ替えて上位だけを返す。
+     無ければ（terraform/agent の create_knowledge_base = false。既定）資料なしでモデルとツールだけで答える
   2. 資料と質問を Converse に渡す。ガードレールは質問（guardContent）と回答を判定する。
      モデルがトポロジのツール（topology.py。機器一覧・隣接・影響範囲・全体図。Neptune があればそこから、
      無ければコンテナ内の静的データ）や異常一覧（anomalies.py。DynamoDB）を使うと言ったら、
@@ -32,7 +33,8 @@ import mcp_client
 import topology
 
 MODEL_ID = os.environ["MODEL_ID"]
-KNOWLEDGE_BASE_ID = os.environ["KNOWLEDGE_BASE_ID"]
+# 空ならナレッジベースを引かない（terraform/agent の create_knowledge_base = false。既定）
+KNOWLEDGE_BASE_ID = os.environ.get("KNOWLEDGE_BASE_ID", "")
 BEDROCK_REGION = os.environ.get("BEDROCK_REGION", "ap-northeast-1")
 NUMBER_OF_RESULTS = int(os.environ.get("NUMBER_OF_RESULTS", "5"))
 # 空ならリランクしない（ハイブリッド検索の上位 NUMBER_OF_RESULTS 件をそのまま使う）
@@ -87,6 +89,8 @@ history: list[dict] = []
 
 
 def retrieve(prompt: str) -> list[dict]:
+    if not KNOWLEDGE_BASE_ID:
+        return []
     search = {"numberOfResults": NUMBER_OF_RESULTS, "overrideSearchType": "HYBRID"}
     if RERANK_MODEL_ARN:
         search["rerankingConfiguration"] = {

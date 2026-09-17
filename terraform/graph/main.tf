@@ -59,6 +59,26 @@ resource "aws_vpc_security_group_ingress_rule" "neptune_from_web" {
   referenced_security_group_id = local.web_sg_id
 }
 
+# terraform/main の runtime / web の SG は送信が 443 だけなので、8182 の送信をこちらで足す（terraform/workflow の tools と同じ形）。
+# 無いと Web の EC2 から Neptune への TCP が落とされ、ops/up.sh の 8-2（seed_graph.py）が接続の待ちで数十分止まる（2026-09-17 に Mac の初回で実測）
+resource "aws_vpc_security_group_egress_rule" "runtime_to_neptune" {
+  security_group_id            = local.runtime_sg_id
+  description                  = "Gremlin to Neptune (terraform/graph)"
+  ip_protocol                  = "tcp"
+  from_port                    = 8182
+  to_port                      = 8182
+  referenced_security_group_id = aws_security_group.neptune.id
+}
+
+resource "aws_vpc_security_group_egress_rule" "web_to_neptune" {
+  security_group_id            = local.web_sg_id
+  description                  = "Gremlin to Neptune (terraform/graph)"
+  ip_protocol                  = "tcp"
+  from_port                    = 8182
+  to_port                      = 8182
+  referenced_security_group_id = aws_security_group.neptune.id
+}
+
 # ---------------------------------------------------------------- neptune
 resource "aws_neptune_cluster" "graph" {
   cluster_identifier                  = "${var.name_prefix}-graph"

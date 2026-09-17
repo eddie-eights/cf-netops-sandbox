@@ -7,14 +7,15 @@
 #   - 値を "…" か '…' で囲むと、中身をそのまま使う（中の # もコメントにならない）
 #   - $HOME や $(…) は展開しない。値の先頭の ~/ だけ $HOME/ に読み替える
 #   - 値が空の行（`IMAGE_TAG=`）は書いていないのと同じ（既定値のまま。空の AWS_PROFILE などを環境に入れない）
-#   - 同じ名前の環境変数が空でなければ、ファイルの値は使わない（`PHASE=2 ops/up.sh` はファイルの PHASE より優先）。
+#   - 同じ名前の環境変数が空でなければ、ファイルの値は使わない（`PIPELINE=1 ops/up.sh` はファイルの PIPELINE より優先）。
 #     ファイルの 1 を環境変数で打ち消すときは空ではなく 0 を渡す（`SKIP_GRAPH=0 ops/up.sh`）
-#   - 知らないキーと、同じキーの 2 回目は止まる（打ち間違いで違うフェーズを作らないため）
+#   - 知らないキーと、同じキーの 2 回目は止まる（打ち間違いで違う機能を作らないため）
 # ファイルの場所は既定でリポジトリ直下の deploy.env。DEPLOY_ENV_FILE=<パス> で変えられる（相対パスは打った場所から）。
 
-# 読めるキー。WITH_LAB（2026-09-16）と WITH_STREAM（2026-09-17）は無くなったキーで、ops/up.sh が案内を出して止まる
-DEPLOY_ENV_KEYS="PHASE SKIP_LAB SKIP_STREAM SKIP_ANALYTICS SKIP_GRAPH CREATE_S3_SINK SINKS IMAGE_TAG ADMIN_ARN VPC_CIDR CLIENT_CIDR
-OPENSEARCH_CACERT_FILE LOCAL_PORT NO_PORTFORWARD KEEP_ECR AWS_PROFILE AWS_CA_BUNDLE WITH_LAB WITH_STREAM"
+# 読めるキー。機能は PIPELINE / AGENT / WORKFLOW の 3 つ（2026-09-17）。PHASE は古い書き方で、ops/up.sh が機能に読み替えて注意を出す。
+# WITH_LAB（2026-09-16）と WITH_STREAM（2026-09-17）は無くなったキーで、ops/up.sh が案内を出して止まる
+DEPLOY_ENV_KEYS="PIPELINE AGENT WORKFLOW CREATE_KB PHASE SKIP_LAB SKIP_STREAM SKIP_ANALYTICS SKIP_GRAPH CREATE_S3_SINK SINKS IMAGE_TAG ADMIN_ARN
+VPC_CIDR CLIENT_CIDR OPENSEARCH_CACERT_FILE LOCAL_PORT NO_PORTFORWARD KEEP_ECR AWS_PROFILE AWS_CA_BUNDLE WITH_LAB WITH_STREAM"
 
 # DEPLOY_ENV_FILE の相対パスを、cd する前の場所から見た絶対パスにする。呼ぶ側が cd の前に打つ
 resolve_deploy_env_file() {
@@ -31,7 +32,7 @@ load_deploy_env() {
   keys=" $(echo $DEPLOY_ENV_KEYS) "  # 改行と連続した空白を 1 つにする
   if [ ! -f "$file" ]; then
     if [ -n "${DEPLOY_ENV_FILE:-}" ]; then die "DEPLOY_ENV_FILE のファイルが無い: $file"; fi
-    echo "deploy.env: 無い（環境変数と既定値で動く。PHASE の既定は 1。作るなら cp deploy.env.example deploy.env）"
+    echo "deploy.env: 無い（環境変数と既定値で動く。既定は AGENT=1 だけ。作るなら cp deploy.env.example deploy.env）"
     return 0
   fi
   while IFS= read -r line || [ -n "$line" ]; do
@@ -51,11 +52,11 @@ load_deploy_env() {
     val="${line#*=}"
     val="${val#"${val%%[![:space:]]*}"}"
     case "$key" in
-      ''|*[!A-Z0-9_]*) die "$file の $n 行目のキー「$key」は英大文字・数字・_ だけで書く" ;;
+      ''|*[!A-Z0-9_]*) die "$file の $n 行目のキー「${key}」は英大文字・数字・_ だけで書く" ;;
     esac
     case "$keys" in
       *" $key "*) ;;
-      *) die "$file の $n 行目のキー「$key」は使えない（使えるキーと意味は deploy.env.example）" ;;
+      *) die "$file の $n 行目のキー「${key}」は使えない（使えるキーと意味は deploy.env.example）" ;;
     esac
     case "$seen" in
       *" $key "*) die "$file の $n 行目: $key が 2 回ある（どちらを使うか決められない）" ;;
@@ -106,6 +107,6 @@ flag_value() {
   case "$v" in
     1|true|yes) printf -v "$name" '%s' 1 ;;
     ''|0|false|no) printf -v "$name" '%s' '' ;;
-    *) die "$name は 1 か 0（いまは「$v」）" ;;
+    *) die "$name は 1 か 0（いまは「${v}」）" ;;
   esac
 }

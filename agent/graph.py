@@ -4,14 +4,18 @@
 どちらも無ければ configured() が False で、topology.py は data/ の静的データを使う（フェーズ 1 のまま動く）。
 
 グラフの形は data/topology.json と同じ:
-  頂点 label=device, id=device_id。property: hostname, site, role, asn, mgmt_ip, enabled
-  辺   label=link, a → b（a < b）。property: a_if, b_if, kind, role, bandwidth_mbps
+  頂点 label=device, id=device_id。property: hostname, site, role, asn, mgmt_ip, enabled, status
+  辺   label=link, a → b（a < b）。property: a_if, b_if, kind, role, bandwidth_mbps, status
+
+status（UP / DOWN / ALARM）は動的な状態で、Spark の検知（AnomalyOpened / AnomalyResolved）を受けた graph/status_handler.py（terraform/graph の Lambda）が
+set_status() で書く。無ければ UP。seed() で入れ直すと消える（静的な構成だけを入れる）。
 """
 
 import os
 import time
 
 import boto3
+from botocore.config import Config
 from botocore.exceptions import BotoCoreError, ClientError
 
 PARAM_PREFIX = os.environ.get("PARAM_PREFIX", "")
@@ -42,7 +46,11 @@ def configured() -> bool:
 def _client():
     ep = endpoint()
     if _cache["client"] is None or _cache["client"][0] != ep:
-        _cache["client"] = (ep, boto3.client("neptunedata", endpoint_url=f"https://{ep}", region_name=REGION))
+        # 既定（接続 60 秒 × 再試行）だと SG で落とされたときに 1 回の呼び出しが数分かかり、
+        # ops/up.sh の 8-2 が何十分も黙る。接続は 10 秒・再試行 1 回で早く諦める
+        _cache["client"] = (ep, boto3.client(
+            "neptunedata", endpoint_url=f"https://{ep}", region_name=REGION,
+            config=Config(connect_timeout=10, read_timeout=60, retries={"max_attempts": 2})))
     return _cache["client"][1]
 
 
@@ -81,8 +89,9 @@ def _props(d: dict, keys) -> str:
     return "".join(f".property({_q(k)},{_q(d[k])})" for k in keys if d.get(k) is not None and d.get(k) != "")
 
 
-DEVICE_KEYS = ("hostname", "site", "role", "asn", "mgmt_ip", "enabled")
-LINK_KEYS = ("a_if", "b_if", "kind", "role", "bandwidth_mbps")
+DEVICE_KEYS = ("hostname", "site", "role", "asn", "mgmt_ip", "enabled", "status")
+LINK_KEYS = ("a_if", "b_if", "kind", "role", "bandwidth_mbps", "status")
+STATUSES = ("UP", "DOWN", "ALARM")
 
 
 def load_topology() -> tuple[list[dict], list[dict]]:
@@ -108,10 +117,11 @@ def count() -> dict:
 
 
 def seed(devices: list[dict], links: list[dict]) -> dict:
-    """静的データで置き換える（全部消してから入れる）。devices は devices.yaml の行に topology.json の asn を足したもの"""
+    """静的データで置き換える（全部消してから入れる）。devices は devices.yaml の行に topology.json の asn を足したもの、
+    または lab/lab_topology.py が lab の定義から作ったもの（同じ形）。status は入れない（入れ直したら全部 UP に戻る）"""
     query("g.V().hasLabel('device').drop()")
     for d in devices:
-        query(f"g.addV('device').property(id,{_q(d['device_id'])}){_props(d, DEVICE_KEYS)}")
+        query(f"g.addV('device').property(id,{_q(d['device_id'])}){_props(d, DEVICE_KEYS[:-1])}")
     for l in links:
         add_link(l["a"], l["a_if"], l["b"], l["b_if"], l.get("kind") or "l2", l.get("role") or "", l.get("bandwidth_mbps"))
     return count()
@@ -157,3 +167,18 @@ def remove_link(a: str, b: str, a_if: str = "") -> dict:
         return {"error": f"{a} - {b} のリンクは無い"}
     query(q + ".drop()")
     return {"removed": n}
+
+
+def set_status(device_id: str, if_name: str = "", status: str = "DOWN") -> dict:
+    """動的な状態を書く。if_name があればその機器のそのインタフェースが付く辺（a 側でも b 側でも）、無ければ機器の頂点。
+    戻り値の updated は書いた要素の数（機器やインタフェースがトポロジに無ければ 0。エラーにはしない。検知はトポロジより先に来ることがある）"""
+    status = str(status).upper()
+    if status not in STATUSES:
+        return {"error": f"status は {' / '.join(STATUSES)} のどれか"}
+    dev = _q(device_id)
+    if if_name:
+        n = query(f"g.V({dev}).outE('link').has('a_if',{_q(if_name)}).property('status',{_q(status)}).count()")[0]
+        n += query(f"g.V({dev}).inE('link').has('b_if',{_q(if_name)}).property('status',{_q(status)}).count()")[0]
+        return {"device_id": device_id, "if_name": if_name, "status": status, "updated": int(n)}
+    n = query(f"g.V({dev}).property('status',{_q(status)}).count()")[0]
+    return {"device_id": device_id, "status": status, "updated": int(n)}

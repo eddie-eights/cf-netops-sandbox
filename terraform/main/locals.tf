@@ -1,38 +1,14 @@
-# fukuda-nwc-poc - NetOps phase 1 for a closed network. Browser on the user's PC -> SSM Session Manager
-# port forwarding -> Gradio web on EC2 (chat + topology figure + device table, 127.0.0.1 only, no inbound rules) ->
-# AgentCore Runtime (VPC mode) -> Bedrock Knowledge Base (OpenSearch Serverless, hybrid search), static topology
-# tools (list_devices / neighbors / blast_radius) and Bedrock Converse with a guardrail.
-# No NAT gateway, no EIP, no public IP, no load balancer. The optional lab (containerlab + FRR) is terraform/lab.
+# fukuda-nwc-poc - base root module shared by the three features (pipeline / agent / workflow). VPC without NAT, EIP,
+# public IP or load balancer (2 private subnets, S3 gateway endpoint, ssm / ssmmessages endpoints), the security groups,
+# the chat web EC2 (Gradio: chat + topology figure + device table, 127.0.0.1 only, reached through SSM Session Manager
+# port forwarding), the shared S3 bucket and the IAM roles the features attach policies to.
+# The AgentCore Runtime, guardrail and optional knowledge base are terraform/agent; the lab / stream / analytics / graph
+# roots are the pipeline; Temporal on ECS is terraform/workflow. Each of them reads this state (terraform_remote_state).
 
 data "aws_caller_identity" "current" {}
 data "aws_partition" "current" {}
 
-# assumed-role のセッションなら元のロールの ARN、IAM ユーザーならそのままユーザーの ARN になる
-data "aws_iam_session_context" "current" {
-  arn = data.aws_caller_identity.current.arn
-}
-
-# エージェントのイメージの置き場は terraform/ecr の state から読む
-data "terraform_remote_state" "ecr" {
-  count   = var.agent_image_uri == "" ? 1 : 0
-  backend = "local"
-
-  config = {
-    path = "${path.module}/../ecr/terraform.tfstate"
-  }
-}
-
 locals {
   account_id = data.aws_caller_identity.current.account_id
   partition  = data.aws_partition.current.partition
-
-  kb_admin_principal_arn = var.kb_admin_principal_arn != "" ? var.kb_admin_principal_arn : data.aws_iam_session_context.current.issuer_arn
-
-  rerank           = var.rerank_model_id != ""
-  rerank_model_arn = local.rerank ? "arn:${local.partition}:bedrock:${var.region}::foundation-model/${var.rerank_model_id}" : ""
-
-  agent_image_uri = var.agent_image_uri != "" ? var.agent_image_uri : "${data.terraform_remote_state.ecr[0].outputs.agent_repository_url}:${var.agent_image_tag}"
-
-  collection_name = "${var.name_prefix}-kb"
-  index_name      = "kb-index"
 }

@@ -52,6 +52,7 @@ def _build(devices: list[dict], links: list[dict]):
             adj.setdefault(me, []).append({
                 "device_id": peer, "local_if": my_if, "remote_if": peer_if,
                 "kind": l["kind"], "role": l.get("role") or "", "bandwidth_mbps": l.get("bandwidth_mbps"),
+                "status": l.get("status") or "UP",   # Neptune の辺の動的な状態（graph.set_status）。静的データには無いので UP
             })
     return devices, {d["device_id"]: d for d in devices}, links, adj
 
@@ -93,7 +94,7 @@ def _public(d: dict) -> dict:
     """SNMP のコミュニティなど、答えに出す必要のない項目を落とす"""
     return {
         "device_id": d["device_id"], "site": d["site"], "role": d["role"], "mgmt_ip": d.get("mgmt_ip"),
-        "asn": d.get("asn"), "monitored": bool(d.get("enabled")),
+        "asn": d.get("asn"), "monitored": bool(d.get("enabled")), "status": d.get("status") or "UP",
     }
 
 
@@ -124,7 +125,8 @@ def blast_radius(device_id: str, max_hops: int = 2) -> dict:
             if nb["device_id"] not in seen:
                 seen[nb["device_id"]] = seen[cur] + 1
                 q.append(nb["device_id"])
-    affected = [{"device_id": k, "hops": v, "site": DEVICE_BY_ID[k]["site"], "role": DEVICE_BY_ID[k]["role"]}
+    affected = [{"device_id": k, "hops": v, "site": DEVICE_BY_ID[k]["site"], "role": DEVICE_BY_ID[k]["role"],
+                 "status": DEVICE_BY_ID[k].get("status") or "UP"}
                 for k, v in seen.items() if k != device_id]
     affected.sort(key=lambda r: (r["hops"], r["device_id"]))
     return {"device_id": device_id, "max_hops": max_hops, "affected": affected}
@@ -134,10 +136,28 @@ def topology_graph() -> dict:
     return {"source": SOURCE, "nodes": [_public(d) for d in DEVICES], "links": LINKS}
 
 
+def interfaces(device_id: str) -> list[str]:
+    """device_id につながるリンクに出てくる、その機器側のインタフェース名（Web の編集画面の選択肢）。
+    機器にインタフェースの一覧は無い（devices.yaml に持たない）ので、いま使われているものだけ"""
+    names = {l["a_if"] if l["a"] == device_id else l["b_if"] for l in LINKS if device_id in (l["a"], l["b"])}
+    return sorted(n for n in names if n)
+
+
+def link_choices() -> list[tuple[str, str]]:
+    """Web の削除用。(表示, 値) の並びで、値は "a|a_if|b"（graph.remove_link の引数に戻す。機器名と IF 名に | は無い）"""
+    out = []
+    for l in LINKS:
+        extra = l.get("kind") or ""
+        if l.get("role"):
+            extra += " " + l["role"]
+        out.append((f'{l["a"]} {l["a_if"]} - {l["b"]} {l["b_if"]}  [{extra}]', f'{l["a"]}|{l["a_if"] or ""}|{l["b"]}'))
+    return out
+
+
 TOOL_SPECS = [
     {"toolSpec": {
         "name": "list_devices",
-        "description": "監視対象ネットワークの機器一覧（拠点 site、役割 role、管理 IP、AS 番号）。site や role で絞れる。",
+        "description": "監視対象ネットワークの機器一覧（拠点 site、役割 role、管理 IP、AS 番号、いまの状態 status = UP / DOWN / ALARM）。site や role で絞れる。",
         "inputSchema": {"json": {"type": "object", "properties": {
             "site": {"type": "string", "description": "拠点名で絞る（hq / dc / br1 / br2 / carrier）。空なら全部"},
             "role": {"type": "string", "description": "役割で絞る（pe / ce / host）。空なら全部"},
@@ -145,14 +165,14 @@ TOOL_SPECS = [
     }},
     {"toolSpec": {
         "name": "neighbors",
-        "description": "機器の隣接（接続先の機器、両端のインタフェース名、回線の種別 ebgp/ibgp/l2、主副、帯域）。",
+        "description": "機器の隣接（接続先の機器、両端のインタフェース名、回線の種別 ebgp/ibgp/l2、主副、帯域、回線のいまの状態 status = UP / DOWN）。",
         "inputSchema": {"json": {"type": "object", "required": ["device_id"], "properties": {
             "device_id": {"type": "string", "description": "機器名（例 hq-ce-01）"},
         }}},
     }},
     {"toolSpec": {
         "name": "blast_radius",
-        "description": "機器が停止したときに影響が及ぶ範囲（指定ホップ数以内の機器と拠点）。",
+        "description": "機器が停止したときに影響が及ぶ範囲（指定ホップ数以内の機器と拠点。各機器のいまの状態 status 付き）。",
         "inputSchema": {"json": {"type": "object", "required": ["device_id"], "properties": {
             "device_id": {"type": "string", "description": "停止を想定する機器名"},
             "max_hops": {"type": "integer", "description": "何ホップ先まで見るか（既定 2、最大 6）"},

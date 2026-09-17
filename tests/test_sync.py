@@ -1,0 +1,114 @@
+"""Neptune へのトポロジ同期の模擬テスト（AWS に触れない）。
+lab/lab_topology.py が lab の定義（wvs2.clab.yml.in + frr/*.conf）から作る機器と回線が agent/data の静的データと同じであること
+（PyYAML があるときと無いときの両方）、graph/status_handler.py が AnomalyOpened / AnomalyResolved を graph.set_status に正しく写すこと、
+terraform/graph の sync.tf がその配線を持つこと。実行は uv run --group dev python tests/test_sync.py"""
+import builtins, importlib.util, json, os, re, sys, types
+
+ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
+sys.path.insert(0, os.path.join(ROOT, "agent"))
+passed = 0
+
+
+def check(name, cond):
+    global passed
+    assert cond, name
+    passed += 1
+    print("ok", name)
+
+
+def load(path, name):
+    spec = importlib.util.spec_from_file_location(name, os.path.join(ROOT, path))
+    m = importlib.util.module_from_spec(spec); sys.modules[name] = m; spec.loader.exec_module(m); return m
+
+
+def read(*p):
+    with open(os.path.join(ROOT, *p), encoding="utf-8") as f:
+        return f.read()
+
+
+# ---- lab → トポロジ
+lt = load("lab/lab_topology.py", "lab_topology")
+topology = load("agent/topology.py", "topology")   # graph は未配備（環境変数もパラメータも無い）なので静的データ
+static_devices, static_links = topology.load_static()
+DEV_KEYS = ("hostname", "site", "role", "asn", "mgmt_ip", "enabled")
+
+
+def same(devices, links):
+    sd = {d["device_id"]: d for d in static_devices}
+    if {d["device_id"] for d in devices} != set(sd):
+        return False
+    for d in devices:
+        if any(d.get(k) != sd[d["device_id"]].get(k) for k in DEV_KEYS):
+            return False
+    key = lambda l: (l["a"], l["a_if"], l["b"], l["b_if"], l["kind"], l.get("role"), l.get("bandwidth_mbps"))
+    return sorted(map(key, links)) == sorted(map(key, static_links))
+
+
+devices, links = lt.load(os.path.join(ROOT, "lab"))
+check("lab の定義から 10 台と 10 本", len(devices) == 10 and len(links) == 10)
+check("機器（hostname / site / role / asn / mgmt_ip / enabled）が agent/data の静的データと同じ", same(devices, static_links))
+check("回線（両端の IF / 種別 / 主副 / 帯域）が agent/data の静的データと同じ", same(static_devices, links))
+check("回線は a < b に正規化", all(l["a"] < l["b"] for l in links))
+check("snmpd のサイドカーは機器に数えず、相乗り先が監視対象", all(d["enabled"] == (d["role"] == "ce") for d in devices))
+check("帯域は FRR の description の 1G / 100M / 10G から", lt.bandwidth_mbps("core 10G") == 10000 and lt.bandwidth_mbps("WAN 100M") == 100
+      and lt.bandwidth_mbps("LAN") is None and lt.bandwidth_mbps("to pe-01 2.5G") == 2500)
+check("主副は description の primary / secondary から", lt.link_role("WAN secondary to x") == "secondary" and lt.link_role("hq-ce-01 primary access") == "primary" and lt.link_role("LAN") is None)
+check("FRR の設定から asn と interface の description", lt.parse_frr("frr version 10\ninterface eth1\n description a 1G\n!\nrouter bgp 65001\n neighbor x remote-as 65000\n")
+      == {"asn": 65001, "interfaces": {"eth1": {"description": "a 1G"}}})
+
+# PyYAML が無い PC（ops/up.sh を打つ手元の python3）でも同じになる
+real_import = builtins.__import__
+def no_yaml(name, *a, **k):
+    if name == "yaml":
+        raise ImportError("no yaml")
+    return real_import(name, *a, **k)
+builtins.__import__ = no_yaml
+try:
+    d2, l2 = lt.load(os.path.join(ROOT, "lab"))
+finally:
+    builtins.__import__ = real_import
+check("PyYAML が無くても同じ結果（自前の読み取り）", d2 == devices and l2 == links)
+check("自前の YAML 読み取りはコメント・引用符・真偽値・数値・flow list を読む",
+      lt.load_yaml('a: "x # y"  # c\nb: [p, "q"]\nc:\n  - d: 1\n    e: true\n  - f\n') == {"a": "x # y", "b": ["p", "q"], "c": [{"d": 1, "e": True}, "f"]})
+check("CLI は {devices, links} の JSON を出す", "json.dump" in read("lab", "lab_topology.py") and '"devices": devices, "links": links' in read("lab", "lab_topology.py"))
+
+# ---- ops/up.sh 8-2 と ops/sync-graph.sh は lab から作って base64 で渡す
+up = read("ops", "up.sh"); sync = read("ops", "sync-graph.sh"); seed = read("ops", "seed_graph.py")
+check("up.sh 8-2 は lab/lab_topology.py の出力を LAB_TOPOLOGY_B64 で seed_graph.py に渡す", "lab/lab_topology.py lab | base64" in up and "LAB_TOPOLOGY_B64=$LAB_TOPOLOGY_B64 /usr/bin/python3.13 -" in up)
+check("sync-graph.sh は --replace で GRAPH_REPLACE=1、--dry-run は Neptune に触らない", "GRAPH_REPLACE=${REPLACE:-0}" in sync and "--replace) REPLACE=1" in sync and 'if [ -n "$DRY" ]; then printf' in sync)
+check("seed_graph.py は LAB_TOPOLOGY_B64 を読み、GRAPH_REPLACE=1 のときだけ入れ直す", 'os.environ.get("LAB_TOPOLOGY_B64")' in seed and 'os.environ.get("GRAPH_REPLACE") != "1"' in seed)
+
+# ---- status Lambda（graph.set_status を差し替えて呼び出しを見る）
+calls = []
+fake_graph = types.ModuleType("graph")
+fake_graph.set_status = lambda dev, ifn="", status="DOWN": (calls.append((dev, ifn, status)) or {"updated": 1})
+sys.modules["graph"] = fake_graph
+h = load("graph/status_handler.py", "status_handler")
+ev = lambda t, **d: {"detail-type": t, "source": "netops.spark", "detail": d}
+h.handler(ev("AnomalyOpened", anomaly_id="hq-ce-01#link_down#eth1", device_id="hq-ce-01", kind="link_down", target="eth1"))
+check("AnomalyOpened の link_down は機器の IF の回線を DOWN", calls[-1] == ("hq-ce-01", "eth1", "DOWN"))
+h.handler(ev("AnomalyResolved", anomaly_id="hq-ce-01#link_down#eth1", device_id="hq-ce-01", kind="link_down", target="eth1"))
+check("AnomalyResolved は同じ回線を UP", calls[-1] == ("hq-ce-01", "eth1", "UP"))
+h.handler(ev("AnomalyOpened", device_id="hq-ce-01", kind="trap", target=".1.3.6.1.6.3.1.1.5.1"))
+check("それ以外の trap は機器を ALARM", calls[-1] == ("hq-ce-01", "", "ALARM"))
+h.handler(ev("AnomalyResolved", device_id="hq-ce-01", kind="trap", target="x"))
+check("trap の解消は機器を UP", calls[-1] == ("hq-ce-01", "", "UP"))
+h.handler(ev("AnomalyOpened", device_id="hq-ce-01", kind="link_down", target="?"))
+check("IF が分からない linkDown は機器に付ける", calls[-1] == ("hq-ce-01", "", "DOWN"))
+n = len(calls)
+check("機器が無い・知らない detail-type は何もしない", "ignored" in h.handler(ev("AnomalyOpened", device_id="?", kind="link_down", target="eth1"))
+      and "ignored" in h.handler(ev("Other", device_id="hq-ce-01")) and len(calls) == n)
+check("detail が JSON 文字列でも読む", h.handler({"detail-type": "AnomalyOpened", "detail": json.dumps({"device_id": "dc-ce-01", "kind": "link_down", "target": "eth2"})})
+      == {"updated": 1} and calls[-1] == ("dc-ce-01", "eth2", "DOWN"))
+
+# ---- terraform/graph の配線
+tf = read("terraform", "graph", "sync.tf")
+check("sync.tf は status_handler.py を index.py、agent/graph.py を graph.py で zip にする", 'graph/status_handler.py")' in tf and 'filename = "index.py"' in tf and 'agent/graph.py")' in tf and 'filename = "graph.py"' in tf)
+check("EventBridge のルールは netops.spark の AnomalyOpened と AnomalyResolved", re.search(r'source\s*=\s*\["netops.spark"\]', tf) and '"detail-type" = ["AnomalyOpened", "AnomalyResolved"]' in tf)
+check("Lambda は VPC の中で NEPTUNE_ENDPOINT を環境変数で持ち、ロググループは retention 付き",
+      "vpc_config" in tf and "NEPTUNE_ENDPOINT = " in tf and "retention_in_days = var.log_retention_days" in tf)
+check("Lambda の SG は Neptune の 8182 へ出て、Neptune の SG がそこからの 8182 を受ける", 'resource "aws_vpc_security_group_egress_rule" "status_to_neptune"' in tf and 'resource "aws_vpc_security_group_ingress_rule" "neptune_from_status"' in tf)
+check("Lambda のロールは neptune-db の Read / Write だけ", '"neptune-db:WriteDataViaQuery"' in tf and "DeleteDataViaQuery" not in tf)
+check("EventBridge から Lambda を呼ぶ permission", 'principal     = "events.amazonaws.com"' in tf and "source_arn    = aws_cloudwatch_event_rule.status.arn" in tf)
+check("variables.tf に log_retention_days", 'variable "log_retention_days"' in read("terraform", "graph", "variables.tf"))
+print(f"通過 {passed} / 失敗 0")

@@ -32,7 +32,7 @@ class FakeClient:
             raise r
         return r
 
-boto3 = types.ModuleType("boto3"); boto3.client = lambda name, region_name=None: FakeClient(name)
+boto3 = types.ModuleType("boto3"); boto3.client = lambda name, **kw: FakeClient(name)
 botocore = types.ModuleType("botocore"); exc = types.ModuleType("botocore.exceptions")
 exc.ClientError = ClientError; exc.BotoCoreError = BotoCoreError; botocore.exceptions = exc
 bac = types.ModuleType("bedrock_agentcore")
@@ -50,13 +50,14 @@ class AWSRequest:
     def __init__(self, **kw): self.headers = {}
     def prepare(self): return self
 auth.SigV4Auth = SigV4Auth; awsreq.AWSRequest = AWSRequest; botocore.auth = auth; botocore.awsrequest = awsreq
+cfg = types.ModuleType("botocore.config"); cfg.Config = lambda **kw: kw; botocore.config = cfg
 sys.modules.update({"boto3": boto3, "botocore": botocore, "botocore.exceptions": exc, "botocore.auth": auth,
-                    "botocore.awsrequest": awsreq, "bedrock_agentcore": bac})
+                    "botocore.awsrequest": awsreq, "botocore.config": cfg, "bedrock_agentcore": bac})
 
 RERANK_ARN = "arn:aws:bedrock:ap-northeast-1::foundation-model/amazon.rerank-v1:0"
 
-def load(guardrail="gr123", rerank=""):
-    os.environ.update({"MODEL_ID": "m", "KNOWLEDGE_BASE_ID": "KB12345678", "NUMBER_OF_RESULTS": "3", "GUARDRAIL_VERSION": "1"})
+def load(guardrail="gr123", rerank="", kb="KB12345678"):
+    os.environ.update({"MODEL_ID": "m", "KNOWLEDGE_BASE_ID": kb, "NUMBER_OF_RESULTS": "3", "GUARDRAIL_VERSION": "1"})
     os.environ["GUARDRAIL_ID"] = guardrail
     os.environ.pop("NUMBER_OF_RERANKED_RESULTS", None)
     if rerank:
@@ -119,6 +120,15 @@ state.update(retrieve=RET, converse=BotoCoreError("x"), calls=[])
 r = app.invoke({"prompt": "q"})
 check("Converse 失敗は error で履歴に残らない", r["status"] == "error" and len(app.history) == n)
 
+# KNOWLEDGE_BASE_ID が空（terraform/agent の create_knowledge_base = false。既定）なら Retrieve を呼ばずに答える
+app_nokb = load(kb="")
+state.update(retrieve=ClientError("must not be called"), converse=ok_converse("資料なしの回答"), calls=[])
+r = app_nokb.invoke({"prompt": "q"})
+check("KNOWLEDGE_BASE_ID が空なら Retrieve を呼ばず Converse だけで答える（参照なし）",
+      r["status"] == "success" and r["response"] == "資料なしの回答" and r["sources"] == []
+      and [c[0] for c in state["calls"]] == ["converse"] and "見つからなかった" in state["calls"][0][1]["messages"][-1]["content"][0]["text"])
+check("app.py は KNOWLEDGE_BASE_ID を任意にする（既定は空）", 'os.environ.get("KNOWLEDGE_BASE_ID", "")' in open(APP_PATH).read())
+
 app.history.clear()
 state.update(retrieve=RET, converse=ok_converse("a"))
 for i in range(15):
@@ -156,6 +166,12 @@ check("run_tool は余計な引数を捨てる", t.run_tool("list_devices", {"si
 check("全体図はノード 10 リンク 10", len(t.topology_graph()["nodes"]) == 10 and len(t.topology_graph()["links"]) == 10)
 check("Neptune が無ければ元データは static", t.SOURCE == "static" and t.topology_graph()["source"] == "static" and not app.graph.configured())
 check("load_static は asn を機器に足す", any(d.get("asn") for d in t.load_static()[0]))
+check("interfaces は機器につながるリンクの自分側の IF 名", t.interfaces("hq-ce-01") == ["eth1", "eth2", "eth3"] and t.interfaces("carrier-pe-02") == ["eth1", "eth2", "eth3", "eth5"])
+check("interfaces は知らない機器なら空", t.interfaces("nope") == [] and t.interfaces("") == [])
+lc = t.link_choices()
+check("link_choices は 10 本の (表示, a|a_if|b)", len(lc) == 10 and ("carrier-pe-01 eth1 - hq-ce-01 eth1  [ebgp primary]", "carrier-pe-01|eth1|hq-ce-01") in lc)
+check("役割の無いリンクは種別だけ", ("hq-ce-01 eth3 - hq-host-01 eth1  [l2]", "hq-ce-01|eth3|hq-host-01") in lc)
+check("link_choices の値は remove_link の引数に戻せる", all(v.count("|") == 2 and v.split("|")[0] < v.split("|")[2] for _, v in lc))
 a = app.anomalies
 check("異常一覧はテーブル未設定なら error と空リスト", a.list_anomalies()["anomalies"] == [] and "terraform/stream" in a.list_anomalies()["error"])
 check("app.run_tool は list_anomalies を anomalies に振る", "error" in app.run_tool("list_anomalies", {"status": "open"}) and app.run_tool("list_devices", {})["count"] == 10)

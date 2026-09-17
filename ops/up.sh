@@ -1,45 +1,52 @@
 #!/usr/bin/env bash
-# deploy.env の PHASE で指定したフェーズまでを 1 本で起こす。
-#   フェーズ 1（既定）  LLM + RAG で対話する。ECR・イメージ・本体・Web（README の手順 1〜5・7）
-#   フェーズ 2          フェーズ 1 に、データパイプライン lab（containerlab + Telegraf）→ stream（MSK）
-#                       → analytics（Spark on EMR Serverless → S3 Tables / OpenSearch / Prometheus、異常検知 → DynamoDB + EventBridge）と、
-#                       graph（Neptune のトポロジと投入）を足す
-#   フェーズ 3          フェーズ 2 に workflow（Temporal on ECS Fargate のワーカー + AgentCore Gateway（MCP）+ EventBridge → SQS）を足す。
-#                       Spark の検知が EventBridge → SQS で届き、エージェントが Neptune / OpenSearch / Prometheus を見て原因を調べて修復案を出し、
-#                       Web の「承認」タブで人が承認すると Temporal が lab で直す
+# deploy.env の PIPELINE / AGENT / WORKFLOW で選んだ機能を 1 本で起こす。機能は互いに独立で、要るものだけ作る（費用を抑えるため）。
+#   土台（必ず作る）  ecr + main（VPC / Web の EC2 / バケット / ロール。README の手順 1〜3・5・7）。約 $0.05/h
+#   AGENT（既定 1）   agent での分析。terraform/agent（AgentCore Runtime + ガードレール + Runtime のエンドポイント。CREATE_KB=1 なら Knowledge Base も）。
+#                     Web の「チャット」タブが使える
+#   PIPELINE          データパイプライン。lab（containerlab + Telegraf）→ stream（MSK）→ analytics（Spark on EMR Serverless → S3 Tables / OpenSearch / Prometheus、
+#                     異常検知 → DynamoDB + EventBridge）と graph（Neptune のトポロジと投入）。Web の「トポロジ」「異常一覧」タブが動く
+#   WORKFLOW          Temporal での実行。workflow（Temporal on ECS Fargate のワーカー + AgentCore Gateway（MCP）+ EventBridge → SQS）。
+#                     Spark の検知が EventBridge → SQS で届き、エージェントが Neptune / OpenSearch / Prometheus を見て原因を調べて修復案を出し、
+#                     Web の「承認」タブで人が承認すると Temporal が lab で直す。AGENT と PIPELINE（lab / stream / analytics）が要る
 # 毎日全部消す運用向け。何度打っても同じ状態に収束する（できているものは Terraform が差分なしで飛ばし、ECR にあるタグはビルドしない）。
+# あとから別の機能を 1 にして打ち直せば、その機能だけ足される（土台と他の機能は作り直さない）。
 # Terraform の state はこの PC のリポジトリの中（terraform/<ルート>/terraform.tfstate）に置く。消すのは ops/down.sh。
 #
 # 使い方（リポジトリの直下で。aws-vault なら `aws-vault exec <プロファイル> --no-session` のサブシェルの中で）:
-#   cp deploy.env.example deploy.env  # 初回だけ。どこまで作るかを deploy.env に書く（無ければ既定のフェーズ 1 で動く）
+#   cp deploy.env.example deploy.env  # 初回だけ。どの機能を作るかを deploy.env に書く（無ければ既定の AGENT=1 だけで動く）
 #   ops/up.sh                         # deploy.env のとおりに作る。最後にポートフォワーディングを開いたまま止まる（Ctrl+C で閉じる）
-#   PHASE=2 ops/up.sh                 # その回だけ変える（環境変数は deploy.env より優先）。初回はフェーズ 2 で 40〜60 分（MSK の作成が長い）
+#   PIPELINE=1 ops/up.sh              # その回だけ変える（環境変数は deploy.env より優先）。初回は PIPELINE で 40〜60 分（MSK の作成が長い）
 #   DEPLOY_ENV_FILE=<パス> ops/up.sh  # 別の設定ファイルを読む
 #
-# どのフェーズも時間課金（試算は README「1 時間起動したときの試算」）。使い終わったら当日中に ops/down.sh を打つ。
-# PHASE を下げて打っても、前に作ったルートは消さない（消すのは ops/down.sh）。
+# どの機能も時間課金（試算は README「1 時間起動したときの試算」）。使い終わったら当日中に ops/down.sh を打つ。
+# 機能を 0 にして打っても、前に作ったルートは消さない（消すのは ops/down.sh）。
 #
 # 設定できるキー（deploy.env か環境変数。全部任意。意味は deploy.env.example、読み方は ops/deploy-env.sh）:
-#   PHASE                   どこまで作るか。1（既定）か 2 か 3（3 は 2 の全部 + workflow。lab と stream が要るので SKIP_LAB / SKIP_STREAM は書けない）
-#   SKIP_LAB=1              PHASE=2 で lab を作らない（stream は lab が要るので SKIP_STREAM=1 も要る）
-#   SKIP_STREAM=1           PHASE=2 で stream と analytics（stream の Kafka を読む）を作らない
-#   SKIP_ANALYTICS=1        PHASE=2 で analytics（Spark → S3 Tables / OpenSearch / Prometheus と異常検知）を作らない。「異常一覧」は使えない
+#   AGENT=1                 agent での分析（既定 1）。terraform/agent を作る
+#   PIPELINE=1              データパイプライン（既定 0）。lab / stream / analytics / graph を作る（SKIP_* で減らせる）
+#   WORKFLOW=1              Temporal での実行（既定 0）。workflow を作る。AGENT と PIPELINE が要り、SKIP_LAB / SKIP_STREAM / SKIP_ANALYTICS は書けない
+#   CREATE_KB=1             AGENT=1 で Knowledge Base（OpenSearch Serverless。+$0.36/h）も作る（既定 0）
+#   PHASE                   古い書き方（1 → AGENT=1、2 → AGENT=1 PIPELINE=1、3 → 全部 1）。読み替えて注意を出す。上の 3 つと同時には書けない
+#   SKIP_LAB=1              PIPELINE=1 で lab を作らない（stream は lab が要るので SKIP_STREAM=1 も要る）
+#   SKIP_STREAM=1           PIPELINE=1 で stream と analytics（stream の Kafka を読む）を作らない
+#   SKIP_ANALYTICS=1        PIPELINE=1 で analytics（Spark → S3 Tables / OpenSearch / Prometheus と異常検知）を作らない。「異常一覧」は使えない
 #   SINKS=iceberg,opensearch,prometheus
 #                           analytics の Spark の格納先（カンマ区切り。既定は 3 つ全部。iceberg = 全トピック → S3 Tables、opensearch = traps → OpenSearch Serverless、
 #                           prometheus = metrics → Amazon Managed Service for Prometheus。terraform/analytics の var.sinks に渡す。
 #                           2026-09-17 ユーザー決定「SINKS に opensearch と prometheus を入れる。KB のコレクションと OCU を共有できなくても入れる」）
-#   SKIP_GRAPH=1            PHASE=2 で graph（Neptune）を作らない
+#   SKIP_GRAPH=1            PIPELINE=1 で graph（Neptune）を作らない
 #   CREATE_S3_SINK=0        MSK Connect の S3 sink を作らない（Confluent の zip が取れないとき。ops/down.sh は state を見て合わせる）
-#   IMAGE_TAG               エージェント（PHASE=3 ではワーカーも）のイメージのタグ。既定 v1。ECR にそのタグが無いときだけ PC の docker buildx でビルドして push する（タグは上書きできない）
-#   ADMIN_ARN               terraform/main の kb_admin_principal_arn。既定は空（Terraform が今の認証情報から決める）
+#   IMAGE_TAG               エージェント（WORKFLOW=1 ではワーカーも）のイメージのタグ。既定 v1。ECR にそのタグが無いときだけ PC の docker buildx でビルドして push する（タグは上書きできない）
+#   ADMIN_ARN               terraform/agent の kb_admin_principal_arn（CREATE_KB=1 のとき）。既定は空（Terraform が今の認証情報から決める）
 #   VPC_CIDR                terraform/main の vpc_cidr（社内と重なるとき）
 #   CLIENT_CIDR             terraform/main の client_cidr（DX / VPN 経由のとき）
-#   OPENSEARCH_CACERT_FILE  terraform/main の opensearch_cacert_file（社内の SSL 検査の CA の PEM）。既定は AWS_CA_BUNDLE と同じ
+#   OPENSEARCH_CACERT_FILE  terraform/agent の opensearch_cacert_file（社内の SSL 検査の CA の PEM）。既定は AWS_CA_BUNDLE と同じ
 #   LOCAL_PORT              PC 側のポート。既定 8080
 #   NO_PORTFORWARD=1        ポートフォワーディングを開かずに終わる
 #   AWS_PROFILE / AWS_CA_BUNDLE  AWS CLI と terraform がそのまま読む
-# SKIP_LAB / SKIP_STREAM / SKIP_ANALYTICS / SKIP_GRAPH / NO_PORTFORWARD は 1 / 0 のほか true / false、yes / no でも書ける（CREATE_S3_SINK と ops/down.sh の KEEP_ECR は 1 か 0 だけ）。
-# WITH_LAB は 2026-09-16 に、WITH_STREAM は 2026-09-17 に無くなった（lab も stream もフェーズ 2 に入り、外すときは SKIP_* で書く）。
+# AGENT / PIPELINE / WORKFLOW / CREATE_KB / SKIP_* / NO_PORTFORWARD は 1 / 0 のほか true / false、yes / no でも書ける（CREATE_S3_SINK と ops/down.sh の KEEP_ECR は 1 か 0 だけ）。
+# WITH_LAB は 2026-09-16 に、WITH_STREAM は 2026-09-17 に無くなった（lab も stream も PIPELINE に入り、外すときは SKIP_* で書く）。
+# フェーズ（PHASE）で分ける運用は 2026-09-17 に機能で分ける運用に変えた（docs/phases.md）。
 #
 # 手順 6（利用者への権限）は人に渡す作業なので入れていない。
 set -euo pipefail
@@ -79,7 +86,7 @@ cd "$(dirname "$0")/.."
 
 log()  { printf '\n\033[1;34m== %s\033[0m\n' "$*"; }
 die()  { printf '\033[1;31mNG: %s\033[0m\n' "$*" >&2; exit 1; }
-# terraform に渡す認証情報。terraform/main の opensearch provider は古い AWS SDK（Go v1）で、`aws login` で入ったプロファイル
+# terraform に渡す認証情報。terraform/agent の opensearch provider は古い AWS SDK（Go v1）で、`aws login` で入ったプロファイル
 # （login_session）を読めずに NoCredentialProviders で落ちる。鍵が環境変数に無い（= プロファイルから読む）ときは、AWS CLI から
 # 資格情報を受け取る credential_process だけのプロファイルを一時ファイルに書き、terraform にはそちらを読ませる
 # （AWS CLI ユーザーガイド「Sharing Login credentials as process credentials」の形。15 分ごとの更新は CLI が続ける）
@@ -172,7 +179,7 @@ GRAPH_PID=""
 GRAPH_LOG=ops/logs/graph-apply.log
 on_exit() {  # 途中で止まっても、バックグラウンドの graph の apply は終わるまで待つ（打ち直したときに state のロックでぶつからないように）
   if [ -n "$GRAPH_PID" ] && kill -0 "$GRAPH_PID" 2>/dev/null; then
-    printf '\n%s\n' "terraform/graph の apply がまだ動いているので、終わるまで待つ（ログ: $GRAPH_LOG）。このターミナルは閉じない" >&2
+    printf '\n%s\n' "terraform/graph の apply がまだ動いているので、終わるまで待つ（ログ: ${GRAPH_LOG}）。このターミナルは閉じない" >&2
     wait "$GRAPH_PID" || true
   fi
   if [ -n "$TF_AWS_CONFIG" ]; then rm -f "$TF_AWS_CONFIG"; fi
@@ -187,7 +194,7 @@ LOCAL_PORT="${LOCAL_PORT:-8080}"
 CREATE_S3_SINK="${CREATE_S3_SINK:-1}"
 case "$CREATE_S3_SINK" in
   0|1) ;;
-  *) die "CREATE_S3_SINK は 1（作る。既定）か 0（作らない）（いまは「$CREATE_S3_SINK」）。まだ何も作っていない" ;;
+  *) die "CREATE_S3_SINK は 1（作る。既定）か 0（作らない）（いまは「${CREATE_S3_SINK}」）。まだ何も作っていない" ;;
 esac
 # analytics の Spark の格納先。terraform/analytics の var.sinks（list）にするので ["iceberg","opensearch"] の形に組む
 SINKS="${SINKS:-iceberg,opensearch,prometheus}"
@@ -196,52 +203,79 @@ SINKS_TF=""
 for s in $(printf '%s' "$SINKS" | tr ',' ' '); do
   case "$s" in
     iceberg|opensearch|prometheus) SINKS_TF="$SINKS_TF${SINKS_TF:+,}\"$s\"" ;;
-    *) die "SINKS は iceberg / opensearch / prometheus のカンマ区切り（いまは「$SINKS」）。まだ何も作っていない" ;;
+    *) die "SINKS は iceberg / opensearch / prometheus のカンマ区切り（いまは「${SINKS}」）。まだ何も作っていない" ;;
   esac
 done
 [ -n "$SINKS_TF" ] || die "SINKS が空。iceberg / opensearch / prometheus を 1 つ以上（既定は 3 つ全部）。まだ何も作っていない"
 if [ -n "${WITH_LAB:-}" ]; then
-  die "WITH_LAB は無くなった（lab はフェーズ 2 に入った）。lab だけ作るなら PHASE=2 と SKIP_STREAM=1 と SKIP_GRAPH=1。まだ何も作っていない"
+  die "WITH_LAB は無くなった（lab は PIPELINE に入った）。lab だけ作るなら PIPELINE=1 と SKIP_STREAM=1 と SKIP_GRAPH=1。まだ何も作っていない"
 fi
 if [ -n "${WITH_STREAM:-}" ]; then
-  die "WITH_STREAM は無くなった（2026-09-17。stream はフェーズ 2 に入った）。PHASE=2 で作り、要らないときは SKIP_STREAM=1 を書く。まだ何も作っていない"
+  die "WITH_STREAM は無くなった（2026-09-17。stream は PIPELINE に入った）。PIPELINE=1 で作り、要らないときは SKIP_STREAM=1 を書く。まだ何も作っていない"
 fi
 flag_value SKIP_LAB; flag_value SKIP_STREAM; flag_value SKIP_ANALYTICS; flag_value SKIP_GRAPH; flag_value NO_PORTFORWARD
-# どこまで作るか。後のフェーズは前のフェーズの state を読むので、指定したフェーズまでを順に作る
-PHASE="${PHASE:-1}"
-WORKFLOW=""
-case "$PHASE" in
-  1)
-    SKIP_LAB=1; SKIP_STREAM=1; SKIP_ANALYTICS=1; SKIP_GRAPH=1 ;;
-  2)
-    if [ -n "$SKIP_LAB" ] && [ -z "$SKIP_STREAM" ]; then
-      die "stream は lab が要る（Telegraf が lab の EC2 で動き、terraform/stream は lab の state から SG とロールを読む）。SKIP_LAB を外すか SKIP_STREAM=1 も書く。まだ何も作っていない"
-    fi
-    if [ -n "$SKIP_STREAM" ] && [ -z "$SKIP_ANALYTICS" ]; then
-      echo "SKIP_STREAM=1 なので analytics も作らない（読む Kafka が無い）"
-      SKIP_ANALYTICS=1
-    fi
-    if [ -n "$SKIP_LAB" ] && [ -n "$SKIP_GRAPH" ]; then
-      echo "SKIP_LAB と SKIP_STREAM と SKIP_GRAPH があるので、フェーズ 1 と同じものだけ作る"
-    fi ;;
-  3)
-    if [ -n "$SKIP_LAB" ] || [ -n "$SKIP_STREAM" ] || [ -n "$SKIP_ANALYTICS" ]; then
-      die "フェーズ 3 は lab と stream と analytics が要る（analytics の Spark が異常を検知して EventBridge に出し、ワーカーが stream の異常テーブルを読み、lab の EC2 で直す）。SKIP_LAB / SKIP_STREAM / SKIP_ANALYTICS を外す。まだ何も作っていない"
-    fi
-    WORKFLOW=1 ;;
-  2B|2b) die "フェーズ 2B は 2026-09-17 にフェーズ 2 に入った（Spark → S3 Tables は PHASE=2 の analytics）。PHASE=2 にする" ;;
-  5A|5a|5B|5b) die "フェーズ $PHASE は 2026-09-17 にフェーズ 3 にまとまった（docs/phases.md）。PHASE=3 にする" ;;
-  4) die "フェーズ 4 は無い（フェーズ 1 に取り込み済み。docs/phases.md）。PHASE=1 か PHASE=2 にする" ;;
-  *) die "PHASE は 1 か 2 か 3（いまは「$PHASE」）" ;;
-esac
+# どの機能を作るか。PHASE は古い書き方で、機能に読み替える（2026-09-17 まで。docs/phases.md）
+if [ -n "${PHASE:-}" ]; then
+  if [ -n "${PIPELINE:-}${AGENT:-}${WORKFLOW:-}" ]; then
+    die "PHASE と PIPELINE / AGENT / WORKFLOW は同時に書けない。PHASE の行を消す（1 → AGENT=1、2 → AGENT=1 PIPELINE=1、3 → 全部 1）。まだ何も作っていない"
+  fi
+  case "$PHASE" in
+    1) AGENT=1; PIPELINE=0; WORKFLOW=0 ;;
+    2) AGENT=1; PIPELINE=1; WORKFLOW=0 ;;
+    3) AGENT=1; PIPELINE=1; WORKFLOW=1 ;;
+    2B|2b) die "フェーズ 2B は 2026-09-17 にフェーズ 2 に入った（Spark → S3 Tables は PIPELINE の analytics）。PIPELINE=1 にする" ;;
+    5A|5a|5B|5b) die "フェーズ $PHASE は 2026-09-17 にフェーズ 3 にまとまった（docs/phases.md）。WORKFLOW=1 にする" ;;
+    4) die "フェーズ 4 は無い（agent に取り込み済み。docs/phases.md）。AGENT=1（既定）にする" ;;
+    *) die "PHASE は 1 か 2 か 3（いまは「${PHASE}」）。いまは PIPELINE / AGENT / WORKFLOW で書く" ;;
+  esac
+  printf '\033[1;33m%s\033[0m\n' "PHASE=$PHASE は古い書き方。AGENT=$AGENT PIPELINE=$PIPELINE WORKFLOW=$WORKFLOW と読み替えた。deploy.env をこの形に書き換える（deploy.env.example）"
+fi
+AGENT="${AGENT:-1}"
+flag_value AGENT; flag_value PIPELINE; flag_value WORKFLOW; flag_value CREATE_KB
+if [ -n "$WORKFLOW" ]; then
+  if [ -z "$AGENT" ]; then
+    die "WORKFLOW は AGENT が要る（ワーカーがエージェントの Runtime を呼ぶ。terraform/workflow は terraform/agent の state から ARN を読む）。AGENT=1 にする。まだ何も作っていない"
+  fi
+  if [ -z "$PIPELINE" ]; then
+    die "WORKFLOW は PIPELINE が要る（analytics の Spark が異常を検知して EventBridge に出し、ワーカーが stream の異常テーブルを読み、lab の EC2 で直す）。PIPELINE=1 にする。まだ何も作っていない"
+  fi
+  if [ -n "$SKIP_LAB" ] || [ -n "$SKIP_STREAM" ] || [ -n "$SKIP_ANALYTICS" ]; then
+    die "WORKFLOW は lab と stream と analytics が要る。SKIP_LAB / SKIP_STREAM / SKIP_ANALYTICS を外す。まだ何も作っていない"
+  fi
+fi
+if [ -n "$PIPELINE" ]; then
+  if [ -n "$SKIP_LAB" ] && [ -z "$SKIP_STREAM" ]; then
+    die "stream は lab が要る（Telegraf が lab の EC2 で動き、terraform/stream は lab の state から SG とロールを読む）。SKIP_LAB を外すか SKIP_STREAM=1 も書く。まだ何も作っていない"
+  fi
+  if [ -n "$SKIP_STREAM" ] && [ -z "$SKIP_ANALYTICS" ]; then
+    echo "SKIP_STREAM=1 なので analytics も作らない（読む Kafka が無い）"
+    SKIP_ANALYTICS=1
+  fi
+  if [ -n "$SKIP_LAB" ] && [ -n "$SKIP_GRAPH" ]; then
+    echo "SKIP_LAB と SKIP_STREAM と SKIP_GRAPH があるので、PIPELINE=1 でも土台だけになる"
+  fi
+else
+  SKIP_LAB=1; SKIP_STREAM=1; SKIP_ANALYTICS=1; SKIP_GRAPH=1
+fi
+if [ -z "$AGENT" ] && [ -n "$CREATE_KB" ]; then
+  echo "AGENT=0 なので CREATE_KB は効かない（Knowledge Base は agent の一部）"
+  CREATE_KB=""
+fi
+if [ -z "$AGENT$PIPELINE$WORKFLOW" ]; then
+  echo "機能が全部 0 なので土台（ecr + main）だけ作る（Web は「チャット」で「配備されていない」と返す）"
+fi
 command -v aws >/dev/null || die "aws CLI が無い（README「WSL2 の準備」）"
 command -v terraform >/dev/null || die "terraform が無い（README「WSL2 の準備」。1.11 以上）"
 if command -v python3 >/dev/null; then PY=(python3)
 elif command -v uv >/dev/null; then PY=(uv run --python 3.13 python)
 else die "python3 も uv も無い（README「WSL2 の準備」）"; fi
-if [ -z "$SKIP_LAB" ]; then command -v curl >/dev/null || die "curl が無い（lab の rpm と analytics の jar を取るのに使う。sudo apt install curl）"; fi
-command -v docker >/dev/null || die "docker が無い（イメージのビルドに使う。README「WSL2 の準備」）"
-docker buildx version >/dev/null 2>&1 || die "docker buildx が無い（Ubuntu の docker.io には入っていない。README「WSL2 の準備」）"
+if [ -z "$SKIP_LAB" ] || [ -z "$SKIP_ANALYTICS" ]; then command -v curl >/dev/null || die "curl が無い（lab の rpm と analytics の jar を取るのに使う。sudo apt install curl）"; fi
+# docker はイメージ（agent / lab の 3 つ / worker / temporal）を ECR に置くときだけ要る。土台だけなら要らない
+NEED_DOCKER="$AGENT$WORKFLOW"; if [ -z "$SKIP_LAB" ]; then NEED_DOCKER=1; fi
+if [ -n "$NEED_DOCKER" ]; then
+  command -v docker >/dev/null || die "docker が無い（イメージのビルドに使う。README「WSL2 の準備」）"
+  docker buildx version >/dev/null 2>&1 || die "docker buildx が無い（Ubuntu の docker.io には入っていない。README「WSL2 の準備」）"
+fi
 # 最後のポートフォワーディング（手順 10）で要る。40〜60 分かけた後で落ちないよう、ここで見る
 if [ -z "$NO_PORTFORWARD" ]; then
   command -v session-manager-plugin >/dev/null || die "Session Manager plugin が無い（手順 10 のポートフォワーディングに使う。README「WSL2 の準備」か「Mac で打つとき」。開かないなら NO_PORTFORWARD=1）"
@@ -254,7 +288,9 @@ case "$CALLER_ARN" in
       die "IAM ユーザーの一時セッション（get-session-token）で入っている。IAM の API が呼べないので aws-vault exec <プロファイル> --no-session で入り直す"
     fi ;;
   arn:aws:sts::*:assumed-role/*) ;;
-  *) [ -n "${ADMIN_ARN:-}" ] || die "この認証情報の形（$CALLER_ARN）では kb_admin_principal_arn を決められない。deploy.env に ADMIN_ARN=arn:aws:iam::<アカウント ID>:role/<ロール名> を書く" ;;
+  *) if [ -n "$CREATE_KB" ] && [ -z "${ADMIN_ARN:-}" ]; then
+       die "この認証情報の形（${CALLER_ARN}）では kb_admin_principal_arn を決められない。deploy.env に ADMIN_ARN=arn:aws:iam::<アカウント ID>:role/<ロール名> を書く"
+     fi ;;
 esac
 tf_use_cli_credentials
 # CloudFormation 版（2026-09-15 まで）のスタックが残っていると、同じ名前のリソースを作れずに apply が途中で落ちる
@@ -266,6 +302,7 @@ if [ -n "$OLD_STACKS" ] && [ "$OLD_STACKS" != None ]; then
 fi
 CACERT="${OPENSEARCH_CACERT_FILE:-${AWS_CA_BUNDLE:-}}"
 ROOTS="ecr main"
+if [ -n "$AGENT" ]; then ROOTS="$ROOTS agent"; fi
 if [ -z "$SKIP_LAB" ]; then ROOTS="$ROOTS lab"; fi
 if [ -z "$SKIP_STREAM" ]; then ROOTS="$ROOTS stream"; fi
 if [ -z "$SKIP_ANALYTICS" ]; then ROOTS="$ROOTS analytics"; fi
@@ -274,17 +311,23 @@ if [ -n "$WORKFLOW" ]; then ROOTS="$ROOTS workflow"; fi
 echo "ACCOUNT_ID=$ACCOUNT_ID"
 echo "CALLER_ARN=$CALLER_ARN"
 echo "IMAGE_TAG=$IMAGE_TAG"
-echo "PHASE=$PHASE"
+echo "AGENT=${AGENT:-0} PIPELINE=${PIPELINE:-0} WORKFLOW=${WORKFLOW:-0} CREATE_KB=${CREATE_KB:-0}"
 echo "作るルート: $ROOTS"
 # 待機時の 1 時間あたりの目安（セント。東京リージョンの税抜。単価は 2026-09-14〜15 に Price List API で確認。内訳は README「1 時間起動したときの試算」）。
-# フェーズ 1 = 52（Interface エンドポイント・OpenSearch Serverless・Web の EC2）、lab = 9、graph = 14、stream = 29（S3 sink 無しなら 15）、
+# 土台 = 5（ssm / ssmmessages のエンドポイント 2 本 + Web の EC2）、agent = 13（Runtime のエンドポイント 4 本 × 2 AZ + bedrock-agentcore 1 本）
+#   + CREATE_KB なら 36（OpenSearch Serverless の OCU 33 + bedrock-agent-runtime のエンドポイント 3）、
+# lab = 9、graph = 14、stream = 29（S3 sink 無しなら 15）、
 # analytics = 20（ストリーミングのジョブが動いている間の EMR Serverless の 2 vCPU + s3tables のエンドポイント 2 本 + 異常検知の events エンドポイント 2 本。単価は 2026-09-17 に確認）
 #   + SINKS に prometheus があれば 3（aps-workspaces のエンドポイント 2 本。取り込みのサンプル課金は別）
-#   + SINKS に opensearch があれば 33（logs コレクションの OCU。フェーズ 1 のコレクションと共有されるか確認できていないので最大値で数える。
+#   + SINKS に opensearch があれば 33（logs コレクションの OCU。KB のコレクションと共有されるか確認できていないので最大値で数える。
 #     2026-09-17 ユーザー決定で既定に入れた。共有されれば 0 に近づく）、
 # workflow = 6（Fargate ARM 1 vCPU / 2 GB のタスク 1 つ + sqs エンドポイント 1 本。Gateway と Lambda と DynamoDB と SQS は使った分だけ。単価は 2026-09-17 に確認）。
 # README の試算を変えたらここも変える
-COST_CENTS=52
+COST_CENTS=5
+if [ -n "$AGENT" ]; then
+  COST_CENTS=$((COST_CENTS + 13))
+  if [ -n "$CREATE_KB" ]; then COST_CENTS=$((COST_CENTS + 36)); fi
+fi
 if [ -z "$SKIP_LAB" ]; then COST_CENTS=$((COST_CENTS + 9)); fi
 if [ -z "$SKIP_GRAPH" ]; then COST_CENTS=$((COST_CENTS + 14)); fi
 if [ -z "$SKIP_STREAM" ]; then
@@ -300,7 +343,7 @@ COST_NOTE=$(printf '待機だけで約 $%d.%02d/h（約 %d 円/h。チャット�
   $((COST_CENTS / 100)) $((COST_CENTS % 100)) $(((COST_CENTS * 150 + 50) / 100)))
 printf '\033[1;33m%s\033[0m\n' "$COST_NOTE"
 case ",$SINKS," in
-  *,opensearch,*) printf '\033[1;33m%s\033[0m\n' "SINKS に opensearch がある（既定）: OpenSearch Serverless の logs コレクションをもう 1 つ作る。OCU がフェーズ 1 のコレクションと共有されなければ最大 \$0.33/h で、上の目安はそれを含んでいる（README「1 時間起動したときの試算」）" ;;
+  *,opensearch,*) if [ -z "$SKIP_ANALYTICS" ]; then printf '\033[1;33m%s\033[0m\n' "SINKS に opensearch がある（既定）: OpenSearch Serverless の logs コレクションを作る。OCU が KB のコレクションと共有されなければ最大 \$0.33/h で、上の目安はそれを含んでいる（README「1 時間起動したときの試算」）"; fi ;;
 esac
 
 # ---- 1. ECR --------------------------------------------------------------------
@@ -313,7 +356,9 @@ TEMPORAL_TAG=1.9.1   # terraform/workflow の temporal_image_tag の既定値。
 # ---- 2. イメージ ----------------------------------------------------------------
 log "2. イメージ（ECR に無いタグだけ作る）"
 NEED_AGENT=""; NEED_FRR=""; NEED_MULTITOOL=""; NEED_SNMPD=""; NEED_WORKER=""; NEED_TEMPORAL=""
-if ecr_has "$PREFIX-agent" "$IMAGE_TAG"; then echo "agent:$IMAGE_TAG はある（作り直すなら IMAGE_TAG を変える）"; else NEED_AGENT=1; fi
+if [ -n "$AGENT" ]; then
+  if ecr_has "$PREFIX-agent" "$IMAGE_TAG"; then echo "agent:$IMAGE_TAG はある（作り直すなら IMAGE_TAG を変える）"; else NEED_AGENT=1; fi
+fi
 if [ -z "$SKIP_LAB" ]; then
   if ecr_has "$PREFIX-lab-frr" "$FRR_TAG"; then echo "lab-frr:$FRR_TAG はある"; else NEED_FRR=1; fi
   if ecr_has "$PREFIX-lab-multitool" "$MULTITOOL_TAG"; then echo "lab-multitool:$MULTITOOL_TAG はある"; else NEED_MULTITOOL=1; fi
@@ -324,7 +369,9 @@ if [ -n "$WORKFLOW" ]; then
   if ecr_has "$PREFIX-temporal" "$TEMPORAL_TAG"; then echo "temporal:$TEMPORAL_TAG はある"; else NEED_TEMPORAL=1; fi
 fi
 NEED_LAB="$NEED_FRR$NEED_MULTITOOL$NEED_SNMPD"
-if [ -n "$NEED_AGENT$NEED_LAB$NEED_WORKER$NEED_TEMPORAL" ]; then
+if [ -z "$NEED_AGENT$NEED_LAB$NEED_WORKER$NEED_TEMPORAL" ]; then
+  echo "作るイメージは無い"
+else
   docker info >/dev/null 2>&1 || die "dockerd に接続できない（WSL なら sudo service docker start。README「WSL2 の準備」）"
   # agent と snmpd は RUN があるので、x86_64 の PC では QEMU（binfmt）が要る
   if [ -n "$NEED_AGENT$NEED_SNMPD$NEED_WORKER" ] && ! docker buildx ls | grep -q 'linux/arm64'; then
@@ -340,8 +387,8 @@ if [ -n "$NEED_AGENT$NEED_LAB$NEED_WORKER$NEED_TEMPORAL" ]; then
     docker push "$REG/$PREFIX-lab-frr:$FRR_TAG"
   fi
   if [ -n "$NEED_MULTITOOL" ]; then
-    docker pull --platform linux/arm64 "wbitt/network-multitool:$MULTITOOL_TAG"
-    docker tag "wbitt/network-multitool:$MULTITOOL_TAG" "$REG/$PREFIX-lab-multitool:$MULTITOOL_TAG"
+    docker pull --platform linux/arm64 "ghcr.io/srl-labs/network-multitool:$MULTITOOL_TAG"
+    docker tag "ghcr.io/srl-labs/network-multitool:$MULTITOOL_TAG" "$REG/$PREFIX-lab-multitool:$MULTITOOL_TAG"
     docker push "$REG/$PREFIX-lab-multitool:$MULTITOOL_TAG"
   fi
   if [ -n "$NEED_SNMPD" ]; then
@@ -359,19 +406,14 @@ if [ -n "$NEED_AGENT$NEED_LAB$NEED_WORKER$NEED_TEMPORAL" ]; then
 fi
 
 # ---- 3. 本体 --------------------------------------------------------------------
-log "3. 本体（terraform/main。初回は 10〜20 分）"
-MAIN_VARS=(-var "agent_image_tag=$IMAGE_TAG")
-if [ -n "${ADMIN_ARN:-}" ];   then MAIN_VARS+=(-var "kb_admin_principal_arn=$ADMIN_ARN"); fi
+log "3. 土台（terraform/main。VPC / Web の EC2 / バケット / ロール。初回は 3〜5 分）"
+MAIN_VARS=()
 if [ -n "${VPC_CIDR:-}" ];    then MAIN_VARS+=(-var "vpc_cidr=$VPC_CIDR"); fi
 if [ -n "${CLIENT_CIDR:-}" ]; then MAIN_VARS+=(-var "client_cidr=$CLIENT_CIDR"); fi
-if [ -n "$CACERT" ];          then MAIN_VARS+=(-var "opensearch_cacert_file=$CACERT"); fi
-tf_apply main "${MAIN_VARS[@]}"
+tf_apply main ${MAIN_VARS[@]+"${MAIN_VARS[@]}"}
 INSTANCE_ID=$(tf main output -raw web_instance_id)
 KB_BUCKET=$(tf main output -raw kb_bucket_name)
-KB_ID=$(tf main output -raw knowledge_base_id)
-DS_ID=$(tf main output -raw data_source_id)
-LOG_GROUP=$(tf main output -raw runtime_log_group_name)
-echo "INSTANCE_ID=$INSTANCE_ID KB_BUCKET=$KB_BUCKET KB_ID=$KB_ID DS_ID=$DS_ID"
+echo "INSTANCE_ID=$INSTANCE_ID KB_BUCKET=$KB_BUCKET"
 
 # graph は main の state しか読まないので、ここで裏で始めて待ち時間を重ねる（Neptune は 10〜15 分）
 if [ -z "$SKIP_GRAPH" ]; then
@@ -381,6 +423,28 @@ if [ -z "$SKIP_GRAPH" ]; then
   ( tf_apply_only graph ) >"$GRAPH_LOG" 2>&1 &
   GRAPH_PID=$!
   echo "進み具合: tail -f $GRAPH_LOG"
+fi
+
+# ---- 3-3. agent ----------------------------------------------------------------
+KB_ID=""; DS_ID=""; LOG_GROUP=""
+if [ -n "$AGENT" ]; then
+  if [ -n "$CREATE_KB" ]; then
+    log "3-3. agent（terraform/agent。Runtime + ガードレール + Knowledge Base。初回は 10〜20 分。OpenSearch Serverless の作成が長い）"
+  else
+    log "3-3. agent（terraform/agent。Runtime + ガードレール + Runtime のエンドポイント。初回は 5〜10 分）"
+  fi
+  AGENT_VARS=(-var "agent_image_tag=$IMAGE_TAG")
+  if [ -n "$CREATE_KB" ];       then AGENT_VARS+=(-var create_knowledge_base=true); fi
+  if [ -n "${ADMIN_ARN:-}" ];   then AGENT_VARS+=(-var "kb_admin_principal_arn=$ADMIN_ARN"); fi
+  if [ -n "$CACERT" ];          then AGENT_VARS+=(-var "opensearch_cacert_file=$CACERT"); fi
+  tf_apply agent "${AGENT_VARS[@]}"
+  LOG_GROUP=$(tf agent output -raw runtime_log_group_name)
+  if [ -n "$CREATE_KB" ]; then
+    KB_ID=$(tf agent output -raw knowledge_base_id)
+    DS_ID=$(tf agent output -raw data_source_id)
+    echo "KB_ID=$KB_ID DS_ID=$DS_ID"
+  fi
+  echo "Runtime の ARN は SSM の $(tf agent output -raw runtime_arn_parameter_name) に置いた（Web は 60 秒以内に拾う）"
 fi
 
 # ---- 4. Web の部品と手順書 ------------------------------------------------------------
@@ -396,27 +460,41 @@ else
 fi
 
 log "4-2. Web の部品を s3://$KB_BUCKET/web/ に置く"
-aws s3 cp web/app.py "s3://$KB_BUCKET/web/app.py"
-aws s3 cp web/requirements.txt "s3://$KB_BUCKET/web/requirements.txt"
-for f in topology anomalies graph proposals; do aws s3 cp "agent/$f.py" "s3://$KB_BUCKET/web/$f.py"; done
-aws s3 cp agent/data/ "s3://$KB_BUCKET/web/data/" --recursive
-aws s3 sync wheels/ "s3://$KB_BUCKET/web/wheels/"
+aws s3 cp --only-show-errors web/app.py "s3://$KB_BUCKET/web/app.py"
+aws s3 cp --only-show-errors web/requirements.txt "s3://$KB_BUCKET/web/requirements.txt"
+for f in topology anomalies graph proposals; do aws s3 cp --only-show-errors "agent/$f.py" "s3://$KB_BUCKET/web/$f.py"; done
+aws s3 cp --only-show-errors agent/data/ "s3://$KB_BUCKET/web/data/" --recursive
+aws s3 sync --only-show-errors wheels/ "s3://$KB_BUCKET/web/wheels/"
 
-log "4-3. 手順書を置いて取り込む"
-aws s3 cp kb-docs/ "s3://$KB_BUCKET/docs/" --recursive --exclude "*" --include "*.md"
-JOB_ID=$(aws bedrock-agent start-ingestion-job --region "$REGION" \
-  --knowledge-base-id "$KB_ID" --data-source-id "$DS_ID" \
-  --query ingestionJob.ingestionJobId --output text)
+if [ -n "$CREATE_KB" ]; then
+log "4-3. 手順書を置いて取り込む（CREATE_KB=1）"
+aws s3 cp --only-show-errors kb-docs/ "s3://$KB_BUCKET/docs/" --recursive --exclude "*" --include "*.md"
+# 索引を作った直後は StartIngestionJob が「no such index」の ValidationException を返す（OpenSearch Serverless 側の反映待ち。
+# 2026-09-17 に索引の置き換えの 2 秒後で実測）。10 秒おきに最大 12 回（2 分）まで打ち直す
+JOB_ID=""
+for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+  JOB_ID=$(aws bedrock-agent start-ingestion-job --region "$REGION" \
+    --knowledge-base-id "$KB_ID" --data-source-id "$DS_ID" \
+    --query ingestionJob.ingestionJobId --output text 2>"${TMPDIR:-/tmp}/ingest-err.$$") && break
+  if grep -q "no such index" "${TMPDIR:-/tmp}/ingest-err.$$"; then
+    echo "索引がまだ見えない（${i} 回目）。10 秒待つ"; sleep 10; JOB_ID=""
+  else
+    cat "${TMPDIR:-/tmp}/ingest-err.$$" >&2; rm -f "${TMPDIR:-/tmp}/ingest-err.$$"; die "取り込みジョブを開始できない"
+  fi
+done
+rm -f "${TMPDIR:-/tmp}/ingest-err.$$"
+[ -n "$JOB_ID" ] || die "索引が 2 分たっても見えない。aws opensearchserverless で kb コレクションの状態を確かめる"
 while :; do
   ST=$(aws bedrock-agent get-ingestion-job --region "$REGION" \
     --knowledge-base-id "$KB_ID" --data-source-id "$DS_ID" --ingestion-job-id "$JOB_ID" \
     --query 'ingestionJob.[status,statistics.numberOfDocumentsFailed]' --output text)
   case "$ST" in
-    COMPLETE*) echo "取り込み $ST（status failed）"; [ "${ST#COMPLETE}" = $'\t0' ] || die "取り込みに失敗した md がある。get-ingestion-job の failureReasons を見る"; break ;;
+    COMPLETE*) echo "取り込み ${ST}（status failed）"; [ "${ST#COMPLETE}" = $'\t0' ] || die "取り込みに失敗した md がある。get-ingestion-job の failureReasons を見る"; break ;;
     FAILED*|STOPPED*) die "取り込みジョブが $ST" ;;
     *) sleep 10 ;;
   esac
 done
+fi
 
 log "4-4. EC2 を再起動して Web を立てる（初回の apply 時点では web/ が無いため）"
 wait_ssm_online "$INSTANCE_ID"
@@ -435,11 +513,11 @@ if [ -z "$SKIP_LAB" ]; then
   log "5-1. lab の材料（containerlab の rpm とトポロジ。stream を作るなら Telegraf の rpm も）を s3://$KB_BUCKET/lab/ に置く（README の lab-2 と s-1）"
   fetch "https://github.com/srl-labs/containerlab/releases/download/v$CONTAINERLAB_VERSION/$CONTAINERLAB_RPM" "$CONTAINERLAB_RPM" \
     || die "containerlab の rpm が取れない（README の lab-2。社内 PC なら「社内 PC で使うとき」の証明書）"
-  aws s3 sync lab/ "s3://$KB_BUCKET/lab/" --exclude "wvs2.clab.yml" --exclude "snmpd/certs/*"
-  aws s3 cp "$CONTAINERLAB_RPM" "s3://$KB_BUCKET/lab/"
+  aws s3 sync --only-show-errors lab/ "s3://$KB_BUCKET/lab/" --exclude "wvs2.clab.yml" --exclude "snmpd/certs/*"
+  aws s3 cp --only-show-errors "$CONTAINERLAB_RPM" "s3://$KB_BUCKET/lab/"
   if [ -z "$SKIP_STREAM" ]; then
     fetch "https://dl.influxdata.com/telegraf/releases/$TELEGRAF_RPM" "$TELEGRAF_RPM" || die "Telegraf の rpm が取れない（README の s-1）"
-    aws s3 cp "$TELEGRAF_RPM" "s3://$KB_BUCKET/lab/"
+    aws s3 cp --only-show-errors "$TELEGRAF_RPM" "s3://$KB_BUCKET/lab/"
   fi
 fi
 STREAM_VARS=()
@@ -453,7 +531,7 @@ if [ -z "$SKIP_STREAM" ]; then
       rm -f "$S3_SINK_ZIP"
       die "Confluent の zip が取れない（利用条件への同意が要るとページが返る）。ブラウザで $S3_SINK_URL を開いて取り、リポジトリの直下に $S3_SINK_ZIP の名前で置いて打ち直す。S3 sink が要らなければ deploy.env に CREATE_S3_SINK=0 を書いて打ち直す"
     fi
-    aws s3 cp "$S3_SINK_ZIP" "s3://$KB_BUCKET/stream/$S3_SINK_ZIP"
+    aws s3 cp --only-show-errors "$S3_SINK_ZIP" "s3://$KB_BUCKET/stream/$S3_SINK_ZIP"
   fi
 fi
 if [ -z "$SKIP_ANALYTICS" ]; then
@@ -463,8 +541,8 @@ if [ -z "$SKIP_ANALYTICS" ]; then
     fetch "$url" "$JARS_DIR/${url##*/}" || die "jar が取れない: $url （README の a-1。社内 PC なら「社内 PC で使うとき」の証明書）"
   done
   "${PY[@]}" -c 'import ast, sys; ast.parse(open(sys.argv[1]).read(), sys.argv[1])' "$SPARK_SCRIPT" || die "$SPARK_SCRIPT が Python として読めない"
-  aws s3 cp "$SPARK_SCRIPT" "s3://$KB_BUCKET/analytics/"
-  aws s3 sync "$JARS_DIR/" "s3://$KB_BUCKET/analytics/jars/" --exclude "*" --include "*.jar"
+  aws s3 cp --only-show-errors "$SPARK_SCRIPT" "s3://$KB_BUCKET/analytics/"
+  aws s3 sync --only-show-errors "$JARS_DIR/" "s3://$KB_BUCKET/analytics/jars/" --exclude "*" --include "*.jar"
 fi
 
 # ---- 6. lab ---------------------------------------------------------------------
@@ -497,14 +575,14 @@ fi
 
 # ---- 7-3. analytics ------------------------------------------------------------------
 if [ -z "$SKIP_ANALYTICS" ]; then
-  log "7-3. analytics（terraform/analytics。S3 Tables と EMR Serverless。格納先: $SINKS。数分）"
+  log "7-3. analytics（terraform/analytics。S3 Tables と EMR Serverless。格納先: ${SINKS}。数分）"
   tf_apply analytics -var "sinks=[$SINKS_TF]"
   APP_ID=$(tf analytics output -raw application_id); echo "APP_ID=$APP_ID"
-  log "7-4. Spark のストリーミングジョブ（Kafka → $SINKS）を起こす（README の a-3。動いていれば何もしない）"
+  log "7-4. Spark のストリーミングジョブ（Kafka → ${SINKS}）を起こす（README の a-3。動いていれば何もしない）"
   RUNNING=$(aws emr-serverless list-job-runs --region "$REGION" --application-id "$APP_ID" \
     --states SUBMITTED PENDING SCHEDULED RUNNING --query 'jobRuns[].id' --output text)
   if [ -n "$RUNNING" ] && [ "$RUNNING" != None ]; then
-    echo "ジョブが動いている（$RUNNING）"
+    echo "ジョブが動いている（${RUNNING}）"
   else
     JOB_RUN_ID=$(aws emr-serverless start-job-run --region "$REGION" --application-id "$APP_ID" \
       --execution-role-arn "$(tf analytics output -raw runtime_role_arn)" \
@@ -523,12 +601,14 @@ if [ -n "$GRAPH_PID" ]; then
   rc=0; wait "$GRAPH_PID" || rc=$?; GRAPH_PID=""
   if [ "$rc" -ne 0 ]; then
     tail -n 40 "$GRAPH_LOG" >&2
-    die "terraform/graph の apply に失敗した（全文: $GRAPH_LOG）。直したらもう一度 ops/up.sh"
+    die "terraform/graph の apply に失敗した（全文: ${GRAPH_LOG}）。直したらもう一度 ops/up.sh"
   fi
   tail -n 3 "$GRAPH_LOG"
-  log "8-2. Neptune が空なら静的トポロジを入れる（GUI の「静的データを投入」と同じ。入っていれば何もしない）"
-  # ops/seed_graph.py を Web の EC2 の上で、Web と同じ環境変数と依存で動かす。コマンドに記号を入れないよう base64 で渡す
-  run_on_instance "$INSTANCE_ID" "echo $(base64 < ops/seed_graph.py | tr -d '\n') | base64 -d | /usr/bin/python3.13 -"
+  log "8-2. Neptune が空なら lab の定義からトポロジを入れる（初期ロード。入っていれば何もしない。入れ直すのは ops/sync-graph.sh --replace）"
+  # lab/lab_topology.py が lab/wvs2.clab.yml.in と lab/frr/*.conf から機器と回線を作り（手元で打つ）、ops/seed_graph.py を Web の EC2 の上で
+  # Web と同じ環境変数と依存で動かして Neptune に入れる。コマンドに記号を入れないよう、スクリプトもトポロジも base64 で渡す
+  LAB_TOPOLOGY_B64=$("${PY[@]}" lab/lab_topology.py lab | base64 | tr -d '\n') || die "lab/lab_topology.py が lab の定義を読めなかった"
+  run_on_instance "$INSTANCE_ID" "echo $(base64 < ops/seed_graph.py | tr -d '\n') | base64 -d | LAB_TOPOLOGY_B64=$LAB_TOPOLOGY_B64 /usr/bin/python3.13 -"
 fi
 if [ -z "$SKIP_STREAM" ] || [ -z "$SKIP_GRAPH" ]; then
   log "8-3. Web を再起動する（起動時に SSM の異常テーブルと Neptune を読むため）"
@@ -536,7 +616,7 @@ if [ -z "$SKIP_STREAM" ] || [ -z "$SKIP_GRAPH" ]; then
   echo "Web が動いている"
 fi
 
-# ---- 8-5. workflow（フェーズ 3）--------------------------------------------------------
+# ---- 8-5. workflow（機能 WORKFLOW）--------------------------------------------------------
 if [ -n "$WORKFLOW" ]; then
   log "8-5. workflow（terraform/workflow。Temporal のワーカーと AgentCore Gateway。数分）"
   tf_apply workflow -var "worker_image_tag=$IMAGE_TAG"
@@ -557,17 +637,19 @@ fi
 
 # ---- 9. Runtime のロググループ -------------------------------------------------------
 # AgentCore が最初の呼び出しで作るもので、Terraform の管理外。保持期間とタグだけ付け、ops/down.sh が消す
-log "9. ロググループ $LOG_GROUP（保持 7 日 + タグ）"
-if ! aws logs put-retention-policy --region "$REGION" --log-group-name "$LOG_GROUP" --retention-in-days 7 2>/dev/null; then
-  aws logs create-log-group --region "$REGION" --log-group-name "$LOG_GROUP"
-  aws logs put-retention-policy --region "$REGION" --log-group-name "$LOG_GROUP" --retention-in-days 7
+if [ -n "$AGENT" ]; then
+  log "9. ロググループ ${LOG_GROUP}（保持 7 日 + タグ）"
+  if ! aws logs put-retention-policy --region "$REGION" --log-group-name "$LOG_GROUP" --retention-in-days 7 2>/dev/null; then
+    aws logs create-log-group --region "$REGION" --log-group-name "$LOG_GROUP"
+    aws logs put-retention-policy --region "$REGION" --log-group-name "$LOG_GROUP" --retention-in-days 7
+  fi
+  aws logs tag-resource --region "$REGION" \
+    --resource-arn "arn:aws:logs:$REGION:$ACCOUNT_ID:log-group:$LOG_GROUP" \
+    --tags "Project=$PREFIX,owner=$OWNER"
 fi
-aws logs tag-resource --region "$REGION" \
-  --resource-arn "arn:aws:logs:$REGION:$ACCOUNT_ID:log-group:$LOG_GROUP" \
-  --tags "Project=$PREFIX,owner=$OWNER"
 
 # ---- 10. ポートフォワーディング -------------------------------------------------------------
-log "できた（$ROOTS）。利用者に配るコマンド:"
+log "できた（${ROOTS}）。利用者に配るコマンド:"
 tf main output -raw start_session_command; echo
 if [ -n "$LAB_INSTANCE_ID" ]; then
   echo "lab に入るコマンド:"

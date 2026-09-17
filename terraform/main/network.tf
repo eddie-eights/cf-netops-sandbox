@@ -144,42 +144,11 @@ resource "aws_vpc_security_group_egress_rule" "client_none" {
   cidr_ipv4         = "127.0.0.1/32"
 }
 
-# ---------------------------------------------------------------- VPC endpoints for AgentCore Runtime (2 AZ)
+# ---------------------------------------------------------------- VPC endpoints
+# Runtime が使う ecr / logs / bedrock-runtime（2 AZ）と bedrock-agentcore（web が Runtime を呼ぶ）は terraform/agent が作る。
+# ここに置くのは S3 gateway と ssm / ssmmessages だけ
 locals {
-  runtime_endpoint_services = var.create_runtime_endpoints ? {
-    "ecr-api"         = "ecr.api"
-    "ecr-dkr"         = "ecr.dkr"
-    "logs"            = "logs"
-    "bedrock-runtime" = "bedrock-runtime"
-  } : {}
-
   ssm_endpoint_sg_ids = concat([aws_security_group.endpoints.id], aws_security_group.client[*].id)
-}
-
-resource "aws_vpc_endpoint" "runtime" {
-  for_each = local.runtime_endpoint_services
-
-  vpc_id              = aws_vpc.this.id
-  service_name        = "com.amazonaws.${var.region}.${each.value}"
-  vpc_endpoint_type   = "Interface"
-  private_dns_enabled = true
-  subnet_ids          = [aws_subnet.a.id, aws_subnet.b.id]
-  security_group_ids  = [aws_security_group.endpoints.id]
-
-  tags = { Name = "${var.name_prefix}-${each.key}" }
-}
-
-resource "aws_vpc_endpoint" "bedrock_agent_runtime" {
-  count = var.create_kb_endpoint ? 1 : 0
-
-  vpc_id              = aws_vpc.this.id
-  service_name        = "com.amazonaws.${var.region}.bedrock-agent-runtime"
-  vpc_endpoint_type   = "Interface"
-  private_dns_enabled = true
-  subnet_ids          = [aws_subnet.a.id, aws_subnet.b.id]
-  security_group_ids  = [aws_security_group.endpoints.id]
-
-  tags = { Name = "${var.name_prefix}-bedrock-agent-runtime" }
 }
 
 # VPC の中から S3 に出る経路はこれだけ。許すのは 4 つ: この root module のバケット（EC2 が web/ を取る、lab が lab/ を取る、
@@ -220,8 +189,22 @@ resource "aws_vpc_endpoint" "s3" {
         Action    = "s3:GetObject"
         Resource  = "arn:${local.partition}:s3:::al2023-repos-${var.region}-de612dc2/*"
       },
+      # S3 Tables のデータ・メタデータ（terraform/analytics の Spark が Iceberg の S3FileIO で読み書きする *--table-s3 バケット）。
+      # オブジェクトの要求でも IAM が評価するのは s3:* ではなく s3tables:GetTableData / PutTableData とテーブルの ARN なので、
+      # s3:* + arn:aws:s3:::*--table-s3 だけだとこのエンドポイントで 403 になる（2026-09-17 に Spark のジョブが metadata.json の読みで AccessDenied。
+      # ロール側は IAM シミュレータで allowed だった）。念のため s3 の形も残す
       {
         Sid       = "AllowS3TablesData"
+        Effect    = "Allow"
+        Principal = "*"
+        Action    = "s3tables:*"
+        Resource = [
+          "arn:${local.partition}:s3tables:${var.region}:${local.account_id}:bucket/*",
+          "arn:${local.partition}:s3tables:${var.region}:${local.account_id}:bucket/*/table/*",
+        ]
+      },
+      {
+        Sid       = "AllowS3TablesObjects"
         Effect    = "Allow"
         Principal = "*"
         Action    = "s3:*"
@@ -245,17 +228,4 @@ resource "aws_vpc_endpoint" "ssm" {
   security_group_ids  = local.ssm_endpoint_sg_ids
 
   tags = { Name = "${var.name_prefix}-${each.value}" }
-}
-
-resource "aws_vpc_endpoint" "agentcore" {
-  count = var.create_agentcore_endpoint ? 1 : 0
-
-  vpc_id              = aws_vpc.this.id
-  service_name        = "com.amazonaws.${var.region}.bedrock-agentcore"
-  vpc_endpoint_type   = "Interface"
-  private_dns_enabled = true
-  subnet_ids          = [aws_subnet.a.id]
-  security_group_ids  = [aws_security_group.endpoints.id]
-
-  tags = { Name = "${var.name_prefix}-bedrock-agentcore" }
 }

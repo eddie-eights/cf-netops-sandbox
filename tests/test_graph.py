@@ -47,7 +47,8 @@ class FakeClient:
 boto3 = types.ModuleType("boto3"); boto3.client = lambda name, **kw: FakeClient(name, **kw)
 botocore = types.ModuleType("botocore"); exc = types.ModuleType("botocore.exceptions")
 exc.ClientError = ClientError; exc.BotoCoreError = BotoCoreError; botocore.exceptions = exc
-sys.modules.update({"boto3": boto3, "botocore": botocore, "botocore.exceptions": exc})
+cfg = types.ModuleType("botocore.config"); cfg.Config = lambda **kw: kw; botocore.config = cfg
+sys.modules.update({"boto3": boto3, "botocore": botocore, "botocore.exceptions": exc, "botocore.config": cfg})
 
 passed = 0
 def check(name, cond):
@@ -80,7 +81,7 @@ devs = [{"id": "a-ce-01", "label": "device", "hostname": "a-ce-01", "site": "a",
 links = [{"id": "e1", "label": "link", "OUT": {"id": "a-ce-01"}, "IN": {"id": "b-ce-01"}, "a_if": "eth1", "b_if": "eth1", "kind": "l2", "role": "primary", "bandwidth_mbps": 1000}]
 state.update(answer={"g.V().hasLabel('device').elementMap()": devs, "g.E().hasLabel('link').elementMap()": links}, queries=[])
 d, l = graph.load_topology()
-check("load_topology は device_id と a/b を組み立てる", d[0]["device_id"] == "a-ce-01" and d[0]["asn"] == 65001 and d[1]["enabled"] is False and l == [{"a_if": "eth1", "b_if": "eth1", "kind": "l2", "role": "primary", "bandwidth_mbps": 1000, "a": "a-ce-01", "b": "b-ce-01"}])
+check("load_topology は device_id と a/b を組み立てる", d[0]["device_id"] == "a-ce-01" and d[0]["asn"] == 65001 and d[1]["enabled"] is False and l == [{"a_if": "eth1", "b_if": "eth1", "kind": "l2", "role": "primary", "bandwidth_mbps": 1000, "status": None, "a": "a-ce-01", "b": "b-ce-01"}])
 
 topology = load("topology")
 check("配備ありなら Neptune から組む", topology.SOURCE == "neptune" and [x["device_id"] for x in topology.DEVICES] == ["a-ce-01", "b-ce-01"])
@@ -112,4 +113,24 @@ check("remove_device は無ければ error", "error" in graph.remove_device("zzz
 state.update(answer={"outE('link')": [0], "drop()": [], "addV": [], "addE": [], "count()": [1]}, queries=[])
 r = graph.seed(*topology.load_static())
 check("seed は drop してから 10 台と 10 本を addV / addE", state["queries"][0] == "g.V().hasLabel('device').drop()" and sum(q.startswith("g.addV") for q in state["queries"]) == 10 and sum(q.startswith("g.addE") for q in state["queries"]) == 10)
+check("seed は status を入れない（入れ直したら UP に戻る）", not any("'status'" in q for q in state["queries"]))
+
+# ---- 動的な状態（graph/status_handler.py が呼ぶ）
+state.update(answer={"outE('link')": [1], "inE('link')": [0]}, queries=[])
+r = graph.set_status("hq-ce-01", "eth1", "down")
+check("set_status は IF 付きなら a 側の outE と b 側の inE の両方に property を書き、更新数を返す",
+      r == {"device_id": "hq-ce-01", "if_name": "eth1", "status": "DOWN", "updated": 1}
+      and state["queries"] == ["g.V('hq-ce-01').outE('link').has('a_if','eth1').property('status','DOWN').count()",
+                               "g.V('hq-ce-01').inE('link').has('b_if','eth1').property('status','DOWN').count()"])
+state.update(answer={"property('status'": [1]}, queries=[])
+check("set_status は IF 無しなら機器の頂点に書く", graph.set_status("hq-ce-01", "", "ALARM")["updated"] == 1
+      and state["queries"] == ["g.V('hq-ce-01').property('status','ALARM').count()"])
+check("set_status は UP / DOWN / ALARM 以外を拒む", "error" in graph.set_status("hq-ce-01", "", "broken") and len(state["queries"]) == 1)
+devs[0]["status"] = "DOWN"; links[0]["status"] = "DOWN"
+state.update(answer={"g.V().hasLabel('device').elementMap()": devs, "g.E().hasLabel('link').elementMap()": links}, queries=[])
+topology.reload(force=True)
+check("Neptune の status は機器一覧・隣接・影響範囲に出て、無ければ UP",
+      topology.list_devices()["devices"][0]["status"] == "DOWN" and topology.list_devices()["devices"][1]["status"] == "UP"
+      and topology.neighbors("b-ce-01")["neighbors"][0]["status"] == "DOWN"
+      and topology.blast_radius("b-ce-01")["affected"][0]["status"] == "DOWN")
 print(f"通過 {passed} / 失敗 0")

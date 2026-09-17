@@ -5,7 +5,7 @@ data "aws_ssm_parameter" "al2023" {
 
 resource "aws_iam_role" "web" {
   name        = "${var.name_prefix}-web"
-  description = "fukuda-nwc-poc chat web EC2 - SSM managed node and invoke the AgentCore Runtime only"
+  description = "fukuda-nwc-poc chat web EC2 - SSM managed node, reads web assets from S3 and the runtime ARN from SSM"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -24,24 +24,9 @@ resource "aws_iam_role_policy_attachment" "web_ssm" {
   policy_arn = "arn:${local.partition}:iam::aws:policy/AmazonSSMManagedInstanceCore"
 }
 
-resource "aws_iam_role_policy" "web_invoke_runtime" {
-  name = "invoke-runtime"
-  role = aws_iam_role.web.id
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Effect = "Allow"
-      Action = "bedrock-agentcore:InvokeAgentRuntime"
-      Resource = [
-        aws_bedrockagentcore_agent_runtime.agent.agent_runtime_arn,
-        "${aws_bedrockagentcore_agent_runtime.agent.agent_runtime_arn}/*",
-      ]
-    }]
-  })
-}
-
-# 画面のコード・静的データ・wheel は同じバケットの web/ に置く（README の手順 4）。docs/ は読ませない
+# 画面のコード・静的データ・wheel は同じバケットの web/ に置く（README の手順 4）。docs/ は読ませない。
+# Runtime の ARN は terraform/agent が /<name_prefix>/runtime-arn に書き、web/app.py が 60 秒ごとに読む（agent を後から入れ替えても再起動が要らない）。
+# InvokeAgentRuntime の許可は terraform/agent がこのロールに足す
 resource "aws_iam_role_policy" "web_assets" {
   name = "web-assets"
   role = aws_iam_role.web.id
@@ -61,6 +46,11 @@ resource "aws_iam_role_policy" "web_assets" {
         Condition = {
           StringLike = { "s3:prefix" = "web/*" }
         }
+      },
+      {
+        Effect   = "Allow"
+        Action   = "ssm:GetParameter"
+        Resource = "arn:${local.partition}:ssm:${var.region}:${local.account_id}:parameter/${var.name_prefix}/*"
       },
     ]
   })
@@ -85,7 +75,6 @@ resource "aws_instance" "web" {
     name_prefix = var.name_prefix
     region      = var.region
     bucket      = aws_s3_bucket.kb.bucket
-    runtime_arn = aws_bedrockagentcore_agent_runtime.agent.agent_runtime_arn
   })
   user_data_replace_on_change = true
 
@@ -116,7 +105,6 @@ resource "aws_instance" "web" {
     aws_iam_role_policy.web_assets,
     aws_vpc_endpoint.s3,
     aws_vpc_endpoint.ssm,
-    aws_vpc_endpoint.agentcore,
     aws_vpc_security_group_egress_rule.web_https,
     aws_vpc_security_group_ingress_rule.endpoints_from_web,
   ]

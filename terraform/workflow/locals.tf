@@ -1,4 +1,4 @@
-# fukuda-nwc-poc - phase 3 workflow root module. One ECS on Fargate task (ARM64, 1 vCPU / 2 GB) runs the Temporal dev server
+# fukuda-nwc-poc - workflow root module (feature "workflow"). One ECS on Fargate task (ARM64, 1 vCPU / 2 GB) runs the Temporal dev server
 # and a Python worker in the VPC of terraform/main. The Spark job of terraform/analytics puts an AnomalyOpened event on EventBridge
 # when it opens an anomaly; events.tf routes it to an SQS queue and the worker starts one workflow per anomaly. The workflow asks the
 # chat runtime (AgentCore) for a cause and a fix (the runtime looks at Neptune / OpenSearch / Prometheus through the MCP tools),
@@ -10,13 +10,21 @@
 data "aws_caller_identity" "current" {}
 data "aws_partition" "current" {}
 
-# VPC / サブネット / SG / ロール名 / Runtime ARN は terraform/main、異常テーブルは terraform/stream、lab EC2 は terraform/lab、
+# VPC / サブネット / SG / ロール名は terraform/main、Runtime ARN は terraform/agent、異常テーブルは terraform/stream、lab EC2 は terraform/lab、
 # Neptune の SG は terraform/graph、OpenSearch / Prometheus は terraform/analytics の state から読む（graph / analytics は無くてもよい）
 data "terraform_remote_state" "main" {
   backend = "local"
 
   config = {
     path = "${path.module}/../main/terraform.tfstate"
+  }
+}
+
+data "terraform_remote_state" "agent" {
+  backend = "local"
+
+  config = {
+    path = "${path.module}/../agent/terraform.tfstate"
   }
 }
 
@@ -64,10 +72,11 @@ locals {
   account_id = data.aws_caller_identity.current.account_id
   partition  = data.aws_partition.current.partition
 
-  vpc_id            = data.terraform_remote_state.main.outputs.vpc_id
-  subnet_id         = data.terraform_remote_state.main.outputs.instance_subnet_id # サブネット a（ssm / bedrock-agentcore のエンドポイントがある方）
-  endpoint_sg_id    = data.terraform_remote_state.main.outputs.endpoint_security_group_id
-  runtime_arn       = data.terraform_remote_state.main.outputs.agent_runtime_arn
+  vpc_id         = data.terraform_remote_state.main.outputs.vpc_id
+  subnet_id      = data.terraform_remote_state.main.outputs.instance_subnet_id # サブネット a（ssm / bedrock-agentcore のエンドポイントがある方）
+  endpoint_sg_id = data.terraform_remote_state.main.outputs.endpoint_security_group_id
+  # agent が無いとワークフローが原因を聞く先が無い。下の precondition で「agent を先に」と出す
+  runtime_arn       = try(data.terraform_remote_state.agent.outputs.agent_runtime_arn, "")
   reader_role_names = toset([data.terraform_remote_state.main.outputs.runtime_role_name, data.terraform_remote_state.main.outputs.web_role_name])
 
   # stream が無いと異常が無い。下の precondition で「stream を先に」と出す

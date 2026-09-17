@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import sys
+import time
 import uuid
 
 import boto3
@@ -53,13 +54,16 @@ def load_env_file() -> str:
 
 
 ENV_FILE = load_env_file()
-_missing = [k for k in ("RUNTIME_ARN", "AWS_REGION") if not os.environ.get(k)]
-if _missing:
-    sys.exit(f"environment variable {' / '.join(_missing)} is not set. "
+if not os.environ.get("AWS_REGION"):
+    sys.exit("environment variable AWS_REGION is not set. "
              "EC2: /etc/<name_prefix>-web.env is written by the user_data of terraform/main (compare with .env.example). "
              "local: cp .env.example .env and fill it in (README)")
-ARN = os.environ["RUNTIME_ARN"]
 REGION = os.environ["AWS_REGION"]
+# Runtime の ARN。環境変数 RUNTIME_ARN があればそれ、無ければ SSM の <PARAM_PREFIX>/runtime-arn（terraform/agent が書く）を 60 秒ごとに読む。
+# どちらも無ければ agent が配備されていない（チャットだけ使えない。トポロジ・異常・承認のタブは動く）
+PARAM_PREFIX = os.environ.get("PARAM_PREFIX", "")
+ARN_TTL = 60
+_arn_cache = {"arn": "", "checked": 0.0}
 PORT = int(os.environ.get("PORT", "8080"))
 DATA_DIR = os.environ.get("DATA_DIR") or os.path.join(HERE, "data")
 if not os.path.isabs(DATA_DIR):  # 相対パスはリポジトリ直下から（.env.example の DATA_DIR=agent/data）
@@ -84,9 +88,25 @@ agentcore = boto3.client("bedrock-agentcore", region_name=REGION,
                          config=boto3.session.Config(read_timeout=150, connect_timeout=10, retries={"max_attempts": 1}))
 
 
+def runtime_arn() -> str:
+    env = os.environ.get("RUNTIME_ARN", "")
+    if env:
+        return env
+    if _arn_cache["arn"] or time.time() - _arn_cache["checked"] < ARN_TTL or not PARAM_PREFIX:
+        return _arn_cache["arn"]
+    _arn_cache["checked"] = time.time()
+    try:
+        _arn_cache["arn"] = boto3.client("ssm", region_name=REGION).get_parameter(
+            Name=f"{PARAM_PREFIX}/runtime-arn")["Parameter"]["Value"]
+    except (ClientError, BotoCoreError):
+        _arn_cache["arn"] = ""
+    return _arn_cache["arn"]
+
+
 # ---------------------------------------------------------------- data
 ROLE_ORDER = ["core", "pe", "distribution", "aggregation", "access", "ce", "host"]
 ROLE_LABEL = {"pe": "キャリア PE", "ce": "拠点 CE", "host": "LAN 端末"}
+DOWN_COLOR = "#c62828"
 
 
 def device_table() -> pd.DataFrame:
@@ -100,7 +120,7 @@ def device_table() -> pd.DataFrame:
         rows.append({
             "機器": d["device_id"], "拠点": d["site"], "役割": d["role"], "AS": d.get("asn") or "",
             "管理 IP": d.get("mgmt_ip") or "", "リンク数": degree.get(d["device_id"], 0),
-            "監視": "対象" if d.get("enabled") else "対象外",
+            "監視": "対象" if d.get("enabled") else "対象外", "状態": d.get("status") or "UP",
         })
     rows.sort(key=lambda r: (ROLE_ORDER.index(r["役割"]) if r["役割"] in ROLE_ORDER else 99, r["機器"]))
     return pd.DataFrame(rows)
@@ -133,9 +153,12 @@ def topology_svg() -> str:
         (x1, y1), (x2, y2) = pos[l["a"]], pos[l["b"]]
         dash = ' stroke-dasharray="6 4"' if l.get("role") == "secondary" else ""
         w = 3 if (l.get("bandwidth_mbps") or 0) >= 1000 else 1.6
-        title = f'{l["a"]} {l["a_if"]} - {l["b"]} {l["b_if"]} ({l["kind"]}{" " + l["role"] if l.get("role") else ""}, {l.get("bandwidth_mbps")} Mbps)'
-        out.append(f'<line x1="{x1:.0f}" y1="{y1:.0f}" x2="{x2:.0f}" y2="{y2:.0f}" stroke="{color.get(l["kind"], "#999")}" '
-                   f'stroke-width="{w}"{dash}><title>{html.escape(title)}</title></line>')
+        down = (l.get("status") or "UP") != "UP"   # Spark の検知で付いた動的な状態（graph.set_status）
+        title = (f'{l["a"]} {l["a_if"]} - {l["b"]} {l["b_if"]} ({l["kind"]}{" " + l["role"] if l.get("role") else ""}, {l.get("bandwidth_mbps")} Mbps'
+                 f'{", " + l["status"] if down else ""})')
+        stroke = DOWN_COLOR if down else color.get(l["kind"], "#999")
+        out.append(f'<line x1="{x1:.0f}" y1="{y1:.0f}" x2="{x2:.0f}" y2="{y2:.0f}" stroke="{stroke}" '
+                   f'stroke-width="{w + 1 if down else w}"{dash}><title>{html.escape(title)}</title></line>')
         mx, my = (x1 + x2) / 2, (y1 + y2) / 2
         out.append(f'<text x="{mx:.0f}" y="{my - 4:.0f}" text-anchor="middle" fill="#4b5563" font-size="10">'
                    f'{html.escape((l.get("a_if") or "") + "/" + (l.get("b_if") or ""))}</text>')
@@ -143,8 +166,10 @@ def topology_svg() -> str:
         n = topology.NODES[dev]
         fill = {"pe": "#e8f0fe", "ce": "#e6f4ea", "host": "#f3f4f6"}.get(n["role"], "#fff")
         asn = f'AS {n["asn"]}' if n.get("asn") else n["site"]
+        st = n.get("status") or "UP"
+        border = f'stroke="{DOWN_COLOR}" stroke-width="2.5"' if st != "UP" else 'stroke="#374151" stroke-width="1.2"'
         out.append(f'<rect x="{x - node_w / 2:.0f}" y="{y - node_h / 2:.0f}" width="{node_w}" height="{node_h}" rx="6" '
-                   f'fill="{fill}" stroke="#374151" stroke-width="1.2"/>')
+                   f'fill="{fill}" {border}><title>{html.escape(dev + " " + st)}</title></rect>')
         out.append(f'<text x="{x:.0f}" y="{y - 3:.0f}" text-anchor="middle" fill="#111827" font-weight="600">{html.escape(dev)}</text>')
         out.append(f'<text x="{x:.0f}" y="{y + 13:.0f}" text-anchor="middle" fill="#6b7480" font-size="10">{html.escape(asn)}</text>')
     out.append("</svg>")
@@ -152,42 +177,63 @@ def topology_svg() -> str:
         topology.SOURCE, "静的データ（data/。terraform/graph を apply すると Neptune に切り替わる）")
     legend = ('<p style="font-size:12px;color:#6b7480;margin:4px 0 0">'
               '実線 = 主回線 / 破線 = 副回線 / 太線 = 1 Gbps 以上。青 = eBGP、紫 = iBGP、灰 = 拠点 LAN。'
+              '<span style="color:#c62828">赤</span> = 落ちている（Spark の検知が Neptune の status に反映したもの。復旧すると戻る）。'
               f'アドレスと帯域はすべて架空（lab と同じ）。元データ: {html.escape(src)}</p>')
     return "".join(out) + legend
 
 
-def refresh_topology():
+def _choices(a="", b=""):
+    """編集画面の選択肢（機器 A / B と削除するリンク）を、読み直したトポロジから作り直す。選んでいた機器は残す"""
+    devs = sorted(topology.NODES)
+    return (gr.update(choices=devs, value=a if a in devs else None),
+            gr.update(choices=devs, value=b if b in devs else None),
+            gr.update(choices=topology.link_choices(), value=None))
+
+
+def refresh_topology(a="", b=""):
     topology.reload(force=True)
-    return topology_svg(), device_table()
+    return topology_svg(), device_table(), *_choices(a, b)
 
 
-def _graph_call(fn, *args):
-    """Neptune の編集。結果のメッセージと、描き直した図・表を返す"""
+def interface_choices(device):
+    """機器を選んだら、その機器でいま使われているインタフェース名を選択肢に出す（新しい名前は打てる）"""
+    return gr.update(choices=topology.interfaces(device) if device else [], value=None)
+
+
+def _graph_call(fn, *args, a="", b=""):
+    """Neptune の編集。結果のメッセージと、描き直した図・表・選択肢を返す"""
     if not graph.configured():
-        return "Neptune は未配備（terraform/graph）", *refresh_topology()
+        return "Neptune は未配備（terraform/graph）", *refresh_topology(a, b)
     try:
         r = fn(*args)
     except (ClientError, BotoCoreError, KeyError, ValueError, TypeError) as e:
         log.error("neptune write failed: %s", str(e)[:500])
-        return f"Neptune の更新に失敗: {str(e)[:200]}", *refresh_topology()
+        return f"Neptune の更新に失敗: {str(e)[:200]}", *refresh_topology(a, b)
     msg = r.get("error") or ", ".join(f"{k}: {v}" for k, v in r.items())
-    return msg, *refresh_topology()
+    return msg, *refresh_topology(a, b)
 
 
-def seed_graph():
-    return _graph_call(lambda: graph.seed(*topology.load_static()))
+def seed_graph(a, b):
+    return _graph_call(lambda: graph.seed(*topology.load_static()), a=a, b=b)
 
 
 def add_link(a, a_if, b, b_if, kind, role, bw):
-    if not (a and a_if and b and b_if):
-        return "両端の機器とインタフェースを入れてください", *refresh_topology()
-    return _graph_call(graph.add_link, a.strip(), a_if.strip(), b.strip(), b_if.strip(), kind, role or "", int(bw) if bw else None)
-
-
-def remove_link(a, b, a_if):
+    a, a_if, b, b_if = (str(x or "").strip() for x in (a, a_if, b, b_if))
     if not (a and b):
-        return "両端の機器を入れてください", *refresh_topology()
-    return _graph_call(graph.remove_link, a.strip(), b.strip(), (a_if or "").strip())
+        return "機器 A と機器 B を選んでください", *refresh_topology(a, b)
+    if a == b:
+        return "機器 A と機器 B が同じです", *refresh_topology(a, b)
+    if not (a_if and b_if):
+        return "両端のインタフェース名を選ぶか入力してください（例 eth3）", *refresh_topology(a, b)
+    return _graph_call(graph.add_link, a, a_if, b, b_if, kind, role or "", int(bw) if bw else None, a=a, b=b)
+
+
+def remove_link(sel, a, b):
+    """sel は削除用 Dropdown の値 "a|a_if|b"（topology.link_choices）"""
+    if not sel or str(sel).count("|") != 2:
+        return "削除するリンクを一覧から選んでください", *refresh_topology(a, b)
+    la, a_if, lb = str(sel).split("|", 2)
+    return _graph_call(graph.remove_link, la, lb, a_if, a=a, b=b)
 
 
 # ---------------------------------------------------------------- anomalies
@@ -227,9 +273,12 @@ def anomaly_table(status: str = "open"):
 
 # ---------------------------------------------------------------- chat
 def invoke(prompt: str, session_id: str) -> str:
+    arn = runtime_arn()
+    if not arn:
+        raise gr.Error("エージェントが配備されていません（terraform/agent を apply する。deploy.env の AGENT=1）")
     try:
         res = agentcore.invoke_agent_runtime(
-            agentRuntimeArn=ARN, runtimeSessionId=session_id, qualifier="DEFAULT",
+            agentRuntimeArn=arn, runtimeSessionId=session_id, qualifier="DEFAULT",
             contentType="application/json", accept="application/json",
             payload=json.dumps({"prompt": prompt}, ensure_ascii=False).encode("utf-8"),
         )
@@ -282,23 +331,40 @@ with gr.Blocks(title=f"{TITLE} チャット") as demo:
         topo_html = gr.HTML(topology_svg())
         topo_table = gr.Dataframe(device_table(), interactive=False, label="機器")
         topo_refresh = gr.Button("再読み込み")
-        topo_refresh.click(refresh_topology, [], [topo_html, topo_table])
-        with gr.Accordion("Neptune で編集（terraform/graph を apply したとき）", open=False):
+        with gr.Accordion("Neptune で編集（terraform/graph がある間だけ）", open=False):
             edit_msg = gr.Markdown("" if graph.configured() else "Neptune は未配備。terraform/graph を apply して Web を再起動すると使えます。")
+            gr.Markdown("**静的データを投入** = Neptune の中身をいったん全部消して、`agent/data/` の 10 台・10 本に戻す（初回と、編集をやり直したいとき）。"
+                        "機器の追加・削除はこの画面にはないので `agent/data/` を直して投入し直す。リンクは下で 1 本ずつ足す・消す。"
+                        "変えた内容はエージェントの次の質問から効く。")
             with gr.Row():
-                seed_btn = gr.Button("静的データを投入（全部置き換え）", interactive=graph.configured())
+                seed_btn = gr.Button("静的データを投入（Neptune を消して 10 台・10 本に戻す）", interactive=graph.configured())
+            gr.Markdown("#### リンクを追加")
             with gr.Row():
-                la = gr.Textbox(label="機器 A", scale=2); lai = gr.Textbox(label="A のインタフェース", scale=2)
-                lb = gr.Textbox(label="機器 B", scale=2); lbi = gr.Textbox(label="B のインタフェース", scale=2)
+                la = gr.Dropdown(sorted(topology.NODES), value=None, label="機器 A", scale=2)
+                lai = gr.Dropdown([], value=None, label="A のインタフェース", allow_custom_value=True, scale=2,
+                                  info="機器 A を選ぶと使用中の名前が出る。新しい名前（eth3 など）も打てる")
+                lb = gr.Dropdown(sorted(topology.NODES), value=None, label="機器 B", scale=2)
+                lbi = gr.Dropdown([], value=None, label="B のインタフェース", allow_custom_value=True, scale=2,
+                                  info="機器 B を選ぶと使用中の名前が出る。新しい名前も打てる")
             with gr.Row():
-                lkind = gr.Dropdown(["ebgp", "ibgp", "l2", "mgmt"], value="l2", label="種別")
-                lrole = gr.Dropdown(["", "primary", "secondary"], value="", label="役割")
-                lbw = gr.Number(label="帯域 Mbps", precision=0)
-                add_btn = gr.Button("リンクを追加", interactive=graph.configured())
-                del_btn = gr.Button("A - B のリンクを削除", interactive=graph.configured())
-            seed_btn.click(seed_graph, [], [edit_msg, topo_html, topo_table])
-            add_btn.click(add_link, [la, lai, lb, lbi, lkind, lrole, lbw], [edit_msg, topo_html, topo_table])
-            del_btn.click(remove_link, [la, lb, lai], [edit_msg, topo_html, topo_table])
+                lkind = gr.Dropdown([("ebgp（拠点 - キャリア）", "ebgp"), ("ibgp（キャリア内）", "ibgp"), ("l2（拠点 LAN）", "l2"), ("mgmt（管理）", "mgmt")],
+                                    value="l2", label="種別")
+                lrole = gr.Dropdown([("なし", ""), ("primary（主回線。図は実線）", "primary"), ("secondary（副回線。図は破線）", "secondary")],
+                                    value="", label="役割")
+                lbw = gr.Number(label="帯域 Mbps", precision=0, info="空でもよい。1000 以上は図で太線")
+                add_btn = gr.Button("リンクを追加", variant="primary", interactive=graph.configured())
+            gr.Markdown("#### リンクを削除")
+            with gr.Row():
+                del_sel = gr.Dropdown(topology.link_choices(), value=None, label="削除するリンク", scale=4,
+                                      info="「機器 A の IF - 機器 B の IF [種別 役割]」。追加・削除・再読み込みのたびに更新")
+                del_btn = gr.Button("選んだリンクを削除", variant="stop", interactive=graph.configured())
+            edit_out = [edit_msg, topo_html, topo_table, la, lb, del_sel]
+            la.change(interface_choices, [la], [lai])
+            lb.change(interface_choices, [lb], [lbi])
+            seed_btn.click(seed_graph, [la, lb], edit_out)
+            add_btn.click(add_link, [la, lai, lb, lbi, lkind, lrole, lbw], edit_out)
+            del_btn.click(remove_link, [del_sel, la, lb], edit_out)
+        topo_refresh.click(refresh_topology, [la, lb], [topo_html, topo_table, la, lb, del_sel])
     with gr.Tab("異常一覧"):
         with gr.Row():
             an_status = gr.Radio(["open", "resolved"], value="open", label="状態（open = 未解消）", scale=3)

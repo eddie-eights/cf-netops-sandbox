@@ -27,6 +27,13 @@ resource "aws_emrserverless_application" "spark" {
     security_group_ids = [aws_security_group.emr.id]
   }
 
+  # scheduler_configuration（max_concurrent_runs / queue_timeout_minutes）は書かない。API が既定値（15 / 360）を返すので、
+  # 書かないと provider（aws 6.64）が毎回 plan に差分を出し、書くと queue_timeout_minutes がアプリ STARTED 中は更新できず apply が 400 で落ちる
+  # （2026-09-17 に Mac で両方実測。ジョブが動いていると stop-application もできない）。ignore_changes で差分そのものを見ないようにする
+  lifecycle {
+    ignore_changes = [scheduler_configuration]
+  }
+
   tags = { Name = "${var.name_prefix}-spark" }
 }
 

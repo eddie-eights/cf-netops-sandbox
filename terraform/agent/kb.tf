@@ -1,60 +1,9 @@
 # ---------------------------------------------------------------- knowledge base (S3 -> Titan Embeddings v2 -> OpenSearch Serverless)
-# 取り込み元の md を置くバケット。利用者の PC から aws s3 cp で置き、start-ingestion-job で取り込む（README の手順 4）。
-# force_destroy = true なので、docs/ web/ lab/ stream/ が残っていても terraform destroy で消える
-resource "aws_s3_bucket" "kb" {
-  bucket        = "${var.name_prefix}-kb-${local.account_id}"
-  force_destroy = true
-
-  tags = { Name = "${var.name_prefix}-kb" }
-}
-
-resource "aws_s3_bucket_public_access_block" "kb" {
-  bucket                  = aws_s3_bucket.kb.id
-  block_public_acls       = true
-  block_public_policy     = true
-  ignore_public_acls      = true
-  restrict_public_buckets = true
-}
-
-resource "aws_s3_bucket_server_side_encryption_configuration" "kb" {
-  bucket = aws_s3_bucket.kb.id
-
-  rule {
-    apply_server_side_encryption_by_default {
-      sse_algorithm = "AES256"
-    }
-  }
-}
-
-resource "aws_s3_bucket_ownership_controls" "kb" {
-  bucket = aws_s3_bucket.kb.id
-
-  rule {
-    object_ownership = "BucketOwnerEnforced"
-  }
-}
-
-resource "aws_s3_bucket_policy" "kb" {
-  bucket = aws_s3_bucket.kb.id
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Sid       = "DenyInsecureTransport"
-      Effect    = "Deny"
-      Principal = "*"
-      Action    = "s3:*"
-      Resource  = [aws_s3_bucket.kb.arn, "${aws_s3_bucket.kb.arn}/*"]
-      Condition = {
-        Bool = { "aws:SecureTransport" = "false" }
-      }
-    }]
-  })
-
-  depends_on = [aws_s3_bucket_public_access_block.kb]
-}
-
+# create_knowledge_base = true のときだけ作る（count）。バケットは terraform/main のもの（web/ lab/ stream/ と共用）。
+# 取り込み元の md は利用者の PC から aws s3 cp で docs/ に置き、start-ingestion-job で取り込む（README の手順 4）
 resource "aws_opensearchserverless_security_policy" "kb_encryption" {
+  count = local.kb ? 1 : 0
+
   name        = local.collection_name
   type        = "encryption"
   description = "AWS owned key for the knowledge base collection"
@@ -71,6 +20,8 @@ resource "aws_opensearchserverless_security_policy" "kb_encryption" {
 # Runtime はコレクションを直接呼ばない（Retrieve を呼ぶと Bedrock がサービス側から検索する）。
 # 非公開（SourceVPCEs / SourceServices）にすると PC からのインデックス作成が通らないので、公開にしてデータアクセスポリシーで絞る
 resource "aws_opensearchserverless_security_policy" "kb_network" {
+  count = local.kb ? 1 : 0
+
   name        = local.collection_name
   type        = "network"
   description = "Collection endpoint reachable over the public AWS endpoint, data access limited by the access policy"
@@ -85,6 +36,8 @@ resource "aws_opensearchserverless_security_policy" "kb_network" {
 }
 
 resource "aws_opensearchserverless_access_policy" "kb" {
+  count = local.kb ? 1 : 0
+
   name        = local.collection_name
   type        = "data"
   description = "Knowledge base service role and the deployer only"
@@ -102,12 +55,14 @@ resource "aws_opensearchserverless_access_policy" "kb" {
         Permission   = ["aoss:CreateIndex", "aoss:DescribeIndex", "aoss:UpdateIndex", "aoss:DeleteIndex", "aoss:ReadDocument", "aoss:WriteDocument"]
       },
     ]
-    Principal = [aws_iam_role.kb.arn, local.kb_admin_principal_arn]
+    Principal = [aws_iam_role.kb[0].arn, local.kb_admin_principal_arn]
   }])
 }
 
 # アクセスポリシーも先に作る。反映に 1 分ほどかかるので、コレクションの作成（数分）の間に効かせてからインデックスを作る
 resource "aws_opensearchserverless_collection" "kb" {
+  count = local.kb ? 1 : 0
+
   name        = local.collection_name
   type        = "VECTORSEARCH"
   description = "fukuda-nwc-poc knowledge base"
@@ -125,6 +80,8 @@ resource "aws_opensearchserverless_collection" "kb" {
 
 # コレクションが ACTIVE になってもデータアクセスポリシーとエンドポイントの DNS が効くまで少し掛かる
 resource "time_sleep" "kb_collection_ready" {
+  count = local.kb ? 1 : 0
+
   create_duration = "60s"
 
   depends_on = [aws_opensearchserverless_collection.kb, aws_opensearchserverless_access_policy.kb]
@@ -132,6 +89,8 @@ resource "time_sleep" "kb_collection_ready" {
 
 # ハイブリッド検索は faiss エンジンと、index が true の text フィールドが要る
 resource "opensearch_index" "kb" {
+  count = local.kb ? 1 : 0
+
   name          = local.index_name
   index_knn     = true
   force_destroy = true
@@ -163,9 +122,18 @@ resource "opensearch_index" "kb" {
   })
 
   depends_on = [time_sleep.kb_collection_ready]
+
+  # 取り込みのあと Bedrock が id / x-amz-bedrock-kb-* のフィールドを索引に足し、provider は既定値の index = true を返さない。
+  # どちらも mappings の差分になって毎回 -/+（置き換え）になり、KB のベクトルが消える（2026-09-17 に Mac の 2 回目の ops/up.sh で実測）。
+  # mappings を変えたいときは -replace=opensearch_index.kb[0] を付けて手で置き換え、そのあと取り込みをやり直す。
+  lifecycle {
+    ignore_changes = [mappings]
+  }
 }
 
 resource "aws_iam_role" "kb" {
+  count = local.kb ? 1 : 0
+
   name        = "${var.name_prefix}-kb"
   description = "Service role for the fukuda-nwc-poc Bedrock knowledge base"
 
@@ -204,8 +172,10 @@ locals {
 }
 
 resource "aws_iam_role_policy" "kb" {
+  count = local.kb ? 1 : 0
+
   name = "kb"
-  role = aws_iam_role.kb.id
+  role = aws_iam_role.kb[0].id
 
   policy = jsonencode({
     Version = "2012-10-17"
@@ -230,7 +200,7 @@ resource "aws_iam_role_policy" "kb" {
           Sid      = "S3List"
           Effect   = "Allow"
           Action   = "s3:ListBucket"
-          Resource = aws_s3_bucket.kb.arn
+          Resource = local.bucket_arn
           Condition = {
             StringEquals = { "aws:ResourceAccount" = local.account_id }
           }
@@ -239,7 +209,7 @@ resource "aws_iam_role_policy" "kb" {
           Sid      = "S3Read"
           Effect   = "Allow"
           Action   = "s3:GetObject"
-          Resource = "${aws_s3_bucket.kb.arn}/*"
+          Resource = "${local.bucket_arn}/*"
           Condition = {
             StringEquals = { "aws:ResourceAccount" = local.account_id }
           }
@@ -258,9 +228,11 @@ resource "aws_iam_role_policy" "kb" {
 }
 
 resource "aws_bedrockagent_knowledge_base" "kb" {
+  count = local.kb ? 1 : 0
+
   name        = "${var.name_prefix}-kb"
   description = "fukuda-nwc-poc runbooks (markdown)"
-  role_arn    = aws_iam_role.kb.arn
+  role_arn    = aws_iam_role.kb[0].arn
 
   knowledge_base_configuration {
     type = "VECTOR"
@@ -272,7 +244,7 @@ resource "aws_bedrockagent_knowledge_base" "kb" {
   storage_configuration {
     type = "OPENSEARCH_SERVERLESS"
     opensearch_serverless_configuration {
-      collection_arn    = aws_opensearchserverless_collection.kb.arn
+      collection_arn    = aws_opensearchserverless_collection.kb[0].arn
       vector_index_name = local.index_name
       field_mapping {
         vector_field   = "bedrock-kb-vector"
@@ -289,7 +261,9 @@ resource "aws_bedrockagent_knowledge_base" "kb" {
 
 # DELETE だと destroy 時にベクトルの削除が走り、コレクションが先に消えると失敗する。RETAIN にしてコレクションごと消す
 resource "aws_bedrockagent_data_source" "docs" {
-  knowledge_base_id    = aws_bedrockagent_knowledge_base.kb.id
+  count = local.kb ? 1 : 0
+
+  knowledge_base_id    = aws_bedrockagent_knowledge_base.kb[0].id
   name                 = "${var.name_prefix}-docs"
   description          = "Markdown files under s3://<bucket>/docs/"
   data_deletion_policy = "RETAIN"
@@ -297,7 +271,7 @@ resource "aws_bedrockagent_data_source" "docs" {
   data_source_configuration {
     type = "S3"
     s3_configuration {
-      bucket_arn         = aws_s3_bucket.kb.arn
+      bucket_arn         = local.bucket_arn
       inclusion_prefixes = ["docs/"]
     }
   }

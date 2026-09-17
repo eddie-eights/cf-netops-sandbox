@@ -22,3 +22,13 @@ output "next_step" {
   description = "Run on the web EC2 after apply (SSM session), then use the topology tab \"Neptune で編集\" to seed the static data"
   value       = "sudo systemctl restart ${var.name_prefix}-web"
 }
+
+output "status_function_name" {
+  description = "Lambda that writes AnomalyOpened / AnomalyResolved into Neptune as the status property"
+  value       = aws_lambda_function.status.function_name
+}
+
+output "status_log_group_name" {
+  description = "Log group of the status Lambda (one line per event: what it received and how many elements it updated)"
+  value       = aws_cloudwatch_log_group.status.name
+}

@@ -74,7 +74,7 @@ resource "aws_vpc_security_group_ingress_rule" "endpoints_from_emr" {
 
 # ---------------------------------------------------------------- VPC endpoint for S3 Tables (control plane)
 # Iceberg のカタログ（メタデータの読み書き）は s3tables の API に行く。NAT が無いので interface endpoint。
-# データ本体（parquet）は S3 の API で、terraform/main の S3 ゲートウェイエンドポイントを通る（ポリシーに *--table-s3 の許可がある）。
+# データ本体（parquet と metadata.json）は S3 の API で、terraform/main の S3 ゲートウェイエンドポイントを通る（ポリシーに s3tables:* のテーブル ARN の許可がある。s3:* の *--table-s3 だけでは 403）。
 # 2 AZ に置くのは、EMR Serverless のジョブがどちらのサブネットで動くか選べないため（1 本 $0.014/h/AZ、2026-09-15 確認）
 resource "aws_vpc_endpoint" "s3tables" {
   vpc_id              = local.vpc_id

@@ -351,15 +351,18 @@ check("up.sh は SINKS（既定 iceberg,opensearch,prometheus）を検査して 
       and 'tf_apply analytics -var "sinks=[$SINKS_TF]"' in up)
 check("up.sh は analytics を stream の後に apply し、job を STREAMING で起こす（名前は snmp-sinks）",
       up.index("tf_apply stream") < up.index("tf_apply analytics") < up.index("--name snmp-sinks --mode STREAMING"))
-check("up.sh は prometheus のエンドポイント 2 本を費用に足し、opensearch は OCU の注意を出す",
-      re.search(r'\*,prometheus,\*\) COST_CENTS=\$\(\(COST_CENTS \+ 3\)\)', up) is not None and re.search(r'\*,opensearch,\*\) printf', up) is not None)
+check("up.sh は prometheus のエンドポイント 2 本を費用に足し、opensearch は analytics を作るときだけ OCU の注意を出す",
+      re.search(r'\*,prometheus,\*\) COST_CENTS=\$\(\(COST_CENTS \+ 3\)\)', up) is not None
+      and re.search(r'\*,opensearch,\*\) if \[ -z "\$SKIP_ANALYTICS" \]; then printf', up) is not None)
 check("up.sh は動いているジョブがあれば起こさない", "--states SUBMITTED PENDING SCHEDULED RUNNING" in up)
-check("up.sh は PHASE=2 で SKIP_STREAM=1 なら analytics も飛ばす", re.search(r'SKIP_STREAM=1 なので analytics も作らない[^\n]*\n\s*SKIP_ANALYTICS=1', up) is not None)
+check("up.sh は PIPELINE=1 で SKIP_STREAM=1 なら analytics も飛ばす", re.search(r'SKIP_STREAM=1 なので analytics も作らない[^\n]*\n\s*SKIP_ANALYTICS=1', up) is not None)
 check("down.sh は job を cancel → stop-application → destroy analytics → destroy graph の順",
       down.index("cancel-job-run") < down.index("stop-application") < down.index("destroy_root analytics") < down.index("destroy_root graph") < down.index("destroy_root stream"))
 check("check.sh は spark/snmp_sinks.py を見る", "spark/snmp_sinks.py" in checksh and "snmp_to_iceberg" not in checksh)
-check("up.sh の PHASE=3 は SKIP_ANALYTICS があれば止まる（Spark の検知が無いとワーカーが起きない）",
-      re.search(r'\n  3\)\n[\s\S]*?-n "\$SKIP_ANALYTICS"[\s\S]*?WORKFLOW=1 ;;', up) is not None)
+check("up.sh の WORKFLOW=1 は SKIP_ANALYTICS があれば止まる（Spark の検知が無いとワーカーが起きない）",
+      re.search(r'if \[ -n "\$WORKFLOW" \]; then\n[\s\S]*?-n "\$SKIP_ANALYTICS"[\s\S]*?die "WORKFLOW は lab と stream と analytics が要る', up) is not None)
+check("up.sh は PIPELINE=0 なら lab / stream / analytics / graph を全部飛ばす",
+      re.search(r'else\n\s*SKIP_LAB=1; SKIP_STREAM=1; SKIP_ANALYTICS=1; SKIP_GRAPH=1\n', up) is not None)
 check("deploy.env.example に SINKS の行がある（既定 3 つ、それぞれの説明）",
       re.search(r'^#SINKS=iceberg,opensearch,prometheus$', env_example, re.M) is not None and all(s in env_example for s in ("iceberg", "opensearch", "prometheus")))
 

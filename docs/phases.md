@@ -4,49 +4,50 @@
 手順とコマンドの正本は [`../README.md`](../README.md)、構成図は [`20260914-fukuda-nwc-poc-architecture.html`](20260914-fukuda-nwc-poc-architecture.html)。
 ここはその手前の「どこまで作ってあって、次に何が残っているか」だけを見るための頁。
 
-番号は **1 / 2 / 3** の 3 つ（2026-09-17 ユーザー決定）。
+**2026-09-17 ユーザー決定: フェーズの番号で積み上げる形をやめ、機能ごとに独立して作る形にした。**目的は費用を抑えること（「フェーズ 1 の上に 2 が乗るのではなく、機能ごとにデプロイできれば嬉しい」）。土台（`terraform/ecr` + `terraform/main`）を必ず作り、その上に 3 つの機能を要るものだけ載せる。`deploy.env` のキーは `AGENT` / `PIPELINE` / `WORKFLOW`。
 
-| フェーズ | 一言で |
+| 機能（`deploy.env`） | 一言で | 作るルート |
+|---|---|---|
+| 土台（必ず） | 閉域の VPC、Web の EC2、S3 バケット、Runtime / Web のロール | `terraform/ecr` → `terraform/main` |
+| `AGENT=1`（既定） | **agent での分析**: AgentCore Runtime + ガードレール。ナレッジベースは `CREATE_KB=1` のときだけ（既定は作らない。2026-09-17 ユーザー決定「ナレッジベースは今回は使わないかな。デフォルトは OFF でいい」） | `terraform/agent` |
+| `PIPELINE=1` | **データパイプライン**: containerlab → Telegraf → Kafka → Spark → S3 Tables / OpenSearch / Prometheus。トポロジは Neptune（「graph はパイプライン側にする」） | `terraform/lab` → `stream` → `analytics`、並行して `graph` |
+| `WORKFLOW=1` | **Temporal での実行**: エージェントが原因を調査し、人が修復を承認するまで。AGENT と PIPELINE が要る | `terraform/workflow` |
+
+古い番号との対応（`deploy.env` に `PHASE` が残っていれば `ops/up.sh` が読み替えて注意を出す。2B / 5A / 5B などは止まる）:
+
+| 古い番号 | いまの書き方 |
 |---|---|
-| 1 | LLM + RAG で対話する |
-| 2 | **データパイプライン**: containerlab → Telegraf → Kafka → Spark → S3 Tables。トポロジは Neptune |
-| 3 | **Temporal でエージェントが原因を調査し、人が修復を承認するまで** |
+| 1（LLM + RAG の対話） | `AGENT=1`。ナレッジベースは `CREATE_KB=1` を足す |
+| 2（lab + graph）と 2 の任意（`WITH_STREAM=1`）、2B（Kafka → Spark → Iceberg） | `PIPELINE=1`（`AGENT=1` はそのまま）。stream / analytics は本体で、外すなら `SKIP_STREAM=1` / `SKIP_ANALYTICS=1` |
+| 3（欠番）/ 4（ベクトル + 全文検索） | 4 は `CREATE_KB=1`（ナレッジベースの検索）。番号は使わない |
+| 5A（エージェントの調査ワークフロー）+ 5B（人が承認して直す）、3 | `WORKFLOW=1`（`AGENT=1` と `PIPELINE=1` も） |
 
-古い番号との対応（2026-09-17 に付け直した。古い番号を `deploy.env` の `PHASE` に書くと `ops/up.sh` が案内を出して止まる）:
-
-| 古い番号 | いまの居場所 |
-|---|---|
-| 2（lab + graph）と 2 の任意（`WITH_STREAM=1`） | **2** に入った。stream は任意ではなく、フェーズ 2 の本体（外すなら `SKIP_STREAM=1`） |
-| 2B（Kafka → Spark → Iceberg） | **2** の `terraform/analytics`。データパイプラインの最後の段なのでフェーズ 2 に入る |
-| 3（欠番）/ 4（ベクトル + 全文検索） | 4 はフェーズ 1 に取り込み済み（ナレッジベースの検索）。番号は使わない |
-| 5A（エージェントの調査ワークフロー）+ 5B（人が承認して直す） | **3** にまとめた |
-
-**3 つとも Terraform とスクリプトがある**（フェーズ 3 は 2026-09-17 に着手済み）。AWS 上の apply はどのフェーズも未確認（各フェーズの「決まっていないこと」）。
+**3 つとも Terraform とスクリプトがある。**AWS 上の apply は、`terraform/agent` に切り出した後の形はどれも未確認（各機能の「決まっていないこと」）。以下の節の見出しは古い番号のままにしてある（1 = AGENT、2 = PIPELINE、3 = WORKFLOW と読む）。
 
 ## 全体
 
-| フェーズ | 到達点 | 作る Terraform ルート | 立てている間の費用（東京・税抜・$1 = 150 円） | 状態 |
+| 機能 | 到達点 | 作る Terraform ルート | 立てている間の費用（東京・税抜・$1 = 150 円） | 状態 |
 |---|---|---|---|---|
-| 1（`PHASE=1`、既定） | LLM + RAG で対話する。閉域の VPC でチャットし、手順書を引いて答える | `terraform/ecr` → `terraform/main` | 置いておくだけ 約 $0.52/h（約 79 円） | **動く**（このリポジトリの本体） |
-| 2（`PHASE=2`） | データパイプライン。EC2 の中の疑似ネットワーク（containerlab）の SNMP を Telegraf が Kafka に流し、Spark が S3 Tables（Iceberg）/ OpenSearch Serverless / Prometheus に書き続け、異常を検知して DynamoDB の一覧に出す（EventBridge にも出す）。トポロジは Neptune で持って Web から編集する | フェーズ 1 に `terraform/lab` → `terraform/stream` → `terraform/analytics`、並行して `terraform/graph` | さらに約 $1.08/h（約 162 円。lab 0.09 + stream 0.28 + analytics 0.20 + OpenSearch 最大 0.33 + Prometheus 0.03 + graph 0.14） | 作ってある（使う日だけ作る。**AWS 上の apply は未確認**） |
-| 3（`PHASE=3`） | Spark の検知が EventBridge → SQS で届き、エージェントが Neptune / OpenSearch / Prometheus を見て原因調査 → 修復案を Temporal のワークフローで回し、**人が Web の「承認」タブで承認**してから Temporal が lab で直して確かめる。エージェントのツールは AgentCore Gateway（MCP）経由 | フェーズ 2 に `terraform/workflow` | さらに約 $0.06/h（約 9 円。Temporal のサーバーとワーカーを ECS on Fargate の 1 タスク（ARM、1 vCPU / 2 GB）+ sqs エンドポイント 1 本） | 作ってある（2026-09-17。使う日だけ作る。**AWS 上の apply は未確認**） |
+| 土台（必ず作る） | 閉域の VPC に Web の EC2（Gradio）を置き、SSM のポートフォワーディングで開く | `terraform/ecr` → `terraform/main` | 約 $0.05/h（約 8 円） | **動く** |
+| AGENT（`AGENT=1`、既定。旧 1） | agent での分析。閉域の VPC でチャットし、モデルとトポロジのツールで答える。`CREATE_KB=1` なら手順書も引く | 土台に `terraform/agent` | 約 $0.13/h（約 20 円）。`CREATE_KB=1` なら +$0.36/h | **動いた**（`terraform/main` 一体の形で 2026-09-16〜17。切り出した後の apply は未確認） |
+| PIPELINE（`PIPELINE=1`。旧 2） | データパイプライン。EC2 の中の疑似ネットワーク（containerlab）の SNMP を Telegraf が Kafka に流し、Spark が S3 Tables（Iceberg）/ OpenSearch Serverless / Prometheus に書き続け、異常を検知して DynamoDB の一覧に出す（EventBridge にも出す）。トポロジは Neptune で持って Web から編集する | 土台に `terraform/lab` → `terraform/stream` → `terraform/analytics`、並行して `terraform/graph` | 約 $1.08/h（約 162 円。lab 0.09 + stream 0.28 + analytics 0.20 + OpenSearch 最大 0.33 + Prometheus 0.03 + graph 0.14） | 作ってある（使う日だけ作る。**AWS 上の apply は未確認**） |
+| WORKFLOW（`WORKFLOW=1`。旧 3。AGENT と PIPELINE が要る） | Spark の検知が EventBridge → SQS で届き、エージェントが Neptune / OpenSearch / Prometheus を見て原因調査 → 修復案を Temporal のワークフローで回し、**人が Web の「承認」タブで承認**してから Temporal が lab で直して確かめる。エージェントのツールは AgentCore Gateway（MCP）経由 | AGENT + PIPELINE に `terraform/workflow` | 約 $0.06/h（約 9 円。Temporal のサーバーとワーカーを ECS on Fargate の 1 タスク（ARM、1 vCPU / 2 GB）+ sqs エンドポイント 1 本） | 作ってある（2026-09-17。使う日だけ作る。**AWS 上の apply は未確認**） |
 
-費用は 1 時間立てたときの目安。内訳と前提は README の「1 時間起動したときの試算」にある（単価はフェーズ 1 が 2026-09-14、lab・graph・stream が 2026-09-15、analytics が 2026-09-17 に AWS Price List API と料金ページで確認した値）。
-どこまで作るかは `deploy.env` の `PHASE` で選ぶ（README の「毎日の起動と片付けをスクリプトで打つ」）。フェーズ 2 の一部だけ要らないときは `SKIP_LAB` / `SKIP_STREAM` / `SKIP_ANALYTICS` / `SKIP_GRAPH`。
+費用は 1 時間立てたときの目安。内訳と前提は README の「1 時間起動したときの試算」にある（単価は土台と AGENT が 2026-09-14、lab・graph・stream が 2026-09-15、analytics が 2026-09-17 に AWS Price List API と料金ページで確認した値）。
+何を作るかは `deploy.env` の `AGENT` / `PIPELINE` / `WORKFLOW`（と `CREATE_KB`）で選ぶ（README の「毎日の起動と片付けをスクリプトで打つ」）。機能は互いに独立で、あとから別の機能を `1` にして打ち直せばその機能だけ足される。PIPELINE の一部だけ要らないときは `SKIP_LAB` / `SKIP_STREAM` / `SKIP_ANALYTICS` / `SKIP_GRAPH`。
 
-**時間課金のものは使う日に作って当日中に消す。**フェーズ 1 を 1 か月置くと約 $383（約 57,400 円）、フェーズ 2 の 4 ルートは約 $504（約 75,600 円）で、
-置いておくだけの費用の 6 割強は OpenSearch Serverless の最小 OCU（月約 $240）。**EC2 を止めてもほとんど減らない。**
+**時間課金のものは使う日に作って当日中に消す。**土台 + AGENT を 1 か月置くと約 $131（約 19,700 円。`CREATE_KB=1` なら +$263 で、その大半は OpenSearch Serverless の最小 OCU）、PIPELINE の 4 ルートは約 $789（約 118,000 円）。**EC2 を止めてもほとんど減らない。**
 
 ---
 
-## フェーズ 1 — 閉域ネットワークで動くチャット
+## フェーズ 1（いまの AGENT + 土台）— 閉域ネットワークで動くチャット
 
 ### 何ができる
 
 - ブラウザのチャット画面（Gradio）から、AgentCore Runtime 上のエージェントと日本語で話せる。
 - 答える前に **Bedrock Knowledge Base** で手順書の md を引き（ベクトル検索とキーワード検索のハイブリッド、候補 20 件を Rerank で 5 件に絞る）、回答の末尾に参照したファイル名が付く。
 - 質問と回答を **Bedrock Guardrails** が判定する。
-- 「トポロジ」タブで機器と結線を見る（フェーズ 2 を作っていなければ静的データ）。
+- 「トポロジ」タブで機器と結線を見る（PIPELINE の graph を作っていなければ静的データ）。
 - エージェントは `list_devices` / `neighbors` / `blast_radius` を呼んで、影響範囲を答えられる。
 
 ### 決まっていること
@@ -59,7 +60,7 @@
 | 画面 | Gradio を EC2（AL2023 / arm64 / t4g.small）の 127.0.0.1:8080 で動かす |
 | state | **ローカル**。ルート間は `terraform_remote_state` で読む（1 人が 1 台の PC で打つ前提） |
 | 手順書 | `kb-docs/*.md` を S3 に置いて取り込みジョブを流す。**`docs/` は取り込まない** |
-| 片付け | 毎日 `ops/down.sh` で消し、翌朝 `ops/up.sh` で作り直す（どこまで作るかは `deploy.env` の `PHASE`。既定はフェーズ 1） |
+| 片付け | 毎日 `ops/down.sh` で消し、翌朝 `ops/up.sh` で作り直す（何を作るかは `deploy.env` の `AGENT` / `PIPELINE` / `WORKFLOW`。既定は土台 + AGENT） |
 
 ### 決まっていないこと・入れていないこと
 
@@ -77,16 +78,16 @@
 
 ---
 
-## フェーズ 2 — データパイプライン（lab → stream → analytics）とトポロジ（graph）
+## フェーズ 2（いまの PIPELINE）— データパイプライン（lab → stream → analytics）とトポロジ（graph）
 
 **2026-09-17 のユーザー決定: フェーズ 2 = containerlab → Telegraf → Kafka → Spark → S3 Tables のデータパイプライン構築。**
 それまで「2 の任意（`WITH_STREAM=1`）」だった stream と、「2B」だった analytics がフェーズ 2 の本体になった。トポロジの Neptune（graph）もこのフェーズのまま。
-`deploy.env` に `PHASE=2` と書くと 4 ルートを作る。**使う日に作って当日中に消す。**`terraform/main` はそのまま使う。
+`deploy.env` に `PIPELINE=1` と書くと 4 ルートを作る。**使う日に作って当日中に消す。**`terraform/main` はそのまま使う。
 
 ```
 lab（EC2 の containerlab: FRR × 6 + snmpd × 4 + ホスト × 4）
   └─ Telegraf（SNMP 10 秒ポーリング + trap）─▶ stream（MSK、トピック metrics / traps）
-                                                 ├─▶ analytics の Spark（detect）─▶ DynamoDB の異常一覧（Web とエージェントが読む「いま」）─▶ EventBridge の AnomalyOpened（フェーズ 3 の SQS へ）
+                                                 ├─▶ analytics の Spark（detect）─▶ DynamoDB の異常一覧（Web とエージェントが読む「いま」）─▶ EventBridge の AnomalyOpened（WORKFLOW の SQS へ）
                                                  ├─▶ MSK Connect（S3 sink）─▶ S3 の stream/（任意。CREATE_S3_SINK=0 で外す）
                                                  ├─▶ analytics（Spark on EMR Serverless）─ 全トピック ─▶ S3 Tables（Iceberg）の snmp_metrics（履歴の正本）
                                                  ├─▶ analytics の Spark ─ traps（ログ）だけ ─▶ OpenSearch Serverless の snmp-logs（SINKS に opensearch。既定で作る）
@@ -136,7 +137,7 @@ graph（Neptune のトポロジ。Web の「トポロジ」タブから編集）
 - Grafana などの可視化（**保留**。2026-09-17 ユーザー決定「OpenSearchとPrometheusはgrafanaで可視化したいけどそこは後回しでOK」）。異常一覧は DynamoDB の表をそのまま出す。OpenSearch Serverless / Prometheus の中身は VPC の中からしか届かない。
 - 異常の重み付けや相関（同時に落ちた複数のリンクを 1 件にまとめる、など）。閾値判定は 2026-09-17 に stream の detector Lambda から Spark（`spark/snmp_sinks.py` の detect）に寄せた。
 - **（失効）OpenSearch の全文検索は入れない（2026-09-17 朝のユーザー決定「いれなくてOK」）。同日午後の「spark から s3 iceburg, splunk, open search + prometheus この3パターンに格納したい」「Kafka から 4 つに分ける」で置き換わり、ログ（`traps`）だけを Spark から OpenSearch Serverless の TIMESERIES コレクションに入れる形で実装した（`SINKS` に `opensearch`。同日夕方のユーザー決定「SINKS に opensearch と prometheus を入れる。KB コレクションと共有できなければこちらを優先して」で既定に入れた）。**下の理由のうち「別に立てると OCU がもう 1 セット出る可能性」はそのまま残っている（確認できていない）。以下は当時の判断:
-  Spark の後に Kafka のメッセージを OpenSearch にも入れる案（2026-09-16 の見直しの矢印にある「+ OpenSearch」）は、次の理由で見送った。フェーズ 1 のコレクションは `VECTORSEARCH` 型で、ID 指定の書き込み・`_update` は `SEARCH` 型だけ、`TIMESERIES` 型は upsert ができない
+  Spark の後に Kafka のメッセージを OpenSearch にも入れる案（2026-09-16 の見直しの矢印にある「+ OpenSearch」）は、次の理由で見送った。ナレッジベース（`CREATE_KB=1`）のコレクションは `VECTORSEARCH` 型で、ID 指定の書き込み・`_update` は `SEARCH` 型だけ、`TIMESERIES` 型は upsert ができない
   （[Supported operations](https://docs.aws.amazon.com/opensearch-service/latest/developerguide/serverless-genref.html)、
   [Choosing a collection type](https://docs.aws.amazon.com/opensearch-service/latest/developerguide/serverless-overview.html)。2026-09-16 に確認）ので相乗りはできない見込み。
   **別に立てると最小 OCU（月 ≒ $240）がもう 1 セット出る可能性がある**（コレクショングループに入らない Classic のコレクションは KMS キーが同じなら OCU を共有できるが、型が違っても共有されるかは未確認）。
@@ -146,9 +147,9 @@ graph（Neptune のトポロジ。Web の「トポロジ」タブから編集）
 
 ---
 
-## フェーズ 3 — Temporal でエージェントが調査し、人が承認して直す
+## フェーズ 3（いまの WORKFLOW）— Temporal でエージェントが調査し、人が承認して直す
 
-**2026-09-17 に着手した**（ユーザー決定「ECSで着手して」「agent gateway の MCP も一緒に」）。`terraform/workflow`（ECS on Fargate のタスク + DynamoDB の修復案テーブル + AgentCore Gateway（MCP）と tools Lambda）、`workflow/`（ワーカー）、`tools/`（Gateway のツール）、`agent/mcp_client.py` / `agent/proposals.py`、Web の「承認」タブ、`PHASE=3 ops/up.sh`、`tests/test_workflow.py`。手順は README の「workflow（フェーズ 3）」。**AWS 上の apply は未確認。**
+**2026-09-17 に着手した**（ユーザー決定「ECSで着手して」「agent gateway の MCP も一緒に」）。`terraform/workflow`（ECS on Fargate のタスク + DynamoDB の修復案テーブル + AgentCore Gateway（MCP）と tools Lambda）、`workflow/`（ワーカー）、`tools/`（Gateway のツール）、`agent/mcp_client.py` / `agent/proposals.py`、Web の「承認」タブ、`WORKFLOW=1 ops/up.sh`、`tests/test_workflow.py`。手順は README の「workflow（WORKFLOW）」。**AWS 上の apply は未確認。**
 **2026-09-17 夕方のユーザー決定**「Spark が異常を検知したら EventBridge にイベント発行して、それを検知した agent が Neptune や S3、OpenSearch、Prometheus を見に行って原因分析 → 修復の提案 → 人間の承認 → Temporal で実行」
 「Step Functions じゃなくて Temporal（EKS）だった。ただいまの段階では EKS ではなく ECS で OK」で、入口を DynamoDB の polling から **EventBridge → SQS** に変え（`terraform/workflow/events.tf`）、
 エージェントに OpenSearch / Prometheus / S3 Tables を見るツール（`agent/evidence.py`）を足した。stream の detector Lambda は消し、検知は Spark（`spark/snmp_sinks.py` の detect）に寄せた。
@@ -174,7 +175,7 @@ graph（Neptune のトポロジ。Web の「トポロジ」タブから編集）
 
 ### 着手できる時期
 
-**フェーズ 2 の stream と analytics が動いていること**（Spark が異常を DynamoDB と EventBridge に出すこと）が前提（2026-09-17 に検知を Spark に寄せたので、analytics も要る）。
+**AGENT と、PIPELINE の stream と analytics が動いていること**（Spark が異常を DynamoDB と EventBridge に出すこと）が前提（2026-09-17 に検知を Spark に寄せたので、analytics も要る）。
 調査の材料が増えるほど質は上がるが、閾値で出た異常だけでもワークフローは回せる。
 
 ### 入れるときに効く費用と前提
@@ -189,7 +190,7 @@ graph（Neptune のトポロジ。Web の「トポロジ」タブから編集）
 - **VPC は main を使い回す。**`terraform/stream` / `terraform/graph` / `terraform/analytics` と同じく `data.terraform_remote_state.main.outputs.vpc_id` で入れる。新しい VPC を作ると ECR や Logs のエンドポイントを一から並べることになる。
 - **サーバーとワーカーは、まず 1 つのタスクに同居させる。**同じタスクなら `localhost` で繋がり、ロードバランサもサービス検出も要らない。
   別々のタスクに分けて **Service Connect を使うなら `ecs-agent` エンドポイントが要る**（Envoy の管理がこれを使う。同じ ECS の文書）。
-- イメージは VPC 内の ECR から引く（フェーズ 1 と同じ）。`temporalio/temporal` 1.9.1 は arm64 を持つ（マニフェスト、2026-09-17 確認）ので、`ops/up.sh` が ECR にミラーする。
+- イメージは VPC 内の ECR から引く（AGENT の Runtime と同じ）。`temporalio/temporal` 1.9.1 は arm64 を持つ（マニフェスト、2026-09-17 確認）ので、`ops/up.sh` が ECR にミラーする。
 - 毎日 `ops/down.sh` で消す運用なので、**このタスクも「使う日に作って当日中に消す」側に入れる。**
 
 ### EKS に戻すとき

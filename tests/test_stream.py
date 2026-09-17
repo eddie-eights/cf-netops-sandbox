@@ -39,7 +39,7 @@ check("argparse に --anomaly-table / --device-map / --event-bus がある",
       all(f'"--{a}"' in src for a in ("anomaly-table", "device-map", "event-bus")))
 check("build は --anomaly-table があるときだけ detect のクエリを足す",
       re.search(r'if args\.anomaly_table:[\s\S]*?http_query\(rows, "detect"', src) is not None)
-check("Source は netops.spark、DetailType は AnomalyOpened", mod.EVENT_SOURCE == "netops.spark" and mod.EVENT_DETAIL_TYPE == "AnomalyOpened")
+check("Source は netops.spark、DetailType は AnomalyOpened / AnomalyResolved", mod.EVENT_SOURCE == "netops.spark" and mod.EVENT_DETAIL_TYPE == "AnomalyOpened" and mod.EVENT_RESOLVED_TYPE == "AnomalyResolved")
 check("parse_device_map は = の無い要素を捨てる",
       mod.parse_device_map("203.0.113.11=hq-ce-01,garbage,203.0.113.12=dc-ce-01") == {"203.0.113.11": "hq-ce-01", "203.0.113.12": "dc-ce-01"}
       and mod.parse_device_map("") == {})
@@ -159,12 +159,17 @@ check("開いたままの down は first_seen を残し、イベントは出さ�
       send([iface("203.0.113.11", "eth1", 2)]) == [] and ddb.plain(key)["first_seen"] == first - 100 and len(ev.calls) == 1)
 check("up → resolved（resolved_at が付く）",
       send([iface("203.0.113.11", "eth1", 1)]) == [] and ddb.plain(key)["status"] == "resolved" and "resolved_at" in ddb.plain(key))
-check("resolved のあとの up は何もしない（ConditionExpression）",
-      send([iface("203.0.113.11", "eth1", 1)]) == [] and ddb.plain(key)["status"] == "resolved" and len(ev.calls) == 1)
+entry = ev.calls[-1][0]
+check("open → resolved で AnomalyResolved を 1 件出す（Detail に anomaly_id / device_id / kind / target / resolved_at / source）",
+      len(ev.calls) == 2 and len(ev.calls[1]) == 1 and entry["DetailType"] == "AnomalyResolved" and entry["Source"] == "netops.spark"
+      and json.loads(entry["Detail"]) == {"anomaly_id": key, "device_id": "hq-ce-01", "kind": "link_down", "target": "eth1",
+                                          "resolved_at": ddb.plain(key)["resolved_at"], "source": "poll"})
+check("resolved のあとの up は何もしない（ConditionExpression。AnomalyResolved も出さない）",
+      send([iface("203.0.113.11", "eth1", 1)]) == [] and ddb.plain(key)["status"] == "resolved" and len(ev.calls) == 2)
 reopened = send([iface("203.0.113.11", "eth1", 2)])
 check("resolved → 再 open はイベントをもう一度出し、first_seen は前のまま",
       len(reopened) == 1 and reopened[0]["first_seen"] == first - 100 and ddb.plain(key)["status"] == "open"
-      and ddb.plain(key)["first_seen"] == first - 100 and len(ev.calls) == 2)
+      and ddb.plain(key)["first_seen"] == first - 100 and len(ev.calls) == 3 and ev.calls[-1][0]["DetailType"] == "AnomalyOpened")
 
 send, ddb, ev = make()
 check("ifDescr が無ければ ifIndex", send([iface("203.0.113.12", None, 2, ifindex="3")]) and "dc-ce-01#link_down#3" in ddb.items)

@@ -55,3 +55,15 @@ variable "deletion_protection" {
   type        = bool
   default     = false
 }
+
+# ---------------------------------------------------------------- status Lambda
+variable "log_retention_days" {
+  description = "Retention of the status Lambda log group /aws/lambda/<name_prefix>-graph-status."
+  type        = number
+  default     = 7
+
+  validation {
+    condition     = contains([1, 3, 7, 14, 30], var.log_retention_days)
+    error_message = "log_retention_days must be one of 1, 3, 7, 14, 30."
+  }
+}

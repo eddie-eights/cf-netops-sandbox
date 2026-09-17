@@ -1,0 +1,24 @@
+# Copy to terraform.tfvars (gitignored) only when the defaults are not right. Every value has a default in variables.tf.
+# ops/up.sh passes owner / agent_image_tag / create_knowledge_base / kb_admin_principal_arn / opensearch_cacert_file with -var.
+# region / name_prefix / owner must be the same values as terraform/main.
+#
+# region      = "ap-northeast-1"
+# name_prefix = "fukuda-nwc-poc"
+# owner       = "fukuda"
+#
+# agent_image_tag = "v1"
+# agent_image_uri = ""             # leave empty to use the terraform/ecr repository
+# runtime_name    = "fukuda_nwc_poc_agent"
+# model_id        = "jp.amazon.nova-2-lite-v1:0"
+#
+# create_knowledge_base      = false  # true adds OpenSearch Serverless (about 0.33 USD per hour) and the Bedrock knowledge base
+# kb_admin_principal_arn     = ""  # leave empty to derive it from the caller (IAM user ARN, or the role of an assumed-role session)
+# guardrail_profile_id       = "apac.guardrail.v1:0"
+# number_of_results          = 20
+# rerank_model_id            = "amazon.rerank-v1:0"
+# number_of_reranked_results = 5
+# opensearch_cacert_file     = ""  # PEM of the corporate CA when HTTPS is inspected on this PC
+#
+# create_runtime_endpoints  = true
+# create_kb_endpoint        = true
+# create_agentcore_endpoint = true

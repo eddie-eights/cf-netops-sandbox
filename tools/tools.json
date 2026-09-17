@@ -1,7 +1,7 @@
 [
   {
     "name": "list_devices",
-    "description": "監視対象ネットワークの機器一覧（拠点 site、役割 role、管理 IP、AS 番号）。site や role で絞れる。",
+    "description": "監視対象ネットワークの機器一覧（拠点 site、役割 role、管理 IP、AS 番号、いまの状態 status = UP / DOWN / ALARM）。site や role で絞れる。",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -18,7 +18,7 @@
   },
   {
     "name": "neighbors",
-    "description": "機器の隣接（接続先の機器、両端のインタフェース名、回線の種別 ebgp/ibgp/l2、主副、帯域）。",
+    "description": "機器の隣接（接続先の機器、両端のインタフェース名、回線の種別 ebgp/ibgp/l2、主副、帯域、回線のいまの状態 status = UP / DOWN）。",
     "inputSchema": {
       "type": "object",
       "required": [
@@ -34,7 +34,7 @@
   },
   {
     "name": "blast_radius",
-    "description": "機器が停止したときに影響が及ぶ範囲（指定ホップ数以内の機器と拠点）。",
+    "description": "機器が停止したときに影響が及ぶ範囲（指定ホップ数以内の機器と拠点。各機器のいまの状態 status 付き）。",
     "inputSchema": {
       "type": "object",
       "required": [

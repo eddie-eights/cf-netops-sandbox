@@ -391,6 +391,7 @@ def make_prometheus_sender(url, region):
 LINK_DOWN, LINK_UP = ".1.3.6.1.6.3.1.1.5.3", ".1.3.6.1.6.3.1.1.5.4"   # IF-MIB linkDown / linkUp の trap OID
 EVENT_SOURCE = "netops.spark"
 EVENT_DETAIL_TYPE = "AnomalyOpened"
+EVENT_RESOLVED_TYPE = "AnomalyResolved"   # open → resolved にした瞬間に出す（terraform/graph の status Lambda が回線を UP に戻す）
 
 
 def parse_device_map(text):
@@ -443,7 +444,8 @@ def anomaly_detail(kind, ifn, src):
 
 
 def make_detect_sender(table_name, devmap, region, event_bus, dynamodb=None, events_client=None):
-    """records（row_to_record の辞書）から異常を出し、DynamoDB に open / resolved を書き、新しく open になったものを EventBridge に出す。
+    """records（row_to_record の辞書）から異常を出し、DynamoDB に open / resolved を書き、新しく open になったものを AnomalyOpened、
+    open から resolved になったものを AnomalyResolved として EventBridge に出す。戻り値は新しく open になったものだけ。
 
     dynamodb / events_client はテストで差し替える（無ければ boto3 で作る。EMR Serverless の Python に boto3 は入っている）。
     同じマイクロバッチに同じキーが何度も出るときは最後の状態だけ書く（ポーリングは 10 秒間隔、トリガーは 60 秒）。
@@ -462,7 +464,7 @@ def make_detect_sender(table_name, devmap, region, event_bus, dynamodb=None, eve
             m = {"name": rec.get("measurement"), "tags": rec.get("tags") or {}, "fields": rec.get("fields") or {}}
             for dev, kind, ifn, opened, src in events(m, devmap):
                 latest[anomaly_key(dev, kind, ifn)] = (dev, kind, ifn, opened, src)
-        opened_now = []
+        opened_now, resolved_now = [], []
         for key, (dev, kind, ifn, opened, src) in latest.items():
             if opened:
                 r = dynamodb.update_item(
@@ -491,14 +493,17 @@ def make_detect_sender(table_name, devmap, region, event_bus, dynamodb=None, eve
                     )
                 except dynamodb.exceptions.ConditionalCheckFailedException:
                     continue  # 開いていない異常の up は何もしない（正常時のポーリングは毎回ここ）
-        for i in range(0, len(opened_now), 10):   # PutEvents は 1 回 10 件まで
-            entries = [{"Source": EVENT_SOURCE, "DetailType": EVENT_DETAIL_TYPE, "EventBusName": event_bus, "Detail": json.dumps(o)}
-                       for o in opened_now[i:i + 10]]
-            r = events_client.put_events(Entries=entries)
+                resolved_now.append({"anomaly_id": key, "device_id": dev, "kind": kind, "target": ifn, "resolved_at": now, "source": src})
+        entries = ([{"Source": EVENT_SOURCE, "DetailType": EVENT_DETAIL_TYPE, "EventBusName": event_bus, "Detail": json.dumps(o)} for o in opened_now]
+                   + [{"Source": EVENT_SOURCE, "DetailType": EVENT_RESOLVED_TYPE, "EventBusName": event_bus, "Detail": json.dumps(o)} for o in resolved_now])
+        for i in range(0, len(entries), 10):   # PutEvents は 1 回 10 件まで
+            r = events_client.put_events(Entries=entries[i:i + 10])
             if r.get("FailedEntryCount"):
                 log(f"detect: put_events で {r['FailedEntryCount']} 件失敗: {r.get('Entries')}")
         if opened_now:
             log("detect: 新しい異常 " + ", ".join(o["anomaly_id"] for o in opened_now))
+        if resolved_now:
+            log("detect: 解消 " + ", ".join(o["anomaly_id"] for o in resolved_now))
         return opened_now
 
     return send

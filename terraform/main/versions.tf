@@ -6,14 +6,5 @@ terraform {
       source  = "hashicorp/aws"
       version = "~> 6.0"
     }
-    # OpenSearch Serverless のベクトルインデックスを作る（aws provider にインデックスのリソースが無い）
-    opensearch = {
-      source  = "opensearch-project/opensearch"
-      version = "~> 2.3"
-    }
-    time = {
-      source  = "hashicorp/time"
-      version = "~> 0.13"
-    }
   }
 }
