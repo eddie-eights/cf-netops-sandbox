@@ -173,7 +173,7 @@ check("link_choices は 10 本の (表示, a|a_if|b)", len(lc) == 10 and ("carri
 check("役割の無いリンクは種別だけ", ("hq-ce-01 eth3 - hq-host-01 eth1  [l2]", "hq-ce-01|eth3|hq-host-01") in lc)
 check("link_choices の値は remove_link の引数に戻せる", all(v.count("|") == 2 and v.split("|")[0] < v.split("|")[2] for _, v in lc))
 a = app.anomalies
-check("異常一覧はテーブル未設定なら error と空リスト", a.list_anomalies()["anomalies"] == [] and "terraform/stream" in a.list_anomalies()["error"])
+check("異常一覧はテーブル未設定なら error と空リスト", a.list_anomalies()["anomalies"] == [] and "terraform/pipeline/stream" in a.list_anomalies()["error"])
 check("app.run_tool は list_anomalies を anomalies に振る", "error" in app.run_tool("list_anomalies", {"status": "open"}) and app.run_tool("list_devices", {})["count"] == 10)
 check("anomalies.run_tool の未知ツール", "unknown" in a.run_tool("nope", {})["error"])
 

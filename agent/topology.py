@@ -1,6 +1,6 @@
 """トポロジをエージェントのツールとして出す。
 
-元データは 2 通り。Neptune（terraform/graph。graph.configured() が真）があればそこから読み、無ければ
+元データは 2 通り。Neptune（terraform/pipeline/graph。graph.configured() が真）があればそこから読み、無ければ
 静的データ（data/devices.yaml と data/topology.json。tools Lambda では devices.json）。どちらも中身はローカル lab（lab/wvs2.clab.yml）の
 10 台そのもので、すべて架空のアドレス。SNMP や lab には触らない。読み取りだけなので、モデルが何度呼んでも副作用は無い。
 Neptune のときは TTL 秒ごとに読み直す（画面で編集した結果が次の質問に効く）。

@@ -1,12 +1,12 @@
 # ---------------------------------------------------------------- naming
 variable "region" {
-  description = "AWS region. Same value as terraform/main."
+  description = "AWS region. Same value as terraform/base/core."
   type        = string
   default     = "ap-northeast-1"
 }
 
 variable "name_prefix" {
-  description = "Same value as terraform/main (the IAM roles <name_prefix>-runtime / <name_prefix>-web get the proposal table and gateway policy)."
+  description = "Same value as terraform/base/core (the IAM roles <name_prefix>-runtime / <name_prefix>-web get the proposal table and gateway policy)."
   type        = string
   default     = "fukuda-nwc-poc"
 
@@ -27,7 +27,7 @@ variable "owner" {
   }
 }
 
-# ---------------------------------------------------------------- images (terraform/ecr)
+# ---------------------------------------------------------------- images (terraform/base/ecr)
 variable "worker_image_tag" {
   description = "Tag of the worker image in the <name_prefix>-worker repository (README workflow-1). ops/up.sh passes IMAGE_TAG."
   type        = string

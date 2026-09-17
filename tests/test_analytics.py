@@ -1,5 +1,5 @@
-"""terraform/analytics と spark/snmp_sinks.py の模擬テスト（AWS に触れない）。
-terraform/analytics が main と stream の state を読み、S3 Tables のテーブルと EMR Serverless と格納先（sinks）を作ること、
+"""terraform/pipeline/analytics と spark/snmp_sinks.py の模擬テスト（AWS に触れない）。
+terraform/pipeline/analytics が main と stream の state を読み、S3 Tables のテーブルと EMR Serverless と格納先（sinks）を作ること、
 Spark のスクリプトが Kafka（MSK の IAM 認証）を格納先ごとに読んで Iceberg / OpenSearch Serverless / Prometheus に流すこと、
 テーブルの列がスクリプトと一致すること、remote write の protobuf と snappy が手で復号できることを見る。
 実行は python3 tests/test_analytics.py（依存は無い。pyspark も botocore も要らない。スクリプトは import するが pyspark は関数の中で読む）。"""
@@ -7,7 +7,7 @@ import ast, importlib.util, io, json, os, re, struct, sys
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 SRC = os.path.join(ROOT, "spark", "snmp_sinks.py")
-TF_DIR = os.path.join(ROOT, "terraform", "analytics")
+TF_DIR = os.path.join(ROOT, "terraform", "pipeline", "analytics")
 UP = os.path.join(ROOT, "ops", "up.sh")
 DOWN = os.path.join(ROOT, "ops", "down.sh")
 CHECK = os.path.join(ROOT, "ops", "check.sh")
@@ -20,7 +20,7 @@ def check(name, cond):
     passed += 1
     print("ok", name)
 
-# terraform/analytics は関心ごとにファイルが分かれているので、ルートの .tf を全部つないで見る
+# terraform/pipeline/analytics は関心ごとにファイルが分かれているので、ルートの .tf を全部つないで見る
 tf = ""
 tf_files = sorted(n for n in os.listdir(TF_DIR) if n.endswith(".tf"))
 for name in tf_files:
@@ -41,7 +41,7 @@ with open(ENV_EXAMPLE, encoding="utf-8") as f:
 check("ファイルは versions / providers / variables / locals / network / tables / emr / sinks / access / outputs",
       set(tf_files) == {"versions.tf", "providers.tf", "variables.tf", "locals.tf", "network.tf", "tables.tf", "emr.tf", "sinks.tf", "access.tf", "outputs.tf"})
 check("main の state をローカルから読む", re.search(r'data "terraform_remote_state" "main"[\s\S]*?backend\s*=\s*"local"', tf, re.S) is not None
-      and '"${path.module}/../main/terraform.tfstate"' in tf)
+      and '"${path.module}/../../base/core/terraform.tfstate"' in tf)
 check("stream の state をローカルから読む", re.search(r'data "terraform_remote_state" "stream"[\s\S]*?backend\s*=\s*"local"', tf, re.S) is not None
       and '"${path.module}/../stream/terraform.tfstate"' in tf)
 for out in ("vpc_id", "runtime_subnet_ids", "endpoint_security_group_id", "kb_bucket_name"):
@@ -49,11 +49,11 @@ for out in ("vpc_id", "runtime_subnet_ids", "endpoint_security_group_id", "kb_bu
 for out in ("msk_cluster_arn", "msk_security_group_id", "bootstrap_brokers"):
     check(f"stream の output {out} を try で読む（無ければ precondition で止める）",
           re.search(r'try\(data\.terraform_remote_state\.stream\.outputs\.' + out + r',\s*""\)', tf) is not None)
-check("stream が無いときは「terraform/stream を先に apply する」と出る",
-      re.search(r'precondition\s*\{[\s\S]*?msk_cluster_arn\s*!=\s*""[\s\S]*?terraform/stream を先に apply する', tf, re.S) is not None)
+check("stream が無いときは「terraform/pipeline/stream を先に apply する」と出る",
+      re.search(r'precondition\s*\{[\s\S]*?msk_cluster_arn\s*!=\s*""[\s\S]*?terraform/pipeline/stream を先に apply する', tf, re.S) is not None)
 # main / stream の outputs.tf に本当にその output があるか
-for root, outs in (("main", ("vpc_id", "runtime_subnet_ids", "endpoint_security_group_id", "kb_bucket_name")),
-                   ("stream", ("msk_cluster_arn", "msk_security_group_id", "bootstrap_brokers"))):
+for root, outs in (("base/core", ("vpc_id", "runtime_subnet_ids", "endpoint_security_group_id", "kb_bucket_name")),
+                   ("pipeline/stream", ("msk_cluster_arn", "msk_security_group_id", "bootstrap_brokers"))):
     with open(os.path.join(ROOT, "terraform", root, "outputs.tf"), encoding="utf-8") as f:
         other = f.read()
     for out in outs:
@@ -103,9 +103,9 @@ check("Kafka のトピック ARN は cluster → topic の置き換え", 'replac
 check("variable sinks は list、既定 3 つ（iceberg / opensearch / prometheus。2026-09-17 ユーザー決定）、3 つのどれかに絞る",
       re.search(r'variable "sinks"[\s\S]*?type\s*=\s*list\(string\)[\s\S]*?default\s*=\s*\["iceberg",\s*"opensearch",\s*"prometheus"\][\s\S]*?validation', tf, re.S) is not None
       and re.search(r'variable "sinks"[\s\S]*?\["iceberg",\s*"opensearch",\s*"prometheus"\]', tf, re.S) is not None)
-check("variable metric_topics / log_topics（既定 metrics / traps、空を拒否）",
+check("variable metric_topics / log_topics（既定 metrics / traps + logs、空を拒否）",
       re.search(r'variable "metric_topics"[\s\S]*?default\s*=\s*\["metrics"\][\s\S]*?validation', tf, re.S) is not None
-      and re.search(r'variable "log_topics"[\s\S]*?default\s*=\s*\["traps"\][\s\S]*?validation', tf, re.S) is not None)
+      and re.search(r'variable "log_topics"[\s\S]*?default\s*=\s*\["traps",\s*"logs"\][\s\S]*?validation', tf, re.S) is not None)
 check("splunk のリソースと変数は Terraform に無い（MSK Connect で後回し。注記と description だけ）",
       re.search(r'(resource|variable|output) "[^"]*splunk', tf, re.I) is None and "sink_splunk" not in tf)
 check("locals に sink_iceberg / sink_opensearch / sink_prometheus",
@@ -153,7 +153,7 @@ check("job_driver は jars を s3://<バケット>/analytics/jars/ から読む"
 check("ジョブは 2 vCPU（driver 1 + executor 1、動的割り当て無し）",
       "spark.driver.cores=1" in tf and "spark.executor.cores=1" in tf and "spark.executor.instances=1" in tf and "spark.dynamicAllocation.enabled=false" in tf)
 check("ドライバーのログは CloudWatch、EMR の managed storage は使わない",
-      re.search(r'cloudWatchLoggingConfiguration\s*=\s*\{\s*enabled\s*=\s*true', tf) is not None
+      re.search(r'cloudWatchLoggingConfiguration\s*=\s*\{\s*enabled\s*=\s*var\.cloudwatch_logging', tf) is not None
       and re.search(r'managedPersistenceMonitoringConfiguration\s*=\s*\{\s*enabled\s*=\s*false', tf) is not None)
 
 # ---- Spark のスクリプト（読み書きの形は文字列で見る。pyspark は関数の中で import するので、モジュールは pyspark 無しで読める）
@@ -173,8 +173,8 @@ check("events のエンドポイント（Interface、2 AZ、private DNS）を持
 check("build の引数は spark / args（格納先ごとに Kafka を読む）", [a.arg for a in funcs["build"].args.args] == ["spark", "args"])
 check("pyspark はモジュールの先頭で import しない（テストと引数の検査を pyspark 無しで動かすため）",
       not any(isinstance(n, (ast.Import, ast.ImportFrom)) and "pyspark" in ast.dump(n) for n in tree.body))
-check("既定のトピックは metrics（メトリクス）と traps（ログ）", re.search(r'^METRIC_TOPICS\s*=\s*"metrics"', src, re.M) is not None
-      and re.search(r'^LOG_TOPICS\s*=\s*"traps"', src, re.M) is not None)
+check("既定のトピックは metrics（メトリクス）と traps / logs（ログ。logs は FRR のログ）", re.search(r'^METRIC_TOPICS\s*=\s*"metrics"', src, re.M) is not None
+      and re.search(r'^LOG_TOPICS\s*=\s*"traps,logs"', src, re.M) is not None)
 check("SINKS は iceberg / opensearch / prometheus（Terraform の validation と同じ）", re.search(r'^SINKS\s*=\s*\("iceberg", "opensearch", "prometheus"\)', src, re.M) is not None)
 check("Kafka を readStream で読み、購読は引数（格納先ごと）", '.readStream.format("kafka")' in src and '.option("subscribe", topics)' in src)
 for k, v in (("kafka.security.protocol", "SASL_SSL"), ("kafka.sasl.mechanism", "AWS_MSK_IAM"),
@@ -217,8 +217,8 @@ def parse_error(argv):
 
 base = ["--bootstrap", "b:9098", "--checkpoint", "s3://bucket/analytics/checkpoint"]
 a = mod.parse_args(base + ["--sinks", "iceberg", "--iceberg-table", "s3tablesbucket.ns.t"])
-check("parse_args: 既定は metrics / traps、checkpoint に / を足す、sinks はリスト",
-      a.metric_topics == "metrics" and a.log_topics == "traps" and a.checkpoint == "s3://bucket/analytics/checkpoint/" and a.sinks == ["iceberg"])
+check("parse_args: 既定は metrics / traps,logs、checkpoint に / を足す、sinks はリスト",
+      a.metric_topics == "metrics" and a.log_topics == "traps,logs" and a.checkpoint == "s3://bucket/analytics/checkpoint/" and a.sinks == ["iceberg"])
 a = mod.parse_args(base + ["--sinks", "iceberg, prometheus ,opensearch", "--iceberg-table", "t", "--prometheus-url", "https://p/api/v1/remote_write",
                            "--opensearch-endpoint", "https://o", "--metric-topics", " metrics , cpu ", "--log-topics", "traps,logs"])
 check("parse_args: 空白を除いて 3 つ、トピックも空白を除く", a.sinks == ["iceberg", "prometheus", "opensearch"] and a.metric_topics == "metrics,cpu" and a.log_topics == "traps,logs"
@@ -345,26 +345,70 @@ for jar in ("spark-sql-kafka-0-10_2.12", "spark-token-provider-kafka-0-10_2.12",
 check("up.sh の SPARK_VERSION は emr_release_label の Spark（3.5.6）", re.search(r'^SPARK_VERSION=3\.5\.6$', up, re.M) is not None
       and "7.13.0 = Spark 3.5.6" in tf)
 check("up.sh のスクリプトは spark/snmp_sinks.py", re.search(r'^SPARK_SCRIPT=spark/snmp_sinks\.py$', up, re.M) is not None and "snmp_to_iceberg" not in up)
-check("up.sh は SINKS（既定 iceberg,opensearch,prometheus）を検査して terraform/analytics の sinks に渡す",
-      re.search(r'^SINKS="\$\{SINKS:-iceberg,opensearch,prometheus\}"$', up, re.M) is not None
-      and re.search(r'iceberg\|opensearch\|prometheus\)', up) is not None
-      and 'tf_apply analytics -var "sinks=[$SINKS_TF]"' in up)
+check("up.sh は SINK_S3 / SINK_OPENSEARCH / SINK_PROMETHEUS（既定 1）を terraform/pipeline/analytics の sinks に組んで渡す",
+      re.search(r'^SINK_S3="\$\{SINK_S3:-1\}"; SINK_OPENSEARCH="\$\{SINK_OPENSEARCH:-1\}"; SINK_PROMETHEUS="\$\{SINK_PROMETHEUS:-1\}"$', up, re.M) is not None
+      and 'ANALYTICS_VARS=(-var "sinks=[$SINKS_TF]")' in up and 'tf_apply pipeline/analytics "${ANALYTICS_VARS[@]}"' in up)
+check("up.sh は AGENT=0 でも CloudWatch へのログを切らない（logs のエンドポイントは土台の共用のもの。2026-09-18）",
+      "cloudwatch_logging=false" not in up and re.search(r'variable "cloudwatch_logging" \{[^}]*default\s*=\s*true', tf) is not None)
+_core = "".join(open(os.path.join(ROOT, "terraform", "base", "core", n), encoding="utf-8").read() for n in sorted(os.listdir(os.path.join(ROOT, "terraform", "base", "core"))) if n.endswith(".tf"))
+check("土台が ecr.api / ecr.dkr / logs のエンドポイントを持ち、create_shared_endpoints で切れる",
+      re.search(r'resource "aws_vpc_endpoint" "shared"[\s\S]*?"ecr-api"\s*=\s*"ecr\.api"[\s\S]*?"ecr-dkr"\s*=\s*"ecr\.dkr"[\s\S]*?"logs"\s*=\s*"logs"', _core) is not None
+      and re.search(r'variable "create_shared_endpoints" \{[^}]*default\s*=\s*true', _core) is not None)
+check("up.sh は AGENT か lab か analytics を作るときだけ共用のエンドポイントを作る",
+      'if [ -n "$AGENT" ] || [ -z "$SKIP_LAB" ] || [ -z "$SKIP_ANALYTICS" ]; then SHARED_ENDPOINTS=1; fi' in up
+      and "MAIN_VARS+=(-var create_shared_endpoints=true)" in up and "MAIN_VARS+=(-var create_shared_endpoints=false)" in up)
+check("up.sh は前の配置（agent に ecr-api）が残っていたら土台の apply の前に止まる",
+      up.index('aws_vpc_endpoint.runtime["ecr-api"]') < up.index("tf_apply base/core "))
+# SINK_* の判定ブロックを up.sh から切り出して、bash で実際に動かす（die と flag_value は up.sh / deploy-env.sh と同じ意味の最小版）
+import subprocess
+_blk = up[up.index('if [ -n "${SINKS:-}" ]; then'):up.index('SINKS_TF="\\"$(printf')]
+_blk += up[up.index('SINKS_TF="\\"$(printf'):].split("\n", 1)[0] + "\n"
+_pre = ('die() { echo "DIE: $*"; exit 1; }\n'
+        'flag_value() { local name="$1" v; v="${!name:-}"; case "$v" in 1|true|yes) printf -v "$name" %s 1 ;; ""|0|false|no) printf -v "$name" %s "" ;; *) die "$name は 1 か 0" ;; esac; }\n')
+def _sinks(**env):
+    r = subprocess.run(["bash", "-c", _pre + _blk + 'echo "OUT: $SINKS | $SINKS_TF"'], capture_output=True, text=True,
+                       env={"PATH": os.environ["PATH"], **env})
+    return r.returncode, r.stdout.strip().splitlines()[-1] if r.stdout.strip() else ""
+check("SINK_* が無ければ 3 つ全部", _sinks() == (0, 'OUT: iceberg,opensearch,prometheus | "iceberg","opensearch","prometheus"'))
+check("SINK_OPENSEARCH=0 で opensearch だけ外れる", _sinks(SINK_OPENSEARCH="0") == (0, 'OUT: iceberg,prometheus | "iceberg","prometheus"'))
+check("SINK_S3=0 SINK_PROMETHEUS=no で opensearch だけ残る", _sinks(SINK_S3="0", SINK_PROMETHEUS="no") == (0, 'OUT: opensearch | "opensearch"'))
+check("SINK_S3=false で S3 Tables が外れる", _sinks(SINK_S3="false") == (0, 'OUT: opensearch,prometheus | "opensearch","prometheus"'))
+_rc, _out = _sinks(SINK_S3="0", SINK_OPENSEARCH="0", SINK_PROMETHEUS="0")
+check("SINK_* が全部 0 なら止まる", _rc == 1 and "全部 0" in _out)
+_rc, _out = _sinks(SINK_S3="2")
+check("SINK_S3=2 は止まる", _rc == 1 and "SINK_S3 は 1 か 0" in _out)
+check("古い SINKS=iceberg は SINK_S3 だけ 1 に読み替える", _sinks(SINKS="iceberg") == (0, 'OUT: iceberg | "iceberg"'))
+check("古い SINKS は順番と空白を問わない", _sinks(SINKS="prometheus, iceberg") == (0, 'OUT: iceberg,prometheus | "iceberg","prometheus"'))
+_rc, _out = _sinks(SINKS="iceberg", SINK_S3="1")
+check("SINKS と SINK_* は同時に書けない", _rc == 1 and "同時に書けない" in _out)
+_rc, _out = _sinks(SINKS="iceberg,splunk")
+check("古い SINKS の知らない名前は止まる", _rc == 1 and "カンマ区切り" in _out)
+check("deploy-env.sh は SINK_* と古い SINKS を読めるキーに持つ",
+      all(re.search(rf'(?<![A-Z_]){k}(?![A-Z_])', open(os.path.join(ROOT, "ops", "deploy-env.sh"), encoding="utf-8").read()) for k in ("SINK_S3", "SINK_OPENSEARCH", "SINK_PROMETHEUS", "SINKS")))
 check("up.sh は analytics を stream の後に apply し、job を STREAMING で起こす（名前は snmp-sinks）",
-      up.index("tf_apply stream") < up.index("tf_apply analytics") < up.index("--name snmp-sinks --mode STREAMING"))
-check("up.sh は prometheus のエンドポイント 2 本を費用に足し、opensearch は analytics を作るときだけ OCU の注意を出す",
-      re.search(r'\*,prometheus,\*\) COST_CENTS=\$\(\(COST_CENTS \+ 3\)\)', up) is not None
+      up.index("tf_apply pipeline/stream") < up.index("tf_apply pipeline/analytics") < up.index("--name snmp-sinks --mode STREAMING"))
+check("up.sh は s3tables / prometheus のエンドポイントと opensearch の OCU を SINK_* ごとに費用に足し、opensearch は analytics を作るときだけ OCU の注意を出す",
+      re.search(r'COST_CENTS=\$\(\(COST_CENTS \+ 17\)\)\n\s*if \[ -n "\$SINK_S3" \]; then COST_CENTS=\$\(\(COST_CENTS \+ 3\)\); fi\n\s*if \[ -n "\$SINK_PROMETHEUS" \]; then COST_CENTS=\$\(\(COST_CENTS \+ 3\)\); fi\n\s*if \[ -n "\$SINK_OPENSEARCH" \]; then COST_CENTS=\$\(\(COST_CENTS \+ 33\)\); fi', up) is not None
       and re.search(r'\*,opensearch,\*\) if \[ -z "\$SKIP_ANALYTICS" \]; then printf', up) is not None)
 check("up.sh は動いているジョブがあれば起こさない", "--states SUBMITTED PENDING SCHEDULED RUNNING" in up)
 check("up.sh は PIPELINE=1 で SKIP_STREAM=1 なら analytics も飛ばす", re.search(r'SKIP_STREAM=1 なので analytics も作らない[^\n]*\n\s*SKIP_ANALYTICS=1', up) is not None)
 check("down.sh は job を cancel → stop-application → destroy analytics → destroy graph の順",
-      down.index("cancel-job-run") < down.index("stop-application") < down.index("destroy_root analytics") < down.index("destroy_root graph") < down.index("destroy_root stream"))
+      down.index("cancel-job-run") < down.index("stop-application") < down.index("destroy_root pipeline/analytics") < down.index("destroy_lambda_root pipeline/graph") < down.index("destroy_root pipeline/stream"))
 check("check.sh は spark/snmp_sinks.py を見る", "spark/snmp_sinks.py" in checksh and "snmp_to_iceberg" not in checksh)
 check("up.sh の WORKFLOW=1 は SKIP_ANALYTICS があれば止まる（Spark の検知が無いとワーカーが起きない）",
       re.search(r'if \[ -n "\$WORKFLOW" \]; then\n[\s\S]*?-n "\$SKIP_ANALYTICS"[\s\S]*?die "WORKFLOW は lab と stream と analytics が要る', up) is not None)
 check("up.sh は PIPELINE=0 なら lab / stream / analytics / graph を全部飛ばす",
       re.search(r'else\n\s*SKIP_LAB=1; SKIP_STREAM=1; SKIP_ANALYTICS=1; SKIP_GRAPH=1\n', up) is not None)
-check("deploy.env.example に SINKS の行がある（既定 3 つ、それぞれの説明）",
-      re.search(r'^#SINKS=iceberg,opensearch,prometheus$', env_example, re.M) is not None and all(s in env_example for s in ("iceberg", "opensearch", "prometheus")))
+check("deploy.env.example に SINK_S3 / SINK_OPENSEARCH / SINK_PROMETHEUS の行がある（既定 1）。古い SINKS の行は載せない（2026-09-18）",
+      all(re.search(rf'^#{k}=1$', env_example, re.M) is not None for k in ("SINK_S3", "SINK_OPENSEARCH", "SINK_PROMETHEUS"))
+      and re.search(r'^#?\s*SINKS=', env_example, re.M) is None)
+# iceberg を外したら S3 Tables も s3tables のエンドポイントも作らない
+for _res in ('resource "aws_s3tables_table_bucket" "tables"', 'resource "aws_s3tables_namespace" "netops"', 'resource "aws_s3tables_table" "snmp_metrics"', 'resource "aws_vpc_endpoint" "s3tables"'):
+    check(f"{_res} は sink_iceberg の count", re.search(re.escape(_res) + r' \{\n  count = local\.sink_iceberg \? 1 : 0\n', tf) is not None)
+check("実行ロールの S3TablesCatalog と Spark のカタログの設定は iceberg があるときだけ",
+      re.search(r'Sid\s*=\s*"S3TablesCatalog"[\s\S]*?\}\] : s if local\.sink_iceberg\]', tf) is not None
+      and re.search(r'warehouse=\$\{local\.table_bucket_arn\}",\n\s*\] : c if local\.sink_iceberg\]', tf) is not None
+      and "aws_s3tables_table_bucket.tables.arn" not in tf)
 
 # outputs の JSON が本当に JSON になる形か（jsonencode の中身の構造を軽く見る）
 check("job_driver_json は sparkSubmit の 3 キー", all(k in tf for k in ("entryPoint ", "entryPointArguments", "sparkSubmitParameters")))

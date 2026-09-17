@@ -1,6 +1,6 @@
 """Kafka（MSK、IAM 認証）のトピックを読み、選んだ格納先に流し続け、異常を検知して EventBridge に出す Spark Structured Streaming のジョブ（Kafka の 4 分岐のうち Spark の 3 本 + 検知）。
 
-EMR Serverless の上で動く（terraform/analytics）。起動は ops/up.sh の a-3（start-job-run）で、引数は terraform/analytics の
+EMR Serverless の上で動く（terraform/pipeline/analytics）。起動は ops/up.sh の a-3（start-job-run）で、引数は terraform/pipeline/analytics の
 output job_driver_json が組み立てる（--bootstrap / --checkpoint / --sinks と、格納先ごとの --iceberg-table などの値）。
 Kafka と S3 Tables の jar、カタログの設定は spark-submit の --conf で渡す。
 
@@ -8,21 +8,21 @@ Kafka と S3 Tables の jar、カタログの設定は spark-submit の --conf �
   iceberg     全トピック → S3 Tables（Iceberg）のテーブルに append（履歴の正本）
   opensearch  ログのトピックだけ → OpenSearch Serverless（TIMESERIES 型のコレクション）の _bulk に SigV4 で POST
   prometheus  メトリクスのトピックだけ → Amazon Managed Service for Prometheus の remote write に SigV4 で POST（数値の field だけ）
-どのトピックがメトリクスでどれがログかは --metric-topics / --log-topics（既定は Telegraf の metrics と traps。lab の Telegraf に
-syslog の入力を足したら --log-topics traps,logs にする）。格納先ごとに別のストリーミングクエリ（別の Kafka の購読と checkpoint）に
+どのトピックがメトリクスでどれがログかは --metric-topics / --log-topics（既定は Telegraf の metrics と traps,logs。
+logs は lab の Telegraf が tail する FRR のログ）。格納先ごとに別のストリーミングクエリ（別の Kafka の購読と checkpoint）に
 するので、1 つが落ちても他は進む。
 
 Telegraf の JSON 出力（outputs.kafka の data_format = "json"、json_timestamp_units = "1s"）は
   {"fields": {…}, "name": "<measurement>", "tags": {"agent_host": "…", "host": "…", …}, "timestamp": <秒>}
 の形。列に分けるのは timestamp / name / agent_host / host だけで、tags と fields は JSON 文字列のまま入れる
-（機器やメトリクスが増えてもテーブルの列を変えないため。terraform/analytics/tables.tf の列と同じ）。
+（機器やメトリクスが増えてもテーブルの列を変えないため。terraform/pipeline/analytics/tables.tf の列と同じ）。
 
 異常の検知（detect）は格納先とは別に常に動く 4 本目のクエリ（2026-09-17 ユーザー決定「Spark が異常を検知したら EventBridge にイベント発行」）:
   metrics の interface で ifOperStatus が down のインタフェース（ポーリング）と、traps の linkDown（即時）を DynamoDB の異常テーブル
-  （terraform/stream の anomalies。キーは <機器>#<種別>#<インタフェース>）に open で書き、up に戻ったポーリングと linkUp で resolved にする。
+  （terraform/pipeline/stream の anomalies。キーは <機器>#<種別>#<インタフェース>）に open で書き、up に戻ったポーリングと linkUp で resolved にする。
   新しく open になったときだけ EventBridge の既定のバスに Source netops.spark / DetailType AnomalyOpened を put_events する
   （terraform/workflow の events.tf がルールで SQS に流し、Temporal の worker が調査ワークフローを起こす）。
-  機器名は sysName タグ > --device-map（IP=機器名,...）の順で引く。以前 terraform/stream の detector Lambda がしていたことをここに寄せた。
+  機器名は sysName タグ > --device-map（IP=機器名,...）の順で引く。以前 terraform/pipeline/stream の detector Lambda がしていたことをここに寄せた。
 
 HTTP の送信は driver でまとめて行う（マイクロバッチを collect する。PoC の量（機器数台、10 秒間隔）なら 1 分に数百行）。
 量が増えたら foreachPartition に移す。remote write の protobuf と snappy は外部ライブラリ無しで組む
@@ -39,10 +39,11 @@ import time
 import urllib.error
 import urllib.request
 
-METRIC_TOPICS = "metrics"   # Telegraf の inputs.snmp（terraform/lab の telegraf.conf）
-LOG_TOPICS = "traps"        # Telegraf の inputs.snmp_trap。syslog を足したら "traps,logs"
+METRIC_TOPICS = "metrics"   # Telegraf の inputs.snmp（terraform/pipeline/lab の telegraf.conf）
+LOG_TOPICS = "traps,logs"   # traps = Telegraf の inputs.snmp_trap、logs = inputs.tail（FRR のログ。measurement は frr_log）
 SINKS = ("iceberg", "opensearch", "prometheus")
 TRIGGER = "60 seconds"
+REMIND = 300  # 落ちた格納先を ERROR で言い直す間隔（秒）
 HTTP_TIMEOUT = 30
 HTTP_RETRIES = 3        # 5xx と接続エラーだけ打ち直す。4xx は捨ててログに出す（古すぎるサンプルなどは何度打っても通らない）
 BULK_SIZE = 500         # 1 回の POST に載せる行数
@@ -63,7 +64,7 @@ def parse_args(argv):
     p.add_argument("--opensearch-endpoint", default="", help="opensearch: コレクションのエンドポイント（https://…）")
     p.add_argument("--opensearch-index", default=OPENSEARCH_INDEX, help="opensearch: インデックス名")
     p.add_argument("--prometheus-url", default="", help="prometheus: remote write の URL（…/api/v1/remote_write）")
-    p.add_argument("--anomaly-table", default="", help="detect: 異常を書く DynamoDB のテーブル名（terraform/stream の anomalies。空なら検知しない）")
+    p.add_argument("--anomaly-table", default="", help="detect: 異常を書く DynamoDB のテーブル名（terraform/pipeline/stream の anomalies。空なら検知しない）")
     p.add_argument("--device-map", default="", help="detect: agent_host の IP から機器名を引く表（IP=機器名,... 。sysName タグがあればそちら）")
     p.add_argument("--event-bus", default="default", help="detect: 新しい異常を put_events する EventBridge のバス名")
     args = p.parse_args(argv)
@@ -391,7 +392,7 @@ def make_prometheus_sender(url, region):
 LINK_DOWN, LINK_UP = ".1.3.6.1.6.3.1.1.5.3", ".1.3.6.1.6.3.1.1.5.4"   # IF-MIB linkDown / linkUp の trap OID
 EVENT_SOURCE = "netops.spark"
 EVENT_DETAIL_TYPE = "AnomalyOpened"
-EVENT_RESOLVED_TYPE = "AnomalyResolved"   # open → resolved にした瞬間に出す（terraform/graph の status Lambda が回線を UP に戻す）
+EVENT_RESOLVED_TYPE = "AnomalyResolved"   # open → resolved にした瞬間に出す（terraform/pipeline/graph の status Lambda が回線を UP に戻す）
 
 
 def parse_device_map(text):
@@ -532,6 +533,10 @@ def iceberg_query(rows, table, checkpoint):
         rows.writeStream.queryName("iceberg").format("iceberg")
         .outputMode("append")
         .option("checkpointLocation", checkpoint + "iceberg/")
+        # テーブルの ts / topic は required だが、Spark の列は nullable のまま届く（to_timestamp と Kafka の topic）。
+        # 検査を切らないと「ts should be required, but is optional」でクエリが止まる（2026-09-18 に実機で確認）。
+        # ts が null の行は parse の where で落としてあり、Kafka の topic は null にならない
+        .option("check-nullability", "false")
         .trigger(processingTime=TRIGGER)
         .toTable(table)
     )
@@ -563,15 +568,21 @@ def main(argv):
     log("格納先: " + ", ".join(f"{s}({sink_topics(s, args.metric_topics, args.log_topics)})" for s in args.sinks)
         + (f"; 検知: DynamoDB {args.anomaly_table} → EventBridge {args.event_bus}" if args.anomaly_table else "; 検知: なし（--anomaly-table が空）"))
     # 1 つのクエリが落ちても他は続ける。全部止まったら 1 で終わる（EMR Serverless の STREAMING モードがジョブごと起こし直す）
-    failed = 0
+    # ジョブは RUNNING のままなので、落ちた格納先は外から見えない。どれが落ちたかを名前つきの ERROR で出し、
+    # 残りが動いているあいだ REMIND 秒ごとに言い直す（CloudWatch Logs で "ERROR sink" を引けば分かる）
+    dead = {}
     while any(q.isActive for q in queries):
         try:
-            spark.streams.awaitAnyTermination()
-        except Exception as e:  # noqa: BLE001 - 落ちたクエリの例外。どれかを見て続ける
-            failed += 1
-            log(f"クエリが落ちた（{failed} 本目）: {str(e)[:500]}")
+            spark.streams.awaitAnyTermination(REMIND)
+        except Exception:  # noqa: BLE001 - 落ちたクエリの例外。下で名前ごとに拾う
+            pass
         spark.streams.resetTerminated()
-    return 1 if failed else 0
+        for q in queries:
+            if not q.isActive and q.name not in dead:
+                dead[q.name] = str(q.exception() or "例外なしで終了")[:500]
+        for name, why in dead.items():
+            log(f"ERROR sink {name} が止まっている（他は継続。直すにはジョブの起動し直し）: {why}")
+    return 1 if dead else 0
 
 
 if __name__ == "__main__":

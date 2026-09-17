@@ -1,12 +1,12 @@
-# ---------------------------------------------------------------- EventBridge -> SQS (the Spark job of terraform/analytics opens an anomaly, the worker starts a workflow)
+# ---------------------------------------------------------------- EventBridge -> SQS (the Spark job of terraform/pipeline/analytics opens an anomaly, the worker starts a workflow)
 # 2026-09-17 ユーザー決定「Spark が異常を検知したら EventBridge にイベント発行して、それを検知した agent が原因分析 → 修復の提案 → 人間の承認 → Temporal で実行」。
-# Spark の driver（terraform/analytics）が既定のバスに Source netops.spark / DetailType AnomalyOpened を put_events し、ここのルールが SQS に流す。
+# Spark の driver（terraform/pipeline/analytics）が既定のバスに Source netops.spark / DetailType AnomalyOpened を put_events し、ここのルールが SQS に流す。
 # worker（workflow/worker.py の starter）は SQS を long polling して investigate-<anomaly_id> のワークフローを起こす（キューが無ければ従来どおりテーブルを polling）。
 # SQS を挟む理由: ECS のタスクは EventBridge から直接叩けない（API ターゲットも Lambda も要らない一番安い経路。SQS は 100 万リクエスト/月まで無料）。
 
 resource "aws_cloudwatch_event_rule" "anomalies" {
   name        = "${var.name_prefix}-anomalies"
-  description = "AnomalyOpened from the Spark job (terraform/analytics) to the workflow queue"
+  description = "AnomalyOpened from the Spark job (terraform/pipeline/analytics) to the workflow queue"
 
   event_pattern = jsonencode({
     source        = ["netops.spark"]

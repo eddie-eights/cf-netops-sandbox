@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# lab EC2（terraform/lab）の上で containerlab を動かす。user_data が /usr/local/bin/lab に置くので、SSM セッションから `sudo lab check` で使う。
-#   lab.sh render | pull | up | down | status | check | snmp <node> | fail-main | heal-main | failover | clab <args...>
-#   lab.sh telegraf-render | telegraf-status     （stream: Telegraf → MSK。deploy.env の WITH_STREAM=1 で terraform/stream を作ってから）
+# lab EC2（terraform/pipeline/lab）の上で containerlab を動かす。user_data が /usr/local/bin/lab に置くので、SSM セッションから `sudo lab check` で使う。
+#   lab.sh render | pull | up | down | status | check | snmp <node> | logs [node] | fail-main | heal-main | failover | clab <args...>
+#   lab.sh telegraf-render | telegraf-status     （stream: Telegraf → MSK。deploy.env の WITH_STREAM=1 で terraform/pipeline/stream を作ってから）
 # 元はローカル PoC の app/wvs2-lab/lab.sh。違いは 3 つ: containerlab を直接呼ぶ（root）、イメージは ECR から取る（pull）、
 # wvs2.clab.yml はテンプレート（.in）からイメージ URI を埋めて作る（render）。
 set -euo pipefail
@@ -9,7 +9,10 @@ cd "$(dirname "$0")"
 SELF="$PWD/$(basename "$0")"
 LAB=wvs2
 TOPO=wvs2.clab.yml
-# terraform/lab の user_data が書く。REGISTRY / FRR_IMAGE / SNMPD_IMAGE / MULTITOOL_IMAGE / AWS_REGION
+# FRR のログの置き場（機器ごとに 1 ディレクトリ。コンテナの /var/log/frr に bind する）。telegraf.conf.in の inputs.tail と同じパス。
+# src/ の下に置かないのは、user_data の aws s3 sync --delete が起動のたびに消すから
+LOG_DIR=/var/log/netops-lab
+# terraform/pipeline/lab の user_data が書く。REGISTRY / FRR_IMAGE / SNMPD_IMAGE / MULTITOOL_IMAGE / AWS_REGION
 ENV_FILE=$(ls /etc/*-lab.env 2>/dev/null | head -1 || true)
 [ -n "$ENV_FILE" ] && set -a && . "$ENV_FILE" && set +a
 
@@ -32,7 +35,12 @@ case "${1:-}" in
   render)
     : "${FRR_IMAGE:?}" "${SNMPD_IMAGE:?}" "${MULTITOOL_IMAGE:?}"
     sed -e "s#__FRR_IMAGE__#$FRR_IMAGE#" -e "s#__SNMPD_IMAGE__#$SNMPD_IMAGE#" -e "s#__MULTITOOL_IMAGE__#$MULTITOOL_IMAGE#" \
-      "$TOPO.in" > "$TOPO"
+      -e "s#__LOG_DIR__#$LOG_DIR#" "$TOPO.in" > "$TOPO"
+    # bind の元が無いと containerlab が deploy で落ちる。FRR はコンテナの中の frr ユーザーで書くので、誰でも書ける形（sticky）にする
+    for f in frr/*.conf; do
+      n=$(basename "$f" .conf)
+      [ "$n" = vtysh ] || install -d -m 1777 "$LOG_DIR/$n"
+    done
     echo "$TOPO を作った（イメージは ${REGISTRY:-?}）"
     ;;
   pull)
@@ -66,6 +74,7 @@ case "${1:-}" in
     snmp_if hq-snmp-01
     ;;
   snmp) snmp_if "${2:-hq-snmp-01}" ;;
+  logs) tail -n "${LINES:-20}" "$LOG_DIR"/${2:-*}/frr.log ;;
   fail-main)
     echo "本社の主回線 (hq-ce-01 eth1 / carrier-pe-01) を落とす"
     x hq-ce-01 ip link set eth1 down
@@ -103,13 +112,15 @@ case "${1:-}" in
     fi
     ;;
   telegraf-render)
-    # terraform/stream が SSM に書いたブローカーを埋めて /etc/telegraf/telegraf.conf を作る。
-    # terraform/stream が無いときは失敗して終わる（unit は Restart=on-failure で 60 秒ごとに試し直す）
+    # terraform/pipeline/stream が SSM に書いたブローカーを埋めて /etc/telegraf/telegraf.conf を作る。
+    # terraform/pipeline/stream が無いときは失敗して終わる（unit は Restart=on-failure で 60 秒ごとに試し直す）
     : "${AWS_REGION:?}" "${PARAM_PREFIX:?}"
     b=$(aws ssm get-parameter --region "$AWS_REGION" --name "$PARAM_PREFIX/msk-bootstrap" --query Parameter.Value --output text) || {
-      echo "SSM $PARAM_PREFIX/msk-bootstrap が読めない。terraform/stream はまだ？" >&2; exit 1; }
+      echo "SSM $PARAM_PREFIX/msk-bootstrap が読めない。terraform/pipeline/stream はまだ？" >&2; exit 1; }
     q=$(printf '"%s"' "${b//,/\",\"}")
     install -d -m 0755 /etc/telegraf
+    # Telegraf の MSK IAM 認証は profile の指定が要る（telegraf.conf.in の注記）。鍵を書かない [default] なので EC2 のロールが使われる
+    printf '[default]\nregion = %s\n' "$AWS_REGION" > /etc/telegraf/aws_config
     sed -e "s#__KAFKA_BROKERS__#$q#" -e "s#__AWS_REGION__#$AWS_REGION#" telegraf.conf.in > /etc/telegraf/telegraf.conf
     echo "/etc/telegraf/telegraf.conf を作った（brokers: $b）"
     ;;

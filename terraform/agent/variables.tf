@@ -1,12 +1,12 @@
 # ---------------------------------------------------------------- naming
 variable "region" {
-  description = "AWS region. Same value as terraform/main."
+  description = "AWS region. Same value as terraform/base/core."
   type        = string
   default     = "ap-northeast-1"
 }
 
 variable "name_prefix" {
-  description = "Prefix for resource names and the value of the Project tag (up to 25 characters). Same value as terraform/main."
+  description = "Prefix for resource names and the value of the Project tag (up to 25 characters). Same value as terraform/base/core."
   type        = string
   default     = "fukuda-nwc-poc"
 
@@ -18,7 +18,7 @@ variable "name_prefix" {
 }
 
 variable "owner" {
-  description = "Value of the owner tag. Same value as terraform/main."
+  description = "Value of the owner tag. Same value as terraform/base/core."
   type        = string
   default     = "fukuda"
 
@@ -30,7 +30,7 @@ variable "owner" {
 
 # ---------------------------------------------------------------- agent
 variable "agent_image_tag" {
-  description = "Tag pushed to the agent repository of terraform/ecr (README step 2). The repository URL is read from terraform/ecr/terraform.tfstate."
+  description = "Tag pushed to the agent repository of terraform/base/ecr (README step 2). The repository URL is read from terraform/base/ecr/terraform.tfstate."
   type        = string
   default     = "v1"
 
@@ -41,7 +41,7 @@ variable "agent_image_tag" {
 }
 
 variable "agent_image_uri" {
-  description = "Optional. Leave empty to use <terraform/ecr repository>:<agent_image_tag>. Set only to run an image from another repository, with tag, built for linux/arm64 (e.g. 123456789012.dkr.ecr.ap-northeast-1.amazonaws.com/fukuda-nwc-poc-agent:v1)."
+  description = "Optional. Leave empty to use <terraform/base/ecr repository>:<agent_image_tag>. Set only to run an image from another repository, with tag, built for linux/arm64 (e.g. 123456789012.dkr.ecr.ap-northeast-1.amazonaws.com/fukuda-nwc-poc-agent:v1)."
   type        = string
   default     = ""
 }
@@ -133,7 +133,7 @@ variable "opensearch_cacert_file" {
 
 # ---------------------------------------------------------------- existing VPC endpoints
 variable "create_runtime_endpoints" {
-  description = "Create ecr.api / ecr.dkr / logs / bedrock-runtime interface endpoints (2 AZ). Set false if the VPC already has them."
+  description = "Create the bedrock-runtime interface endpoint (2 AZ). ecr.api / ecr.dkr / logs are created by terraform/base/core (create_shared_endpoints). Set false if the VPC already has it."
   type        = bool
   default     = true
 }

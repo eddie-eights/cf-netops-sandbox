@@ -2,7 +2,7 @@
 
 2026-09-17 ユーザー決定「Spark が異常を検知したら EventBridge にイベント発行して、それを検知した agent が Neptune や S3、OpenSearch、
 Prometheus を見に行って原因分析」。Neptune は graph.py / topology.py（neighbors / blast_radius）、ここは残りの 3 つ:
-  search_logs    OpenSearch Serverless の logs コレクション（terraform/analytics の sinks=opensearch。Spark が traps を書く）を機器名で検索
+  search_logs    OpenSearch Serverless の logs コレクション（terraform/pipeline/analytics の sinks=opensearch。Spark が traps を書く）を機器名で検索
   query_metrics  Amazon Managed Service for Prometheus（sinks=prometheus。Spark が metrics を remote write）に PromQL を投げる
   query_history  S3 Tables（Iceberg）の履歴。Athena のワークグループとカタログの接続をまだ配備していないので、案内だけ返す（未実装）
 
@@ -52,7 +52,7 @@ def _signed(method: str, url: str, service: str, body: bytes | None = None, head
 def search_logs(device_id: str = "", minutes: int = 60, limit: int = 20) -> dict:
     """直近 minutes 分の traps / ログを機器名で検索（新しい順）。device_id が空なら全機器"""
     if not OPENSEARCH_ENDPOINT:
-        return {"error": "ログの検索はまだ配備されていない（terraform/analytics を sinks に opensearch を入れて apply すると使える）", "hits": []}
+        return {"error": "ログの検索はまだ配備されていない（terraform/pipeline/analytics を sinks に opensearch を入れて apply すると使える）", "hits": []}
     minutes = max(1, min(int(minutes), 24 * 60))
     limit = max(1, min(int(limit), 100))
     since = int((time.time() - minutes * 60) * 1000)
@@ -71,7 +71,7 @@ def search_logs(device_id: str = "", minutes: int = 60, limit: int = 20) -> dict
 def query_metrics(query: str, minutes: int = 15) -> dict:
     """PromQL の range query（step 60 秒）。例: interface_ifOperStatus{sysName="hq-ce-01"}"""
     if not PROMETHEUS_QUERY_URL:
-        return {"error": "メトリクスの検索はまだ配備されていない（terraform/analytics を sinks に prometheus を入れて apply すると使える）", "series": []}
+        return {"error": "メトリクスの検索はまだ配備されていない（terraform/pipeline/analytics を sinks に prometheus を入れて apply すると使える）", "series": []}
     if not query:
         return {"error": "query（PromQL）が空", "series": []}
     minutes = max(1, min(int(minutes), 24 * 60))

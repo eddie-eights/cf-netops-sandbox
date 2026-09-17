@@ -18,7 +18,7 @@ resource "aws_vpc_security_group_egress_rule" "task_https" {
 
 resource "aws_vpc_security_group_ingress_rule" "endpoints_from_task" {
   security_group_id            = local.endpoint_sg_id
-  description                  = "Workflow task through the endpoints of terraform/main"
+  description                  = "Workflow task through the endpoints of terraform/base/core"
   ip_protocol                  = "tcp"
   from_port                    = 443
   to_port                      = 443
@@ -107,7 +107,7 @@ resource "aws_ecs_task_definition" "workflow" {
   lifecycle {
     precondition {
       condition     = local.worker_repository_url != "" && local.temporal_repository_url != ""
-      error_message = "terraform/ecr の state から worker_repository_url / temporal_repository_url が読めない。terraform/ecr を create_workflow_repositories = true で apply する。"
+      error_message = "terraform/base/ecr の state から worker_repository_url / temporal_repository_url が読めない。terraform/base/ecr を create_workflow_repositories = true で apply する。"
     }
     precondition {
       condition     = local.runtime_arn != ""

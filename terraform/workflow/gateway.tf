@@ -1,8 +1,8 @@
 # ---------------------------------------------------------------- AgentCore Gateway (MCP) + tools Lambda
 # The chat runtime (agent/app.py) lists the tools through the gateway URL (SSM <name_prefix>/gateway-url) and calls them over MCP
 # instead of its built-in functions. The Lambda runs the same agent/topology.py, agent/anomalies.py and agent/evidence.py inside
-# the VPC (subnet a), so it reads Neptune (terraform/graph), the logs collection and the metrics workspace (terraform/analytics)
-# and the anomaly table (terraform/stream). Without graph / analytics the topology comes from data/ and the evidence tools say so.
+# the VPC (subnet a), so it reads Neptune (terraform/pipeline/graph), the logs collection and the metrics workspace (terraform/pipeline/analytics)
+# and the anomaly table (terraform/pipeline/stream). Without graph / analytics the topology comes from data/ and the evidence tools say so.
 
 locals {
   tools = jsondecode(file("${path.module}/../../tools/tools.json"))
@@ -90,7 +90,7 @@ data "aws_iam_policy_document" "tools" {
     resources = ["*"]
   }
 
-  # Neptune のエンドポイント（terraform/graph）と異常テーブル名（terraform/stream）を SSM から引く
+  # Neptune のエンドポイント（terraform/pipeline/graph）と異常テーブル名（terraform/pipeline/stream）を SSM から引く
   statement {
     sid       = "Parameters"
     actions   = ["ssm:GetParameter"]
@@ -125,7 +125,7 @@ data "aws_iam_policy_document" "tools" {
   }
 }
 
-# ---------------------------------------------------------------- tools Lambda network (subnet a of terraform/main)
+# ---------------------------------------------------------------- tools Lambda network (subnet a of terraform/base/core)
 resource "aws_security_group" "tools" {
   count = var.create_gateway ? 1 : 0
 
@@ -151,7 +151,7 @@ resource "aws_vpc_security_group_egress_rule" "tools_neptune" {
   count = var.create_gateway && local.neptune_sg_id != "" ? 1 : 0
 
   security_group_id            = aws_security_group.tools[0].id
-  description                  = "Gremlin to Neptune (terraform/graph)"
+  description                  = "Gremlin to Neptune (terraform/pipeline/graph)"
   ip_protocol                  = "tcp"
   from_port                    = 8182
   to_port                      = 8182
@@ -173,14 +173,14 @@ resource "aws_vpc_security_group_ingress_rule" "endpoints_from_tools" {
   count = var.create_gateway ? 1 : 0
 
   security_group_id            = local.endpoint_sg_id
-  description                  = "Tools Lambda through the endpoints of terraform/main and terraform/analytics (aoss, aps)"
+  description                  = "Tools Lambda through the endpoints of terraform/base/core and terraform/pipeline/analytics (aoss, aps)"
   ip_protocol                  = "tcp"
   from_port                    = 443
   to_port                      = 443
   referenced_security_group_id = aws_security_group.tools[0].id
 }
 
-# 検索だけ。terraform/analytics の data access policy は Spark の実行ロール（書く側）だけなので、読む側はここで足す
+# 検索だけ。terraform/pipeline/analytics の data access policy は Spark の実行ロール（書く側）だけなので、読む側はここで足す
 resource "aws_opensearchserverless_access_policy" "tools" {
   count = var.create_gateway && local.opensearch_collection_name != "" ? 1 : 0
 

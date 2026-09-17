@@ -7,7 +7,7 @@
 #   ops/sync-graph.sh --replace  # 入っていても入れ直す（Web で編集した内容と、Spark の検知で付いた status は消えて lab の定義に戻る）
 #   ops/sync-graph.sh --dry-run  # Neptune には触らず、lab から作ったトポロジ（JSON）を出すだけ
 #
-# terraform/main（Web の EC2）と terraform/graph（Neptune）が出来ていることが前提。Web の EC2 の上で ops/seed_graph.py を SSM Run Command で動かす。
+# terraform/base/core（Web の EC2）と terraform/pipeline/graph（Neptune）が出来ていることが前提。Web の EC2 の上で ops/seed_graph.py を SSM Run Command で動かす。
 set -uo pipefail
 
 cd "$(dirname "$0")/.."
@@ -33,8 +33,8 @@ TOPO_JSON=$("${PY[@]}" lab/lab_topology.py lab) || die "lab/lab_topology.py が 
 if [ -n "$DRY" ]; then printf '%s\n' "$TOPO_JSON"; exit 0; fi
 
 if [ -n "${AWS_PROFILE:-}" ]; then export AWS_PROFILE; fi
-INSTANCE_ID=$(terraform -chdir=terraform/main output -raw web_instance_id 2>/dev/null) || die "terraform/main の出力 web_instance_id が読めない（apply 済みか、認証情報があるか）"
-[ -n "$INSTANCE_ID" ] || die "terraform/main の出力 web_instance_id が空"
+INSTANCE_ID=$(terraform -chdir=terraform/base/core output -raw web_instance_id 2>/dev/null) || die "terraform/base/core の出力 web_instance_id が読めない（apply 済みか、認証情報があるか）"
+[ -n "$INSTANCE_ID" ] || die "terraform/base/core の出力 web_instance_id が空"
 
 # ops/up.sh の ssm_run と同じ。コマンドは JSON の文字列に埋めるので、ダブルクォートとバックスラッシュを含めない
 CMD="echo $(base64 < ops/seed_graph.py | tr -d '\n') | base64 -d | LAB_TOPOLOGY_B64=$(printf '%s' "$TOPO_JSON" | base64 | tr -d '\n') GRAPH_REPLACE=${REPLACE:-0} /usr/bin/python3.13 -"

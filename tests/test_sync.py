@@ -1,7 +1,7 @@
 """Neptune へのトポロジ同期の模擬テスト（AWS に触れない）。
 lab/lab_topology.py が lab の定義（wvs2.clab.yml.in + frr/*.conf）から作る機器と回線が agent/data の静的データと同じであること
 （PyYAML があるときと無いときの両方）、graph/status_handler.py が AnomalyOpened / AnomalyResolved を graph.set_status に正しく写すこと、
-terraform/graph の sync.tf がその配線を持つこと。実行は uv run --group dev python tests/test_sync.py"""
+terraform/pipeline/graph の sync.tf がその配線を持つこと。実行は uv run --group dev python tests/test_sync.py"""
 import builtins, importlib.util, json, os, re, sys, types
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
@@ -101,8 +101,8 @@ check("機器が無い・知らない detail-type は何もしない", "ignored"
 check("detail が JSON 文字列でも読む", h.handler({"detail-type": "AnomalyOpened", "detail": json.dumps({"device_id": "dc-ce-01", "kind": "link_down", "target": "eth2"})})
       == {"updated": 1} and calls[-1] == ("dc-ce-01", "eth2", "DOWN"))
 
-# ---- terraform/graph の配線
-tf = read("terraform", "graph", "sync.tf")
+# ---- terraform/pipeline/graph の配線
+tf = read("terraform", "pipeline", "graph", "sync.tf")
 check("sync.tf は status_handler.py を index.py、agent/graph.py を graph.py で zip にする", 'graph/status_handler.py")' in tf and 'filename = "index.py"' in tf and 'agent/graph.py")' in tf and 'filename = "graph.py"' in tf)
 check("EventBridge のルールは netops.spark の AnomalyOpened と AnomalyResolved", re.search(r'source\s*=\s*\["netops.spark"\]', tf) and '"detail-type" = ["AnomalyOpened", "AnomalyResolved"]' in tf)
 check("Lambda は VPC の中で NEPTUNE_ENDPOINT を環境変数で持ち、ロググループは retention 付き",
@@ -110,5 +110,5 @@ check("Lambda は VPC の中で NEPTUNE_ENDPOINT を環境変数で持ち、ロ�
 check("Lambda の SG は Neptune の 8182 へ出て、Neptune の SG がそこからの 8182 を受ける", 'resource "aws_vpc_security_group_egress_rule" "status_to_neptune"' in tf and 'resource "aws_vpc_security_group_ingress_rule" "neptune_from_status"' in tf)
 check("Lambda のロールは neptune-db の Read / Write だけ", '"neptune-db:WriteDataViaQuery"' in tf and "DeleteDataViaQuery" not in tf)
 check("EventBridge から Lambda を呼ぶ permission", 'principal     = "events.amazonaws.com"' in tf and "source_arn    = aws_cloudwatch_event_rule.status.arn" in tf)
-check("variables.tf に log_retention_days", 'variable "log_retention_days"' in read("terraform", "graph", "variables.tf"))
+check("variables.tf に log_retention_days", 'variable "log_retention_days"' in read("terraform", "pipeline", "graph", "variables.tf"))
 print(f"通過 {passed} / 失敗 0")

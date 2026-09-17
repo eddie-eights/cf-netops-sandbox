@@ -29,7 +29,7 @@ import graph  # noqa: E402
 import topology  # noqa: E402
 
 if not graph.configured():
-    sys.exit(f"SSM の {os.environ.get('PARAM_PREFIX', '')}/neptune-endpoint が読めない（terraform/graph の apply が終わっているか）")
+    sys.exit(f"SSM の {os.environ.get('PARAM_PREFIX', '')}/neptune-endpoint が読めない（terraform/pipeline/graph の apply が終わっているか）")
 
 if os.environ.get("LAB_TOPOLOGY_B64"):
     lab = json.loads(base64.b64decode(os.environ["LAB_TOPOLOGY_B64"]))

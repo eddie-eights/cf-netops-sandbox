@@ -5,12 +5,12 @@
     セッション ID はブラウザのセッションごとに 1 つ（Runtime 側の会話履歴はこの ID で分かれる）
   - トポロジ: 段（pe / ce / host）に分けて SVG に描き、機器を表で出す。元データはエージェントと同じ
     topology.py（Neptune があればそこから、無ければ data/ の静的データ）。Neptune のときはリンクの追加・削除と
-    静的データからの投入がここでできる。lab（terraform/lab）には触らない
-  - 異常一覧: terraform/analytics の Spark が DynamoDB に書いた異常（anomalies.py）。未配備なら案内だけ出す
+    静的データからの投入がここでできる。lab（terraform/pipeline/lab）には触らない
+  - 異常一覧: terraform/pipeline/analytics の Spark が DynamoDB に書いた異常（anomalies.py）。未配備なら案内だけ出す
   - 承認: terraform/workflow のワーカーが出した修復案（proposals.py）を見て、承認か却下を書き戻す。未配備なら案内だけ出す
 
-agent/ の topology.py / anomalies.py / graph.py / proposals.py をそのまま同じディレクトリに置いて import する（terraform/main の出力 upload_web_command）。
-依存（gradio / boto3 / pyyaml）は S3 に置いた wheel から入れる（terraform/main の user_data）。インターネットには出ない。
+agent/ の topology.py / anomalies.py / graph.py / proposals.py をそのまま同じディレクトリに置いて import する（terraform/base/core の出力 upload_web_command）。
+依存（gradio / boto3 / pyyaml）は S3 に置いた wheel から入れる（terraform/base/core の user_data）。インターネットには出ない。
 """
 
 import html
@@ -56,7 +56,7 @@ def load_env_file() -> str:
 ENV_FILE = load_env_file()
 if not os.environ.get("AWS_REGION"):
     sys.exit("environment variable AWS_REGION is not set. "
-             "EC2: /etc/<name_prefix>-web.env is written by the user_data of terraform/main (compare with .env.example). "
+             "EC2: /etc/<name_prefix>-web.env is written by the user_data of terraform/base/core (compare with .env.example). "
              "local: cp .env.example .env and fill it in (README)")
 REGION = os.environ["AWS_REGION"]
 # Runtime の ARN。環境変数 RUNTIME_ARN があればそれ、無ければ SSM の <PARAM_PREFIX>/runtime-arn（terraform/agent が書く）を 60 秒ごとに読む。
@@ -173,8 +173,8 @@ def topology_svg() -> str:
         out.append(f'<text x="{x:.0f}" y="{y - 3:.0f}" text-anchor="middle" fill="#111827" font-weight="600">{html.escape(dev)}</text>')
         out.append(f'<text x="{x:.0f}" y="{y + 13:.0f}" text-anchor="middle" fill="#6b7480" font-size="10">{html.escape(asn)}</text>')
     out.append("</svg>")
-    src = {"neptune": "Neptune（terraform/graph）", "neptune-empty": "Neptune は空。静的データを表示中（下の「静的データを投入」で入る）"}.get(
-        topology.SOURCE, "静的データ（data/。terraform/graph を apply すると Neptune に切り替わる）")
+    src = {"neptune": "Neptune（terraform/pipeline/graph）", "neptune-empty": "Neptune は空。静的データを表示中（下の「静的データを投入」で入る）"}.get(
+        topology.SOURCE, "静的データ（data/。terraform/pipeline/graph を apply すると Neptune に切り替わる）")
     legend = ('<p style="font-size:12px;color:#6b7480;margin:4px 0 0">'
               '実線 = 主回線 / 破線 = 副回線 / 太線 = 1 Gbps 以上。青 = eBGP、紫 = iBGP、灰 = 拠点 LAN。'
               '<span style="color:#c62828">赤</span> = 落ちている（Spark の検知が Neptune の status に反映したもの。復旧すると戻る）。'
@@ -203,7 +203,7 @@ def interface_choices(device):
 def _graph_call(fn, *args, a="", b=""):
     """Neptune の編集。結果のメッセージと、描き直した図・表・選択肢を返す"""
     if not graph.configured():
-        return "Neptune は未配備（terraform/graph）", *refresh_topology(a, b)
+        return "Neptune は未配備（terraform/pipeline/graph）", *refresh_topology(a, b)
     try:
         r = fn(*args)
     except (ClientError, BotoCoreError, KeyError, ValueError, TypeError) as e:
@@ -331,8 +331,8 @@ with gr.Blocks(title=f"{TITLE} チャット") as demo:
         topo_html = gr.HTML(topology_svg())
         topo_table = gr.Dataframe(device_table(), interactive=False, label="機器")
         topo_refresh = gr.Button("再読み込み")
-        with gr.Accordion("Neptune で編集（terraform/graph がある間だけ）", open=False):
-            edit_msg = gr.Markdown("" if graph.configured() else "Neptune は未配備。terraform/graph を apply して Web を再起動すると使えます。")
+        with gr.Accordion("Neptune で編集（terraform/pipeline/graph がある間だけ）", open=False):
+            edit_msg = gr.Markdown("" if graph.configured() else "Neptune は未配備。terraform/pipeline/graph を apply して Web を再起動すると使えます。")
             gr.Markdown("**静的データを投入** = Neptune の中身をいったん全部消して、`agent/data/` の 10 台・10 本に戻す（初回と、編集をやり直したいとき）。"
                         "機器の追加・削除はこの画面にはないので `agent/data/` を直して投入し直す。リンクは下で 1 本ずつ足す・消す。"
                         "変えた内容はエージェントの次の質問から効く。")

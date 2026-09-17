@@ -1,5 +1,5 @@
 # ---------------------------------------------------------------- AgentCore Runtime
-# 実行ロールそのものは terraform/main が持つ（terraform/stream / terraform/graph がロール名を読んでポリシーを付けるため）。
+# 実行ロールそのものは terraform/base/core が持つ（terraform/pipeline/stream / terraform/pipeline/graph がロール名を読んでポリシーを付けるため）。
 # ここでは Runtime が動くのに要るポリシーを足し、Runtime を作る
 resource "aws_iam_role_policy" "runtime" {
   name = "runtime"
@@ -134,7 +134,7 @@ resource "aws_bedrockagentcore_agent_runtime" "agent" {
       BEDROCK_REGION    = var.region
       GUARDRAIL_ID      = aws_bedrock_guardrail.this.guardrail_id
       GUARDRAIL_VERSION = aws_bedrock_guardrail_version.r1.version
-      # terraform/stream / terraform/graph が書く SSM（anomaly-table / neptune-endpoint）の接頭辞。無ければ静的データで動く
+      # terraform/pipeline/stream / terraform/pipeline/graph が書く SSM（anomaly-table / neptune-endpoint）の接頭辞。無ければ静的データで動く
       PARAM_PREFIX = local.param_prefix
     },
     # KB を作らないときは KNOWLEDGE_BASE_ID を渡さない（agent は Retrieve を飛ばしてモデルとツールだけで答える）
@@ -148,7 +148,7 @@ resource "aws_bedrockagentcore_agent_runtime" "agent" {
 
   tags = { Name = "${var.name_prefix}-agent" }
 
-  # VPC endpoints ができてから Runtime を作らせる（イメージ取得とログ出力がエンドポイント経由）
+  # VPC endpoints ができてから Runtime を作らせる（イメージ取得とログ出力がエンドポイント経由。ecr / logs は terraform/base/core が先に作ってある）
   depends_on = [
     aws_iam_role_policy.runtime,
     aws_vpc_endpoint.runtime,
@@ -158,7 +158,7 @@ resource "aws_bedrockagentcore_agent_runtime" "agent" {
 
 # ---------------------------------------------------------------- hand the runtime ARN to the chat web
 # web EC2 は起動時に環境変数で ARN を受け取るのではなく、この SSM パラメータを読む（60 秒キャッシュ）。
-# こうすると agent を後から apply / destroy しても terraform/main（web EC2）を作り直さずに済む
+# こうすると agent を後から apply / destroy しても terraform/base/core（web EC2）を作り直さずに済む
 resource "aws_ssm_parameter" "runtime_arn" {
   name        = "${local.param_prefix}/runtime-arn"
   description = "ARN of the AgentCore Runtime the chat web invokes (written by terraform/agent)"

@@ -11,9 +11,9 @@ EC2 のセキュリティグループに**受信ルールは 1 つも無い**。
 
 | 何 | できること | 作るもの（`terraform/` の下） | 待機の時間課金（東京） |
 |---|---|---|---|
-| 土台（必ず作る） | 閉域の VPC と Web の EC2（Gradio の画面）、S3 バケット、Runtime / Web のロール | `ecr` / `main` | 約 $0.05/h（約 8 円） |
+| 土台（必ず作る） | 閉域の VPC と Web の EC2（Gradio の画面）、S3 バケット、Runtime / Web のロール | `base/ecr` / `base/core` | 約 $0.05/h（約 8 円） |
 | `AGENT=1`（既定） | agent での分析。AgentCore Runtime + ガードレール（チャットがモデルとトポロジのツールで答える）。`CREATE_KB=1` でナレッジベース（手順書の検索）も足す | + `agent` | 約 $0.13/h（約 20 円）。`CREATE_KB=1` なら +$0.36/h |
-| `PIPELINE=1` | データパイプライン（lab の containerlab → Telegraf → Kafka → Spark → S3 Tables / OpenSearch Serverless（ログ）/ Prometheus（メトリクス）。3 つとも既定で作り、`SINKS` で減らせる。Spark が異常を検知して DynamoDB の「異常一覧」と EventBridge に出す）と、トポロジの操作（Neptune。Web の「トポロジ」タブで編集する） | + `lab` / `stream` / `analytics` / `graph` | 約 $1.08/h（約 162 円。OpenSearch Serverless の最大 0.33 を含む）。`SKIP_*` / `SINKS` で一部を外せる |
+| `PIPELINE=1` | データパイプライン（lab の containerlab → Telegraf → Kafka → Spark → S3 Tables / OpenSearch Serverless（ログ）/ Prometheus（メトリクス）。3 つとも既定で作り、`SINK_S3` / `SINK_OPENSEARCH` / `SINK_PROMETHEUS` の `1` / `0` で 1 つずつ外せる。Spark が異常を検知して DynamoDB の「異常一覧」と EventBridge に出す）と、トポロジの操作（Neptune。Web の「トポロジ」タブで編集する） | + `lab` / `stream` / `analytics` / `graph` | 約 $1.08/h（約 162 円。OpenSearch Serverless の最大 0.33 を含む）。`SKIP_*` / `SINK_*` で一部を外せる |
 | `WORKFLOW=1` | Temporal での実行。Spark の検知が EventBridge → SQS で届き、エージェントが Neptune / OpenSearch / Prometheus を見て原因を Temporal のワークフローで調べて修復案を出し、人が Web の「承認」タブで承認すると Temporal が lab で直して確かめる。エージェントのツールは AgentCore Gateway（MCP）経由。**AGENT と PIPELINE が要る** | + `workflow` | 約 $0.06/h（約 9 円） |
 
 PIPELINE は、組織の SCP / IAM で止められていることがある（「前提」の「AWS 側」）。フェーズの番号（`PHASE=1 / 2 / 3`）は 2026-09-17 に機能の名前に替えた（1 → `AGENT=1`、2 → `AGENT=1` + `PIPELINE=1`、3 → 全部 `1`。`PHASE` を書いたままなら `ops/up.sh` が読み替えて注意を出す。`docs/phases.md`）。
@@ -69,28 +69,28 @@ AgentCore Runtime（VPC モード。terraform/agent。AGENT=1）
   │ 2. Converse + ガードレール + ツール ─ bedrock-runtime エンドポイント ─▶ Guardrail が質問を判定
   │      ↑ モデルが list_devices / neighbors / blast_radius を呼んだら        └▶ Amazon Nova 2 Lite（jp 推論プロファイル）
   │        トポロジ（Neptune があればそこから、無ければ agent/data/）で答えて往復（最大 5 回）  └▶ Guardrail が回答を判定
-  │        list_anomalies を呼んだら DynamoDB の異常一覧（terraform/stream のテーブルに terraform/analytics の Spark が書く。PIPELINE=1 で SKIP_STREAM / SKIP_ANALYTICS が空のとき）を返す
-  │        search_logs / query_metrics を呼んだら OpenSearch Serverless のログ / Prometheus のメトリクス（terraform/analytics の SINKS）を返す
+  │        list_anomalies を呼んだら DynamoDB の異常一覧（terraform/pipeline/stream のテーブルに terraform/pipeline/analytics の Spark が書く。PIPELINE=1 で SKIP_STREAM / SKIP_ANALYTICS が空のとき）を返す
+  │        search_logs / query_metrics を呼んだら OpenSearch Serverless のログ / Prometheus のメトリクス（terraform/pipeline/analytics の sinks。deploy.env の SINK_*）を返す
   │        WORKFLOW=1 で Gateway があれば、ツールの一覧は Gateway（MCP の tools/list）から取り、呼び出しも Gateway（tools/call → tools Lambda）に投げる
   ▼ 回答の末尾に参照した md のファイル名を付けて返す
 
 取り込み（CREATE_KB=1 のとき。利用者が手で行う）: kb-docs/*.md ─ aws s3 cp ─▶ S3 ─ start-ingestion-job ─▶ Titan Embeddings V2 ─▶ OpenSearch Serverless
 Web の部品（利用者が手で行う）: web/app.py + agent/data/ + wheels/ ─ aws s3 sync ─▶ S3 の web/ ─ 起動時に EC2 が取る
 
-データパイプライン（PIPELINE=1。terraform/lab → stream → analytics と terraform/graph の 4 ルート。使う日だけ作って当日中に消す）:
+データパイプライン（PIPELINE=1。terraform/pipeline/lab → stream → analytics と terraform/pipeline/graph の 4 ルート。使う日だけ作って当日中に消す）:
   lab: 同じ VPC の EC2 1 台で containerlab + FRR × 6 + snmpd × 4 + ホスト × 4 を動かす。
-    SSM セッションで入って `sudo lab check` / `sudo lab failover`。イメージは ECR（terraform/ecr）、設定と rpm は S3 の lab/。
-  lab EC2 の Telegraf ─ SNMP ポーリング（10 秒、CE 4 台）+ SNMP trap（linkUp/linkDown、snmpd → 203.0.113.1:162）
-    ─ Kafka（IAM 認証、9098）─▶ MSK（2 ブローカー、terraform/stream）─┬▶ MSK Connect（S3 sink）─▶ S3 の stream/（任意。CREATE_S3_SINK=0 で外す）
-                                                                 ├▶ Spark（EMR Serverless、terraform/analytics）─ 全トピック ─▶ S3 Tables（Iceberg）の snmp_metrics（履歴の正本。60 秒ごとに追記）
-                                                                 ├▶ Spark ─ traps（ログ）だけ ─▶ OpenSearch Serverless の snmp-logs（SINKS の opensearch。既定で作る）
-                                                                 ├▶ Spark ─ metrics だけ ─▶ Amazon Managed Service for Prometheus（SINKS の prometheus。既定で作る）
-                                                                 └▶ Spark の detect ─ link_down を見つける ─▶ DynamoDB の異常テーブル（terraform/stream）─▶ Web の「異常一覧」/ エージェントの list_anomalies
+    SSM セッションで入って `sudo lab check` / `sudo lab failover`。イメージは ECR（terraform/base/ecr）、設定と rpm は S3 の lab/。
+  lab EC2 の Telegraf ─ SNMP ポーリング（10 秒、CE 4 台）+ SNMP trap（linkUp/linkDown、snmpd → 203.0.113.1:162）+ FRR のログ（6 台。/var/log/netops-lab/<機器名>/frr.log を tail）
+    ─ Kafka（IAM 認証、9098）─▶ MSK（2 ブローカー、terraform/pipeline/stream）─┬▶ MSK Connect（S3 sink）─▶ S3 の stream/（任意。CREATE_S3_SINK=0 で外す）
+                                                                 ├▶ Spark（EMR Serverless、terraform/pipeline/analytics）─ 全トピック ─▶ S3 Tables（Iceberg）の snmp_metrics（履歴の正本。60 秒ごとに追記）
+                                                                 ├▶ Spark ─ traps / logs（ログ）だけ ─▶ OpenSearch Serverless の snmp-logs（SINK_OPENSEARCH。既定で作る）
+                                                                 ├▶ Spark ─ metrics だけ ─▶ Amazon Managed Service for Prometheus（SINK_PROMETHEUS。既定で作る）
+                                                                 └▶ Spark の detect ─ link_down を見つける ─▶ DynamoDB の異常テーブル（terraform/pipeline/stream）─▶ Web の「異常一覧」/ エージェントの list_anomalies
                                                                                                         └▶ EventBridge に AnomalyOpened（source netops.spark。WORKFLOW の SQS が受ける）
     Kafka から 4 つに分ける設計（2026-09-17）の 4 本目、log + metrics → Splunk は Kafka の sink（MSK Connect）にする予定で後回し。Grafana での可視化も後回し
-  Neptune（terraform/graph）─ Gremlin（boto3 neptunedata、IAM 認証）─▶ エージェントの topology.py と Web の「トポロジ」タブ（図・表・リンクの追加削除）
+  Neptune（terraform/pipeline/graph）─ Gremlin（boto3 neptunedata、IAM 認証）─▶ エージェントの topology.py と Web の「トポロジ」タブ（図・表・リンクの追加削除）
 
-Temporal での実行（WORKFLOW=1。terraform/workflow の 1 ルート。AGENT と PIPELINE の lab / stream / analytics が要る。graph が無ければトポロジは静的、SINKS を減らすとそのツールは「配備されていない」を返す）:
+Temporal での実行（WORKFLOW=1。terraform/workflow の 1 ルート。AGENT と PIPELINE の lab / stream / analytics が要る。graph が無ければトポロジは静的、SINK_* を 0 にするとそのツールは「配備されていない」を返す）:
   ECS on Fargate（ARM64、1 タスク = temporal コンテナ（temporal server start-dev、SQLite）+ worker コンテナ）を同じ VPC のプライベートサブネットに置く
   EventBridge のルール（netops.spark / AnomalyOpened）─▶ SQS ─ worker の starter が long polling（20 秒）─▶ 異常ごとに Temporal のワークフロー investigate-<anomaly_id>
     （SQS が無ければ 60 秒ごとに DynamoDB の異常テーブルの open を見る。5 回失敗したメッセージは DLQ へ）
@@ -106,22 +106,38 @@ Temporal での実行（WORKFLOW=1。terraform/workflow の 1 ルート。AGENT 
 
 | ファイル | 動く場所 | 何をするか | 環境変数を入れるもの |
 |---|---|---|---|
-| `web/app.py` | **EC2**（`fukuda-nwc-poc-web.service`、127.0.0.1:8080） | Gradio の画面（チャット・トポロジ・異常一覧）。チャットは boto3 の `invoke_agent_runtime` で Runtime に投げるだけで、モデルもナレッジベースも直接は呼ばない | `terraform/main` の user_data（`templates/web_user_data.sh.tftpl`）が `/etc/fukuda-nwc-poc-web.env` に書く（`AWS_REGION` / `PARAM_PREFIX` など）。Runtime の ARN は `terraform/agent` が書く SSM の `<prefix>/runtime-arn` を 60 秒キャッシュで読む（agent を作り直しても EC2 は作り直さない） |
+| `web/app.py` | **EC2**（`fukuda-nwc-poc-web.service`、127.0.0.1:8080） | Gradio の画面（チャット・トポロジ・異常一覧）。チャットは boto3 の `invoke_agent_runtime` で Runtime に投げるだけで、モデルもナレッジベースも直接は呼ばない | `terraform/base/core` の user_data（`templates/web_user_data.sh.tftpl`）が `/etc/fukuda-nwc-poc-web.env` に書く（`AWS_REGION` / `PARAM_PREFIX` など）。Runtime の ARN は `terraform/agent` が書く SSM の `<prefix>/runtime-arn` を 60 秒キャッシュで読む（agent を作り直しても EC2 は作り直さない） |
 | `agent/app.py` | **AgentCore Runtime のコンテナ**（手順 2 で ECR に push したイメージ） | `BedrockAgentCoreApp`。`POST /invocations` を受けて Retrieve → Converse → ツールを回す。画面は無い | `terraform/agent/runtime.tf` の `environment_variables`（`MODEL_ID` / `GUARDRAIL_ID` など。`KNOWLEDGE_BASE_ID` は `CREATE_KB=1` のときだけ） |
 
-**`agent/app.py` を EC2 に置かない**（S3 の `web/app.py` に上書きしない）。置くと `KeyError: 'MODEL_ID'` で落ちるか、立ってもブラウザが `404 Not Found` になり、EC2 のロールに `bedrock:Retrieve` / `bedrock:InvokeModel` が無いのでその先にも進めない。無いのは意図した形で、それらは Runtime のロール（`runtime.tf` の `aws_iam_role.runtime`）が持つ。EC2 のロールに足して直さない。`terraform/main` の user_data は起動時にこれを検出し、`is not web/app.py` と cloud-init のログに出して止まる。
+**`agent/app.py` を EC2 に置かない**（S3 の `web/app.py` に上書きしない）。置くと `KeyError: 'MODEL_ID'` で落ちるか、立ってもブラウザが `404 Not Found` になり、EC2 のロールに `bedrock:Retrieve` / `bedrock:InvokeModel` が無いのでその先にも進めない。無いのは意図した形で、それらは Runtime のロール（`runtime.tf` の `aws_iam_role.runtime`）が持つ。EC2 のロールに足して直さない。`terraform/base/core` の user_data は起動時にこれを検出し、`is not web/app.py` と cloud-init のログに出して止まる。
+
+Terraform のルートは、土台（`base`）と機能ごと（`agent` / `pipeline` / `workflow`）に分けてある（2026-09-18。それまでの `terraform/main` は `terraform/base/core`）。1 ディレクトリ = 1 state で、`deploy.env` の機能のキーとそのまま対応する。
+
+```
+terraform/
+├── base/          土台（必ず作る）
+│   ├── ecr/         ECR リポジトリ
+│   └── core/        VPC / SG / エンドポイント / バケット / ロール / Web の EC2
+├── agent/         AGENT=1     AgentCore Runtime / ガードレール / KB
+├── pipeline/      PIPELINE=1
+│   ├── lab/         containerlab の EC2
+│   ├── stream/      MSK / MSK Connect / 異常テーブル
+│   ├── analytics/   EMR Serverless（Spark）/ S3 Tables / OpenSearch / Prometheus
+│   └── graph/       Neptune
+└── workflow/      WORKFLOW=1  Temporal on ECS / Gateway（MCP）
+```
 
 | ファイル | 中身 |
 |---|---|
-| `terraform/ecr/` | エージェントと lab、WORKFLOW のワーカーと Temporal（ミラー）のイメージの ECR リポジトリ（タグは上書き不可、destroy でイメージごと消える）。**最初に apply する。**`terraform/agent` がリポジトリの URL をこのルートの state から読む |
-| `terraform/main/` | 土台（必ず作る）。`network.tf`（VPC・サブネット 2 つ・ssm / ssmmessages のエンドポイント・SG）/ `bucket.tf`（S3 バケット）/ `runtime.tf`（Runtime と Web のロールだけ。ポリシーは各機能のルートが足す）/ `web.tf`（EC2）/ `templates/web_user_data.sh.tftpl`（起動時に S3 から Web を取って入れる）/ `locals.tf`。他のルートが VPC / サブネット / SG / バケット / ロール名をこの state から読む |
-| `terraform/agent/` | AGENT。`runtime.tf`（AgentCore Runtime と Runtime のロールのポリシー、Web に ARN を渡す SSM の `runtime-arn`、Web のロールへの `InvokeAgentRuntime`）/ `network.tf`（Runtime 用のエンドポイント ecr.api / ecr.dkr / logs / bedrock-runtime × 2 AZ と、Web 用の bedrock-agentcore × 1 AZ）/ `kb.tf`（ガードレールと、`create_knowledge_base=true` のときだけ OpenSearch Serverless・インデックス・ナレッジベース）/ `locals.tf`。`terraform/ecr` と `terraform/main` の state を読む |
-| `terraform/lab/` | PIPELINE。containerlab + FRR の lab を動かす EC2 1 台（`templates/lab_user_data.sh.tftpl`）。VPC / サブネット / SG / バケットは `terraform/main` の state から読む。stream を作るときは Telegraf も入れる |
-| `terraform/stream/` | PIPELINE。`network.tf`（SG と sts・dynamodb エンドポイント）/ `msk.tf`（MSK。2 ブローカー、IAM 認証）/ `anomalies.tf`（DynamoDB の異常テーブル。書くのは analytics の Spark）/ `sink.tf`（MSK Connect の S3 sink）/ `access.tf`（`terraform/main` と `terraform/lab` のロールに足す権限）/ `locals.tf`。`terraform/main` と `terraform/lab` の state を読む |
-| `terraform/analytics/` | PIPELINE。`tables.tf`（S3 Tables のテーブルバケット・namespace `netops`・Iceberg テーブル `snmp_metrics`）/ `emr.tf`（EMR Serverless の Spark アプリケーション。ARM64、アイドル 15 分で止まる）/ `access.tf`（ジョブの実行ロール）/ `sinks.tf`（OpenSearch Serverless の logs コレクションと Prometheus のワークスペース。`sinks` で生える）/ `network.tf`（EMR の SG、MSK への 9098、`s3tables` / `aps-workspaces` / `events` の interface エンドポイント）/ `locals.tf` / `outputs.tf`（`start-job-run` に渡す JSON）。`terraform/main` と `terraform/stream` の state を読む |
-| `spark/snmp_sinks.py` | analytics のジョブ本体。Kafka の `metrics` / `traps` を読み、Telegraf の JSON を行にして格納先に 60 秒ごとに流す（Structured Streaming。格納先ごとに別のクエリ）。iceberg = 全トピック → S3 Tables、opensearch = `traps` → OpenSearch Serverless の `_bulk`（SigV4）、prometheus = `metrics` の数値の field → Amazon Managed Service for Prometheus の remote write（protobuf + snappy を手組み）。detect = `link_down` を DynamoDB の異常テーブルに open / resolved で書き、開いた瞬間に EventBridge へ `AnomalyOpened` を出す。`ops/up.sh` が jar 6 本と一緒に S3 の `analytics/` に置く（a-1） |
-| `terraform/graph/` | PIPELINE。Neptune（db.t4g.medium × 1、IAM 認証）と、`terraform/main` のロールへの Gremlin 権限、Spark の検知（EventBridge）を受けて機器と回線の `status` を書く Lambda（`graph/status_handler.py`）。`terraform/main` の state を読む。無ければ静的データで動く |
-| `terraform/workflow/` | WORKFLOW。`ecs.tf`（ECS クラスタ・タスク定義（temporal + worker の 2 コンテナ、ARM64、1 vCPU / 2 GB）・サービス・SG・ロググループ）/ `proposals.tf`（DynamoDB の修復案テーブルと SSM の `proposal-table`、Web と Runtime のロールへの読み書き権限）/ `iam.tf`（タスクのロール。Runtime の呼び出し、lab の EC2 への `AWS-RunShellScript` だけ）/ `events.tf`（EventBridge のルール `AnomalyOpened` → SQS `<prefix>-anomalies` と DLQ、`sqs` の interface エンドポイント）/ `gateway.tf`（AgentCore Gateway（MCP、IAM 認証）と VPC の中の tools Lambda、SSM の `gateway-url`。`create_gateway=false` で外せる）/ `locals.tf`。`terraform/ecr` / `main` / `agent` / `lab` / `stream` の state を読み、`graph` / `analytics` は有れば読む |
+| `terraform/base/ecr/` | エージェントと lab、WORKFLOW のワーカーと Temporal（ミラー）のイメージの ECR リポジトリ（タグは上書き不可、destroy でイメージごと消える）。**最初に apply する。**`terraform/agent` がリポジトリの URL をこのルートの state から読む |
+| `terraform/base/core/` | 土台（必ず作る）。`vpc.tf`（VPC・サブネット 2 つ・ルートテーブル）/ `security_groups.tf`（Runtime / Web / エンドポイントの SG）/ `endpoints.tf`（ssm / ssmmessages、S3 ゲートウェイ、共用の ecr.api / ecr.dkr / logs）/ `bucket.tf`（S3 バケット）/ `runtime.tf`（Runtime と Web のロールだけ。ポリシーは各機能のルートが足す）/ `web.tf`（EC2）/ `templates/web_user_data.sh.tftpl`（起動時に S3 から Web を取って入れる）/ `locals.tf`。他のルートが VPC / サブネット / SG / バケット / ロール名をこの state から読む |
+| `terraform/agent/` | AGENT。`runtime.tf`（AgentCore Runtime と Runtime のロールのポリシー、Web に ARN を渡す SSM の `runtime-arn`、Web のロールへの `InvokeAgentRuntime`）/ `network.tf`（Runtime 用のエンドポイント bedrock-runtime × 2 AZ と、Web 用の bedrock-agentcore × 1 AZ。ecr.api / ecr.dkr / logs は lab と Spark も使うので `terraform/base/core` が持つ）/ `kb.tf`（ガードレールと、`create_knowledge_base=true` のときだけ OpenSearch Serverless・インデックス・ナレッジベース）/ `locals.tf`。`terraform/base/ecr` と `terraform/base/core` の state を読む |
+| `terraform/pipeline/lab/` | PIPELINE。containerlab + FRR の lab を動かす EC2 1 台。`network.tf`（SG とエンドポイントへの 443）/ `iam.tf`（インスタンスロール）/ `instance.tf`（EC2 と `templates/lab_user_data.sh.tftpl`）/ `locals.tf`。VPC / サブネット / SG / バケットは `terraform/base/core` の state から読む。stream を作るときは Telegraf も入れる |
+| `terraform/pipeline/stream/` | PIPELINE。`network.tf`（SG と sts・dynamodb エンドポイント）/ `msk.tf`（MSK。2 ブローカー、IAM 認証）/ `anomalies.tf`（DynamoDB の異常テーブル。書くのは analytics の Spark）/ `sink.tf`（MSK Connect の S3 sink）/ `access.tf`（`terraform/base/core` と `terraform/pipeline/lab` のロールに足す権限）/ `locals.tf`。`terraform/base/core` と `terraform/pipeline/lab` の state を読む |
+| `terraform/pipeline/analytics/` | PIPELINE。`tables.tf`（S3 Tables のテーブルバケット・namespace `netops`・Iceberg テーブル `snmp_metrics`）/ `emr.tf`（EMR Serverless の Spark アプリケーション。ARM64、アイドル 15 分で止まる）/ `access.tf`（ジョブの実行ロール）/ `sinks.tf`（OpenSearch Serverless の logs コレクションと Prometheus のワークスペース。`sinks` で生える）/ `network.tf`（EMR の SG、MSK への 9098、`s3tables` / `aps-workspaces` / `events` の interface エンドポイント）/ `locals.tf` / `outputs.tf`（`start-job-run` に渡す JSON）。`terraform/base/core` と `terraform/pipeline/stream` の state を読む |
+| `spark/snmp_sinks.py` | analytics のジョブ本体。Kafka の `metrics` / `traps` / `logs` を読み、Telegraf の JSON を行にして格納先に 60 秒ごとに流す（Structured Streaming。格納先ごとに別のクエリ）。iceberg = 全トピック → S3 Tables、opensearch = `traps` と `logs`（FRR のログ）→ OpenSearch Serverless の `_bulk`（SigV4）、prometheus = `metrics` の数値の field → Amazon Managed Service for Prometheus の remote write（protobuf + snappy を手組み）。detect = `link_down` を DynamoDB の異常テーブルに open / resolved で書き、開いた瞬間に EventBridge へ `AnomalyOpened` を出す。`ops/up.sh` が jar 6 本と一緒に S3 の `analytics/` に置く（a-1） |
+| `terraform/pipeline/graph/` | PIPELINE。Neptune（db.t4g.medium × 1、IAM 認証）と、`terraform/base/core` のロールへの Gremlin 権限、Spark の検知（EventBridge）を受けて機器と回線の `status` を書く Lambda（`graph/status_handler.py`）。`network.tf`（SG とサブネットグループ）/ `neptune.tf` / `access.tf`（ロールへの権限）/ `sync.tf`（Lambda と EventBridge）/ `locals.tf`。`terraform/base/core` の state を読む。無ければ静的データで動く |
+| `terraform/workflow/` | WORKFLOW。`ecs.tf`（ECS クラスタ・タスク定義（temporal + worker の 2 コンテナ、ARM64、1 vCPU / 2 GB）・サービス・SG・ロググループ）/ `proposals.tf`（DynamoDB の修復案テーブルと SSM の `proposal-table`、Web と Runtime のロールへの読み書き権限）/ `iam.tf`（タスクのロール。Runtime の呼び出し、lab の EC2 への `AWS-RunShellScript` だけ）/ `events.tf`（EventBridge のルール `AnomalyOpened` → SQS `<prefix>-anomalies` と DLQ、`sqs` の interface エンドポイント）/ `gateway.tf`（AgentCore Gateway（MCP、IAM 認証）と VPC の中の tools Lambda、SSM の `gateway-url`。`create_gateway=false` で外せる）/ `locals.tf`。`terraform/base/ecr` / `main` / `agent` / `lab` / `stream` の state を読み、`graph` / `analytics` は有れば読む |
 | `workflow/` | ワーカーのコンテナ（`worker.py` / `Dockerfile` / `requirements.txt`。Python 3.13、`temporalio` SDK、arm64）。starter（SQS の `AnomalyOpened` を受けてワークフローを起こす。キューが無ければ DynamoDB を 60 秒ごとに見る）とワークフロー（調査 → 修復案 → 承認待ち → lab で修復 → 確認）が 1 プロセス |
 | `tools/` | Gateway のツール（`tools.json` が MCP のツール定義 8 つ、`handler.py` が Lambda の本体。`agent/` の `topology.py` / `graph.py` / `anomalies.py` / `evidence.py` と `data/` を同じ zip に入れる） |
 | `terraform/<ルート>/terraform.tfvars.example` | 変数と既定値の一覧。既定のままでよい。変えたいときだけ同じ場所の `terraform.tfvars` に写す（gitignore 済み） |
@@ -130,11 +146,11 @@ Temporal での実行（WORKFLOW=1。terraform/workflow の 1 ルート。AGENT 
 | `web/` | EC2 で動かす Gradio の画面（`app.py`。チャット・トポロジ・異常一覧・承認）と依存（`requirements.txt`）。`agent/` の 5 モジュールと一緒に S3 に置く（出力 `upload_web_command`） |
 | `.env.example` | 環境変数の一覧（Web / エージェント / lab。意味と AWS 上で誰が入れるか）。AWS 上では Terraform（user_data と Runtime の環境変数）が書くので手で用意しない。EC2 で Web が立たないときの見比べ先で、手元で `web/app.py` を動かすときは `.env` に写して使う（「Web を手元で動かす」） |
 | `deploy.env.example` | `ops/up.sh` / `ops/down.sh` の設定の見本（どの機能を作るか、ECR を残すかなど）。`cp deploy.env.example deploy.env` で写して書く。`deploy.env` は gitignore 済みで、無ければ土台と AGENT を作る |
-| `lab/` | lab の材料。`wvs2.clab.yml.in`（containerlab の定義。イメージ名は起動時に埋める）、`frr/`、`snmpd/`（Dockerfile と設定。trap の送信も）、`telegraf.conf.in`（ポーリングと trap 受信 → MSK）、`lab.sh`、`lab_topology.py`（定義から Neptune に入れる機器と回線を作る。「Neptune のトポロジを lab から作る」） |
-| `graph/` | `status_handler.py`。`terraform/graph` の Lambda で、Spark の検知（EventBridge の `AnomalyOpened` / `AnomalyResolved`）を受けて Neptune の機器と回線の `status` を書く。`agent/graph.py` と一緒に zip になる |
+| `lab/` | lab の材料。`wvs2.clab.yml.in`（containerlab の定義。イメージ名は起動時に埋める）、`frr/`、`snmpd/`（Dockerfile と設定。trap の送信も）、`telegraf.conf.in`（ポーリングと trap 受信、FRR のログの tail → MSK の `metrics` / `traps` / `logs`）、`lab.sh`、`lab_topology.py`（定義から Neptune に入れる機器と回線を作る。「Neptune のトポロジを lab から作る」） |
+| `graph/` | `status_handler.py`。`terraform/pipeline/graph` の Lambda で、Spark の検知（EventBridge の `AnomalyOpened` / `AnomalyResolved`）を受けて Neptune の機器と回線の `status` を書く。`agent/graph.py` と一緒に zip になる |
 | `kb-docs/` | ナレッジベースに入れる手順書の例（架空の md 3 つ。`CREATE_KB=1` のときだけ使う） |
 | `ops/` | `up.sh`（`deploy.env` の `AGENT` / `PIPELINE` / `WORKFLOW` で選んだ機能を、手順 1〜7・lab・graph・stream・analytics・workflow の順に 1 本で打つ）と `down.sh`（片付けをまとめて打つ）。毎日消して作り直す運用向け（「毎日の起動と片付けをスクリプトで打つ」）。`deploy-env.sh` は 2 本が読む `deploy.env` の読み込み（シェルとしては実行しない）。`seed_graph.py` は `up.sh` が Web の EC2 の上で打つ Neptune への投入（`lab/lab_topology.py` が lab の定義から作った機器と回線を受け取る）。`sync-graph.sh` は起動後にトポロジを入れ直す（「Neptune のトポロジを lab から作る」）。`check.sh` は AWS に触らない検査をまとめて打つ（「手元で確かめる」）。`vscode-setup.sh` は VS Code の設定を入れる（「VS Code の設定」） |
-| `tests/` | 模擬テスト（AWS に触れない。打ち方は「手元で確かめる」）。`test_app.py`（エージェント）、`test_graph.py`（Neptune の読み書き・動的な状態・静的への切り戻し）、`test_sync.py`（lab の定義からのトポロジ、状態を書く Lambda、`terraform/graph` の配線）、`test_stream.py`（Spark の検知（`spark/snmp_sinks.py` の detect）と `terraform/stream` の配線）、`test_analytics.py`（`terraform/analytics` と Spark のスクリプトの整合）、`test_workflow.py`（ワーカー・修復案・MCP クライアント・tools Lambda と `terraform/workflow` の配線） |
+| `tests/` | 模擬テスト（AWS に触れない。打ち方は「手元で確かめる」）。`test_app.py`（エージェント）、`test_graph.py`（Neptune の読み書き・動的な状態・静的への切り戻し）、`test_sync.py`（lab の定義からのトポロジ、状態を書く Lambda、`terraform/pipeline/graph` の配線）、`test_stream.py`（Spark の検知（`spark/snmp_sinks.py` の detect）と `terraform/pipeline/stream` の配線）、`test_analytics.py`（`terraform/pipeline/analytics` と Spark のスクリプトの整合）、`test_workflow.py`（ワーカー・修復案・MCP クライアント・tools Lambda と `terraform/workflow` の配線） |
 
 ## なぜこの形にしたか
 
@@ -213,7 +229,7 @@ OpenSearch Serverless のセキュリティポリシー・アクセスポリシ�
 ### AWS 側
 
 - リージョンは `ap-northeast-1`。
-- **VPC は `terraform/main` が作る**（既存の VPC は使わない。destroy すれば VPC ごと消えるので、消し忘れが残らない）。
+- **VPC は `terraform/base/core` が作る**（既存の VPC は使わない。destroy すれば VPC ごと消えるので、消し忘れが残らない）。
   既定は `10.0.0.0/16` に `/24` のプライベートサブネット 2 つ（AZ ID `apne1-az1` と `apne1-az4`）。IGW も NAT も無く、外へはエンドポイントだけ。
   社内のネットワークと CIDR が重なると DX / VPN でつなぐときに困るので、重なるなら変数 `vpc_cidr` を変える（`/16`〜`/24`）。
   AZ ID は AgentCore Runtime が東京で対応する `apne1-az1` / `apne1-az2` / `apne1-az4` から選ぶ（変数 `az_id_a` / `az_id_b`。既定のままでよい）。
@@ -256,7 +272,7 @@ ENI にタグが付かず上で何も出ないときは、`aws ec2 describe-vpc-
 ### Terraform を打つ PC 側
 
 - Terraform 1.11 以上（`terraform version`）。provider は `terraform init` が `registry.terraform.io` から取るので、そこに 443 で届く（版は各ルートの `.terraform.lock.hcl` で固定してある）。
-- **`terraform/main` の apply / destroy を打つ PC から `*.ap-northeast-1.aoss.amazonaws.com` に 443 で届く。**インデックスの作成と削除はその PC から OpenSearch Serverless へ直接つなぐ（ネットワークポリシーは公開なので、インターネットか社内プロキシの先で届けばよい）。
+- **`terraform/base/core` の apply / destroy を打つ PC から `*.ap-northeast-1.aoss.amazonaws.com` に 443 で届く。**インデックスの作成と削除はその PC から OpenSearch Serverless へ直接つなぐ（ネットワークポリシーは公開なので、インターネットか社内プロキシの先で届けばよい）。
 - 社内の SSL 検査がある PC は、次の「社内 PC で使うとき」を先に済ませる。
 
 ### WSL2 の準備
@@ -325,7 +341,7 @@ brew tap hashicorp/tap && brew install hashicorp/tap/terraform
 brew install --cask session-manager-plugin
 ```
 
-Apple Silicon の Mac（Docker Desktop 29 / buildx 0.33 / Terraform 1.16 / AWS CLI 2.36）で、道具が揃うことと `ops/up.sh` / `ops/down.sh` が bash 3.2 で構文エラーにならないことは 2026-09-16 に確認した。同日に `aws login` のプロファイルで `ops/up.sh` を打ったときは、ECR とイメージまで作ったあと `terraform/main` の plan が opensearch provider の `NoCredentialProviders` で落ちた。手順 0 で credential_process に切り替えるようにしたあと、同じプロファイルで `terraform/main` の apply まで通した。2026-09-17 に Mac で通しの `ops/up.sh` を打ったところ、手順 4-3 の取り込みで `ST�: unbound variable` になった。macOS の bash 3.2 は UTF-8 ロケール（`LANG=ja_JP.UTF-8` など）だと `$ST（` のように変数名の直後に全角文字が続くとその文字のバイトまで変数名に読む（`LC_ALL=C` だと出ないので `bash -n` では見つからない）。ops のスクリプトでは非 ASCII の直前の変数を `${ST}` の形に揃えた。Intel Mac は確かめていない。
+Apple Silicon の Mac（Docker Desktop 29 / buildx 0.33 / Terraform 1.16 / AWS CLI 2.36）で、道具が揃うことと `ops/up.sh` / `ops/down.sh` が bash 3.2 で構文エラーにならないことは 2026-09-16 に確認した。同日に `aws login` のプロファイルで `ops/up.sh` を打ったときは、ECR とイメージまで作ったあと `terraform/base/core` の plan が opensearch provider の `NoCredentialProviders` で落ちた。手順 0 で credential_process に切り替えるようにしたあと、同じプロファイルで `terraform/base/core` の apply まで通した。2026-09-17 に Mac で通しの `ops/up.sh` を打ったところ、手順 4-3 の取り込みで `ST�: unbound variable` になった。macOS の bash 3.2 は UTF-8 ロケール（`LANG=ja_JP.UTF-8` など）だと `$ST（` のように変数名の直後に全角文字が続くとその文字のバイトまで変数名に読む（`LC_ALL=C` だと出ないので `bash -n` では見つからない）。ops のスクリプトでは非 ASCII の直前の変数を `${ST}` の形に揃えた。Intel Mac は確かめていない。
 
 ### 社内 PC で使うとき
 
@@ -374,10 +390,10 @@ EOF2
 
 ### `create_*_endpoint(s)` 変数
 
-`terraform/main` は VPC を自分で作るので、エンドポイントは全部このルートが作る。`create_runtime_endpoints` / `create_kb_endpoint` / `create_ssm_endpoints` / `create_agentcore_endpoint` / `create_s3_gateway_endpoint` の 5 つは**既定の `true` のまま**にする
+`terraform/base/core` は VPC と、どの機能も使うエンドポイント（`create_ssm_endpoints` / `create_s3_gateway_endpoint` / `create_shared_endpoints`）を作り、`terraform/agent` は bedrock のエンドポイント（`create_runtime_endpoints` / `create_kb_endpoint` / `create_agentcore_endpoint`）を作る。6 つとも**既定の `true` のまま**にする。`create_shared_endpoints` は ecr.api / ecr.dkr / logs × 2 AZ で、Runtime と lab の EC2 がイメージを取り、Spark と MSK Connect と ECS がログを出すのに使う（2026-09-18 に `terraform/agent` から移した。それまでは `AGENT=0 PIPELINE=1` で lab がイメージを取れなかった）。`ops/up.sh` は AGENT も lab も analytics も作らないときだけ `false` で打つ
 （`false` は、既存の VPC に載せ替えたときのための名残）。
 
-**VPC の中から S3 に出る経路は S3 ゲートウェイだけ**で、そのポリシーが許す先は 3 つ。`terraform/main` のバケット `fukuda-nwc-poc-kb-…`（EC2 が `web/` を取る、lab が `lab/` を取る、MSK Connect が `stream/` に書く）、
+**VPC の中から S3 に出る経路は S3 ゲートウェイだけ**で、そのポリシーが許す先は 3 つ。`terraform/base/core` のバケット `fukuda-nwc-poc-kb-…`（EC2 が `web/` を取る、lab が `lab/` を取る、MSK Connect が `stream/` に書く）、
 ECR のレイヤー置き場（Runtime のイメージ取得）、AL2023 の dnf リポジトリ（`/usr/bin/python3` は 3.9 のままなので、起動時に `dnf install python3.13` で 3.13 を入れる）。
 バケットに対する操作の絞り込みはゲートウェイではなく各ロールの IAM ポリシーで行う（2026-09-15 にゲートウェイ側で絞っていて `s3:ListBucket` が落ち、EC2 が `web/` を取れなかった。同日に直した）。
 
@@ -387,11 +403,11 @@ ECR のレイヤー置き場（Runtime のイメージ取得）、AL2023 の dnf
 
 ### 毎日の起動と片付けをスクリプトで打つ
 
-業務終了後に全部消し、翌朝また作る運用なら、この 2 本を使う。**`ops/up.sh` は `deploy.env` で `1` にした機能を 1 本で作る**: 土台（`terraform/ecr` → `terraform/main`。手順 1〜4・7）は必ず作り、`AGENT=1`（既定。agent での分析）は `terraform/agent`（Runtime とガードレール。手順 3 の後半と 5）を、`PIPELINE=1`（データパイプラインとトポロジ）は lab → stream（Telegraf → MSK）→ analytics（Spark → S3 Tables / OpenSearch Serverless / Prometheus と、異常検知 → DynamoDB の「異常一覧」+ EventBridge）と graph（Neptune と静的トポロジの投入）を、`WORKFLOW=1`（Temporal での実行）は workflow（EventBridge → SQS、Temporal on ECS Fargate のワーカー、AgentCore Gateway（MCP））を足す。機能は互いに独立で、翌日に別の機能を `1` にして打ち直せばその機能だけ足される。PIPELINE の一部だけ要らないときは `SKIP_LAB` / `SKIP_STREAM` / `SKIP_ANALYTICS` / `SKIP_GRAPH`。WORKFLOW は AGENT と lab / stream / analytics が要るので、`WORKFLOW=1` なら `AGENT=1` と `PIPELINE=1` にし、`SKIP_LAB` / `SKIP_STREAM` / `SKIP_ANALYTICS` は書けない。
+業務終了後に全部消し、翌朝また作る運用なら、この 2 本を使う。**`ops/up.sh` は `deploy.env` で `1` にした機能を 1 本で作る**: 土台（`terraform/base/ecr` → `terraform/base/core`。手順 1〜4・7）は必ず作り、`AGENT=1`（既定。agent での分析）は `terraform/agent`（Runtime とガードレール。手順 3 の後半と 5）を、`PIPELINE=1`（データパイプラインとトポロジ）は lab → stream（Telegraf → MSK）→ analytics（Spark → S3 Tables / OpenSearch Serverless / Prometheus と、異常検知 → DynamoDB の「異常一覧」+ EventBridge）と graph（Neptune と静的トポロジの投入）を、`WORKFLOW=1`（Temporal での実行）は workflow（EventBridge → SQS、Temporal on ECS Fargate のワーカー、AgentCore Gateway（MCP））を足す。機能は互いに独立で、翌日に別の機能を `1` にして打ち直せばその機能だけ足される。PIPELINE の一部だけ要らないときは `SKIP_LAB` / `SKIP_STREAM` / `SKIP_ANALYTICS` / `SKIP_GRAPH`。WORKFLOW は AGENT と lab / stream / analytics が要るので、`WORKFLOW=1` なら `AGENT=1` と `PIPELINE=1` にし、`SKIP_LAB` / `SKIP_STREAM` / `SKIP_ANALYTICS` は書けない。
 中身は下の手順のコマンドそのもので、**できているものは飛ばす**（Terraform は差分だけ作る、ECR に同じタグのイメージがあればビルドしない、`wheels/`・rpm・zip が手元にあれば取り直さない、Neptune に機器が入っていれば投入しない）ので、途中で落ちても同じコマンドを打ち直せばよい。
 手順 0 の環境変数は要らない（スクリプトが認証情報と Terraform の出力から取る）。**aws-vault の人は 0-1 の `--no-session` のサブシェルの中で打つ**（一時セッションで入っていると、その旨を出して止まる）。社内 PC は「社内 PC で使うとき」の設定を入れたターミナルで打つ。
 
-**待機の時間課金は、土台 0.05 + AGENT 0.13（`CREATE_KB=1` なら +0.36）+ PIPELINE の lab（t4g.large）0.09 + stream（MSK / MSK Connect）0.28 + analytics（EMR Serverless / S3 Tables / エンドポイント）0.20 + OpenSearch Serverless の logs コレクション最大 0.33 + Prometheus 0.03 + graph（Neptune）0.14 + WORKFLOW 0.06 で、全部作ると約 $1.32/h**（「1 時間起動したときの試算」。`ops/up.sh` も手順 0 で目安を出す）。**使い終わったら当日中に `ops/down.sh` を打つ。**
+**待機の時間課金は、土台 0.05 + 共用のエンドポイント 0.08（AGENT / lab / analytics のどれかを作るとき）+ AGENT 0.05（`CREATE_KB=1` なら +0.36）+ PIPELINE の lab（t4g.large）0.09 + stream（MSK / MSK Connect）0.28 + analytics（EMR Serverless / S3 Tables / エンドポイント）0.20 + OpenSearch Serverless の logs コレクション最大 0.33 + Prometheus 0.03 + graph（Neptune）0.14 + WORKFLOW 0.06 で、全部作ると約 $1.32/h**（「1 時間起動したときの試算」。`ops/up.sh` も手順 0 で目安を出す）。**使い終わったら当日中に `ops/down.sh` を打つ。**
 
 初回だけ、設定のファイルを写す（`deploy.env` は gitignore 済み）:
 
@@ -418,15 +434,15 @@ PIPELINE=1 ops/up.sh
 | 順 | 何をする | 対応する手順 |
 |---|---|---|
 | 0 | `deploy.env` を読む（無ければ環境変数と既定値で動く。知らないキーや値の誤りがあれば止まる）。`aws` / `terraform` / `python3`（無ければ `uv`）/ `curl` / `docker` と `docker buildx` / `session-manager-plugin`（`NO_PORTFORWARD` が空のとき）があるか、認証が通っているかを確かめる。aws-vault の一時セッションなら止まる。鍵が環境変数に無ければ（`aws login` など）、Terraform には AWS CLI 経由（`credential_process`）で認証情報を渡す（0-1 の「`aws login` で入っているとき」を一時ファイルで行う）。CloudFormation 版のスタック（`fukuda-nwc-poc*`）が残っていれば止まる（「CloudFormation 版から移るとき」）。作る機能とルートと、待機の時間課金の目安を表示する（`AGENT` / `PIPELINE` / `WORKFLOW` / `CREATE_KB` が `1` / `0` 以外、`PHASE` が `1` / `2` / `3` 以外、`SKIP_LAB=1` で `SKIP_STREAM` が空、`WORKFLOW=1` で `AGENT=0` か `PIPELINE=0` か `SKIP_LAB` か `SKIP_STREAM` か `SKIP_ANALYTICS`、無くなったキー `WITH_LAB` / `WITH_STREAM` のときは、何も作らずに止まる。`SKIP_STREAM=1` なら `SKIP_ANALYTICS=1` に自動でなる） | 0 |
-| 1 | `terraform/ecr` を init / apply | 1 |
+| 1 | `terraform/base/ecr` を init / apply | 1 |
 | 2 | ECR に**無いタグだけ** arm64 でビルドして push する（`AGENT=1` ならエージェント。lab を作るときは lab の frr / multitool / snmpd も。`WORKFLOW=1` ではワーカーもビルドし、Temporal（`temporalio/temporal`）は arm64 のイメージをそのまま ECR にミラーする）。PC の `docker buildx` で作る（dockerd が動いていないとき、agent か snmpd を作るのに `docker buildx ls` に `linux/arm64` が無いときは止まる） | 2 / lab-1 |
-| 3 | `terraform/main` を init / apply（土台。初回 3〜5 分）。graph を作るとき（`PIPELINE=1` で `SKIP_GRAPH` が空）は、終わったら `terraform/graph` の apply を**裏で**始める（10〜15 分。ログは `ops/logs/graph-apply.log`） | 3 / g-1 |
+| 3 | `terraform/base/core` を init / apply（土台。初回 3〜5 分）。graph を作るとき（`PIPELINE=1` で `SKIP_GRAPH` が空）は、終わったら `terraform/pipeline/graph` の apply を**裏で**始める（10〜15 分。ログは `ops/logs/graph-apply.log`） | 3 / g-1 |
 | 3-3 | **`AGENT=1` のときだけ。**`terraform/agent` を init / apply（Runtime とガードレール。5〜10 分。`CREATE_KB=1` なら OpenSearch Serverless のコレクションも作るので 10〜20 分） | 3 |
 | 4 | wheel を取り（`wheels/` が空のときだけ）、Web の部品を S3 に置く。`CREATE_KB=1` なら手順書も置いて、取り込みが `COMPLETE` になるまで待つ。EC2 の初回の user_data が終わるのを待ってから再起動し、Web のサービスが `active` になるまで待つ | 4 |
 | 5 | **lab を作るときだけ**（`PIPELINE=1` で `SKIP_LAB` が空）。containerlab の rpm（stream を作るなら Telegraf の rpm と S3 sink の zip も。`CREATE_S3_SINK=0` なら zip は取らない）をリポジトリの直下に取り（無いときだけ）、lab の設定と一緒に S3 に置く。lab の EC2 を作る前に置くので、Telegraf まで最初の起動で入る。**analytics を作るときは**、Spark の jar 6 本（Maven Central）を `jars/` に取り（無いときだけ）、`spark/snmp_sinks.py` と一緒に S3 の `analytics/` に置く | lab-2 / s-1 / a-1 |
-| 6 | **lab を作るときだけ。**`terraform/lab` を init / apply | lab-3 |
-| 7 | **stream を作るときだけ**（`SKIP_STREAM` が空）。`terraform/stream` を init / apply（MSK の作成に 20〜30 分）。lab が前の実行から残っていて Telegraf が入っていなければ、lab の EC2 を再起動する | s-2 / s-3 |
-| 7-3 | **analytics を作るときだけ**（`SKIP_ANALYTICS` が空）。`terraform/analytics` を init / apply（数分） | a-2 |
+| 6 | **lab を作るときだけ。**`terraform/pipeline/lab` を init / apply | lab-3 |
+| 7 | **stream を作るときだけ**（`SKIP_STREAM` が空）。`terraform/pipeline/stream` を init / apply（MSK の作成に 20〜30 分）。lab が前の実行から残っていて Telegraf が入っていなければ、lab の EC2 を再起動する | s-2 / s-3 |
+| 7-3 | **analytics を作るときだけ**（`SKIP_ANALYTICS` が空）。`terraform/pipeline/analytics` を init / apply（数分） | a-2 |
 | 7-4 | **analytics を作るときだけ。**Spark のストリーミングジョブ（Kafka → S3 Tables / OpenSearch / Prometheus と異常検知）が動いていなければ `start-job-run` で起こす（起動に 2〜5 分。動いていれば何もしない） | a-3 |
 | 8 | **graph を作るときだけ。**graph の apply が終わるのを待ち、Neptune が空なら lab の定義（`lab/wvs2.clab.yml.in` と `lab/frr/*.conf`）から作ったトポロジを入れる（`lab/lab_topology.py` の出力を `ops/seed_graph.py` に渡して Web の EC2 の上で打つ。「Neptune のトポロジを lab から作る」）。graph か stream を作ったときは、Web を再起動して `active` になるまで待つ（起動時に異常テーブルと Neptune の場所を読むため） | g-2 |
 | 8-5 | **`WORKFLOW=1` のときだけ。**`terraform/workflow` を init / apply（数分）し、ECS のサービスが安定する（イメージの取得と Temporal の起動。1〜3 分）まで待つ。ワーカーのログを追うコマンドと、Temporal の UI を PC で開くポートフォワーディングのコマンド（Web の EC2 経由でタスクの 8233 へ）を表示する | w-2 / w-3 |
@@ -445,15 +461,16 @@ Terraform の確認プロンプトは出さずに進む（スクリプトの中�
 
 | キー | 意味 |
 |---|---|
-| `AGENT` | agent での分析を作るか。`1`（既定）で `terraform/agent`（AgentCore Runtime・ガードレール・Runtime のエンドポイント 5 本）を足す。Web の「チャット」タブが使える。約 $0.13/h |
-| `PIPELINE` | データパイプラインとトポロジを作るか。`1` で lab / stream / analytics / graph を足す（既定 `0`）。Web の「トポロジ」「異常一覧」タブが動く。約 $1.08/h（`SINKS` が既定のとき。`SKIP_*` / `SINKS` で減らせる） |
+| `AGENT` | agent での分析を作るか。`1`（既定）で `terraform/agent`（AgentCore Runtime・ガードレール・bedrock のエンドポイント 3 本）を足す。Web の「チャット」タブが使える。約 $0.05/h（ecr.api / ecr.dkr / logs の共用のエンドポイント 約 $0.08/h は土台の側で、AGENT か lab か analytics を作るときにかかる） |
+| `PIPELINE` | データパイプラインとトポロジを作るか。`1` で lab / stream / analytics / graph を足す（既定 `0`）。Web の「トポロジ」「異常一覧」タブが動く。約 $1.08/h（`SINK_*` が既定のとき。`SKIP_*` / `SINK_*` で減らせる） |
 | `WORKFLOW` | Temporal での実行を作るか。`1` で workflow を足す（既定 `0`）。AGENT と lab / stream / analytics が要るので、`AGENT=1` と `PIPELINE=1` にし、`SKIP_LAB` / `SKIP_STREAM` / `SKIP_ANALYTICS` とは一緒に書けない。約 $0.06/h |
 | `CREATE_KB` | `AGENT=1` でナレッジベース（S3 の md → Titan Embeddings → OpenSearch Serverless。手順 4 の手順書の取り込み）も作るか。既定 `0`（エージェントはモデルとツールだけで答える）。`1` で +$0.36/h（OpenSearch Serverless の最小 OCU と bedrock-agent-runtime のエンドポイント） |
 | `PHASE` | 古い書き方（2026-09-17 まで）。`1` → `AGENT=1`、`2` → `AGENT=1` + `PIPELINE=1`、`3` → 全部 `1` に読み替えて注意を出す。`AGENT` / `PIPELINE` / `WORKFLOW` と同時には書けない |
 | `SKIP_LAB=1` | `PIPELINE=1` で lab を作らない。約 $0.09/h 下がる。stream は lab の Telegraf から流すので、`SKIP_STREAM=1` も書く（無いと止まる） |
-| `SKIP_STREAM=1` | `PIPELINE=1` で stream（Telegraf → MSK と、MSK Connect の S3 sink）を作らない。読む Kafka が無くなるので analytics も作らない。「異常一覧」は使えない。約 $0.84/h 下がる（`SINKS` が既定のとき） |
-| `SKIP_ANALYTICS=1` | `PIPELINE=1` で analytics（EMR Serverless の Spark、S3 Tables、`SINKS` の格納先、異常検知）を作らない。「異常一覧」は使えない（検知は Spark がする）。約 $0.56/h 下がる（`SINKS` が既定のとき） |
-| `SINKS` | analytics の Spark の格納先（カンマ区切り。既定 `iceberg,opensearch,prometheus` の 3 つ全部。2026-09-17 ユーザー決定「SINKS に opensearch と prometheus を入れる。KB コレクションと共有できなければこちらを優先して」。減らすなら `SINKS=iceberg`）。`iceberg` = 全トピック → S3 Tables、`opensearch` = `traps` → OpenSearch Serverless の TIMESERIES コレクション（VPC の中からだけ届く。OCU が `CREATE_KB=1` のコレクションと共有されるか確認できていないので最大 +$0.33/h）、`prometheus` = `metrics` → Amazon Managed Service for Prometheus（エンドポイント 2 本で +$0.03/h と取り込みのサンプル課金）。`terraform/analytics` の `sinks` に渡す |
+| `SKIP_STREAM=1` | `PIPELINE=1` で stream（Telegraf → MSK と、MSK Connect の S3 sink）を作らない。読む Kafka が無くなるので analytics も作らない。「異常一覧」は使えない。約 $0.84/h 下がる（`SINK_*` が既定のとき） |
+| `SKIP_ANALYTICS=1` | `PIPELINE=1` で analytics（EMR Serverless の Spark、`SINK_*` の格納先、異常検知）を作らない。「異常一覧」は使えない（検知は Spark がする）。約 $0.56/h 下がる（`SINK_*` が既定のとき） |
+| `SINK_S3` / `SINK_OPENSEARCH` / `SINK_PROMETHEUS` | analytics の Spark の格納先を 1 つずつ作る（`1`）/ 作らない（`0`）。既定は 3 つとも `1`（2026-09-17 ユーザー決定「SINKS に opensearch と prometheus を入れる。KB コレクションと共有できなければこちらを優先して」）。`0` にした格納先は Spark が書かないだけでなく、リソースごと作らない（前に作ってあれば、打ち直した `ops/up.sh` が消す。S3 Tables のテーブルの中身も消える）。3 つとも `0` は止まる（ジョブは格納先が 1 つ以上要る。analytics ごと要らないなら `SKIP_ANALYTICS=1`）。`SINK_S3` = 全トピック → S3 Tables（Iceberg）。テーブルは無料、`s3tables` のエンドポイント 2 本で +$0.03/h。stream の S3 sink（`CREATE_S3_SINK`）とは別物。`SINK_OPENSEARCH` = `traps` と `logs` → OpenSearch Serverless の TIMESERIES コレクション（VPC の中からだけ届く。OCU が `CREATE_KB=1` のコレクションと共有されるか確認できていないので最大 +$0.33/h）。`SINK_PROMETHEUS` = `metrics` → Amazon Managed Service for Prometheus（エンドポイント 2 本で +$0.03/h と取り込みのサンプル課金）。`terraform/pipeline/analytics` の `sinks`（`iceberg` / `opensearch` / `prometheus`）に組んで渡す |
+| `SINKS` | 古い書き方（2026-09-17 まで。カンマ区切りの `iceberg,opensearch,prometheus`）。書いてあれば `ops/up.sh` が `SINK_*` に読み替えて注意を出す。`SINK_*` と同時には書けない |
 | `SKIP_GRAPH=1` | `PIPELINE=1` で graph（Neptune）を作らない。約 $0.14/h 下がる。「トポロジ」タブは静的データを出す（編集はできない） |
 | `CREATE_S3_SINK=0` | stream の S3 sink（MSK Connect）を作らない。約 $0.14/h 下がる。履歴の正本は analytics の S3 Tables なので、外してもデータは残る。`ops/down.sh` には要らない（state から読む） |
 | `IMAGE_TAG` | エージェントのイメージのタグ（`WORKFLOW=1` ではワーカーも同じタグ）。既定 `v1`。`agent/` や `workflow/` を変えたら `v2` などに書き換える（`deploy.env` に書けば毎回付けなくてよい。行を消すと `v1` に戻す差分になる） |
@@ -464,6 +481,7 @@ Terraform の確認プロンプトは出さずに進む（スクリプトの中�
 | `LOCAL_PORT` | PC 側のポート。既定 8080 |
 | `NO_PORTFORWARD=1` | ポートフォワーディングを開かずに終わる |
 | `KEEP_ECR=1` | `ops/down.sh` で ECR（イメージ）を残す（下の表。`ops/up.sh` は見ない） |
+| `TF_VERBOSE=1` | `ops/up.sh` / `ops/down.sh` が terraform の出力を全部そのまま出す。既定は `Plan:`、できた（消えた）リソース、5 分ごとの経過、エラーだけを出し、全文は `ops/logs/tf-<ルート>-apply.log`（`-destroy.log`。gitignore 済み）に残す |
 
 - `AGENT` / `PIPELINE` / `WORKFLOW` / `CREATE_KB` / `SKIP_LAB` / `SKIP_STREAM` / `SKIP_ANALYTICS` / `SKIP_GRAPH` / `NO_PORTFORWARD` は `1` / `0` のほか `true` / `false`、`yes` / `no` でもよい。`CREATE_S3_SINK` と `KEEP_ECR` は `1` か `0` だけ。
 - `deploy.env` はシェルとして実行しない。`$HOME` や `$(…)` は展開せず、値の先頭の `~/` だけ読み替える。
@@ -478,6 +496,7 @@ ops/down.sh
 
 「片付け」と同じ順（workflow → analytics（Spark のジョブを止めてから）→ graph → stream → lab → agent → main → ecr → Runtime のロググループ）で、**state にリソースが載っているルートだけ** destroy する（作っていないルートは飛ばす。`deploy.env` の `AGENT` / `PIPELINE` / `WORKFLOW` / `CREATE_KB` / `SKIP_*` / `CREATE_S3_SINK` は見ないので、`PIPELINE=0` に戻した後でも前に作った lab / stream / analytics / graph / workflow まで消す）。
 バケットは中身ごと、ECR はイメージごと消える（`KEEP_ECR=1` のときは ECR を残す）。最後に `Project=fukuda-nwc-poc` のタグが付いたものが残っていないかを出す（何も出なければ全部消えている）。
+graph と workflow は VPC の中に Lambda を持つ。Lambda は関数を消しても ENI が `available` のまま 20〜40 分残ることがあり、その間は SG とサブネットが消えない（2026-09-18 に graph の destroy が 20 分以上止まった）。`ops/down.sh` はこの 2 つを消している間、その関数の `available` な ENI だけを裏で消し続ける（実機では未確認）。
 ECR を残すか消すかは `deploy.env` の `KEEP_ECR`（環境変数でもよい）で選ぶ。残すと翌朝の `ops/up.sh` がビルドを飛ばせる（保管料は月数円。Runtime はイメージが無いと作れないので、翌朝ビルドし直す時間が惜しいならこちら）。
 
 | `KEEP_ECR` | ECR |
@@ -502,7 +521,7 @@ KEEP_ECR=1 ops/down.sh
 
 | 書き方 | 意味 | 例 |
 |---|---|---|
-| そのままの文字 | **実際の値。置き換えない** | `fukuda-nwc-poc`、`owner=fukuda`、`ap-northeast-1`、`v1`、ルートのディレクトリ名（`terraform/main` など） |
+| そのままの文字 | **実際の値。置き換えない** | `fukuda-nwc-poc`、`owner=fukuda`、`ap-northeast-1`、`v1`、ルートのディレクトリ名（`terraform/base/core` など） |
 | `$ACCOUNT_ID` `$KB_BUCKET` `$INSTANCE_ID` のように `$` で始まる | **あなたの環境の値が入った環境変数。**`$ACCOUNT_ID`（と、要るときだけ `$ADMIN_ARN`）は手順 0 で入れる。それ以外（`$REPO` `$KB_BUCKET` `$INSTANCE_ID` `$KB_ID` `$DS_ID` `$JOB_ID` `$LOG_GROUP` `$RUNTIME_ARN` `$LAB_INSTANCE_ID`）は **`terraform output` で取る値**で、使う枠の 1 行目に「取るコマンド + `echo`」を置いてある。枠ごと上から順にコピーして打てば、値を書き換える場所は無い（シェルが `$ACCOUNT_ID` を 12 桁の数字に置き換えて実行する） | `$ACCOUNT_ID` → `123456789012` のような 12 桁。`$INSTANCE_ID` → `i-0` で始まるインスタンス ID |
 | `<日本語>` の山括弧 | 手で書き換える場所（手順 0-1 と 0-3、「社内 PC で使うとき」の 1、手順 6 の JSON だけ） | `<ロール名>` `<プロファイル>` `<アカウント ID>` |
 
@@ -535,7 +554,7 @@ aws sts get-caller-identity
 
 aws-vault を使っていない（`aws configure` の長期キー、または SSO ログイン）なら、この 0-1 は飛ばして 0-2 へ。`aws login` で入っているときは、下の段落だけ済ませる。
 
-**`aws login`（コンソールの認証情報）で入っているとき。**`terraform/main` の opensearch provider は古い AWS SDK（Go v1）で、`aws login` のプロファイル（`login_session`）を読めない。plan / apply / destroy が `NoCredentialProviders: no valid providers in chain` で落ちる（2026-09-16 に Mac で確認）。Terraform を手で打つときは、AWS CLI から認証情報を受け取るプロファイルを `~/.aws/config` に書き足し、以降の手順をそのプロファイルで打つ（[AWS CLI ユーザーガイド](https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-sign-in.html) の「Sharing Login credentials as process credentials」と同じ形。15 分ごとの更新は CLI が続ける）。`ops/up.sh` / `ops/down.sh` は同じことを一時ファイルで行うので、スクリプトだけ使うなら要らない。
+**`aws login`（コンソールの認証情報）で入っているとき。**`terraform/base/core` の opensearch provider は古い AWS SDK（Go v1）で、`aws login` のプロファイル（`login_session`）を読めない。plan / apply / destroy が `NoCredentialProviders: no valid providers in chain` で落ちる（2026-09-16 に Mac で確認）。Terraform を手で打つときは、AWS CLI から認証情報を受け取るプロファイルを `~/.aws/config` に書き足し、以降の手順をそのプロファイルで打つ（[AWS CLI ユーザーガイド](https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-sign-in.html) の「Sharing Login credentials as process credentials」と同じ形。15 分ごとの更新は CLI が続ける）。`ops/up.sh` / `ops/down.sh` は同じことを一時ファイルで行うので、スクリプトだけ使うなら要らない。
 
 `~/.aws/config` に足す 3 行（`<aws login したプロファイル>` は `aws login --profile` に付けた名前。付けていなければ `default`）:
 
@@ -645,18 +664,18 @@ source ~/.fukuda-nwc-poc.env; echo "ACCOUNT_ID=$ACCOUNT_ID"; echo "ADMIN_ARN=$AD
 ### 1. ECR リポジトリを作る
 
 ```bash
-terraform -chdir=terraform/ecr init
+terraform -chdir=terraform/base/ecr init
 ```
 
 ```bash
-terraform -chdir=terraform/ecr apply
+terraform -chdir=terraform/base/ecr apply
 ```
 
 作るリソースの一覧が出て `Enter a value:` で止まるので、中身を見て `yes` と打つ。`Apply complete!` と出ればよい。
 push 先のリポジトリ URL を出力から見ておく（手順 2 の 1 行目でもう一度取る）。
 
 ```bash
-terraform -chdir=terraform/ecr output -raw agent_repository_url; echo
+terraform -chdir=terraform/base/ecr output -raw agent_repository_url; echo
 ```
 
 `123456789012.dkr.ecr.ap-northeast-1.amazonaws.com/fukuda-nwc-poc-agent` の形（先頭の 12 桁は `$ACCOUNT_ID` と同じ）で出ればよい。
@@ -667,7 +686,7 @@ terraform -chdir=terraform/ecr output -raw agent_repository_url; echo
 インターネットに出られる端末で行う。**必ず arm64 でビルドする。**タグは上書きできない設定なので、更新のたびに変える。
 
 ```bash
-REPO=$(terraform -chdir=terraform/ecr output -raw agent_repository_url); echo "$REPO"
+REPO=$(terraform -chdir=terraform/base/ecr output -raw agent_repository_url); echo "$REPO"
 aws ecr get-login-password --region ap-northeast-1 | docker login --username AWS --password-stdin "${REPO%%/*}"
 docker buildx build --platform linux/arm64 -t "$REPO:v1" --push agent/
 ```
@@ -682,16 +701,16 @@ docker buildx build --platform linux/arm64 -t "$REPO:v1" --push agent/
 `agent/Dockerfile` は PyPI の 3 ホスト（`pypi.org` / `files.pythonhosted.org` / `pypi.python.org`）を `--trusted-host` にしてあるので、上のコマンドをそのまま打てば通る。
 `ReadTimeoutError` は QEMU の arm64 エミュレーションで遅いだけなので、そのまま打ち直す（`PIP_DEFAULT_TIMEOUT=100` で既に長めにしてある）。
 
-### 3. 土台（terraform/main）と agent（terraform/agent）を apply する
+### 3. 土台（terraform/base/core）と agent（terraform/agent）を apply する
 
 **土台。**VPC・サブネット・ssm / ssmmessages のエンドポイント・SG・S3 バケット・Runtime と Web のロール・Web の EC2。機能に関わらず必ず作る。
 
 ```bash
-terraform -chdir=terraform/main init
+terraform -chdir=terraform/base/core init
 ```
 
 ```bash
-terraform -chdir=terraform/main apply
+terraform -chdir=terraform/base/core apply
 ```
 
 差分を見て `yes` と打つ。手で決める値は無い。必要に応じて次を足す。
@@ -701,12 +720,12 @@ terraform -chdir=terraform/main apply
 | `-var vpc_cidr=10.123.0.0/16` | 社内のネットワークと `10.0.0.0/16` が重なるとき（値はネットワーク担当に聞く） |
 | `-var client_cidr=192.0.2.0/24` | DX / VPN 経由でこの VPC の ssm エンドポイントを使うとき（値は社内 PC の CIDR。ネットワーク担当に聞く）。AWS の API に直接出られるなら付けない |
 
-**同じ `-var` を、以後の apply と destroy にも毎回付ける。**付け忘れると既定の値に戻す差分が出る（`vpc_cidr` なら VPC の作り直し）。毎回付けるのが面倒なら `terraform/main/terraform.tfvars.example` を `terraform.tfvars` に写して書く。3〜5 分で終わる。
+**同じ `-var` を、以後の apply と destroy にも毎回付ける。**付け忘れると既定の値に戻す差分が出る（`vpc_cidr` なら VPC の作り直し）。毎回付けるのが面倒なら `terraform/base/core/terraform.tfvars.example` を `terraform.tfvars` に写して書く。3〜5 分で終わる。
 
-- `terraform/agent` / `terraform/lab` / `terraform/stream` / `terraform/analytics` / `terraform/graph` / `terraform/workflow` は、`terraform/main` の state から VPC ID・サブネット・SG・バケット名・ロール名を読むので、それらのルートにネットワークの値は渡さない。
+- `terraform/agent` / `terraform/pipeline/lab` / `terraform/pipeline/stream` / `terraform/pipeline/analytics` / `terraform/pipeline/graph` / `terraform/workflow` は、`terraform/base/core` の state から VPC ID・サブネット・SG・バケット名・ロール名を読むので、それらのルートにネットワークの値は渡さない。
   **消す順番は `workflow` → `analytics` → `graph` → `stream` → `lab` → `agent` → `main` → `ecr`**（「片付け」）。先に `main` を消すと、後のルートが state から値を読めずに destroy の途中で止まる。
 
-**agent（`AGENT=1`）。**AgentCore Runtime・ガードレール・Runtime 用のエンドポイント（ecr.api / ecr.dkr / logs / bedrock-runtime × 2 AZ）・Web が Runtime を呼ぶ bedrock-agentcore のエンドポイント・Web に ARN を渡す SSM パラメータ。
+**agent（`AGENT=1`）。**AgentCore Runtime・ガードレール・Runtime 用のエンドポイント（bedrock-runtime × 2 AZ。ecr.api / ecr.dkr / logs は土台の `create_shared_endpoints`）・Web が Runtime を呼ぶ bedrock-agentcore のエンドポイント・Web に ARN を渡す SSM パラメータ。
 
 ```bash
 terraform -chdir=terraform/agent init
@@ -726,15 +745,15 @@ terraform -chdir=terraform/agent apply -var agent_image_tag=v1
 
 Runtime の作成で 5〜10 分、ナレッジベースを作るなら OpenSearch Serverless のコレクションの分が乗って 10〜20 分ほどかかる。
 
-- イメージの URL は `terraform/ecr` の state（`terraform/ecr/terraform.tfstate` の出力 `agent_repository_url`）から取り、`agent_image_tag` のタグを付ける。手順 1 をこの PC で apply していないと `does not have an attribute named "agent_repository_url"` で止まる。
-- 別のリポジトリのイメージを使うときだけ `-var agent_image_uri=<URI:タグ>` を足す（そのときは `terraform/ecr` の state を読まない）。
+- イメージの URL は `terraform/base/ecr` の state（`terraform/base/ecr/terraform.tfstate` の出力 `agent_repository_url`）から取り、`agent_image_tag` のタグを付ける。手順 1 をこの PC で apply していないと `does not have an attribute named "agent_repository_url"` で止まる。
+- 別のリポジトリのイメージを使うときだけ `-var agent_image_uri=<URI:タグ>` を足す（そのときは `terraform/base/ecr` の state を読まない）。
 - `agent_image_tag` は手順 2 で push したタグそのもの（初回は `v1`）。`agent/` を直して push し直したときは、新しいタグ（`v2` など。タグは上書きできない設定なので同じ名前は使えない）を push してから、ここを新しいタグにして同じコマンドを打ち直す。
-- Runtime の ARN は SSM の `<prefix>/runtime-arn` に書かれ、Web の EC2 が 60 秒キャッシュで読む。agent を後から apply / destroy しても `terraform/main`（EC2）を作り直さなくてよい。
+- Runtime の ARN は SSM の `<prefix>/runtime-arn` に書かれ、Web の EC2 が 60 秒キャッシュで読む。agent を後から apply / destroy しても `terraform/base/core`（EC2）を作り直さなくてよい。
 
 できたら出力を一覧で見る。
 
 ```bash
-terraform -chdir=terraform/main output
+terraform -chdir=terraform/base/core output
 ```
 
 ```bash
@@ -745,12 +764,12 @@ terraform -chdir=terraform/agent output
 
 | 出力（ルート） | 何の値 | 使う手順（環境変数） |
 |---|---|---|
-| `web_instance_id`（main） | Web を動かす EC2 のインスタンス ID（`i-0` で始まる） | 4 の再起動、7 のポートフォワーディング（`$INSTANCE_ID`） |
-| `kb_bucket_name`（main） | S3 バケット名。`fukuda-nwc-poc-kb-` + アカウント ID | 4、lab-2、s-1（`$KB_BUCKET`） |
-| `start_session_command`（main） | 7 のコマンドにインスタンス ID を埋めた完成形 | 7。利用者に配るときはこちらをコピーして渡す（利用者の PC には state も環境変数も無い） |
-| `upload_web_command`（main） | 4 のコマンドにバケット名を埋めた完成形 | 4。README の枠と同じ内容なので、どちらを打ってもよい |
-| `chat_url`（main） | `http://localhost:8080/` | 7 |
-| `vpc_id` / `runtime_subnet_ids` / `endpoint_security_group_id` / `runtime_role_name` ほか（main） | ネットワークの ID とロール名 | 手では使わない（`terraform/agent` などが state から読む） |
+| `web_instance_id`（base/core） | Web を動かす EC2 のインスタンス ID（`i-0` で始まる） | 4 の再起動、7 のポートフォワーディング（`$INSTANCE_ID`） |
+| `kb_bucket_name`（base/core） | S3 バケット名。`fukuda-nwc-poc-kb-` + アカウント ID | 4、lab-2、s-1（`$KB_BUCKET`） |
+| `start_session_command`（base/core） | 7 のコマンドにインスタンス ID を埋めた完成形 | 7。利用者に配るときはこちらをコピーして渡す（利用者の PC には state も環境変数も無い） |
+| `upload_web_command`（base/core） | 4 のコマンドにバケット名を埋めた完成形 | 4。README の枠と同じ内容なので、どちらを打ってもよい |
+| `chat_url`（base/core） | `http://localhost:8080/` | 7 |
+| `vpc_id` / `runtime_subnet_ids` / `endpoint_security_group_id` / `runtime_role_name` ほか（base/core） | ネットワークの ID とロール名 | 手では使わない（`terraform/agent` などが state から読む） |
 | `agent_runtime_arn`（agent） | Runtime の ARN | 7 の CLI からの呼び出し、「Web を手元で動かす」（`$RUNTIME_ARN`） |
 | `runtime_log_group_name`（agent） | Runtime のロググループ名 | 5、片付け（`$LOG_GROUP`） |
 | `runtime_arn_parameter_name`（agent） | Web が ARN を読む SSM パラメータの名前 | 確かめるときだけ |
@@ -760,7 +779,7 @@ terraform -chdir=terraform/agent output
 
 ### 4. 手順書と Web の部品を S3 に置く
 
-**Web の部品。**EC2 は起動のたびに S3 の `web/` を取って Gradio を入れる。バケットは `terraform/main` が作るので、初回は「apply → 置く → インスタンスを再起動」の順になる（置く前に起動した EC2 は、`web/` が無いことをログに書いて Web を立てずに終わる）。
+**Web の部品。**EC2 は起動のたびに S3 の `web/` を取って Gradio を入れる。バケットは `terraform/base/core` が作るので、初回は「apply → 置く → インスタンスを再起動」の順になる（置く前に起動した EC2 は、`web/` が無いことをログに書いて Web を立てずに終わる）。
 wheel はインターネットに出られる端末で、**arm64 / Python 3.13 用を指定して**取る（PC が x86 でも Mac でもこのコマンドでよい。58 個、約 130 MB）。
 
 ```bash
@@ -776,7 +795,7 @@ uv には `pip download` に当たるものが無いので、使い捨ての環�
 1 行目で手順 3 の出力 `kb_bucket_name` を `$KB_BUCKET` に入れる（`echo` で `fukuda-nwc-poc-kb-` で始まる名前が出ること）。
 
 ```bash
-KB_BUCKET=$(terraform -chdir=terraform/main output -raw kb_bucket_name); echo "$KB_BUCKET"
+KB_BUCKET=$(terraform -chdir=terraform/base/core output -raw kb_bucket_name); echo "$KB_BUCKET"
 aws s3 cp web/app.py "s3://$KB_BUCKET/web/app.py"
 aws s3 cp web/requirements.txt "s3://$KB_BUCKET/web/requirements.txt"
 for f in topology anomalies graph proposals; do aws s3 cp agent/$f.py "s3://$KB_BUCKET/web/$f.py"; done
@@ -787,7 +806,7 @@ aws s3 sync wheels/ "s3://$KB_BUCKET/web/wheels/"
 置けたらインスタンスを再起動する（起動のたびに `web/` を取り直す）。1 行目で手順 3 の出力 `web_instance_id` を `$INSTANCE_ID` に入れる。`echo` で `i-0` で始まる ID が出ること。
 
 ```bash
-INSTANCE_ID=$(terraform -chdir=terraform/main output -raw web_instance_id); echo "$INSTANCE_ID"
+INSTANCE_ID=$(terraform -chdir=terraform/base/core output -raw web_instance_id); echo "$INSTANCE_ID"
 aws ec2 reboot-instances --region ap-northeast-1 --instance-ids "$INSTANCE_ID"
 ```
 
@@ -796,10 +815,10 @@ aws ec2 reboot-instances --region ap-northeast-1 --instance-ids "$INSTANCE_ID"
 **手順書（`CREATE_KB=1` / `create_knowledge_base=true` のときだけ。既定では作らないので、この段落は飛ばす）。**このリポジトリの `kb-docs/` を S3 に置いて、取り込みジョブを流す。**ナレッジベースは S3 を自動で見に行かない。**md を足したり直したりしたら、置き直して取り込みをやり直す。
 S3 と Bedrock の API を呼ぶので、インターネットか AWS の API に届く端末で行う。コマンドは出力 `upload_docs_command` と `start_ingestion_command` にもある。
 
-最初の 3 行で手順 3 の出力 `kb_bucket_name`（main）と `knowledge_base_id` / `data_source_id`（agent）を `$KB_BUCKET` / `$KB_ID` / `$DS_ID` に入れる（`echo` でバケット名と英数字 10 桁が 2 つ出ること。ID が空ならナレッジベースを作っていない）。最後の行は取り込みジョブを始めて、そのジョブ ID を `$JOB_ID` に入れる。
+最初の 3 行で手順 3 の出力 `kb_bucket_name`（base/core）と `knowledge_base_id` / `data_source_id`（agent）を `$KB_BUCKET` / `$KB_ID` / `$DS_ID` に入れる（`echo` でバケット名と英数字 10 桁が 2 つ出ること。ID が空ならナレッジベースを作っていない）。最後の行は取り込みジョブを始めて、そのジョブ ID を `$JOB_ID` に入れる。
 
 ```bash
-KB_BUCKET=$(terraform -chdir=terraform/main output -raw kb_bucket_name)
+KB_BUCKET=$(terraform -chdir=terraform/base/core output -raw kb_bucket_name)
 KB_ID=$(terraform -chdir=terraform/agent output -raw knowledge_base_id)
 DS_ID=$(terraform -chdir=terraform/agent output -raw data_source_id); echo "KB_BUCKET=$KB_BUCKET KB_ID=$KB_ID DS_ID=$DS_ID"
 aws s3 cp kb-docs/ "s3://$KB_BUCKET/docs/" --recursive --exclude "*" --include "*.md"
@@ -896,7 +915,7 @@ aws bedrock-agentcore invoke-agent-runtime --region ap-northeast-1 \
 ポートフォワーディングを始める。1 行目で手順 3 の出力 `web_instance_id` を `$INSTANCE_ID` に入れる（手順 4 と同じ行。`echo` で `i-0` で始まる ID が出ること）。**開いている間はこのターミナルを閉じない。**
 
 ```bash
-INSTANCE_ID=$(terraform -chdir=terraform/main output -raw web_instance_id); echo "$INSTANCE_ID"
+INSTANCE_ID=$(terraform -chdir=terraform/base/core output -raw web_instance_id); echo "$INSTANCE_ID"
 aws ssm start-session --region ap-northeast-1 \
   --target "$INSTANCE_ID" \
   --document-name AWS-StartPortForwardingSession \
@@ -906,7 +925,7 @@ aws ssm start-session --region ap-northeast-1 \
 利用者に配るときは、出力 `start_session_command`（インスタンス ID を埋めた 1 行）をそのまま渡す。利用者の PC には state も環境変数も無いため。
 
 ```bash
-terraform -chdir=terraform/main output -raw start_session_command; echo
+terraform -chdir=terraform/base/core output -raw start_session_command; echo
 ```
 
 Windows ではクォートの扱いが違うので、パラメータをファイルにして渡すのが確実。`pf.json` に `{"portNumber":["8080"],"localPortNumber":["8080"]}` と書いて `--parameters file://pf.json` とする。
@@ -925,7 +944,7 @@ BGP の主副切替と SNMP の見え方を手で確かめるためのもので�
 
 ### lab-1. イメージを ECR に置く
 
-手順 1 の `terraform/ecr` は既定（変数 `create_lab_repositories = true`）で `fukuda-nwc-poc-lab-frr` / `-lab-snmpd` / `-lab-multitool` も作っているので、ECR 側の準備は要らない。
+手順 1 の `terraform/base/ecr` は既定（変数 `create_lab_repositories = true`）で `fukuda-nwc-poc-lab-frr` / `-lab-snmpd` / `-lab-multitool` も作っているので、ECR 側の準備は要らない。
 インターネットに出られる端末で、**arm64 のイメージ**を取って push する。snmpd だけはビルドする。
 
 ```bash
@@ -942,65 +961,92 @@ snmpd のビルドは apk なので `--trusted-host` に当たるものが無い
 
 ### lab-2. 設定と containerlab の rpm を S3 に置く
 
-1 行目で `terraform/main` の出力 `kb_bucket_name` を `$KB_BUCKET` に入れる。
+1 行目で `terraform/base/core` の出力 `kb_bucket_name` を `$KB_BUCKET` に入れる。
 
 ```bash
-KB_BUCKET=$(terraform -chdir=terraform/main output -raw kb_bucket_name); echo "$KB_BUCKET"
+KB_BUCKET=$(terraform -chdir=terraform/base/core output -raw kb_bucket_name); echo "$KB_BUCKET"
 curl -LO https://github.com/srl-labs/containerlab/releases/download/v0.79.0/containerlab_0.79.0_linux_arm64.rpm
 aws s3 sync lab/ "s3://$KB_BUCKET/lab/" --exclude "wvs2.clab.yml"
 aws s3 cp containerlab_0.79.0_linux_arm64.rpm "s3://$KB_BUCKET/lab/"
 ```
 
-バケットは `terraform/main` のもの。ナレッジベースは `docs/` しか読まないので混ざらない。lab を apply した後なら、出力 `upload_lab_command` に同じ内容の完成形がある。
+バケットは `terraform/base/core` のもの。ナレッジベースは `docs/` しか読まないので混ざらない。lab を apply した後なら、出力 `upload_lab_command` に同じ内容の完成形がある。
 
 ### lab-3. apply する
 
-VPC / サブネット / エンドポイントの SG / バケットは `terraform/main` の state から読むので、ネットワークの値は要らない。
+VPC / サブネット / エンドポイントの SG / バケットは `terraform/base/core` の state から読むので、ネットワークの値は要らない。
 エンドポイントの SG には lab の EC2 から ssm / ssmmessages / ecr へ 443 を許すルール（`aws_vpc_security_group_ingress_rule.endpoints_from_lab`）が足される。
 
 ```bash
-terraform -chdir=terraform/lab init
+terraform -chdir=terraform/pipeline/lab init
 ```
 
 ```bash
-terraform -chdir=terraform/lab apply
+terraform -chdir=terraform/pipeline/lab apply
 ```
 
 起動時に Docker と containerlab を入れ、ECR からイメージを取り、トポロジを上げる（5 分ほど）。`-var auto_start_lab=false` を付けると上げずに待つ（付けたら以後の apply にも毎回付ける）。
 
 ### lab-4. 入って確かめる
 
-管理者用のシェルセッション（手順 6 の `SSM-SessionManagerRunShell`）で入る。1 行目で `terraform/lab` の出力 `lab_instance_id` を `$LAB_INSTANCE_ID` に入れる（Web の EC2 とは別のインスタンス。`echo` で `i-0` で始まる ID が出ること）。出力 `start_session_command` に ID を埋めた完成形もある。
+管理者用のシェルセッション（手順 6 の `SSM-SessionManagerRunShell`）で入る。1 行目で `terraform/pipeline/lab` の出力 `lab_instance_id` を `$LAB_INSTANCE_ID` に入れる（Web の EC2 とは別のインスタンス。`echo` で `i-0` で始まる ID が出ること）。出力 `start_session_command` に ID を埋めた完成形もある。
 
 ```bash
-LAB_INSTANCE_ID=$(terraform -chdir=terraform/lab output -raw lab_instance_id); echo "$LAB_INSTANCE_ID"
+LAB_INSTANCE_ID=$(terraform -chdir=terraform/pipeline/lab output -raw lab_instance_id); echo "$LAB_INSTANCE_ID"
 aws ssm start-session --region ap-northeast-1 --target "$LAB_INSTANCE_ID"
 ```
 
+セッションに入ったら、次を**セッションのタブに貼って**打つ（PC 側のシェルで打っても動かない。`lab` は EC2 の `/usr/local/bin/lab`）。
+
 ```bash
-sudo lab status      # 14 コンテナが running か
-sudo lab check       # BGP の隣接、経路、拠点間 ping、SNMP の ifOperStatus
-sudo lab failover    # 本社の主回線を落として副回線に切り替わるのを見る（30〜60 秒）
-sudo lab heal-main   # 主回線を戻す
-sudo lab snmp hq-snmp-01
+sudo lab status              # 14 コンテナが running か
+sudo lab check               # BGP の隣接、経路、拠点間 ping、SNMP の ifOperStatus
+sudo lab failover            # 本社の主回線を落として副回線に切り替わるのを見る（30〜60 秒）
+sudo lab heal-main           # 主回線を戻す
+sudo lab fail-main           # 主回線を落とすだけ（戻すまで落ちたまま）
+sudo lab snmp hq-snmp-01     # 1 台の ifDescr と ifOperStatus
+sudo lab logs                # 全機器の FRR のログの末尾（1 台だけなら sudo lab logs hq-ce-01、行数は LINES=50 を前に付ける）
+sudo lab telegraf-status     # Telegraf のサービスの状態と直近のログ（stream を作ってから）
+sudo lab clab inspect --all  # containerlab をそのまま呼ぶ
 ```
 
-起動に失敗したら `/var/log/cloud-init-output.log` と `sudo journalctl -u fukuda-nwc-poc-lab`。ECR から取れないときは、エンドポイントの SG に lab の SG からの 443 が足されているか（`terraform/lab` が `terraform/main` の state から SG を取って足す。手で SG を直していないか）。
+機器に直接入るとき（コンテナ名は `clab-wvs2-` + 機器名）。
+
+```bash
+sudo docker ps --format '{{.Names}}\t{{.Status}}'
+sudo docker exec -it clab-wvs2-hq-ce-01 vtysh          # FRR の CLI（show bgp summary / show ip route）
+sudo docker exec -it clab-wvs2-hq-ce-01 vtysh -c 'show bgp summary'
+```
+
+サービスとして見るとき（lab と Telegraf は systemd のサービス）。
+
+```bash
+systemctl is-active fukuda-nwc-poc-lab fukuda-nwc-poc-telegraf
+sudo journalctl -u fukuda-nwc-poc-lab -n 50 --no-pager
+sudo journalctl -u fukuda-nwc-poc-telegraf -n 50 --no-pager
+sudo tail -n 50 /var/log/cloud-init-output.log         # 起動時（Docker と containerlab の導入、イメージの取得）のログ
+sudo systemctl restart fukuda-nwc-poc-lab              # トポロジを上げ直す
+```
+
+起動に失敗したら上の `cloud-init-output.log` と `journalctl -u fukuda-nwc-poc-lab` を見る。ECR から取れないとき（`docker pull` がタイムアウトする）は次の 2 つ。
+
+- `terraform/base/core` に `ecr.api` / `ecr.dkr` のエンドポイントがあるか（`create_shared_endpoints`。既定は `true`。`ops/up.sh` は lab か analytics を作るなら `true` で打つ）。
+- エンドポイントの SG に lab の SG からの 443 が足されているか（`terraform/pipeline/lab` が `terraform/base/core` の state から SG を取って足す。手で SG を直していないか）。
 
 ### lab-5. 止める・消す
 
 1 行目は lab-4 と同じ（`$LAB_INSTANCE_ID` を入れる）。止める・起動するは出力 `stop_command` / `start_command` にも完成形がある。
 
 ```bash
-LAB_INSTANCE_ID=$(terraform -chdir=terraform/lab output -raw lab_instance_id); echo "$LAB_INSTANCE_ID"
+LAB_INSTANCE_ID=$(terraform -chdir=terraform/pipeline/lab output -raw lab_instance_id); echo "$LAB_INSTANCE_ID"
 aws ec2 stop-instances --region ap-northeast-1 --instance-ids "$LAB_INSTANCE_ID"    # 止める（EBS 16 GB の保管料だけ）
 aws ec2 start-instances --region ap-northeast-1 --instance-ids "$LAB_INSTANCE_ID"   # 起動すると lab も上がる
 ```
 
-ルートごと消すとき（`terraform/stream` を作っているなら、先にそちらを消し終える。stream が lab の state を読むため）。
+ルートごと消すとき（`terraform/pipeline/stream` を作っているなら、先にそちらを消し終える。stream が lab の state を読むため）。
 
 ```bash
-terraform -chdir=terraform/lab destroy
+terraform -chdir=terraform/pipeline/lab destroy
 ```
 
 - lab の設定（`lab/frr/` など）を変えたら lab-2 を置き直して再起動する。
@@ -1009,21 +1055,21 @@ terraform -chdir=terraform/lab destroy
 
 ## stream / analytics / graph（PIPELINE）: lab → MSK → Spark → S3 Tables / OpenSearch / Prometheus と異常検知、Neptune のトポロジ
 
-stream は lab の SNMP（ポーリングと trap）を MSK に流し、DynamoDB の異常テーブルを持つ（書くのは analytics の Spark。2026-09-17 までの detector Lambda は消した）。
-analytics は MSK のトピックを Spark（EMR Serverless）のストリーミングジョブで読み、全部を S3 Tables（Iceberg）のテーブル `snmp_metrics` に、`traps` を OpenSearch Serverless の `snmp-logs` に、`metrics` を Amazon Managed Service for Prometheus に 60 秒ごとに流す（`SINKS`。既定は 3 つ全部）。履歴の正本は S3 Tables。
+stream は lab の SNMP（ポーリングと trap）と FRR のログを MSK に流し（トピック `metrics` / `traps` / `logs`）、DynamoDB の異常テーブルを持つ（書くのは analytics の Spark。2026-09-17 までの detector Lambda は消した）。
+analytics は MSK のトピックを Spark（EMR Serverless）のストリーミングジョブで読み、全部を S3 Tables（Iceberg）のテーブル `snmp_metrics` に、`traps` と `logs` を OpenSearch Serverless の `snmp-logs` に、`metrics` を Amazon Managed Service for Prometheus に 60 秒ごとに流す（`deploy.env` の `SINK_S3` / `SINK_OPENSEARCH` / `SINK_PROMETHEUS`。既定は 3 つ全部）。履歴の正本は S3 Tables。
 同じジョブの detect が `link_down` を DynamoDB の異常テーブルに open / resolved で書き、開いた瞬間に EventBridge へ `AnomalyOpened` を出す（WORKFLOW の SQS が受ける）。Web の「異常一覧」とエージェントの `list_anomalies` がその表を読む。
 graph はトポロジを Neptune に置く。静的な構成（機器と回線）は lab の定義から作って入れ、動的な状態（UP / DOWN）は Spark の検知を EventBridge → Lambda で書く（「Neptune のトポロジを lab から作る」）。Web の「トポロジ」タブから編集でき、エージェントのトポロジのツールもそこを読む。
-**どれも時間課金なので、使う日に作って当日中に消す**（下の試算）。`terraform/main` はそのまま使い、stream は `terraform/lab` も、analytics は `terraform/stream` も使う。
+**どれも時間課金なので、使う日に作って当日中に消す**（下の試算）。`terraform/base/core` はそのまま使い、stream は `terraform/pipeline/lab` も、analytics は `terraform/pipeline/stream` も使う。
 
-順番: s-1 で rpm と zip を置く → `terraform/stream` → lab EC2 の Telegraf を起動（再起動）→ a-1 で jar とスクリプトを置く → `terraform/analytics` → Spark のジョブを起こす → `terraform/graph` → Web の再起動と投入。
+順番: s-1 で rpm と zip を置く → `terraform/pipeline/stream` → lab EC2 の Telegraf を起動（再起動）→ a-1 で jar とスクリプトを置く → `terraform/pipeline/analytics` → Spark のジョブを起こす → `terraform/pipeline/graph` → Web の再起動と投入。
 `ops/up.sh` は `PIPELINE=1` ならこれを全部打つ（`SKIP_STREAM=1` / `SKIP_ANALYTICS=1` / `SKIP_GRAPH=1` で外す）。以下はその中身と、動いてからの確かめ方。
 
 ### s-1. Telegraf の rpm と S3 sink のプラグインを S3 に置く
 
-1 行目で `terraform/main` の出力 `kb_bucket_name` を `$KB_BUCKET` に入れる。**プラグインの zip は s-2 の apply より前に置く**（無いと s-2 が止まる）。
+1 行目で `terraform/base/core` の出力 `kb_bucket_name` を `$KB_BUCKET` に入れる。**プラグインの zip は s-2 の apply より前に置く**（無いと s-2 が止まる）。
 
 ```bash
-KB_BUCKET=$(terraform -chdir=terraform/main output -raw kb_bucket_name); echo "$KB_BUCKET"
+KB_BUCKET=$(terraform -chdir=terraform/base/core output -raw kb_bucket_name); echo "$KB_BUCKET"
 curl -LO https://dl.influxdata.com/telegraf/releases/telegraf-1.40.0-1.aarch64.rpm
 aws s3 cp telegraf-1.40.0-1.aarch64.rpm "s3://$KB_BUCKET/lab/"
 curl -LO https://hub-downloads.confluent.io/api/plugins/confluentinc/kafka-connect-s3/versions/12.1.11/confluentinc-kafka-connect-s3-12.1.11.zip
@@ -1033,37 +1079,37 @@ aws s3 cp confluentinc-kafka-connect-s3-12.1.11.zip "s3://$KB_BUCKET/stream/"
 プラグインの URL は Confluent Hub の形で、ダウンロードには利用条件への同意が要ることがある。取れなければブラウザで取って同じキー（`stream/confluentinc-kafka-connect-s3-12.1.11.zip`）に置く。
 S3 sink が要らなければ zip は飛ばし、s-2 の apply に `-var create_s3_sink=false` を付ける（以後の apply と destroy にも毎回付ける）。
 
-### s-2. terraform/stream を apply する
+### s-2. terraform/pipeline/stream を apply する
 
-VPC / サブネット（`terraform/main` の Runtime サブネット）/ ルートテーブル / エンドポイントの SG / バケット / ロール名は `terraform/main` の state から、lab の SG とロールは `terraform/lab` の state から読む。**`terraform/lab` を先に apply しておく。**
+VPC / サブネット（`terraform/base/core` の Runtime サブネット）/ ルートテーブル / エンドポイントの SG / バケット / ロール名は `terraform/base/core` の state から、lab の SG とロールは `terraform/pipeline/lab` の state から読む。**`terraform/pipeline/lab` を先に apply しておく。**
 
 ```bash
-terraform -chdir=terraform/stream init
+terraform -chdir=terraform/pipeline/stream init
 ```
 
 ```bash
-terraform -chdir=terraform/stream apply
+terraform -chdir=terraform/pipeline/stream apply
 ```
 
 plan の段階で次のどちらかが出たら、そのとおりに直してから打ち直す（何も作られていない）。
 
 | 出たメッセージ（先頭） | やること |
 |---|---|
-| `terraform/lab の state（terraform/lab/terraform.tfstate）から lab_security_group_id / lab_role_name が読めない` | lab-3 を先に apply する（この PC で） |
+| `terraform/pipeline/lab の state（terraform/pipeline/lab/terraform.tfstate）から lab_security_group_id / lab_role_name が読めない` | lab-3 を先に apply する（この PC で） |
 | `s3://<バケット名>/stream/confluentinc-kafka-connect-s3-12.1.11.zip に Confluent S3 sink の zip が無い` | s-1 の zip を置く。シンク無しで立てるなら `-var create_s3_sink=false` |
 
-MSK の作成に 20〜30 分かかる。出来上がると SSM の `/fukuda-nwc-poc/msk-bootstrap`（ブローカー）と `/fukuda-nwc-poc/anomaly-table` が書かれ、lab の Telegraf と Web / エージェントはそこから読む（`terraform/analytics` はテーブル名を state から読む）。
+MSK の作成に 20〜30 分かかる。出来上がると SSM の `/fukuda-nwc-poc/msk-bootstrap`（ブローカー）と `/fukuda-nwc-poc/anomaly-table` が書かれ、lab の Telegraf と Web / エージェントはそこから読む（`terraform/pipeline/analytics` はテーブル名を state から読む）。
 
 ### s-3. lab の Telegraf を動かす
 
 lab の EC2 は起動のたびに s-1 で置いた rpm を入れて `fukuda-nwc-poc-telegraf` サービスを作るので、**すでに lab が動いていれば再起動するだけでよい**（1 行目は lab-4 と同じ）。lab をまだ作っていなければ lab-3 を打つ（変数 `telegraf_version` は既定の `1.40.0` のまま）。
 
 ```bash
-LAB_INSTANCE_ID=$(terraform -chdir=terraform/lab output -raw lab_instance_id); echo "$LAB_INSTANCE_ID"
+LAB_INSTANCE_ID=$(terraform -chdir=terraform/pipeline/lab output -raw lab_instance_id); echo "$LAB_INSTANCE_ID"
 aws ec2 reboot-instances --region ap-northeast-1 --instance-ids "$LAB_INSTANCE_ID"
 ```
 
-Telegraf は起動のたびに `lab telegraf-render` で SSM のブローカーを設定に埋める。`terraform/stream` より先に上げた場合は失敗して 60 秒ごとにやり直すので、そのまま待てばつながる。
+Telegraf は起動のたびに `lab telegraf-render` で SSM のブローカーを設定に埋める。`terraform/pipeline/stream` より先に上げた場合は失敗して 60 秒ごとにやり直すので、そのまま待てばつながる。
 
 ```bash
 sudo lab telegraf-status       # サービスの状態と直近のログ
@@ -1071,16 +1117,18 @@ sudo lab failover              # 主回線を落とす → 5 秒以内に trap�
 sudo lab heal-main             # 戻す → resolved
 ```
 
+FRR のログ（BGP の隣接の up / down、zebra のインタフェースの変化）は、EC2 の `/var/log/netops-lab/<機器名>/frr.log` を Telegraf が tail してトピック `logs` に出す（measurement は `frr_log`、タグ `sysName` が機器名、`daemon` が BGP / ZEBRA など）。元のログは `sudo lab logs` で見る。`sudo lab failover` を打つと hq-ce-01 と carrier-pe-01 に隣接の変化が出る。
+
 Web の「異常一覧」タブか、チャットで「今の異常は？」と聞く（異常一覧に出るのは analytics の Spark が動いてから。a-3）。S3 sink は 1 分ごとに `stream/topics/<トピック>/dt=.../hour=.../` に JSON を置く（出力 `sink_prefix`）。
 
 
 ### a-1. Spark の jar とスクリプトを S3 に置く
 
-Spark が Kafka（MSK の IAM 認証）と S3 Tables を読み書きするための jar 6 本を Maven Central から取り、`spark/snmp_sinks.py` と一緒に `terraform/main` のバケットの `analytics/` に置く。**a-2 の apply より前に置く**（ジョブがここから読む）。
+Spark が Kafka（MSK の IAM 認証）と S3 Tables を読み書きするための jar 6 本を Maven Central から取り、`spark/snmp_sinks.py` と一緒に `terraform/base/core` のバケットの `analytics/` に置く。**a-2 の apply より前に置く**（ジョブがここから読む）。
 版は `ops/up.sh` の `JAR_URLS`（Spark 3.5.6 = EMR Serverless の `emr-7.13.0`）と揃える。`jars/` は gitignore 済み。
 
 ```bash
-KB_BUCKET=$(terraform -chdir=terraform/main output -raw kb_bucket_name); echo "$KB_BUCKET"
+KB_BUCKET=$(terraform -chdir=terraform/base/core output -raw kb_bucket_name); echo "$KB_BUCKET"
 ```
 
 ```bash
@@ -1095,20 +1143,20 @@ aws s3 cp spark/snmp_sinks.py "s3://$KB_BUCKET/analytics/"
 aws s3 sync jars/ "s3://$KB_BUCKET/analytics/jars/" --exclude "*" --include "*.jar"
 ```
 
-### a-2. terraform/analytics を apply する
+### a-2. terraform/pipeline/analytics を apply する
 
-VPC / サブネット / バケットは `terraform/main` の state から、MSK のクラスターと SG とブローカーは `terraform/stream` の state から読む（stream が無いと precondition で止まる）。
+VPC / サブネット / バケットは `terraform/base/core` の state から、MSK のクラスターと SG とブローカーは `terraform/pipeline/stream` の state から読む（stream が無いと precondition で止まる）。
 作るのは S3 Tables のテーブルバケット `fukuda-nwc-poc-tables`（namespace `netops`、テーブル `snmp_metrics`）、EMR Serverless の Spark アプリケーション（ARM64、`emr-7.13.0`、アイドル 15 分で止まる）、ジョブの実行ロール、EMR の SG（MSK の SG に 9098 の受信を足す）、`s3tables` と `events`（EventBridge の PutEvents）の interface エンドポイント（2 AZ）、DynamoDB の異常テーブルへの書き込み権限。数分。
 
 格納先は変数 `sinks`（既定 `["iceberg", "opensearch", "prometheus"]` の 3 つ全部）で選ぶ。`opensearch` があると OpenSearch Serverless の TIMESERIES コレクション `fukuda-nwc-poc-logs`（VPC エンドポイント経由だけ。インデックス `snmp-logs` は最初の書き込みで作られる）、`prometheus` があると Amazon Managed Service for Prometheus のワークスペース `fukuda-nwc-poc-metrics` と `aps-workspaces` の interface エンドポイント（2 AZ）も作る。
-`ops/up.sh` は `deploy.env` の `SINKS` をこの変数に渡す。手で打つときは既定のままなら `-var` は要らず、減らすなら apply に `-var 'sinks=["iceberg"]'` を付ける（`--metric-topics` / `--log-topics` は変数 `metric_topics` / `log_topics`。既定 `metrics` / `traps`）。
+`ops/up.sh` は `deploy.env` の `SINK_S3` / `SINK_OPENSEARCH` / `SINK_PROMETHEUS` をこの変数に組んで渡す。`iceberg` を外すと S3 Tables のテーブルバケットと `s3tables` のエンドポイントも作らない。手で打つときは既定のままなら `-var` は要らず、減らすなら apply に `-var 'sinks=["iceberg"]'` を付ける（`--metric-topics` / `--log-topics` は変数 `metric_topics` / `log_topics`。既定 `metrics` / `traps` と `logs`）。
 
 ```bash
-terraform -chdir=terraform/analytics init
+terraform -chdir=terraform/pipeline/analytics init
 ```
 
 ```bash
-terraform -chdir=terraform/analytics apply
+terraform -chdir=terraform/pipeline/analytics apply
 ```
 
 ### a-3. Spark のジョブを起こす
@@ -1117,19 +1165,19 @@ terraform -chdir=terraform/analytics apply
 `start-job-run` に渡す JSON は Terraform の出力にある（`job_driver_json` が Kafka のブローカー・格納先（`--sinks` と格納先ごとのテーブル名 / エンドポイント / URL）・チェックポイントの引数と Iceberg / S3 Tables の設定、`configuration_overrides_json` がドライバーのログを CloudWatch Logs に出す設定）。
 
 ```bash
-APP_ID=$(terraform -chdir=terraform/analytics output -raw application_id); echo "$APP_ID"
+APP_ID=$(terraform -chdir=terraform/pipeline/analytics output -raw application_id); echo "$APP_ID"
 ```
 
 ```bash
-ROLE_ARN=$(terraform -chdir=terraform/analytics output -raw runtime_role_arn); echo "$ROLE_ARN"
+ROLE_ARN=$(terraform -chdir=terraform/pipeline/analytics output -raw runtime_role_arn); echo "$ROLE_ARN"
 ```
 
 ```bash
-JOB_DRIVER=$(terraform -chdir=terraform/analytics output -raw job_driver_json); echo "$JOB_DRIVER"
+JOB_DRIVER=$(terraform -chdir=terraform/pipeline/analytics output -raw job_driver_json); echo "$JOB_DRIVER"
 ```
 
 ```bash
-OVERRIDES=$(terraform -chdir=terraform/analytics output -raw configuration_overrides_json); echo "$OVERRIDES"
+OVERRIDES=$(terraform -chdir=terraform/pipeline/analytics output -raw configuration_overrides_json); echo "$OVERRIDES"
 ```
 
 ```bash
@@ -1139,25 +1187,58 @@ aws emr-serverless start-job-run --region ap-northeast-1 --application-id "$APP_
 起動に 2〜5 分。様子は `list_job_runs_command` の出力のコマンドで見る（`RUNNING` になれば読んでいる。`FAILED` ならロググループ `/aws/emr-serverless/fukuda-nwc-poc` のドライバーの stderr）。テーブルに行が入ったかは `list_tables_command` と Athena（S3 Tables のカタログ `s3tablescatalog`）で見る。
 
 ```bash
-terraform -chdir=terraform/analytics output -raw list_job_runs_command; echo
+terraform -chdir=terraform/pipeline/analytics output -raw list_job_runs_command; echo
 ```
 
 ```bash
-terraform -chdir=terraform/analytics output -raw list_tables_command; echo
+terraform -chdir=terraform/pipeline/analytics output -raw list_tables_command; echo
+```
+
+#### Spark の UI（GUI）を開く
+
+EMR Studio は要らない。動いているジョブの ID を取り、`get-dashboard-for-job-run` が返す URL をブラウザで開く（動いているジョブは live の Spark UI、終わったジョブは Spark History Server）。
+**URL は一時的な認証を含み、約 1 時間で切れる。チャットやチケットに貼らない**（切れたら同じコマンドを打ち直す）。
+
+```bash
+APP_ID=$(terraform -chdir=terraform/pipeline/analytics output -raw application_id); echo "$APP_ID"
+```
+
+```bash
+JOB_RUN_ID=$(aws emr-serverless list-job-runs --region ap-northeast-1 --application-id "$APP_ID" --states RUNNING --query 'jobRuns[0].id' --output text); echo "$JOB_RUN_ID"
+```
+
+```bash
+aws emr-serverless get-dashboard-for-job-run --region ap-northeast-1 --application-id "$APP_ID" --job-run-id "$JOB_RUN_ID" --query url --output text
+```
+
+`$JOB_RUN_ID` が `None` なら動いているジョブが無い（`--states RUNNING` を外すと終わったものも出る）。見るのは「Structured Streaming」タブ（バッチごとの入力行数と処理時間）と「Executors」タブ。CLI だけで様子を見るなら次の 2 つ。
+
+```bash
+aws emr-serverless get-job-run --region ap-northeast-1 --application-id "$APP_ID" --job-run-id "$JOB_RUN_ID" --query 'jobRun.[state,stateDetails,totalExecutionDurationSeconds]' --output table
+```
+
+```bash
+LOG_GROUP=$(terraform -chdir=terraform/pipeline/analytics output -raw log_group_name); aws logs tail "$LOG_GROUP" --region ap-northeast-1 --since 10m --follow
+```
+
+止めるときは `cancel-job-run`（`ops/down.sh` は analytics を消す前に打つ）。
+
+```bash
+aws emr-serverless cancel-job-run --region ap-northeast-1 --application-id "$APP_ID" --job-run-id "$JOB_RUN_ID"
 ```
 
 ジョブは同時に 1 本だけにする（同じチェックポイントを 2 本で書くと壊れる）。`ops/up.sh` は動いているジョブがあれば起こさない。
 
-### g-1. terraform/graph を apply する
+### g-1. terraform/pipeline/graph を apply する
 
-VPC / サブネット（`terraform/main` の Runtime サブネット）/ Runtime と Web の SG / ロール名は `terraform/main` の state から読む。
+VPC / サブネット（`terraform/base/core` の Runtime サブネット）/ Runtime と Web の SG / ロール名は `terraform/base/core` の state から読む。
 
 ```bash
-terraform -chdir=terraform/graph init
+terraform -chdir=terraform/pipeline/graph init
 ```
 
 ```bash
-terraform -chdir=terraform/graph apply
+terraform -chdir=terraform/pipeline/graph apply
 ```
 
 10〜15 分。出来上がると SSM の `/fukuda-nwc-poc/neptune-endpoint` が書かれる。次にやることは出力 `next_step` にも出る。
@@ -1185,7 +1266,7 @@ ops/sync-graph.sh
 ops/sync-graph.sh --replace
 ```
 
-動的な状態は別の経路で書く。Spark の検知が EventBridge に出す `AnomalyOpened` / `AnomalyResolved`（source `netops.spark`）を `terraform/graph` のルールが受け、VPC の中の Lambda（`graph/status_handler.py`。`fukuda-nwc-poc-graph-status`）が Gremlin で `status` を書く。
+動的な状態は別の経路で書く。Spark の検知が EventBridge に出す `AnomalyOpened` / `AnomalyResolved`（source `netops.spark`）を `terraform/pipeline/graph` のルールが受け、VPC の中の Lambda（`graph/status_handler.py`。`fukuda-nwc-poc-graph-status`）が Gremlin で `status` を書く。
 linkDown / linkUp（`kind` が `link_down`）はその機器のそのインタフェースが付く回線の辺に `DOWN` / `UP`、ほかの trap は機器の頂点に `ALARM` / `UP`。
 機器一覧・隣接・影響範囲のツールの答えに `status` が付き、Web の「トポロジ」タブでは赤い回線・赤い枠で出る（表の「状態」列も）。`ops/sync-graph.sh --replace` や「静的データを投入」で入れ直すと状態は消えて全部 UP に戻る（静的な構成だけを入れる）。
 Lambda のログは出力 `status_log_group_name` のロググループ（保持は `log_retention_days`、既定 7 日）。EventBridge は 1 分のあいだに Lambda が落ちれば 15 分・3 回まで再送する。
@@ -1195,7 +1276,7 @@ Lambda のログは出力 `status_log_group_name` のロググループ（保持
 workflow を作っていれば、**最初に**消す（lab と stream の state を読む。「workflow（WORKFLOW）」の「消す」）。analytics は stream の state を読むので、**stream より先に**消す。先に Spark のジョブを止めないと destroy がアプリケーションで止まる（動いているジョブの ID は a-3 の `list_job_runs_command` で分かる）。
 
 ```bash
-APP_ID=$(terraform -chdir=terraform/analytics output -raw application_id); echo "$APP_ID"
+APP_ID=$(terraform -chdir=terraform/pipeline/analytics output -raw application_id); echo "$APP_ID"
 ```
 
 ```bash
@@ -1211,31 +1292,31 @@ aws emr-serverless stop-application --region ap-northeast-1 --application-id "$A
 ```
 
 ```bash
-terraform -chdir=terraform/analytics destroy
+terraform -chdir=terraform/pipeline/analytics destroy
 ```
 
 S3 Tables のテーブルはバケットごと消える（**Iceberg の履歴も消える。**残すなら先に Athena などで別のバケットへ写す）。S3 の `analytics/` に置いた jar とスクリプトは残る。
 
 ```bash
-terraform -chdir=terraform/graph destroy
+terraform -chdir=terraform/pipeline/graph destroy
 ```
 
 ```bash
-terraform -chdir=terraform/stream destroy
+terraform -chdir=terraform/pipeline/stream destroy
 ```
 
 S3 sink 無しで立てた（`-var create_s3_sink=false`）なら、destroy にも同じ `-var` を付ける（`ops/down.sh` は state を見て自分で付ける）。
-`stream` は MSK Connect → MSK の順に消えるので 15 分ほど。DynamoDB のテーブルも一緒に消える。S3 の `stream/` に置いた生データとプラグインは残る（`terraform/main` を destroy すればバケットごと消える）。
+`stream` は MSK Connect → MSK の順に消えるので 15 分ほど。DynamoDB のテーブルも一緒に消える。S3 の `stream/` に置いた生データとプラグインは残る（`terraform/base/core` を destroy すればバケットごと消える）。
 生データだけ消したいときは、**stream を消し終えてから**次を打つ。プラグインの zip も消えるので、次に stream を立てる前に s-1 で置き直す。
 
 ```bash
-KB_BUCKET=$(terraform -chdir=terraform/main output -raw kb_bucket_name); echo "$KB_BUCKET"
+KB_BUCKET=$(terraform -chdir=terraform/base/core output -raw kb_bucket_name); echo "$KB_BUCKET"
 aws s3 rm "s3://$KB_BUCKET/stream/" --recursive
 ```
 
 ## workflow（WORKFLOW）: Temporal on ECS Fargate のワーカーと AgentCore Gateway（MCP）
 
-`WORKFLOW=1`（`AGENT=1` と `PIPELINE=1` も）の `ops/up.sh` が w-1 〜 w-4 を打つ。手で打つときは agent と PIPELINE の lab / stream / analytics が上がってから（graph が無ければトポロジは静的データ、`SINKS` を減らすとそのツールは「配備されていない」を返す）。
+`WORKFLOW=1`（`AGENT=1` と `PIPELINE=1` も）の `ops/up.sh` が w-1 〜 w-4 を打つ。手で打つときは agent と PIPELINE の lab / stream / analytics が上がってから（graph が無ければトポロジは静的データ、`SINK_*` を 0 にするとそのツールは「配備されていない」を返す）。
 **しくみ。**ECS on Fargate の 1 タスクに temporal コンテナ（`temporal server start-dev`。データは SQLite でタスクの中）と worker コンテナ（`workflow/worker.py`）を入れる。
 Spark が異常を開くと EventBridge に `AnomalyOpened` が出て、ルールが SQS `fukuda-nwc-poc-anomalies` に流す。worker の starter がそれを long polling（20 秒）で受け、異常ごとに Temporal のワークフロー `investigate-<anomaly_id>` を起こす（SQS が無ければ 60 秒ごとに DynamoDB の `open` を見る）。ワークフローは AgentCore Runtime に原因と修復案を JSON で答えさせ、
 修復案テーブル（`terraform/workflow` の DynamoDB）に `pending` で置く。人が Web の「承認」タブで承認すると、SSM Run Command で lab の EC2 に `sudo lab heal-main`（か `sudo lab check`）を打ち、異常が `resolved` になるまで 30 秒おきに 6 回確かめて `verified` / `failed` にする。
@@ -1244,14 +1325,14 @@ Spark が異常を開くと EventBridge に `AnomalyOpened` が出て、ルー�
 
 ### w-1. ワーカーのイメージをビルドし、Temporal のイメージをミラーする
 
-`terraform/ecr` にリポジトリ `worker` と `temporal` がある（手順 1 で作られる。前に作ったなら apply を打ち直すと 2 つ増える）。ワーカーはエージェントと同じく arm64 で作る（Fargate のタスク定義が `ARM64`）。Temporal は Docker Hub のイメージを arm64 で引いて ECR に置き直すだけ（閉域の Fargate は ECR からしか引けない）。
+`terraform/base/ecr` にリポジトリ `worker` と `temporal` がある（手順 1 で作られる。前に作ったなら apply を打ち直すと 2 つ増える）。ワーカーはエージェントと同じく arm64 で作る（Fargate のタスク定義が `ARM64`）。Temporal は Docker Hub のイメージを arm64 で引いて ECR に置き直すだけ（閉域の Fargate は ECR からしか引けない）。
 
 ```bash
-WORKER_REPO=$(terraform -chdir=terraform/ecr output -raw worker_repository_url); echo "$WORKER_REPO"
+WORKER_REPO=$(terraform -chdir=terraform/base/ecr output -raw worker_repository_url); echo "$WORKER_REPO"
 ```
 
 ```bash
-TEMPORAL_REPO=$(terraform -chdir=terraform/ecr output -raw temporal_repository_url); echo "$TEMPORAL_REPO"
+TEMPORAL_REPO=$(terraform -chdir=terraform/base/ecr output -raw temporal_repository_url); echo "$TEMPORAL_REPO"
 ```
 
 ```bash
@@ -1283,7 +1364,7 @@ terraform -chdir=terraform/workflow init -input=false
 terraform -chdir=terraform/workflow apply -var worker_image_tag=v1
 ```
 
-`-var` は destroy にも同じものを付ける。`terraform/main` / `lab` / `stream` の state を読むので、その 3 つが apply 済みでないと止まる（`graph` / `analytics` の state は有れば読み、tools Lambda に Neptune / OpenSearch / Prometheus の接続先と権限を付ける）。数分で終わるが、ECS のサービスがタスクを起こしてイメージを引き、Temporal が上がるまで 1〜3 分かかる。
+`-var` は destroy にも同じものを付ける。`terraform/base/core` / `lab` / `stream` の state を読むので、その 3 つが apply 済みでないと止まる（`graph` / `analytics` の state は有れば読み、tools Lambda に Neptune / OpenSearch / Prometheus の接続先と権限を付ける）。数分で終わるが、ECS のサービスがタスクを起こしてイメージを引き、Temporal が上がるまで 1〜3 分かかる。
 
 ```bash
 WF_CLUSTER=$(terraform -chdir=terraform/workflow output -raw cluster_name); echo "$WF_CLUSTER"
@@ -1329,13 +1410,13 @@ Gateway に届いていないときは Runtime のログに `gateway tools/list 
 
 ### 消す
 
-`terraform/lab` / `terraform/stream` / `terraform/analytics` / `terraform/graph` より**先に**消す（それらの state を読む）。`ops/down.sh` は最初に消す。
+`terraform/pipeline/lab` / `terraform/pipeline/stream` / `terraform/pipeline/analytics` / `terraform/pipeline/graph` より**先に**消す（それらの state を読む）。`ops/down.sh` は最初に消す。
 
 ```bash
 terraform -chdir=terraform/workflow destroy -var worker_image_tag=v1
 ```
 
-修復案テーブルはルートと一緒に消える（残すものは無い）。Temporal の実行履歴もタスクと一緒に消える。ECR の `worker` / `temporal` のイメージは `terraform/ecr` を消すまで残る。
+修復案テーブルはルートと一緒に消える（残すものは無い）。Temporal の実行履歴もタスクと一緒に消える。ECR の `worker` / `temporal` のイメージは `terraform/base/ecr` を消すまで残る。
 
 ## うまくいかないとき
 
@@ -1346,10 +1427,10 @@ terraform -chdir=terraform/workflow destroy -var worker_image_tag=v1
 | `terraform init` が `x509: certificate signed by unknown authority` / `Failed to query available provider packages` | WSL に社内 CA が無い（「社内 PC で使うとき」の 1）。社内 PC でなければ `registry.terraform.io` に届くか |
 | `terraform apply` が認証エラー（`AccessDenied` / `InvalidClientTokenId` / `not authorized to perform: iam:CreateRole`）で落ちる。読み取りは通る | aws-vault の一時セッション（`get-session-token`）で打っている。手順 0-1 のとおり `aws-vault exec <プロファイル> --no-session` のサブシェルの中で打つ |
 | apply が `EntityAlreadyExists` / `AlreadyExistsException` / `BucketAlreadyOwnedByYou` / `RepositoryAlreadyExistsException` など「もうある」で落ちる | 同じ名前のリソースが Terraform の外にある。CloudFormation 版のスタックが残っている（「CloudFormation 版から移るとき」）か、state を消した・別の PC で apply した（「毎日の起動と片付けをスクリプトで打つ」の state の注意） |
-| `terraform/main` の apply が `does not have an attribute named "agent_repository_url"` | 手順 1 の `terraform/ecr` をこの PC で apply していない |
-| `terraform/lab` / `stream` / `graph` が `does not have an attribute named "vpc_id"`（`kb_bucket_name` なども同じ） | `terraform/main` をこの PC で apply していない、または先に destroy した。main を apply してから打ち直す（destroy のときは main を戻してから順番どおりに消す） |
-| `terraform/stream` の plan が `lab_security_group_id / lab_role_name が読めない` / `Confluent S3 sink の zip が無い` | s-2 の表 |
-| `terraform/main` の plan / apply / destroy が `NoCredentialProviders: no valid providers in chain`（`with provider["registry.terraform.io/opensearch-project/opensearch"]`） | `aws login` で入ったプロファイルを opensearch provider が読めない。`ops/up.sh` / `ops/down.sh` は手順 0 で「AWS CLI 経由（credential_process）で渡す」と出して自分で回避する。手で打つときは 0-1 の「`aws login` で入っているとき」 |
+| `terraform/base/core` の apply が `does not have an attribute named "agent_repository_url"` | 手順 1 の `terraform/base/ecr` をこの PC で apply していない |
+| `terraform/pipeline/lab` / `stream` / `graph` が `does not have an attribute named "vpc_id"`（`kb_bucket_name` なども同じ） | `terraform/base/core` をこの PC で apply していない、または先に destroy した。main を apply してから打ち直す（destroy のときは main を戻してから順番どおりに消す） |
+| `terraform/pipeline/stream` の plan が `lab_security_group_id / lab_role_name が読めない` / `Confluent S3 sink の zip が無い` | s-2 の表 |
+| `terraform/base/core` の plan / apply / destroy が `NoCredentialProviders: no valid providers in chain`（`with provider["registry.terraform.io/opensearch-project/opensearch"]`） | `aws login` で入ったプロファイルを opensearch provider が読めない。`ops/up.sh` / `ops/down.sh` は手順 0 で「AWS CLI 経由（credential_process）で渡す」と出して自分で回避する。手で打つときは 0-1 の「`aws login` で入っているとき」 |
 | `Error acquiring the state lock` | 同じルートの terraform が別のターミナルで動いている（`ops/up.sh` を 2 つ打った など）。終わるのを待ってから打ち直す |
 | `SessionManagerPlugin is not found` | PC に Session Manager plugin が入っていない |
 | `start-session` がタイムアウトする / 名前が解決できない | PC から ssm / ssmmessages に届いていない（前提の「利用者の PC 側」） |
@@ -1417,9 +1498,9 @@ aws logs describe-log-groups --region ap-northeast-1 --log-group-name-prefix /aw
 
 ## 変更するとき
 
-- **画面（`web/app.py`）を直すときは S3 に置いてインスタンスを再起動する**（手順 4）。apply は要らない。Web の起動のしかた（`templates/web_user_data.sh.tftpl`）を変えたときだけ `terraform/main` を apply する。**user_data が変わるとインスタンスが作り直され、インスタンス ID が変わる**（`user_data_replace_on_change`。Web は状態を持たないので中身は失われない）。手順 4・7 の枠は毎回出力から ID を取るのでそのまま打てばよいが、利用者に配った `start_session_command` は配り直す。
+- **画面（`web/app.py`）を直すときは S3 に置いてインスタンスを再起動する**（手順 4）。apply は要らない。Web の起動のしかた（`templates/web_user_data.sh.tftpl`）を変えたときだけ `terraform/base/core` を apply する。**user_data が変わるとインスタンスが作り直され、インスタンス ID が変わる**（`user_data_replace_on_change`。Web は状態を持たないので中身は失われない）。手順 4・7 の枠は毎回出力から ID を取るのでそのまま打てばよいが、利用者に配った `start_session_command` は配り直す。
 - **エージェントを更新するときは、新しいタグで push して `-var agent_image_tag=v2` で apply する**（`ops/up.sh` なら `IMAGE_TAG=v2`）。以後の apply にも毎回同じタグを付ける（付け忘れると既定の `v1` に戻す差分が出る）。`agent/data/` を変えたときも同じ（トポロジはイメージに入っている）。Web の「トポロジ」タブは S3 の `web/data/` を見るので、そちらも置き直す。
-- **ガードレールを変えたら、`terraform/main/kb.tf` の `aws_bedrock_guardrail_version.r1` の `description` を `fukuda-nwc-poc r2` のように上げて apply する。**版は作ったときの中身で固定されるので、上げないと Runtime は古い版のまま判定する。
+- **ガードレールを変えたら、`terraform/base/core/kb.tf` の `aws_bedrock_guardrail_version.r1` の `description` を `fukuda-nwc-poc r2` のように上げて apply する。**版は作ったときの中身で固定されるので、上げないと Runtime は古い版のまま判定する。
 - 手順書を変えたら、手順 4 をやり直す。apply は要らない。
 - AMI は apply のたびに SSM パラメータ（変数 `ami_ssm_parameter`）から最新の AL2023 を引く。新しい AMI が出ていると**インスタンスが作り直され、インスタンス ID が変わる**（上と同じ扱い）。apply の差分に `aws_instance.web` の `ami` が出ていたらこれ。
 - user_data のテンプレート（`templates/*.sh.tftpl`）は `templatefile` を通るので、シェルの `${…}` をそのまま書くと Terraform の変数として解釈される。シェルの変数は `$${…}`、`%{` は `%%{` と書く。
@@ -1431,7 +1512,7 @@ aws logs describe-log-groups --region ap-northeast-1 --log-group-name-prefix /aw
 まとめて打つなら `ops/down.sh`（「毎日の起動と片付けをスクリプトで打つ」）。以下はその中身。
 
 **順番はこのとおりに。**後のルートが前のルートの state を読んでいるので、先に前のルートを消すと、後のルートの destroy が値を読めずに止まる。
-作っていないルートの行は飛ばす（`ls terraform/*/terraform.tfstate` で state があるルートが分かる）。各 destroy は消すリソースの一覧を出して `yes` を待つ。手順 3 で `-var` を足したなら、`terraform/main` の destroy にも同じものを付ける。
+作っていないルートの行は飛ばす（`ls terraform/*/terraform.tfstate` で state があるルートが分かる）。各 destroy は消すリソースの一覧を出して `yes` を待つ。手順 3 で `-var` を足したなら、`terraform/base/core` の destroy にも同じものを付ける。
 
 ```bash
 LOG_GROUP=$(terraform -chdir=terraform/agent output -raw runtime_log_group_name); echo "$LOG_GROUP"
@@ -1448,19 +1529,19 @@ terraform -chdir=terraform/workflow destroy -var "worker_image_tag=$IMAGE_TAG"
 analytics を作っていれば、先に Spark のジョブを止めてアプリケーションを止める（「stream / analytics / graph」の「消す」の 4 コマンド）。そのあと:
 
 ```bash
-terraform -chdir=terraform/analytics destroy
+terraform -chdir=terraform/pipeline/analytics destroy
 ```
 
 ```bash
-terraform -chdir=terraform/graph destroy
+terraform -chdir=terraform/pipeline/graph destroy
 ```
 
 ```bash
-terraform -chdir=terraform/stream destroy
+terraform -chdir=terraform/pipeline/stream destroy
 ```
 
 ```bash
-terraform -chdir=terraform/lab destroy
+terraform -chdir=terraform/pipeline/lab destroy
 ```
 
 agent を作っていれば（手順 3 の `-var` を destroy にも付ける）:
@@ -1470,11 +1551,11 @@ terraform -chdir=terraform/agent destroy -var agent_image_tag=v1
 ```
 
 ```bash
-terraform -chdir=terraform/main destroy
+terraform -chdir=terraform/base/core destroy
 ```
 
 ```bash
-terraform -chdir=terraform/ecr destroy
+terraform -chdir=terraform/base/ecr destroy
 ```
 
 ↑ ECR（イメージ）を残すなら打たない（`KEEP_ECR=1 ops/down.sh` と同じ）。
@@ -1485,19 +1566,19 @@ terraform -chdir=terraform/ecr destroy
 aws logs delete-log-group --region ap-northeast-1 --log-group-name "$LOG_GROUP"
 ```
 
-- **Runtime の ENI は削除後も最大 8 時間残る。**`terraform/agent` の destroy は通るが、その ENI（種類 `agentic_ai`、タグ `AmazonBedrockAgentCoreManaged=true`、取り付け先 `amazon-aws`）が残っている間は Runtime の SG やサブネットが消せず、`terraform/main` の destroy が `DependencyViolation` で止まる。自分では外せない（`detach-network-interface` は AWS 側の所有）。残るのは VPC・サブネット・SG だけで時間課金は無いので、時間をおいて同じ destroy（か `ops/down.sh`）を打ち直す（消え残ったものだけを消しにいく）。`ops/down.sh` は `terraform/main` を消す前にこの ENI を調べ、残っていれば VPC・サブネット・Runtime の SG だけを残して他を `-target` で消す（20 分待って落ちるのを避ける）。同じ日に何度も上げ下げするなら残りはそのままでよい。次の `ops/up.sh` が同じ VPC を使い回す。ただし新しい Runtime は残っていた ENI をそのまま使うことがあり、その場合 8 時間は最後に消した時点から数え直しになる（2026-09-17 に同じ ENI ID で確認）。`aws ec2 describe-network-interfaces --filters Name=vpc-id,Values=<VPC ID> --query 'NetworkInterfaces[].[NetworkInterfaceId,InterfaceType,Status]'` で残りが見える。
-- `terraform/main` を消すと VPC・サブネット・エンドポイント・SG・バケット（中身ごと）も一緒に消える。VPC が残るのは、上の Runtime の ENI か、手で足した ENI / SG が残っているとき。
-- ECR はイメージごと消える（`force_delete`）。残すなら `terraform/ecr` を消さなくてよい（保管料は月数円）。
+- **Runtime の ENI は削除後も最大 8 時間残る。**`terraform/agent` の destroy は通るが、その ENI（種類 `agentic_ai`、タグ `AmazonBedrockAgentCoreManaged=true`、取り付け先 `amazon-aws`）が残っている間は Runtime の SG やサブネットが消せず、`terraform/base/core` の destroy が `DependencyViolation` で止まる。自分では外せない（`detach-network-interface` は AWS 側の所有）。残るのは VPC・サブネット・SG だけで時間課金は無いので、時間をおいて同じ destroy（か `ops/down.sh`）を打ち直す（消え残ったものだけを消しにいく）。`ops/down.sh` は `terraform/base/core` を消す前にこの ENI を調べ、残っていれば VPC・サブネット・Runtime の SG だけを残して他を `-target` で消す（20 分待って落ちるのを避ける）。同じ日に何度も上げ下げするなら残りはそのままでよい。次の `ops/up.sh` が同じ VPC を使い回す。ただし新しい Runtime は残っていた ENI をそのまま使うことがあり、その場合 8 時間は最後に消した時点から数え直しになる（2026-09-17 に同じ ENI ID で確認）。`aws ec2 describe-network-interfaces --filters Name=vpc-id,Values=<VPC ID> --query 'NetworkInterfaces[].[NetworkInterfaceId,InterfaceType,Status]'` で残りが見える。
+- `terraform/base/core` を消すと VPC・サブネット・エンドポイント・SG・バケット（中身ごと）も一緒に消える。VPC が残るのは、上の Runtime の ENI か、手で足した ENI / SG が残っているとき。
+- ECR はイメージごと消える（`force_delete`）。残すなら `terraform/base/ecr` を消さなくてよい（保管料は月数円）。
 - destroy が終わっても **state ファイルは消さない**（空の state が残るだけ。次の apply で使う）。
 - 消し残しは「名前とタグ」の `get-resources` で確かめる。
 
 ## 1 時間起動したときの試算
 
-**土台 + AGENT（既定）をチャットを使いながら 1 時間で約 $0.42（約 63 円）。何もせず置いておくだけで約 $0.18/h（約 27 円）、1 か月で約 $131（約 19,700 円）。**`CREATE_KB=1` なら置いておくだけで +$0.36/h（1 か月 +$263）で、その大半は OpenSearch Serverless の最小 OCU。
+**土台 + AGENT（既定）をチャットを使いながら 1 時間で約 $0.36（約 54 円）。何もせず置いておくだけで約 $0.18/h（約 27 円）、1 か月で約 $131（約 19,700 円）。**`CREATE_KB=1` なら置いておくだけで +$0.36/h（1 か月 +$263）で、その大半は OpenSearch Serverless の最小 OCU。
 
 東京リージョン、単価は 2026-09-14 に AWS Price List API で確認した税抜の値。$1 = 150 円で換算した。
 
-**土台（`terraform/ecr` + `terraform/main`。必ず作る）は約 $0.05/h（約 8 円）。**
+**土台（`terraform/base/ecr` + `terraform/base/core`。必ず作る）は約 $0.05/h（約 8 円）。**
 
 | 土台の項目 | 単価 | 1 時間の想定 | 金額 |
 |---|---|---|---|
@@ -1509,17 +1590,19 @@ aws logs delete-log-group --region ap-northeast-1 --log-group-name "$LOG_GROUP"
 | ECR | $0.10/GB 月 | イメージ数百 MB | 約 $0 |
 | **合計** | | | **約 $0.05（約 8 円）** |
 
-**AGENT（`terraform/agent`）は置いておくだけで約 $0.13/h（約 20 円）、チャットを 1 分に 1 回使うと約 $0.37/h（約 56 円）。**
+**共用のエンドポイント（`terraform/base/core` の `create_shared_endpoints`。AGENT / lab / analytics のどれかを作るとき）は約 $0.08/h（約 13 円）。**ecr.api / ecr.dkr / logs × 2 AZ = 6 AZ 時間 × $0.014 = $0.084。2026-09-18 に `terraform/agent` から土台へ移したので、下の AGENT の表ではなくここに数える。
+
+**AGENT（`terraform/agent`）は置いておくだけで約 $0.05/h（約 8 円。共用のエンドポイントと合わせて約 $0.13/h）、チャットを 1 分に 1 回使うと約 $0.23/h（約 35 円）。**
 
 | AGENT の項目 | 単価 | 1 時間の想定 | 金額 |
 |---|---|---|---|
-| インターフェイスエンドポイント（Runtime 用）ecr.api / ecr.dkr / logs / bedrock-runtime × 2 AZ | $0.014/h/AZ、データ $0.01/GB | 8 AZ 時間。データは数 MB | $0.112 |
+| インターフェイスエンドポイント（Runtime 用）bedrock-runtime × 2 AZ | $0.014/h/AZ、データ $0.01/GB | 2 AZ 時間。データは数 MB | $0.028 |
 | インターフェイスエンドポイント（EC2 用）bedrock-agentcore × 1 AZ | 同上 | 1 AZ 時間 | $0.014 |
 | Guardrails（コンテンツフィルタ、プロンプト攻撃を含む） | $0.15/1,000 テキストユニット（1 ユニット = 1,000 文字まで） | 60 往復 × 質問 1 + 回答 1 ユニット | $0.018 |
 | AgentCore Runtime | $0.0895/vCPU 時間、$0.00945/GB 時間。CPU は実消費、秒課金 | 1 セッション。CPU 実消費 60 秒、メモリ 0.5 GB × 1 時間 | 約 $0.01 |
 | Bedrock Amazon Nova 2 Lite（jp 推論プロファイル） | 入力 $0.396/100 万、出力 $3.311/100 万トークン | 60 往復 × 入力 3,000・出力 400 トークン | $0.15 |
 | SSM パラメータ（Standard）/ CloudWatch Logs | 無料 / 取り込み $0.76/GB | 数 MB | 約 $0.005 |
-| **合計** | | | **置いておくだけ約 $0.13、使って約 $0.31（約 47 円）** |
+| **合計** | | | **置いておくだけ約 $0.05、使って約 $0.23（約 35 円）** |
 
 **`CREATE_KB=1`（ナレッジベース）はさらに約 $0.36/h（約 54 円）。**使わなくてもかかる OpenSearch Serverless の最小 OCU が大半で、1 か月で約 $263（約 39,500 円）。
 
@@ -1534,7 +1617,7 @@ aws logs delete-log-group --region ap-northeast-1 --log-group-name "$LOG_GROUP"
 
 PIPELINE（`PIPELINE=1`）は上に含めていない。単価は東京リージョンの税抜で、2026-09-15（analytics は 2026-09-17）に AWS Price List API と料金ページで確認した。
 
-**PIPELINE の 4 ルート（lab + stream + analytics + graph）は約 $1.08/h（約 162 円）、1 か月置くと約 $789（約 118,000 円）**なので、使う日に作って当日中に消す。内訳は lab + graph が約 $0.23/h、stream が約 $0.28/h、analytics が約 $0.20/h、`SINKS` の既定の OpenSearch Serverless が最大 $0.33/h と Prometheus が $0.03/h。
+**PIPELINE の 4 ルート（lab + stream + analytics + graph）は約 $1.08/h（約 162 円）、1 か月置くと約 $789（約 118,000 円）**なので、使う日に作って当日中に消す。内訳は lab + graph が約 $0.23/h、stream が約 $0.28/h、analytics が約 $0.20/h、`SINK_OPENSEARCH` の OpenSearch Serverless が最大 $0.33/h と Prometheus が $0.03/h。
 
 | lab + graph の項目 | 単価 | 1 時間 |
 |---|---|---|
@@ -1572,7 +1655,7 @@ MSK Connect を作らなければ（`CREATE_S3_SINK=0`）stream は約 $0.14/h�
 | DynamoDB の異常テーブル（オンデマンド）/ EventBridge（カスタムイベント $1/100 万） | 数百万リクエストまでほぼ無料枠 | 約 $0 |
 | **合計** | | **約 $0.20（約 30 円）** |
 
-`SINKS` の `opensearch` / `prometheus` は既定で作るが、上には含めていない（2026-09-17。`SINKS=iceberg` にすると消える）。
+`SINK_OPENSEARCH` / `SINK_PROMETHEUS` は既定で作るが、上には含めていない（2026-09-17。どちらも `0` にすると消える）。`SINK_S3=0` なら上の `s3tables` のエンドポイントの $0.028 も消える。
 
 | 格納先の項目 | 単価 | 1 時間 |
 |---|---|---|
@@ -1582,11 +1665,12 @@ MSK Connect を作らなければ（`CREATE_S3_SINK=0`）stream は約 $0.14/h�
 
 | パターン（土台 + AGENT） | 1 時間 | 1 か月（730 時間） |
 |---|---|---|
-| 上の想定（1 人が 1 分に 1 回話す） | 約 $0.42（約 63 円） | 使い方しだい |
+| 上の想定（1 人が 1 分に 1 回話す） | 約 $0.36（約 54 円） | 使い方しだい |
 | 置いておくだけ | 約 $0.18（約 27 円） | **約 $131（約 19,700 円）** |
 | 置いておくだけ + `CREATE_KB=1` | 約 $0.54（約 81 円） | 約 $394（約 59,100 円） |
-| 土台だけ（AGENT を destroy） | 約 $0.05（約 8 円） | 約 $37（約 5,500 円） |
-| 全部（AGENT + PIPELINE + WORKFLOW、`SINKS` 既定） | 約 $1.32（約 198 円） | 約 $964（約 144,600 円） |
+| 土台だけ（AGENT を destroy。共用のエンドポイントも作らない） | 約 $0.05（約 8 円） | 約 $37（約 5,500 円） |
+| `AGENT=0 PIPELINE=1`（土台 + 共用のエンドポイント + PIPELINE、`SINK_*` 既定） | 約 $1.21（約 182 円） | 約 $883（約 132,500 円） |
+| 全部（AGENT + PIPELINE + WORKFLOW、`SINK_*` 既定） | 約 $1.32（約 198 円） | 約 $964（約 144,600 円） |
 
 注意すること。
 
@@ -1622,7 +1706,7 @@ MSK Connect を作らなければ（`CREATE_S3_SINK=0`）stream は約 $0.14/h�
 ## 入っていないもの
 
 - 会話の永続化。履歴は Runtime のセッション（microVM）の中にだけあり、アイドル 5 分か 1 時間、または画面の再読み込みで消える。
-- チャット Web のログの CloudWatch Logs 転送（CloudWatch エージェント）。必要なら AL2023 の `amazon-cloudwatch-agent` を入れる。logs エンドポイントは Runtime 用に作ったものが VPC 全体で使える。
+- チャット Web のログの CloudWatch Logs 転送（CloudWatch エージェント）。必要なら AL2023 の `amazon-cloudwatch-agent` を入れる。logs エンドポイントは土台の共用のもの（`create_shared_endpoints`）が VPC 全体で使える。
 - 複数人の同時利用を想定した作り。t4g.small で数人程度まで（Gradio の同時実行は 4）。
 - BGP の状態の監視。stream で入るのはインタフェースの up/down（ポーリングと trap）だけで、BGP の隣接や経路の変化は異常にならない。
 - Temporal の永続化。`temporal server start-dev` の SQLite はタスクの中にあり、タスクが入れ替わると（デプロイ・障害・`ops/down.sh`）実行履歴ごと消える。毎日消す運用なので置いていない。UI（8233）に認証も無く、SSM のポートフォワーディングでしか届かない。
@@ -1631,7 +1715,7 @@ MSK Connect を作らなければ（`CREATE_S3_SINK=0`）stream は約 $0.14/h�
 - 修復の対象は lab の EC2 で、打てるのは `sudo lab heal-main` と `sudo lab check` だけ（`workflow/worker.py` の `ALLOWED_ACTIONS`。エージェントがそれ以外を返したら `none` にする）。実機には何も打たない。
 - Grafana などの可視化は保留。異常一覧と修復案は DynamoDB の表をそのまま出す。
 - Kafka から 4 つに分ける設計（2026-09-17）の 4 本目、log + metrics → Splunk。Spark を通さず Kafka の sink（MSK Connect の Splunk Connect for Kafka）にする予定で後回し。Splunk 自体も置いていない（Splunk Enterprise の公式コンテナイメージ `splunk/splunk` はあるが、arm64 のイメージがあるか、Free ライセンス（500 MB/日）で HEC が使えるかは確認できていない）。
-- OpenSearch Serverless と Prometheus（`SINKS` の既定）の可視化。Grafana は置いていない（後回し）。中身は VPC の中からしか届かないので、見るなら Web の EC2 から curl するか Grafana を足す。
+- OpenSearch Serverless と Prometheus（`SINK_OPENSEARCH` / `SINK_PROMETHEUS`。既定で作る）の可視化。Grafana は置いていない（後回し）。中身は VPC の中からしか届かないので、見るなら Web の EC2 から curl するか Grafana を足す。
 - Neptune のトポロジと lab の実配線の同期。Neptune は手で編集するもので、lab を変えても追随しない。
 - 手順書の自動取り込み。S3 のイベントで取り込みジョブを流す仕組みは入れていない。
 - 日本語向けの形態素解析（kuromoji など）。キーワード検索は OpenSearch の既定のアナライザで、日本語は細かく切られる。ログの文字列やコマンド名のような英数字の一致には効く。
@@ -1709,7 +1793,7 @@ for r in ecr main lab stream analytics graph workflow; do terraform -chdir=terra
 for t in test_app test_graph test_stream test_sync test_analytics test_workflow; do uv run --group dev python tests/$t.py || break; done
 ```
 
-健全なら `fmt` は何も出さず、`validate` は 7 回 `Success! The configuration is valid.` を出し、テストはそれぞれ最後の行が `通過 46 / 失敗 0`、`通過 23 / 失敗 0`、`通過 34 / 失敗 0`、`通過 28 / 失敗 0`、`通過 152 / 失敗 0`、`通過 120 / 失敗 0` になる（`--group dev` は `agent/topology.py` が `devices.yaml` を読むための PyYAML）。
+健全なら `fmt` は何も出さず、`validate` は 8 回 `Success! The configuration is valid.` を出し（workflow は非推奨の警告が付く）、テストはそれぞれ最後の行が `通過 48 / 失敗 0`、`通過 23 / 失敗 0`、`通過 44 / 失敗 0`、`通過 28 / 失敗 0`、`通過 173 / 失敗 0`、`通過 133 / 失敗 0` になる（`--group dev` は `agent/topology.py` が `devices.yaml` を読むための PyYAML）。
 `init -backend=false` は provider を取るだけで、state には触らない（apply 済みの PC で打ってもよい）。
 `ops/up.sh` と `ops/down.sh`、EC2 の上で打つ `ops/seed_graph.py` は AWS に触らないと動かせないので、`ops/check.sh` は構文だけを見る。
 `pyproject.toml` と `uv.lock` はこの確認のためだけのもので、AWS に置く依存は `agent/requirements.txt` と `web/requirements.txt`。`.venv/` は gitignore してある。
@@ -1744,10 +1828,10 @@ uv run python web/app.py
 
 - `ops/check.sh` が最後まで `すべて通過` で終わる（2026-09-16）。中身は次の 2 つと `bash -n`。
 - `deploy.env` の読み込みと機能の分け方を、偽の `aws` / `terraform` で `ops/up.sh` の手順 0 まで流した（2026-09-17）。ファイル無しで土台 + AGENT、`PIPELINE=1` で lab + stream + analytics + graph、`SKIP_STREAM` で analytics も外れ、`SKIP_ANALYTICS` / `SKIP_LAB` + `SKIP_STREAM` / `SKIP_GRAPH` で外れること。`WORKFLOW=1` で workflow が足され、`WORKFLOW=1` に `AGENT=0` / `PIPELINE=0` / `SKIP_LAB` / `SKIP_STREAM` / `SKIP_ANALYTICS` を書くと止まること。古い `PHASE=1 / 2 / 3` が機能に読み替えられ、`2B` / `5A`、`WITH_LAB` / `WITH_STREAM`、値の誤りで何も作らずに止まること。環境変数がファイルより優先されること。`ops/down.sh` がファイルの `KEEP_ECR` を読むこと（`tests/test_workflow.py`）。
-- 8 つのルート（`ecr` / `main` / `agent` / `lab` / `stream` / `analytics` / `graph` / `workflow`）で `terraform init -backend=false` と `terraform validate` が通り、`terraform fmt -check -recursive` に差分が無い（Terraform 1.16.0、hashicorp/aws 6.64.0、opensearch-project/opensearch 2.6.0、hashicorp/time 0.14.2、hashicorp/archive 2.8.1。2026-09-17）。`terraform/agent` と `terraform/workflow` の plan は `terraform/main`（workflow は agent も）を apply した後でないと remote state が読めずに止まる（設計どおり）。
-- Spark の検知と graph の模擬テスト。`tests/test_stream.py`（34 項目、2026-09-17: `spark/snmp_sinks.py` の detect を pyspark 無しで動かし、機器名の引き方、ポーリングの open / resolved、`first_seen` を保つ、解消済みへの up を数えない、MIB 無しの trap から ifDescr を取る、linkUp で resolved、壊れたレコードを飛ばす、開いた瞬間だけ EventBridge に `AnomalyOpened` を、解消した瞬間だけ `AnomalyResolved` を出す。`terraform/stream` から detector Lambda と lambda エンドポイントが消え、`anomaly_table_arn` を出すこと）、`tests/test_graph.py`（23 項目: SSM 未設定なら静的、GraphSON の読み替え、Neptune からの組み立て、失敗時と空のときの静的への切り戻し、`add_link` の正規化と重複拒否、`remove_link` / `add_device` / `seed` の Gremlin、`seed` が `status` を入れないこと、`set_status` が回線の両向きと機器に書くこと、`status` が機器一覧・隣接・影響範囲に出ること）、`tests/test_sync.py`（28 項目、2026-09-17: `lab/lab_topology.py` が lab の定義から作る機器と回線が `agent/data/` と同じであること（PyYAML があるときと無いとき）、帯域・主副・asn の読み取り、`ops/up.sh` / `sync-graph.sh` / `seed_graph.py` の受け渡し、`graph/status_handler.py` の `AnomalyOpened` / `AnomalyResolved` から `set_status` への写し（回線 / 機器 / 知らない型は無視）、`terraform/graph` の zip・EventBridge のルール・VPC の Lambda・SG・IAM・ロググループ）。
-- analytics の静的テスト `tests/test_analytics.py`（152 項目、2026-09-17: `terraform/analytics` が読む main / stream の出力が実際に定義されていること、EMR の SG に CIDR の受信が無いこと、S3 Tables のテーブルの列が `spark/snmp_sinks.py` の select の列と同じ順で同じ型であること、`start-job-run` に渡す JSON の Iceberg / S3 Tables の設定と `--sinks` / `--metric-topics` / `--log-topics`、`sinks` で OpenSearch Serverless のコレクション（TIMESERIES、VPC エンドポイントだけ）と Prometheus のワークスペース + `aps-workspaces` のエンドポイントが count で生えること、実行ロールの `aoss:APIAccessAll` / `aps:RemoteWrite`、Kafka の MSK IAM 認証のオプション 4 つ、格納先ごとの checkpoint と 60 秒トリガー、`sinks` の既定が 3 つ全部で `events` のエンドポイントと DynamoDB への書き込み権限が付くこと、`ops/up.sh` の `SINKS` の検査と jar 6 本が Spark 3.5.6 と揃っていること、up / down の順番。スクリプトは pyspark 無しで import して、引数の検査・トピックの振り分け・メトリクス名とラベル名の規則・remote write の protobuf と snappy（テストの中で手で復号する）・`_bulk` の文書を実際に動かす）。
-- workflow の静的テスト `tests/test_workflow.py`（120 項目、2026-09-17: ワーカーのプロンプトと JSON の読み取り、`ALLOWED_ACTIONS` が `lab/lab.sh` のサブコマンドにあること、起こす条件とワークフロー ID、DynamoDB の読み書きの形（GSI `status-updated_at-index`、承認は `pending` のときだけ通る条件式）、Runtime の呼び方（`qualifier=DEFAULT`、セッション ID 33 文字以上）、MCP クライアントの JSON / SSE の読み取りと `toolConfig` への変換、`tools/tools.json` が `agent/` のツール仕様と名前・引数・必須・説明まで同じであること、tools Lambda の振り分け、SQS のメッセージから `anomaly_id` を取ること、`terraform/workflow` の配線（EventBridge のルール → SQS と DLQ、ワーカーの `ANOMALY_QUEUE_URL` と受信 / 削除の権限、VPC の中の tools Lambda と `aoss` / `aps` の権限、ARM64 の Fargate、`start-dev` の SQLite、worker が temporal の起動を待つ、環境変数、IAM が `InvokeAgentRuntime` と `AWS-RunShellScript` だけ、Gateway の `AWS_IAM` / `MCP`、Lambda の zip の中身）、`ops/up.sh` / `down.sh` / `check.sh` と `deploy.env.example`）。
+- 8 つのルート（`base/ecr` / `base/core` / `agent` / `pipeline/lab` / `pipeline/stream` / `pipeline/analytics` / `pipeline/graph` / `workflow`）で `terraform init -backend=false` と `terraform validate` が通り、`terraform fmt -check -recursive` に差分が無い（Terraform 1.16.0、hashicorp/aws 6.64.0、opensearch-project/opensearch 2.6.0、hashicorp/time 0.14.2、hashicorp/archive 2.8.1。2026-09-17）。`terraform/agent` と `terraform/workflow` の plan は `terraform/base/core`（workflow は agent も）を apply した後でないと remote state が読めずに止まる（設計どおり）。
+- Spark の検知と graph の模擬テスト。`tests/test_stream.py`（34 項目、2026-09-17: `spark/snmp_sinks.py` の detect を pyspark 無しで動かし、機器名の引き方、ポーリングの open / resolved、`first_seen` を保つ、解消済みへの up を数えない、MIB 無しの trap から ifDescr を取る、linkUp で resolved、壊れたレコードを飛ばす、開いた瞬間だけ EventBridge に `AnomalyOpened` を、解消した瞬間だけ `AnomalyResolved` を出す。`terraform/pipeline/stream` から detector Lambda と lambda エンドポイントが消え、`anomaly_table_arn` を出すこと）、`tests/test_graph.py`（23 項目: SSM 未設定なら静的、GraphSON の読み替え、Neptune からの組み立て、失敗時と空のときの静的への切り戻し、`add_link` の正規化と重複拒否、`remove_link` / `add_device` / `seed` の Gremlin、`seed` が `status` を入れないこと、`set_status` が回線の両向きと機器に書くこと、`status` が機器一覧・隣接・影響範囲に出ること）、`tests/test_sync.py`（28 項目、2026-09-17: `lab/lab_topology.py` が lab の定義から作る機器と回線が `agent/data/` と同じであること（PyYAML があるときと無いとき）、帯域・主副・asn の読み取り、`ops/up.sh` / `sync-graph.sh` / `seed_graph.py` の受け渡し、`graph/status_handler.py` の `AnomalyOpened` / `AnomalyResolved` から `set_status` への写し（回線 / 機器 / 知らない型は無視）、`terraform/pipeline/graph` の zip・EventBridge のルール・VPC の Lambda・SG・IAM・ロググループ）。
+- analytics の静的テスト `tests/test_analytics.py`（169 項目、2026-09-17: `terraform/pipeline/analytics` が読む main / stream の出力が実際に定義されていること、EMR の SG に CIDR の受信が無いこと、S3 Tables のテーブルの列が `spark/snmp_sinks.py` の select の列と同じ順で同じ型であること、`start-job-run` に渡す JSON の Iceberg / S3 Tables の設定と `--sinks` / `--metric-topics` / `--log-topics`、`sinks` で OpenSearch Serverless のコレクション（TIMESERIES、VPC エンドポイントだけ）と Prometheus のワークスペース + `aps-workspaces` のエンドポイントが count で生えること、実行ロールの `aoss:APIAccessAll` / `aps:RemoteWrite`、Kafka の MSK IAM 認証のオプション 4 つ、格納先ごとの checkpoint と 60 秒トリガー、`sinks` の既定が 3 つ全部で `events` のエンドポイントと DynamoDB への書き込み権限が付くこと、`SINK_S3=0` で S3 Tables と `s3tables` のエンドポイントと実行ロールの `S3TablesCatalog` と Spark のカタログの設定が外れること、`ops/up.sh` の `SINK_S3` / `SINK_OPENSEARCH` / `SINK_PROMETHEUS` の判定（up.sh から切り出して bash で実際に動かす。全部 0 と、古い `SINKS` との併記は止まる）と jar 6 本が Spark 3.5.6 と揃っていること、up / down の順番。スクリプトは pyspark 無しで import して、引数の検査・トピックの振り分け・メトリクス名とラベル名の規則・remote write の protobuf と snappy（テストの中で手で復号する）・`_bulk` の文書を実際に動かす）。
+- workflow の静的テスト `tests/test_workflow.py`（131 項目、2026-09-17: ワーカーのプロンプトと JSON の読み取り、`ALLOWED_ACTIONS` が `lab/lab.sh` のサブコマンドにあること、起こす条件とワークフロー ID、DynamoDB の読み書きの形（GSI `status-updated_at-index`、承認は `pending` のときだけ通る条件式）、Runtime の呼び方（`qualifier=DEFAULT`、セッション ID 33 文字以上）、MCP クライアントの JSON / SSE の読み取りと `toolConfig` への変換、`tools/tools.json` が `agent/` のツール仕様と名前・引数・必須・説明まで同じであること、tools Lambda の振り分け、SQS のメッセージから `anomaly_id` を取ること、`terraform/workflow` の配線（EventBridge のルール → SQS と DLQ、ワーカーの `ANOMALY_QUEUE_URL` と受信 / 削除の権限、VPC の中の tools Lambda と `aoss` / `aps` の権限、ARM64 の Fargate、`start-dev` の SQLite、worker が temporal の起動を待つ、環境変数、IAM が `InvokeAgentRuntime` と `AWS-RunShellScript` だけ、Gateway の `AWS_IAM` / `MCP`、Lambda の zip の中身）、`ops/up.sh` / `down.sh` / `check.sh` と `deploy.env.example`）。
 - `temporalio/temporal` 1.9.1 のイメージが arm64 を含むこと（マニフェスト、2026-09-17）。
 - EMR Serverless の `emr-7.13.0` が Spark 3.5.6 であること、S3 Tables のカタログが `emr-7.5.0` 以上で使えること、jar 6 本が Maven Central にあること（HTTP 200）、S3 Tables のデータが `<uuid>--table-s3` という名前のバケットに置かれること、EMR Serverless が 0.0.0.0/0 の受信を持つ SG を拒否すること、`start-job-run` に `--mode STREAMING` があること（2026-09-17、AWS の文書）。
 - Telegraf の `inputs.snmp` は数値 OID とフィールド名を明示すれば MIB 無しで動き、`inputs.snmp_trap` は v2c を MIB 無しで受ける（varbind の名前は数値 OID）。`agent_host` タグは `source` に替わっている。net-snmp の `monitor` には `iquerySecName` と内部ユーザーが要る。
@@ -1769,7 +1853,7 @@ uv run python web/app.py
 
 確認できていないこと。
 
-- **実環境への apply。**上はすべて手元の静的検査と模擬テストで、`terraform/agent` に切り出した後の形は AWS 上で apply していない（切り出す前の `terraform/main` 一体の形は 2026-09-16〜17 に動いた）。PIPELINE の 4 ルートも同じで、lab の起動、Telegraf → MSK の IAM 認証、MSK Connect、Spark のジョブ、S3 Tables / OpenSearch Serverless / Prometheus への書き込み、Spark の検知（DynamoDB と EventBridge）、Neptune への Gremlin は実環境で通していない。Mac からの通しの apply も打っていない。
+- **実環境への apply。**上はすべて手元の静的検査と模擬テストで、`terraform/agent` に切り出した後の形は AWS 上で apply していない（切り出す前の `terraform/base/core` 一体の形は 2026-09-16〜17 に動いた）。PIPELINE の 4 ルートも同じで、lab の起動、Telegraf → MSK の IAM 認証、MSK Connect、Spark のジョブ、S3 Tables / OpenSearch Serverless / Prometheus への書き込み、Spark の検知（DynamoDB と EventBridge）、Neptune への Gremlin は実環境で通していない。Mac からの通しの apply も打っていない。
 - workflow の次の点。Gateway（MCP）に VPC モードの Runtime と Fargate のタスクから届くか（Gateway のエンドポイントは公開で、閉域からは `bedrock-agentcore` の interface エンドポイント経由になる想定。届かなければ Runtime はコンテナの中のツールに戻る）。組織の SCP / IAM が ECS / Fargate / AgentCore Gateway / Lambda を止めていないか。`temporal server start-dev` が Fargate の中で `--ip 0.0.0.0` で上がり、worker が `localhost:7233` に付けるか。`temporalio` 1.33.0 の SDK と Temporal サーバー 1.9.1 の組み合わせ。SSM Run Command が lab の EC2 で `sudo lab heal-main` を通し、異常が resolved に変わるまでの時間が確認の 6 回 × 30 秒に収まるか。Nova 2 Lite が求めた JSON の形で修復案を返すか（返さなければ `action=none` の案になる）。EMR Serverless の driver から `events` の interface エンドポイント経由で PutEvents が通るか。EventBridge のルールから SQS へ届き、ワーカーが `sqs` の interface エンドポイント経由で long polling できるか。VPC の中の tools Lambda から Neptune（SG の穴）/ OpenSearch Serverless（`aoss` エンドポイント、コレクションの network policy）/ Prometheus（`aps-workspaces` エンドポイントで `query_range`）に届くか。OpenSearch Serverless の logs コレクションの OCU が `CREATE_KB=1` のコレクションと共有されるか（されなければ +$0.33/h）。Spark が書く文書の `@timestamp` を `search_logs` がそのまま range で引けるか。
 - analytics の次の点。`emr-7.13.0` に S3 Tables のカタログの jar が同梱されているか（同梱なら `s3-tables-catalog-for-iceberg-runtime` を足すと衝突する可能性がある）。Kafka の jar 6 本の組み合わせで Structured Streaming の Kafka ソースが動くか。閉域から S3 Tables に届くか（`s3tables` の interface エンドポイントと、S3 ゲートウェイエンドポイントの `*--table-s3` の許可）。Lake Formation の設定が要るか。EMR の SG に自分自身からの受信が要るか。組織の SCP / IAM が EMR Serverless / S3 Tables を止めていないか。
 - `templatefile` で展開した user_data（`web_user_data.sh.tftpl` / `lab_user_data.sh.tftpl`）が `bash -n` を通るか。展開後のシェルを手元で取り出して確かめていない。

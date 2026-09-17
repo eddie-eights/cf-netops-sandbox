@@ -4,13 +4,13 @@
 手順とコマンドの正本は [`../README.md`](../README.md)、構成図は [`20260914-fukuda-nwc-poc-architecture.html`](20260914-fukuda-nwc-poc-architecture.html)。
 ここはその手前の「どこまで作ってあって、次に何が残っているか」だけを見るための頁。
 
-**2026-09-17 ユーザー決定: フェーズの番号で積み上げる形をやめ、機能ごとに独立して作る形にした。**目的は費用を抑えること（「フェーズ 1 の上に 2 が乗るのではなく、機能ごとにデプロイできれば嬉しい」）。土台（`terraform/ecr` + `terraform/main`）を必ず作り、その上に 3 つの機能を要るものだけ載せる。`deploy.env` のキーは `AGENT` / `PIPELINE` / `WORKFLOW`。
+**2026-09-17 ユーザー決定: フェーズの番号で積み上げる形をやめ、機能ごとに独立して作る形にした。**目的は費用を抑えること（「フェーズ 1 の上に 2 が乗るのではなく、機能ごとにデプロイできれば嬉しい」）。土台（`terraform/base/ecr` + `terraform/base/core`）を必ず作り、その上に 3 つの機能を要るものだけ載せる。`deploy.env` のキーは `AGENT` / `PIPELINE` / `WORKFLOW`。
 
 | 機能（`deploy.env`） | 一言で | 作るルート |
 |---|---|---|
-| 土台（必ず） | 閉域の VPC、Web の EC2、S3 バケット、Runtime / Web のロール | `terraform/ecr` → `terraform/main` |
+| 土台（必ず） | 閉域の VPC、Web の EC2、S3 バケット、Runtime / Web のロール | `terraform/base/ecr` → `terraform/base/core` |
 | `AGENT=1`（既定） | **agent での分析**: AgentCore Runtime + ガードレール。ナレッジベースは `CREATE_KB=1` のときだけ（既定は作らない。2026-09-17 ユーザー決定「ナレッジベースは今回は使わないかな。デフォルトは OFF でいい」） | `terraform/agent` |
-| `PIPELINE=1` | **データパイプライン**: containerlab → Telegraf → Kafka → Spark → S3 Tables / OpenSearch / Prometheus。トポロジは Neptune（「graph はパイプライン側にする」） | `terraform/lab` → `stream` → `analytics`、並行して `graph` |
+| `PIPELINE=1` | **データパイプライン**: containerlab → Telegraf → Kafka → Spark → S3 Tables / OpenSearch / Prometheus。トポロジは Neptune（「graph はパイプライン側にする」） | `terraform/pipeline/lab` → `stream` → `analytics`、並行して `graph` |
 | `WORKFLOW=1` | **Temporal での実行**: エージェントが原因を調査し、人が修復を承認するまで。AGENT と PIPELINE が要る | `terraform/workflow` |
 
 古い番号との対応（`deploy.env` に `PHASE` が残っていれば `ops/up.sh` が読み替えて注意を出す。2B / 5A / 5B などは止まる）:
@@ -28,9 +28,9 @@
 
 | 機能 | 到達点 | 作る Terraform ルート | 立てている間の費用（東京・税抜・$1 = 150 円） | 状態 |
 |---|---|---|---|---|
-| 土台（必ず作る） | 閉域の VPC に Web の EC2（Gradio）を置き、SSM のポートフォワーディングで開く | `terraform/ecr` → `terraform/main` | 約 $0.05/h（約 8 円） | **動く** |
-| AGENT（`AGENT=1`、既定。旧 1） | agent での分析。閉域の VPC でチャットし、モデルとトポロジのツールで答える。`CREATE_KB=1` なら手順書も引く | 土台に `terraform/agent` | 約 $0.13/h（約 20 円）。`CREATE_KB=1` なら +$0.36/h | **動いた**（`terraform/main` 一体の形で 2026-09-16〜17。切り出した後の apply は未確認） |
-| PIPELINE（`PIPELINE=1`。旧 2） | データパイプライン。EC2 の中の疑似ネットワーク（containerlab）の SNMP を Telegraf が Kafka に流し、Spark が S3 Tables（Iceberg）/ OpenSearch Serverless / Prometheus に書き続け、異常を検知して DynamoDB の一覧に出す（EventBridge にも出す）。トポロジは Neptune で持って Web から編集する | 土台に `terraform/lab` → `terraform/stream` → `terraform/analytics`、並行して `terraform/graph` | 約 $1.08/h（約 162 円。lab 0.09 + stream 0.28 + analytics 0.20 + OpenSearch 最大 0.33 + Prometheus 0.03 + graph 0.14） | 作ってある（使う日だけ作る。**AWS 上の apply は未確認**） |
+| 土台（必ず作る） | 閉域の VPC に Web の EC2（Gradio）を置き、SSM のポートフォワーディングで開く | `terraform/base/ecr` → `terraform/base/core` | 約 $0.05/h（約 8 円）。AGENT / lab / analytics のどれかを作るなら共用のエンドポイント（ecr.api / ecr.dkr / logs）で +$0.08/h | **動く** |
+| AGENT（`AGENT=1`、既定。旧 1） | agent での分析。閉域の VPC でチャットし、モデルとトポロジのツールで答える。`CREATE_KB=1` なら手順書も引く | 土台に `terraform/agent` | 約 $0.05/h（約 8 円。2026-09-18 に ecr.api / ecr.dkr / logs を土台へ移した。合わせると今までどおり約 $0.13/h）。`CREATE_KB=1` なら +$0.36/h | **動いた**（`terraform/base/core` 一体の形で 2026-09-16〜17。切り出した後の apply は未確認） |
+| PIPELINE（`PIPELINE=1`。旧 2） | データパイプライン。EC2 の中の疑似ネットワーク（containerlab）の SNMP を Telegraf が Kafka に流し、Spark が S3 Tables（Iceberg）/ OpenSearch Serverless / Prometheus に書き続け、異常を検知して DynamoDB の一覧に出す（EventBridge にも出す）。トポロジは Neptune で持って Web から編集する | 土台に `terraform/pipeline/lab` → `terraform/pipeline/stream` → `terraform/pipeline/analytics`、並行して `terraform/pipeline/graph` | 約 $1.08/h（約 162 円。lab 0.09 + stream 0.28 + analytics 0.20 + OpenSearch 最大 0.33 + Prometheus 0.03 + graph 0.14） | 作ってある（使う日だけ作る。**AWS 上の apply は未確認**） |
 | WORKFLOW（`WORKFLOW=1`。旧 3。AGENT と PIPELINE が要る） | Spark の検知が EventBridge → SQS で届き、エージェントが Neptune / OpenSearch / Prometheus を見て原因調査 → 修復案を Temporal のワークフローで回し、**人が Web の「承認」タブで承認**してから Temporal が lab で直して確かめる。エージェントのツールは AgentCore Gateway（MCP）経由 | AGENT + PIPELINE に `terraform/workflow` | 約 $0.06/h（約 9 円。Temporal のサーバーとワーカーを ECS on Fargate の 1 タスク（ARM、1 vCPU / 2 GB）+ sqs エンドポイント 1 本） | 作ってある（2026-09-17。使う日だけ作る。**AWS 上の apply は未確認**） |
 
 費用は 1 時間立てたときの目安。内訳と前提は README の「1 時間起動したときの試算」にある（単価は土台と AGENT が 2026-09-14、lab・graph・stream が 2026-09-15、analytics が 2026-09-17 に AWS Price List API と料金ページで確認した値）。
@@ -82,21 +82,21 @@
 
 **2026-09-17 のユーザー決定: フェーズ 2 = containerlab → Telegraf → Kafka → Spark → S3 Tables のデータパイプライン構築。**
 それまで「2 の任意（`WITH_STREAM=1`）」だった stream と、「2B」だった analytics がフェーズ 2 の本体になった。トポロジの Neptune（graph）もこのフェーズのまま。
-`deploy.env` に `PIPELINE=1` と書くと 4 ルートを作る。**使う日に作って当日中に消す。**`terraform/main` はそのまま使う。
+`deploy.env` に `PIPELINE=1` と書くと 4 ルートを作る。**使う日に作って当日中に消す。**`terraform/base/core` はそのまま使う。
 
 ```
 lab（EC2 の containerlab: FRR × 6 + snmpd × 4 + ホスト × 4）
-  └─ Telegraf（SNMP 10 秒ポーリング + trap）─▶ stream（MSK、トピック metrics / traps）
+  └─ Telegraf（SNMP 10 秒ポーリング + trap + FRR のログの tail）─▶ stream（MSK、トピック metrics / traps / logs）
                                                  ├─▶ analytics の Spark（detect）─▶ DynamoDB の異常一覧（Web とエージェントが読む「いま」）─▶ EventBridge の AnomalyOpened（WORKFLOW の SQS へ）
                                                  ├─▶ MSK Connect（S3 sink）─▶ S3 の stream/（任意。CREATE_S3_SINK=0 で外す）
                                                  ├─▶ analytics（Spark on EMR Serverless）─ 全トピック ─▶ S3 Tables（Iceberg）の snmp_metrics（履歴の正本）
-                                                 ├─▶ analytics の Spark ─ traps（ログ）だけ ─▶ OpenSearch Serverless の snmp-logs（SINKS に opensearch。既定で作る）
-                                                 └─▶ analytics の Spark ─ metrics だけ ─▶ Amazon Managed Service for Prometheus（SINKS に prometheus。既定で作る）
+                                                 ├─▶ analytics の Spark ─ traps / logs（ログ）だけ ─▶ OpenSearch Serverless の snmp-logs（SINK_OPENSEARCH。既定で作る）
+                                                 └─▶ analytics の Spark ─ metrics だけ ─▶ Amazon Managed Service for Prometheus（SINK_PROMETHEUS。既定で作る）
   4 本目の log + metrics → Splunk は Kafka の sink（MSK Connect）にする予定で後回し（2026-09-17 ユーザー決定「splunkは後回しでもOK」）
 graph（Neptune のトポロジ。Web の「トポロジ」タブから編集）
 ```
 
-作る順は `lab` → `stream` → `analytics`（stream の Kafka を読む）。`graph` は独立なので `ops/up.sh` は main の直後に裏で始める。
+作る順は `lab` → `stream` → `analytics`（stream の Kafka を読む）。`graph` は独立なので `ops/up.sh` は base/core の直後に裏で始める。
 消す順は `analytics`（Spark のジョブを止めてから）→ `graph` → `stream` → `lab`（`ops/down.sh` がこの順で消す）。
 
 一部だけ要らないとき: `SKIP_LAB=1`（stream は lab の SNMP が要るので `SKIP_STREAM=1` も書く）、`SKIP_STREAM=1`（analytics も作らない。読む Kafka が無い）、`SKIP_ANALYTICS=1`、`SKIP_GRAPH=1`。
@@ -112,11 +112,11 @@ graph（Neptune のトポロジ。Web の「トポロジ」タブから編集）
 
 | 項目 | 決めたこと |
 |---|---|
-| lab | 機器のアドレスは **RFC 5737 の文書用アドレス**（`203.0.113.0/24`）。実機の値は写さない。イメージは `terraform/ecr`、設定と rpm は S3 の `lab/` に置く |
+| lab | 機器のアドレスは **RFC 5737 の文書用アドレス**（`203.0.113.0/24`）。実機の値は写さない。イメージは `terraform/base/ecr`、設定と rpm は S3 の `lab/` に置く |
 | stream | MSK は IAM 認証（9098）。異常の「いま」は **DynamoDB**（オンデマンド）。ブローカーとテーブル名は SSM パラメータ経由で lab と Web に渡す |
 | S3 sink | 任意。`CREATE_S3_SINK=0` にすると MSK Connect を作らず約 $0.14/h 下がる。履歴の正本は analytics の S3 Tables なので、外してもデータは残る |
 | analytics の実体 | **EMR Serverless**（Glue ではない。ジョブが無ければ 0、アプリケーションは器だけ）。ARM64、release `emr-7.13.0`（Spark 3.5.6。S3 Tables は 7.5.0 以上。2026-09-17 確認） |
-| analytics の格納先 | **Kafka から 4 つに分ける**（2026-09-17 ユーザー決定）。Spark が 3 本: iceberg = 全トピック → S3 Tables（既定）、opensearch = ログ（いまは `traps` だけ。Telegraf に syslog を足したら `logs` も）→ OpenSearch Serverless の TIMESERIES コレクション `<prefix>-logs`（VPC エンドポイント経由だけ）、prometheus = メトリクス（`metrics`）→ Amazon Managed Service for Prometheus `<prefix>-metrics`（remote write を SigV4 で）。格納先ごとに別のストリーミングクエリと checkpoint。4 本目の Splunk（log + metrics）は Spark を通さず MSK Connect の sink にする予定で後回し。`deploy.env` の `SINKS`（既定 `iceberg,opensearch,prometheus`。2026-09-17 ユーザー決定「SINKS に opensearch と prometheus を入れる。KB のコレクションと共有できなければこちらを優先」）→ `terraform/analytics` の `var.sinks` |
+| analytics の格納先 | **Kafka から 4 つに分ける**（2026-09-17 ユーザー決定）。Spark が 3 本: iceberg = 全トピック → S3 Tables（既定）、opensearch = ログ（`traps` と `logs`。`logs` は FRR の `log file` を EC2 に bind して Telegraf の `inputs.tail` で読む。FRR のコンテナに syslogd が無いので syslog にはしていない。2026-09-18）→ OpenSearch Serverless の TIMESERIES コレクション `<prefix>-logs`（VPC エンドポイント経由だけ）、prometheus = メトリクス（`metrics`）→ Amazon Managed Service for Prometheus `<prefix>-metrics`（remote write を SigV4 で）。格納先ごとに別のストリーミングクエリと checkpoint。4 本目の Splunk（log + metrics）は Spark を通さず MSK Connect の sink にする予定で後回し。`deploy.env` の `SINK_S3` / `SINK_OPENSEARCH` / `SINK_PROMETHEUS`（`1` / `0`。既定は 3 つとも `1`。2026-09-17 夜のユーザー決定「s3, open search, prometheus のデプロイをそれぞれ 1 と 0 でオンオフ」。`0` はリソースごと作らない。カンマ区切りの `SINKS` は古い書き方で読み替える。2026-09-17 ユーザー決定「SINKS に opensearch と prometheus を入れる。KB のコレクションと共有できなければこちらを優先」）→ `terraform/pipeline/analytics` の `var.sinks` |
 | analytics のテーブル | **S3 Tables（Iceberg）**。テーブルバケット `<prefix>-tables`、namespace `netops`、テーブル `snmp_metrics`（namespace とテーブル名はアンダースコアだけ。ハイフン不可）。テーブルは Terraform で作る（destroy でバケットまで消せるように） |
 | analytics のジョブ | Structured Streaming、`--mode STREAMING`、60 秒トリガー、driver 1 + executor 1 の 2 vCPU。Kafka / MSK IAM / S3 Tables カタログの jar 6 本は `ops/up.sh` が Maven Central から取って `s3://<バケット>/analytics/jars/` に置く。起動は `ops/up.sh` の start-job-run（動いていれば起こさない） |
 | analytics のネットワーク | NAT が無いので S3 Tables の API は **interface エンドポイント `s3tables`（2 AZ）**、データ本体は main の S3 ゲートウェイエンドポイント。EMR の SG は inbound を自分自身からだけにする（0.0.0.0/0 の inbound があると EMR Serverless が拒否する） |
@@ -187,7 +187,7 @@ graph（Neptune のトポロジ。Web の「トポロジ」タブから編集）
 | エンドポイント | **足すものは 0 個。**Fargate のタスクは ECS 用のエンドポイント（`ecs` / `ecs-agent` / `ecs-telemetry`）を要らない（ECS の文書、2026-09-16 確認）。要るのは ECR（イメージ）と CloudWatch Logs（`awslogs`）で、**どちらも main にある**。AgentCore は main の `bedrock-agentcore` で呼ぶ |
 | Temporal のデータ | 保存先に PostgreSQL / MySQL / SQLite を使え、**Elasticsearch は必須ではない**（Temporal の文書、2026-09-16 確認）。**PoC の規模なら SQLite で足りるので、DB を別に立てずに始められる。**ただしタスクを止めると SQLite ごと消える（毎日 down する運用なので困りにくい）。実行件数が増えたら OpenSearch か Elasticsearch が推奨されている |
 
-- **VPC は main を使い回す。**`terraform/stream` / `terraform/graph` / `terraform/analytics` と同じく `data.terraform_remote_state.main.outputs.vpc_id` で入れる。新しい VPC を作ると ECR や Logs のエンドポイントを一から並べることになる。
+- **VPC は base/core を使い回す。**`terraform/pipeline/stream` / `terraform/pipeline/graph` / `terraform/pipeline/analytics` と同じく `data.terraform_remote_state.main.outputs.vpc_id` で入れる。新しい VPC を作ると ECR や Logs のエンドポイントを一から並べることになる。
 - **サーバーとワーカーは、まず 1 つのタスクに同居させる。**同じタスクなら `localhost` で繋がり、ロードバランサもサービス検出も要らない。
   別々のタスクに分けて **Service Connect を使うなら `ecs-agent` エンドポイントが要る**（Envoy の管理がこれを使う。同じ ECS の文書）。
 - イメージは VPC 内の ECR から引く（AGENT の Runtime と同じ）。`temporalio/temporal` 1.9.1 は arm64 を持つ（マニフェスト、2026-09-17 確認）ので、`ops/up.sh` が ECR にミラーする。
@@ -196,9 +196,9 @@ graph（Neptune のトポロジ。Web の「トポロジ」タブから編集）
 ### EKS に戻すとき
 
 - **クラスタ本体が $0.10/h（月 ≒ $73）**かかる（東京・2026-09-16 確認）。止めない限り毎時かかる。
-- **エンドポイントが 4〜5 個足りない。**AWS の文書（閉域クラスタの作り方、2026-09-16 確認）と main を突き合わせると、`ec2` / `sts` / `eks` と、`oidc-eks`（IRSA）か `eks-auth`（Pod Identity）のどちらかが無い（ロードバランサを使うなら `elasticloadbalancing` も）。
+- **エンドポイントが 4〜5 個足りない。**AWS の文書（閉域クラスタの作り方、2026-09-16 確認）と base/core を突き合わせると、`ec2` / `sts` / `eks` と、`oidc-eks`（IRSA）か `eks-auth`（Pod Identity）のどちらかが無い（ロードバランサを使うなら `elasticloadbalancing` も）。
 - **EKS はサブネットを別々の AZ に 2 つ以上要求する**ので、エンドポイントも 2 AZ ぶんで見る。**月 ≒ $80〜$100。**合わせて**月 ≒ $153〜$173 の上乗せ**になる。
-- `sts` は `terraform/stream` が持っている。**同じ VPC に同じサービスのエンドポイントを 2 つ作らない**（二重に課金される）。
+- `sts` は `terraform/pipeline/stream` が持っている。**同じ VPC に同じサービスのエンドポイントを 2 つ作らない**（二重に課金される）。
 - 閉域を外す（NAT を置く）話にはしない。**閉域という前提そのものを崩す。**
 
 ### 2026-09-17 の実装で決めたこと（PMO 判断。変えるなら issue で）

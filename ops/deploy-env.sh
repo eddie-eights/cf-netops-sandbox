@@ -14,7 +14,7 @@
 
 # 読めるキー。機能は PIPELINE / AGENT / WORKFLOW の 3 つ（2026-09-17）。PHASE は古い書き方で、ops/up.sh が機能に読み替えて注意を出す。
 # WITH_LAB（2026-09-16）と WITH_STREAM（2026-09-17）は無くなったキーで、ops/up.sh が案内を出して止まる
-DEPLOY_ENV_KEYS="PIPELINE AGENT WORKFLOW CREATE_KB PHASE SKIP_LAB SKIP_STREAM SKIP_ANALYTICS SKIP_GRAPH CREATE_S3_SINK SINKS IMAGE_TAG ADMIN_ARN
+DEPLOY_ENV_KEYS="PIPELINE AGENT WORKFLOW CREATE_KB PHASE SKIP_LAB SKIP_STREAM SKIP_ANALYTICS SKIP_GRAPH CREATE_S3_SINK SINK_S3 SINK_OPENSEARCH SINK_PROMETHEUS SINKS IMAGE_TAG ADMIN_ARN
 VPC_CIDR CLIENT_CIDR OPENSEARCH_CACERT_FILE LOCAL_PORT NO_PORTFORWARD KEEP_ECR AWS_PROFILE AWS_CA_BUNDLE WITH_LAB WITH_STREAM"
 
 # DEPLOY_ENV_FILE の相対パスを、cd する前の場所から見た絶対パスにする。呼ぶ側が cd の前に打つ
@@ -109,4 +109,17 @@ flag_value() {
     ''|0|false|no) printf -v "$name" '%s' '' ;;
     *) die "$name は 1 か 0（いまは「${v}」）" ;;
   esac
+}
+
+# ---- terraform の出力を絞る（up.sh / down.sh 共通。呼ぶ側が tf <ルート> <引数…> を持っていること）
+# 画面には Plan / 完了したリソース / 5 分ごとの経過 / エラーだけを出し、全文は ops/logs/ に残す。TF_VERBOSE=1 で全部そのまま出す。
+TF_VERBOSE="${TF_VERBOSE:-}"
+TF_KEEP='^(Plan:|Apply complete|Destroy complete|No changes)|Error|^[│╷╵]|: (Creation|Destruction|Modifications) complete|: Still (creating|destroying|modifying)\.\.\. \[[0-9]*[05]m0s elapsed\]'
+tf_log_file() { echo "ops/logs/tf-${1//\//-}-$2.log"; }
+tf_logged() { # <ルート> <apply|destroy> <引数…>。終了コードは terraform のもの（呼ぶ側の pipefail が前提）
+  local root="$1" verb="$2"; shift 2
+  if [ -n "$TF_VERBOSE" ]; then tf "$root" "$verb" "$@"; return; fi
+  local logf; logf=$(tf_log_file "$root" "$verb")
+  mkdir -p ops/logs
+  tf "$root" "$verb" -no-color -compact-warnings "$@" 2>&1 | tee "$logf" | { grep --line-buffered -E "$TF_KEEP" || true; }
 }

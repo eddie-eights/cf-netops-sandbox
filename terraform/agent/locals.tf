@@ -2,7 +2,7 @@
 # execution policy, the guardrail, the interface endpoints the runtime needs (ecr / logs / bedrock-runtime, 2 AZ) and the
 # bedrock-agentcore endpoint the chat web invokes it through. Optionally (create_knowledge_base = true) a Bedrock
 # Knowledge Base on OpenSearch Serverless for RAG - off by default because the collection costs about 0.33 USD per hour.
-# The VPC, the security groups, the S3 bucket, the chat web EC2 and the runtime IAM role come from terraform/main
+# The VPC, the security groups, the S3 bucket, the chat web EC2 and the runtime IAM role come from terraform/base/core
 # (read through terraform_remote_state), so this root can be created and destroyed on its own while the base stays.
 
 data "aws_caller_identity" "current" {}
@@ -13,22 +13,22 @@ data "aws_iam_session_context" "current" {
   arn = data.aws_caller_identity.current.arn
 }
 
-# VPC / サブネット / SG / バケット / ロールは terraform/main の state から読む
+# VPC / サブネット / SG / バケット / ロールは terraform/base/core の state から読む
 data "terraform_remote_state" "main" {
   backend = "local"
 
   config = {
-    path = "${path.module}/../main/terraform.tfstate"
+    path = "${path.module}/../base/core/terraform.tfstate"
   }
 }
 
-# エージェントのイメージの置き場は terraform/ecr の state から読む
+# エージェントのイメージの置き場は terraform/base/ecr の state から読む
 data "terraform_remote_state" "ecr" {
   count   = var.agent_image_uri == "" ? 1 : 0
   backend = "local"
 
   config = {
-    path = "${path.module}/../ecr/terraform.tfstate"
+    path = "${path.module}/../base/ecr/terraform.tfstate"
   }
 }
 

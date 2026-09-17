@@ -50,7 +50,7 @@
     <li>PC から EC2 へは SSM のポートフォワーディングで入り、EC2 から先は VPC エンドポイントだけで AWS のサービスに届く</li>
     <li>エージェントは Knowledge Base をハイブリッド検索（ベクトル + キーワード）で候補 20 件を引き、リランクで 5 件に絞って Amazon Nova 2 Lite に渡す</li>
     <li>ガードレールが質問と回答の両方を判定し、止めたときは定型文を返す</li>
-    <li>置いておくだけで 1 時間 ≈ $0.52（約 79 円）。<em>OpenSearch Serverless だけで月 ≈ $240</em> かかるので、使わない期間は <code>terraform/main</code> を destroy する</li>
+    <li>置いておくだけで 1 時間 ≈ $0.52（約 79 円）。<em>OpenSearch Serverless だけで月 ≈ $240</em> かかるので、使わない期間は <code>terraform/base/core</code> を destroy する</li>
   </ul>
 </div>
 
@@ -126,7 +126,7 @@
 <circle cx="50" cy="771" r="9" fill="#FFFFFF" stroke="#111110" stroke-width="1.5"/><text x="50" y="775" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="11" fill="#111110" font-weight="700" text-anchor="middle">5</text>
 </svg>
   </div>
-  <figcaption>fig.1 EC2 の Web から LLM と会話するときの流れ。通信はすべて TLS 443。番号は「会話 1 往復の流れ」に対応する。任意の lab（<code>terraform/lab</code>、containerlab + FRR の EC2 1 台）は同じ VPC に置くが、この流れにはつながらない</figcaption>
+  <figcaption>fig.1 EC2 の Web から LLM と会話するときの流れ。通信はすべて TLS 443。番号は「会話 1 往復の流れ」に対応する。任意の lab（<code>terraform/pipeline/lab</code>、containerlab + FRR の EC2 1 台）は同じ VPC に置くが、この流れにはつながらない</figcaption>
 </figure>
 
 <h2 id="flow">会話 1 往復の流れ</h2>
@@ -183,13 +183,13 @@
 <h2 id="deploy">デプロイから会話まで</h2>
 
 <ol>
-  <li><code>terraform/ecr</code> を apply して ECR リポジトリを作る</li>
+  <li><code>terraform/base/ecr</code> を apply して ECR リポジトリを作る</li>
   <li>arm64 のエージェントイメージ（トポロジのツールと静的データ入り）をビルドして push する</li>
-  <li><code>terraform/main</code> を apply する。VPC / サブネット / ルートテーブルを作り、push したタグ <code>agent_image_tag</code> を渡す（OpenSearch の管理者は apply した人の認証情報から自動で取る）。VPC ID・サブネット・SG・バケット名は出力に出し、<code>terraform/lab</code> / <code>terraform/stream</code> / <code>terraform/analytics</code> / <code>terraform/graph</code> はローカルの state（<code>terraform_remote_state</code>）から読む</li>
+  <li><code>terraform/base/core</code> を apply する。VPC / サブネット / ルートテーブルを作り、push したタグ <code>agent_image_tag</code> を渡す（OpenSearch の管理者は apply した人の認証情報から自動で取る）。VPC ID・サブネット・SG・バケット名は出力に出し、<code>terraform/pipeline/lab</code> / <code>terraform/pipeline/stream</code> / <code>terraform/pipeline/analytics</code> / <code>terraform/pipeline/graph</code> はローカルの state（<code>terraform_remote_state</code>）から読む</li>
   <li>Gradio の画面と wheel（arm64 / cp313）を S3 の <code>web/</code> に置いて EC2 を再起動し、<code>kb-docs/</code> の md を S3 に置いて取り込みジョブを流す</li>
   <li>Runtime のロググループに保持期間とタグを付け、利用者に <code>ssm:StartSession</code> の権限を渡す</li>
   <li>PC でポートフォワーディングを始め、ブラウザで <code>http://localhost:8080/</code> を開く</li>
-  <li>（任意）lab のイメージを ECR に、設定と containerlab の rpm を S3 に置き、<code>terraform/lab</code> を apply する。SSM セッションで入って <code>sudo lab check</code></li>
+  <li>（任意）lab のイメージを ECR に、設定と containerlab の rpm を S3 に置き、<code>terraform/pipeline/lab</code> を apply する。SSM セッションで入って <code>sudo lab check</code></li>
 </ol>
 
 <pre><code class="language-bash">aws ssm start-session --region ap-northeast-1 \
@@ -205,7 +205,7 @@
 
 <p>
 フェーズ 1 では lab と Web はつながっておらず、トポロジもコンテナに焼いた静的データでした。
-フェーズ 2 は 4 つのルート（<code>terraform/lab</code> → <code>terraform/stream</code> → <code>terraform/analytics</code> と <code>terraform/graph</code>）を足して、lab の SNMP を Kafka に流し、Spark で S3 Tables（Iceberg）に溜め、トポロジを Neptune に置きます（2026-09-17 のユーザー決定でフェーズ 2 の範囲をここまでにし、旧 2B を取り込みました。フェーズ 3 は <code>terraform/workflow</code> を足して、Temporal on ECS Fargate のワーカーがエージェントに原因を調査させ、人が Web の「承認」タブで承認すると lab で直します。エージェントのツールは AgentCore Gateway（MCP）経由。2026-09-17 着手。<code>docs/phases.md</code>）。
+フェーズ 2 は 4 つのルート（<code>terraform/pipeline/lab</code> → <code>terraform/pipeline/stream</code> → <code>terraform/pipeline/analytics</code> と <code>terraform/pipeline/graph</code>）を足して、lab の SNMP を Kafka に流し、Spark で S3 Tables（Iceberg）に溜め、トポロジを Neptune に置きます（2026-09-17 のユーザー決定でフェーズ 2 の範囲をここまでにし、旧 2B を取り込みました。フェーズ 3 は <code>terraform/workflow</code> を足して、Temporal on ECS Fargate のワーカーがエージェントに原因を調査させ、人が Web の「承認」タブで承認すると lab で直します。エージェントのツールは AgentCore Gateway（MCP）経由。2026-09-17 着手。<code>docs/phases.md</code>）。
 どれも時間課金なので、<strong>使う日に作って当日中に消す</strong>前提です。
 </p>
 

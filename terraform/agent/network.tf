@@ -1,11 +1,9 @@
 # ---------------------------------------------------------------- VPC endpoints for the AgentCore Runtime (2 AZ)
-# VPC / サブネット / SG は terraform/main のもの。Runtime の ENI が 2 AZ に置かれるので、Runtime が使うエンドポイントは 2 AZ に置く。
-# エンドポイントの SG（terraform/main の endpoints）は web / runtime の SG からの 443 を通す
+# VPC / サブネット / SG は terraform/base/core のもの。Runtime の ENI が 2 AZ に置かれるので、Runtime が使うエンドポイントは 2 AZ に置く。
+# ecr.api / ecr.dkr / logs は terraform/base/core が作る（lab / analytics / workflow も使うので。2026-09-18 に移した）。ここは Runtime だけが使う bedrock-runtime
+# エンドポイントの SG（terraform/base/core の endpoints）は web / runtime の SG からの 443 を通す
 locals {
   runtime_endpoint_services = var.create_runtime_endpoints ? {
-    "ecr-api"         = "ecr.api"
-    "ecr-dkr"         = "ecr.dkr"
-    "logs"            = "logs"
     "bedrock-runtime" = "bedrock-runtime"
   } : {}
 }

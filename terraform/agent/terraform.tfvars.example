@@ -1,13 +1,13 @@
 # Copy to terraform.tfvars (gitignored) only when the defaults are not right. Every value has a default in variables.tf.
 # ops/up.sh passes owner / agent_image_tag / create_knowledge_base / kb_admin_principal_arn / opensearch_cacert_file with -var.
-# region / name_prefix / owner must be the same values as terraform/main.
+# region / name_prefix / owner must be the same values as terraform/base/core.
 #
 # region      = "ap-northeast-1"
 # name_prefix = "fukuda-nwc-poc"
 # owner       = "fukuda"
 #
 # agent_image_tag = "v1"
-# agent_image_uri = ""             # leave empty to use the terraform/ecr repository
+# agent_image_uri = ""             # leave empty to use the terraform/base/ecr repository
 # runtime_name    = "fukuda_nwc_poc_agent"
 # model_id        = "jp.amazon.nova-2-lite-v1:0"
 #

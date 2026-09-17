@@ -1,5 +1,5 @@
 """異常検知（spark/snmp_sinks.py の detect）の模擬テスト。boto3 のクライアントを差し替えて DynamoDB と EventBridge への書き込みを確かめ、
-terraform/stream から detector Lambda が消えて anomalies テーブルだけが残っていることも確かめる。
+terraform/pipeline/stream から detector Lambda が消えて anomalies テーブルだけが残っていることも確かめる。
 実行は python3 tests/test_stream.py（pyspark も boto3 も要らない。snmp_sinks.py は pyspark を関数の中で import する）。"""
 import importlib.util, json, os, re, sys
 
@@ -13,18 +13,18 @@ def check(name, cond):
     passed += 1
     print("ok", name)
 
-# ---- terraform/stream: detector Lambda は analytics の Spark に寄せた
-TF_DIR = os.path.join(ROOT, "terraform", "stream")
+# ---- terraform/pipeline/stream: detector Lambda は analytics の Spark に寄せた
+TF_DIR = os.path.join(ROOT, "terraform", "pipeline", "stream")
 tf = ""
 for name in sorted(os.listdir(TF_DIR)):
     if name.endswith(".tf"):
         with open(os.path.join(TF_DIR, name), encoding="utf-8") as f:
             tf += f.read() + "\n"
 check("stream/detector.py は無い（検知は spark/snmp_sinks.py）", not os.path.exists(os.path.join(ROOT, "stream", "detector.py")))
-check("terraform/stream に detector の Lambda が無い", '"detector"' not in tf and "stream/detector.py" not in tf and "archive_file" not in tf)
-check("terraform/stream に lambda のエンドポイントが無い", '.lambda"' not in tf)
-check("terraform/stream は sts のエンドポイントを create_sts_endpoint で切れる", 'variable "create_sts_endpoint"' in tf and 'toset(["sts"])' in tf)
-check("terraform/stream は anomalies テーブルを持つ", re.search(r'resource "aws_dynamodb_table" "anomalies"', tf) is not None)
+check("terraform/pipeline/stream に detector の Lambda が無い", '"detector"' not in tf and "stream/detector.py" not in tf and "archive_file" not in tf)
+check("terraform/pipeline/stream に lambda のエンドポイントが無い", '.lambda"' not in tf)
+check("terraform/pipeline/stream は sts のエンドポイントを create_sts_endpoint で切れる", 'variable "create_sts_endpoint"' in tf and 'toset(["sts"])' in tf)
+check("terraform/pipeline/stream は anomalies テーブルを持つ", re.search(r'resource "aws_dynamodb_table" "anomalies"', tf) is not None)
 check("output に anomaly_table_name と anomaly_table_arn がある（analytics が読む）",
       'output "anomaly_table_name"' in tf and 'output "anomaly_table_arn"' in tf)
 check("detector_logs の output は無い", "detector_logs" not in tf)
@@ -205,5 +205,36 @@ check("linkDown / linkUp 以外の trap は kind=trap で open", key in ddb.item
 send, ddb, ev = make()
 opened = send([iface("203.0.113.11", f"eth{i}", 2) for i in range(23)])
 check("新しい異常が 10 件を超えたら put_events を分ける", len(opened) == 23 and [len(c) for c in ev.calls] == [10, 10, 3])
+
+# ---- ログの経路: FRR の log file → EC2 の /var/log/netops-lab/<機器名> → Telegraf の tail → Kafka の logs → Spark（2026-09-18）
+def _read(*parts):
+    with open(os.path.join(ROOT, *parts), encoding="utf-8") as f:
+        return f.read()
+frr_nodes = sorted(n[:-5] for n in os.listdir(os.path.join(ROOT, "lab", "frr")) if n.endswith(".conf") and n != "vtysh.conf")
+check("FRR の 6 台とも log file と bgp log-neighbor-changes を持つ", len(frr_nodes) == 6 and all(
+      re.search(r"^log file /var/log/frr/frr\.log informational$", _read("lab", "frr", n + ".conf"), re.M)
+      and re.search(r"^\s*bgp log-neighbor-changes$", _read("lab", "frr", n + ".conf"), re.M) for n in frr_nodes))
+clab = _read("lab", "wvs2.clab.yml.in")
+check("containerlab は FRR の 6 台のログの置き場を bind する", all(f"- __LOG_DIR__/{n}:/var/log/frr" in clab for n in frr_nodes))
+labsh = _read("lab", "lab.sh")
+tele = _read("lab", "telegraf.conf.in")
+log_dir = re.search(r"^LOG_DIR=(\S+)$", labsh, re.M).group(1)
+check("lab.sh は render で __LOG_DIR__ を埋めて置き場を作り、logs で読める",
+      '-e "s#__LOG_DIR__#$LOG_DIR#"' in labsh and 'install -d -m 1777 "$LOG_DIR/$n"' in labsh and re.search(r"^\s*logs\)", labsh, re.M) is not None)
+check("置き場は src/ の外（user_data の s3 sync --delete に消されない）", log_dir.startswith("/var/log/"))
+check("Telegraf は lab.sh と同じ置き場を tail し、frr_log として logs トピックに出す",
+      f'files = ["{log_dir}/*/frr.log"]' in tele and 'name_override = "frr_log"' in tele
+      and re.search(r'topic = "logs"[\s\S]*?namepass = \["frr_log"\]|namepass = \["frr_log"\][\s\S]*?topic = "logs"', tele) is not None)
+check("metrics / traps の出力に frr_log が混ざらない（namepass / namedrop）",
+      all(re.search(r"name(pass|drop)", blk) for blk in tele.split("[[outputs.kafka]]")[1:]))
+check("パスから sysName を作る（detect と同じ機器名のタグ）", 'result_key = "sysName"' in tele and log_dir + "/([^/]+)/" in tele)
+# grok と同じ形を Python の正規表現で確かめる（FRR の log file の 1 行）
+_line = "2026/09/18 01:02:03 BGP: [M59KS-A3ZXZ] bgp_update_receive: rcvd End-of-RIB for IPv4 Unicast from 203.0.113.2 in vrf default"
+_m = re.match(r"^(?P<log_time>\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}) (?P<daemon>\w+): (?P<message>.*)$", _line)
+check("grok の形（日時 デーモン: 本文）が FRR の行に合う", _m is not None and _m.group("daemon") == "BGP" and "%{FRR_TS:log_time} %{WORD:daemon:tag}: %{GREEDYDATA:message}" in tele)
+check("detect は frr_log を異常にしない", mod.events({"name": "frr_log", "tags": {"sysName": "hq-ce-01"}, "fields": {"message": "x"}}, {}) == [])
+sink_tf = _read("terraform", "pipeline", "stream", "sink.tf")
+check("S3 sink と Spark の既定は logs も読む", '"metrics,traps,logs"' in sink_tf and mod.LOG_TOPICS == "traps,logs"
+      and mod.sink_topics("opensearch", mod.METRIC_TOPICS, mod.LOG_TOPICS) == "traps,logs")
 
 print(f"通過 {passed} / 失敗 0")

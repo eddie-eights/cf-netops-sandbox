@@ -276,7 +276,7 @@ async def set_status(proposal_id: str, status: str, fields: dict | None = None) 
 @activity.defn
 async def apply_on_lab(command: str) -> dict:
     if not LAB_INSTANCE_ID:
-        return {"status": "Skipped", "output": "LAB_INSTANCE_ID が無い（terraform/lab が無い）"}
+        return {"status": "Skipped", "output": "LAB_INSTANCE_ID が無い（terraform/pipeline/lab が無い）"}
     status, out = await asyncio.to_thread(run_on_lab, command)
     return {"status": status, "output": out}
 

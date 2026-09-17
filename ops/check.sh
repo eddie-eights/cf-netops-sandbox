@@ -10,7 +10,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-ROOTS=(ecr main agent lab stream analytics graph workflow)
+ROOTS=(base/ecr base/core agent pipeline/lab pipeline/stream pipeline/analytics pipeline/graph workflow)
 
 log() { printf '\n== %s\n' "$*"; }
 die() {

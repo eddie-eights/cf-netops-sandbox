@@ -30,7 +30,7 @@ resource "aws_dynamodb_table" "proposals" {
   lifecycle {
     precondition {
       condition     = local.anomaly_table != ""
-      error_message = "terraform/stream の state（terraform/stream/terraform.tfstate）から anomaly_table_name が読めない。terraform/stream を先に apply する。"
+      error_message = "terraform/pipeline/stream の state（terraform/pipeline/stream/terraform.tfstate）から anomaly_table_name が読めない。terraform/pipeline/stream を先に apply する。"
     }
   }
 }
@@ -42,7 +42,7 @@ resource "aws_ssm_parameter" "proposal_table" {
   value = aws_dynamodb_table.proposals.name
 }
 
-# ---------------------------------------------------------------- access for the chat runtime and the web EC2 (terraform/main roles)
+# ---------------------------------------------------------------- access for the chat runtime and the web EC2 (terraform/base/core roles)
 data "aws_iam_policy_document" "reader_access" {
   statement {
     sid = "Proposals"

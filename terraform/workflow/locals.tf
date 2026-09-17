@@ -1,8 +1,8 @@
 # fukuda-nwc-poc - workflow root module (feature "workflow"). One ECS on Fargate task (ARM64, 1 vCPU / 2 GB) runs the Temporal dev server
-# and a Python worker in the VPC of terraform/main. The Spark job of terraform/analytics puts an AnomalyOpened event on EventBridge
+# and a Python worker in the VPC of terraform/base/core. The Spark job of terraform/pipeline/analytics puts an AnomalyOpened event on EventBridge
 # when it opens an anomaly; events.tf routes it to an SQS queue and the worker starts one workflow per anomaly. The workflow asks the
 # chat runtime (AgentCore) for a cause and a fix (the runtime looks at Neptune / OpenSearch / Prometheus through the MCP tools),
-# writes a proposal to DynamoDB, waits for a human decision (web tab "承認"), applies the fix on the lab EC2 (terraform/lab)
+# writes a proposal to DynamoDB, waits for a human decision (web tab "承認"), applies the fix on the lab EC2 (terraform/pipeline/lab)
 # through SSM Run Command and checks that the anomaly resolved. Temporal runs on ECS now (EKS later - 2026-09-17 user decision).
 # The AgentCore Gateway (MCP) exposes the agent tools through a Lambda in the VPC so the runtime can read Neptune, the logs
 # collection and the metrics workspace over MCP. Costs about 0.06 USD per hour while it exists (Fargate + endpoints) - destroy it the same day.
@@ -10,13 +10,13 @@
 data "aws_caller_identity" "current" {}
 data "aws_partition" "current" {}
 
-# VPC / サブネット / SG / ロール名は terraform/main、Runtime ARN は terraform/agent、異常テーブルは terraform/stream、lab EC2 は terraform/lab、
-# Neptune の SG は terraform/graph、OpenSearch / Prometheus は terraform/analytics の state から読む（graph / analytics は無くてもよい）
+# VPC / サブネット / SG / ロール名は terraform/base/core、Runtime ARN は terraform/agent、異常テーブルは terraform/pipeline/stream、lab EC2 は terraform/pipeline/lab、
+# Neptune の SG は terraform/pipeline/graph、OpenSearch / Prometheus は terraform/pipeline/analytics の state から読む（graph / analytics は無くてもよい）
 data "terraform_remote_state" "main" {
   backend = "local"
 
   config = {
-    path = "${path.module}/../main/terraform.tfstate"
+    path = "${path.module}/../base/core/terraform.tfstate"
   }
 }
 
@@ -32,7 +32,7 @@ data "terraform_remote_state" "stream" {
   backend = "local"
 
   config = {
-    path = "${path.module}/../stream/terraform.tfstate"
+    path = "${path.module}/../pipeline/stream/terraform.tfstate"
   }
 }
 
@@ -40,7 +40,7 @@ data "terraform_remote_state" "lab" {
   backend = "local"
 
   config = {
-    path = "${path.module}/../lab/terraform.tfstate"
+    path = "${path.module}/../pipeline/lab/terraform.tfstate"
   }
 }
 
@@ -48,7 +48,7 @@ data "terraform_remote_state" "ecr" {
   backend = "local"
 
   config = {
-    path = "${path.module}/../ecr/terraform.tfstate"
+    path = "${path.module}/../base/ecr/terraform.tfstate"
   }
 }
 
@@ -56,7 +56,7 @@ data "terraform_remote_state" "graph" {
   backend = "local"
 
   config = {
-    path = "${path.module}/../graph/terraform.tfstate"
+    path = "${path.module}/../pipeline/graph/terraform.tfstate"
   }
 }
 
@@ -64,7 +64,7 @@ data "terraform_remote_state" "analytics" {
   backend = "local"
 
   config = {
-    path = "${path.module}/../analytics/terraform.tfstate"
+    path = "${path.module}/../pipeline/analytics/terraform.tfstate"
   }
 }
 

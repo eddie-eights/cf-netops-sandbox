@@ -208,12 +208,12 @@ for name in tf_files:
 check("ファイルは versions / providers / variables / locals / proposals / iam / ecs / gateway / outputs",
       set(tf_files) == {"versions.tf", "providers.tf", "variables.tf", "locals.tf", "proposals.tf", "iam.tf", "ecs.tf", "gateway.tf", "events.tf", "outputs.tf"})
 check("graph と analytics の state は try で読む（無くても apply できる）",
-      '"${path.module}/../graph/terraform.tfstate"' in tf and '"${path.module}/../analytics/terraform.tfstate"' in tf
+      '"${path.module}/../pipeline/graph/terraform.tfstate"' in tf and '"${path.module}/../pipeline/analytics/terraform.tfstate"' in tf
       and re.search(r'try\(data\.terraform_remote_state\.analytics', tf) is not None)
-for root in ("main", "stream", "lab", "ecr", "agent"):
+for root in ("base/core", "pipeline/stream", "pipeline/lab", "base/ecr", "agent"):
     check(f"{root} の state をローカルから読む", f'"${{path.module}}/../{root}/terraform.tfstate"' in tf)
-main_out = read("terraform", "main", "outputs.tf"); stream_out = read("terraform", "stream", "outputs.tf")
-lab_out = read("terraform", "lab", "outputs.tf"); ecr_out = read("terraform", "ecr", "outputs.tf"); agent_out = read("terraform", "agent", "outputs.tf")
+main_out = read("terraform", "base", "core", "outputs.tf"); stream_out = read("terraform", "pipeline", "stream", "outputs.tf")
+lab_out = read("terraform", "pipeline", "lab", "outputs.tf"); ecr_out = read("terraform", "base", "ecr", "outputs.tf"); agent_out = read("terraform", "agent", "outputs.tf")
 for out in ("vpc_id", "instance_subnet_id", "endpoint_security_group_id", "runtime_role_name", "web_role_name"):
     check(f"main の出力 {out} がある", f'output "{out}"' in main_out and f"outputs.{out}" in tf)
 check("agent の出力 agent_runtime_arn を try で読み、無ければ precondition で止まる（terraform/agent を先に apply）",
@@ -263,8 +263,8 @@ check("agent/Dockerfile は mcp_client.py と proposals.py を入れる", "mcp_c
 check("workflow/Dockerfile は非 root で worker.py を打つ", "USER worker" in read("workflow", "Dockerfile") and '["python", "worker.py"]' in read("workflow", "Dockerfile"))
 check("workflow/requirements.txt は temporalio と boto3 を固定する", "temporalio==" in read("workflow", "requirements.txt") and "boto3>=" in read("workflow", "requirements.txt"))
 ast.parse(read("workflow", "worker.py"))
-ecr_tf = read("terraform", "ecr", "main.tf")
-check("terraform/ecr は worker / temporal のリポジトリを作る", '"worker", "temporal"' in ecr_tf and 'resource "aws_ecr_repository" "workflow"' in ecr_tf)
+ecr_tf = read("terraform", "base", "ecr", "main.tf")
+check("terraform/base/ecr は worker / temporal のリポジトリを作る", '"worker", "temporal"' in ecr_tf and 'resource "aws_ecr_repository" "workflow"' in ecr_tf)
 
 # ---- web の承認タブ
 web = read("web", "app.py")
@@ -296,19 +296,27 @@ check("up.sh の TEMPORAL_TAG は terraform/workflow の temporal_image_tag の�
 check("up.sh は workflow を apply して services-stable を待ち、Temporal UI のポートフォワーディングを案内する",
       'tf_apply workflow -var "worker_image_tag=$IMAGE_TAG"' in up and 'aws ecs wait services-stable' in up and 'AWS-StartPortForwardingSessionToRemoteHost' in up)
 check("down.sh は workflow を最初に消す（必須変数はダミーで渡す）",
-      down.index('destroy_root workflow') < down.index('destroy_root analytics') and 'worker_image_tag=${IMAGE_TAG:-destroy}' in down)
+      down.index('destroy_lambda_root workflow') < down.index('destroy_root pipeline/analytics') and 'worker_image_tag=${IMAGE_TAG:-destroy}' in down)
 check("check.sh は workflow ルートとこのテストを見る", "workflow)" in chk and "tests/test_workflow.py" in chk and "workflow/worker.py" in chk)
-check("deploy.env.example は AGENT=1 / PIPELINE=0 / WORKFLOW=0 を既定にし、CREATE_KB と PHASE（古い書き方）を説明する",
+check("deploy.env.example は AGENT=1 / PIPELINE=0 / WORKFLOW=0 を既定にし、CREATE_KB を説明する（古い PHASE の行は載せない。2026-09-18）",
       re.search(r"^AGENT=1\n^PIPELINE=0\n^WORKFLOW=0$", read("deploy.env.example"), re.M) is not None
-      and re.search(r"^#CREATE_KB=0$", read("deploy.env.example"), re.M) is not None and re.search(r"^#PHASE=1$", read("deploy.env.example"), re.M) is not None
+      and re.search(r"^#CREATE_KB=0$", read("deploy.env.example"), re.M) is not None and re.search(r"^#?\s*PHASE=", read("deploy.env.example"), re.M) is None
       and "workflow" in read("deploy.env.example"))
-# ---- terraform/agent と terraform/main の分担
+check("down.sh は VPC の Lambda を持つルート（workflow / graph）を消す間、その関数の available な ENI だけを裏で消す（2026-09-18）",
+      'destroy_lambda_root workflow "$PREFIX-tools"' in down and 'destroy_lambda_root pipeline/graph "$PREFIX-graph-status"' in down
+      and 'Values=AWS Lambda VPC ENI-$1-*" Name=status,Values=available' in down and "kill -0 $$" in down)
+_envsh = read("ops", "deploy-env.sh")
+check("terraform の出力は tf_logged で絞り、全文を ops/logs に残す。TF_VERBOSE=1 で全部出す。up.sh と down.sh の両方が通す",
+      "tf_logged()" in _envsh and 'tee "$logf"' in _envsh and 'if [ -n "$TF_VERBOSE" ]' in _envsh
+      and 'tf_logged "$root" apply' in read("ops", "up.sh") and 'tf_logged "$root" destroy' in down
+      and re.search(r"^set -e?uo pipefail", down, re.M) is not None)
+# ---- terraform/agent と terraform/base/core の分担
 agent_files = set(n for n in os.listdir(os.path.join(ROOT, "terraform", "agent")) if n.endswith(".tf"))
 check("terraform/agent のファイルは versions / providers / variables / locals / network / runtime / kb / outputs",
       agent_files == {"versions.tf", "providers.tf", "variables.tf", "locals.tf", "network.tf", "runtime.tf", "kb.tf", "outputs.tf"})
 agent_tf = "".join(read("terraform", "agent", n) for n in sorted(agent_files))
-main_tf = "".join(read("terraform", "main", n) for n in sorted(os.listdir(os.path.join(ROOT, "terraform", "main"))) if n.endswith(".tf"))
-check("Runtime / ガードレール / KB / Runtime のエンドポイントは terraform/agent にあり、terraform/main には無い",
+main_tf = "".join(read("terraform", "base", "core", n) for n in sorted(os.listdir(os.path.join(ROOT, "terraform", "base", "core"))) if n.endswith(".tf"))
+check("Runtime / ガードレール / KB / Runtime のエンドポイントは terraform/agent にあり、terraform/base/core には無い",
       all(r in agent_tf for r in ('resource "aws_bedrockagentcore_agent_runtime" "agent"', 'resource "aws_bedrock_guardrail" "this"', 'resource "aws_bedrockagent_knowledge_base" "kb"', 'resource "aws_vpc_endpoint" "runtime"'))
       and not any(r in main_tf for r in ("aws_bedrockagentcore_agent_runtime", "aws_bedrock_guardrail", "aws_bedrockagent_knowledge_base", "aws_opensearchserverless", 'resource "aws_vpc_endpoint" "runtime"')))
 check("KB は create_knowledge_base（既定 false）の count で作り、Runtime は KB があるときだけ KNOWLEDGE_BASE_ID を受ける",
@@ -316,19 +324,19 @@ check("KB は create_knowledge_base（既定 false）の count で作り、Runti
       and re.search(r'local\.kb \? \{\n\s*KNOWLEDGE_BASE_ID', agent_tf) is not None)
 check("Runtime の ARN は agent が SSM に書き、web はそれを読む（main は runtime_arn を user_data に渡さない）",
       'resource "aws_ssm_parameter" "runtime_arn"' in agent_tf and 'name        = "${local.param_prefix}/runtime-arn"' in agent_tf
-      and "runtime_arn" not in read("terraform", "main", "templates", "web_user_data.sh.tftpl") and 'def runtime_arn()' in web and '/runtime-arn' in web
+      and "runtime_arn" not in read("terraform", "base", "core", "templates", "web_user_data.sh.tftpl") and 'def runtime_arn()' in web and '/runtime-arn' in web
       and 'ssm:GetParameter' in main_tf)
 check("agent は web のロールに InvokeAgentRuntime を付け、main の runtime ロールにポリシーを足す",
       'role = local.web_role_name' in agent_tf and 'bedrock-agentcore:InvokeAgentRuntime' in agent_tf and 'role = local.runtime_role_name' in agent_tf
       and 'output "runtime_role_arn"' in main_out and 'resource "aws_iam_role" "runtime"' in main_tf)
 check("down.sh は Runtime の ENI が残るあいだ VPC・サブネット・Runtime の SG を残して他を消す",
-      "InterfaceType=='agentic_ai'" in down and "Name=tag:Name,Values=$PREFIX-vpc" in down and "tf main output -raw vpc_id" not in down and "Runtime の ENI の確認:" in down
+      "InterfaceType=='agentic_ai'" in down and "Name=tag:Name,Values=$PREFIX-vpc" in down and "tf base/core output -raw vpc_id" not in down and "Runtime の ENI の確認:" in down
       and '""|data.*|aws_vpc.this|aws_subnet.*|aws_security_group.runtime) ;;' in down
-      and down.index("InterfaceType=='agentic_ai'") < down.index("destroy_root main") < down.index("destroy_root ecr"))
+      and down.index("InterfaceType=='agentic_ai'") < down.index("destroy_root base/core") < down.index("destroy_root base/ecr"))
 check("down.sh は agent を lab の後、main の前に消し、ロググループ名を agent の state から読む",
-      down.index("destroy_root lab") < down.index("destroy_root agent") < down.index("destroy_root main") and "tf agent output -raw runtime_log_group_name" in down)
+      down.index("destroy_root pipeline/lab") < down.index("destroy_root agent") < down.index("destroy_root base/core") and "tf agent output -raw runtime_log_group_name" in down)
 check("up.sh は main の後に agent を apply し、CREATE_KB のときだけ手順書を取り込む",
-      up.index("tf_apply main") < up.index('tf_apply agent "${AGENT_VARS[@]}"') < up.index("start-ingestion-job")
+      up.index("tf_apply base/core") < up.index('tf_apply agent "${AGENT_VARS[@]}"') < up.index("start-ingestion-job")
       and re.search(r'if \[ -n "\$CREATE_KB" \]; then\nlog "4-3\. 手順書を置いて取り込む', up) is not None and 'AGENT_VARS+=(-var create_knowledge_base=true)' in up)
 
 print(f"通過 {passed} / 失敗 0")

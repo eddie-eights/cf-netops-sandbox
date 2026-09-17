@@ -60,9 +60,31 @@ destroy_root() {  # destroy_root <ルート> [-var 名前=値 …]
   local root="$1"; shift
   if ! has_resources "$root"; then echo "terraform/$root: 無い（state が無いか空）"; return 0; fi
   echo "terraform/$root: 消す"
-  tf "$root" destroy -input=false -auto-approve -var "owner=$OWNER" "$@" \
-    || die "terraform/$root が消えなかった（上のエラー。Runtime の ENI でサブネットや SG が消えないときは最大 8 時間待って ops/down.sh を打ち直す）"
+  tf_logged "$root" destroy -input=false -auto-approve -var "owner=$OWNER" "$@" \
+    || die "terraform/$root が消えなかった（上のエラー。全文は $(tf_log_file "$root" destroy)。Runtime の ENI でサブネットや SG が消えないときは最大 8 時間待って ops/down.sh を打ち直す）"
   echo "terraform/$root: 消えた"
+}
+# VPC の中の Lambda は、関数を消しても ENI が available のまま 20〜40 分残り、SG とサブネットの削除を DependencyViolation で待たせる
+# （2026-09-18 に graph の destroy が 20 分以上止まった）。destroy の間、その関数の available な ENI だけを裏で消し続ける。
+reap_lambda_enis() {  # reap_lambda_enis <関数名>  親（このスクリプト）が終われば止まる
+  local e
+  while kill -0 $$ 2>/dev/null; do
+    for e in $(aws ec2 describe-network-interfaces --region "$REGION" \
+        --filters "Name=description,Values=AWS Lambda VPC ENI-$1-*" Name=status,Values=available \
+        --query 'NetworkInterfaces[].NetworkInterfaceId' --output text 2>/dev/null); do
+      if aws ec2 delete-network-interface --region "$REGION" --network-interface-id "$e" >/dev/null 2>&1; then
+        echo "Lambda（$1）の残った ENI を 1 つ消した"
+      fi
+    done
+    sleep 20
+  done
+}
+destroy_lambda_root() {  # destroy_lambda_root <ルート> <VPC の中の Lambda の関数名> [-var 名前=値 …]
+  local root="$1" fn="$2" reaper; shift 2
+  reap_lambda_enis "$fn" &
+  reaper=$!
+  destroy_root "$root" "$@"
+  kill "$reaper" 2>/dev/null; wait "$reaper" 2>/dev/null || true
 }
 
 log "0. 設定と道具と認証"
@@ -84,8 +106,8 @@ if [ -n "$CACERT" ]; then AGENT_VARS+=(-var "opensearch_cacert_file=$CACERT"); f
 
 log "1. analytics → graph → stream（analytics は stream の Kafka を読み、stream は lab の state を読むので、この順）"
 # EMR Serverless のアプリケーションは、ジョブが動いているか STARTED のままだと destroy が落ちる。先にジョブを止め、アプリケーションを止める
-if has_resources analytics; then
-  APP_ID=$(tf analytics output -raw application_id 2>/dev/null || true)
+if has_resources pipeline/analytics; then
+  APP_ID=$(tf pipeline/analytics output -raw application_id 2>/dev/null || true)
   if [ -n "$APP_ID" ]; then
     RUNNING=$(aws emr-serverless list-job-runs --region "$REGION" --application-id "$APP_ID" \
       --states SUBMITTED PENDING SCHEDULED RUNNING --query 'jobRuns[].id' --output text 2>/dev/null || true)
@@ -110,20 +132,20 @@ if has_resources analytics; then
   fi
 fi
 # workflow の worker_image_tag は必須変数だが destroy では使われないので、何でもよい値を渡す
-destroy_root workflow -var "worker_image_tag=${IMAGE_TAG:-destroy}"
-destroy_root analytics
-destroy_root graph
+destroy_lambda_root workflow "$PREFIX-tools" -var "worker_image_tag=${IMAGE_TAG:-destroy}"
+destroy_root pipeline/analytics
+destroy_lambda_root pipeline/graph "$PREFIX-graph-status"
 STREAM_VARS=()
 # S3 sink 無しで作った stream（CREATE_S3_SINK=0 ops/up.sh）は、既定の create_s3_sink=true のまま destroy すると zip の有無を確かめに行って止まる
-if has_resources stream && ! tf stream state list 2>/dev/null | grep -Eq '\.(connect|s3_sink)\['; then
+if has_resources pipeline/stream && ! tf pipeline/stream state list 2>/dev/null | grep -Eq '\.(connect|s3_sink)\['; then
   STREAM_VARS+=(-var create_s3_sink=false)
 fi
-destroy_root stream ${STREAM_VARS[@]+"${STREAM_VARS[@]}"}
+destroy_root pipeline/stream ${STREAM_VARS[@]+"${STREAM_VARS[@]}"}
 
 log "2. lab"
-destroy_root lab
+destroy_root pipeline/lab
 
-log "3. agent（Runtime / ガードレール / KB。terraform/main のロールにポリシーを付けているので main より先）"
+log "3. agent（Runtime / ガードレール / KB。terraform/base/core のロールにポリシーを付けているので main より先）"
 LOG_GROUP=""
 if has_resources agent; then
   LOG_GROUP=$(tf agent output -raw runtime_log_group_name 2>/dev/null || true)
@@ -134,12 +156,12 @@ if has_resources agent && tf agent state list 2>/dev/null | grep -q '^aws_opense
 fi
 destroy_root agent ${AGENT_VARS[@]+"${AGENT_VARS[@]}"}
 
-log "3-2. 土台（terraform/main。VPC / Web の EC2 / バケット（中身ごと消える）/ ロール）"
+log "3-2. 土台（terraform/base/core。VPC / Web の EC2 / バケット（中身ごと消える）/ ロール）"
 # Runtime の ENI（種類 agentic_ai。AWS 側の所有で、自分では外せない）は Runtime を消したあとも最大 8 時間残り、その間はサブネットと
 # Runtime の SG が DependencyViolation で消えない（terraform は 20 分待ってから落ちる）。残っているあいだは、それ以外だけを消して先へ進む。
 # 残る VPC・サブネット・SG に時間課金は無く、次の ops/up.sh はそのまま使い回す
 MAIN_LEFT=0
-if has_resources main; then
+if has_resources base/core; then
   # 確認そのものが落ちたときに黙って全部消しにいくと 20 分待ちに戻るので、結果は必ず表示し、エラーも隠さない
   # VPC は terraform の output でなくタグで引く。destroy が途中で落ちた state には output が残らず（terraform は output を先に外す）、
   # `terraform output -raw` は空を返して成功するので、打ち直しのとき（= いちばん要るとき）に読めない
@@ -163,25 +185,25 @@ if has_resources main; then
         ""|data.*|aws_vpc.this|aws_subnet.*|aws_security_group.runtime) ;;
         *) MAIN_TARGETS+=("-target=$addr") ;;
       esac
-    done < <(tf main state list 2>/dev/null)
+    done < <(tf base/core state list 2>/dev/null)
     if [ "${#MAIN_TARGETS[@]}" -gt 0 ]; then
-      tf main destroy -input=false -auto-approve -var "owner=$OWNER" "${MAIN_TARGETS[@]}" \
-        || die "terraform/main の ENI に関わらない部分が消えなかった（上のエラー）"
+      tf_logged base/core destroy -input=false -auto-approve -var "owner=$OWNER" "${MAIN_TARGETS[@]}" \
+        || die "terraform/base/core の ENI に関わらない部分が消えなかった（上のエラー）"
     else
-      echo "terraform/main: 残っているのは VPC・サブネット・Runtime の SG だけ"
+      echo "terraform/base/core: 残っているのは VPC・サブネット・Runtime の SG だけ"
     fi
   else
-    destroy_root main
+    destroy_root base/core
   fi
 else
-  echo "terraform/main: 無い（state が無いか空）"
+  echo "terraform/base/core: 無い（state が無いか空）"
 fi
 
 if [ "$KEEP_ECR" = 1 ]; then
   log "4. ECR は残す（KEEP_ECR=1）"
 else
   log "4. ECR（イメージごと消える）"
-  destroy_root ecr
+  destroy_root base/ecr
 fi
 
 log "5. Runtime のロググループ（AgentCore が作るもので Terraform の管理外）"
@@ -205,7 +227,7 @@ OLD_STACKS=$(aws cloudformation list-stacks --region "$REGION" \
   --query "StackSummaries[?starts_with(StackName, '$PREFIX') && StackStatus != 'DELETE_COMPLETE'].StackName" \
   --output text 2>/dev/null || true)
 if [ "$MAIN_LEFT" = 1 ]; then
-  echo "terraform/main の VPC・サブネット・Runtime の SG は残した（Runtime の ENI 待ち。時間課金は無い）。"
+  echo "terraform/base/core の VPC・サブネット・Runtime の SG は残した（Runtime の ENI 待ち。時間課金は無い）。"
   echo "すぐ使うなら ops/up.sh がそのまま使い回す。消し切るなら数時間おいて ops/down.sh を打ち直す"
 fi
 if [ -n "$OLD_STACKS" ] && [ "$OLD_STACKS" != None ]; then

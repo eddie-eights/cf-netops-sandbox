@@ -1,0 +1,18 @@
+# Copy to terraform.tfvars (gitignored) only when the defaults are not right. Every value has a default in variables.tf.
+# terraform/base/core and terraform/pipeline/lab must be applied first (this root reads their state files).
+# With create_s3_sink = true the Confluent S3 sink zip must be in the asset bucket before apply (README s-1).
+#
+# region      = "ap-northeast-1"
+# name_prefix = "fukuda-nwc-poc"
+# owner       = "fukuda"
+#
+# create_sts_endpoint      = true
+# create_dynamodb_endpoint = true
+#
+# kafka_version        = "3.9.x"
+# broker_instance_type = "kafka.t3.small"
+# log_retention_days   = 7
+#
+# create_s3_sink        = true
+# kafka_connect_version = "2.7.1"
+# s3_sink_plugin_key    = "stream/confluentinc-kafka-connect-s3-12.1.11.zip"
