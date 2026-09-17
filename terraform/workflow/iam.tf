@@ -30,11 +30,17 @@ resource "aws_iam_role_policy_attachment" "execution" {
 # ---------------------------------------------------------------- task role (the worker)
 resource "aws_iam_role" "task" {
   name               = "${var.name_prefix}-workflow-task"
-  description        = "Workflow worker - anomaly and proposal tables, chat runtime, SSM Run Command on the lab EC2, ECS Exec"
+  description        = "Workflow worker - anomaly queue, anomaly and proposal tables, chat runtime, SSM Run Command on the lab EC2, ECS Exec"
   assume_role_policy = data.aws_iam_policy_document.ecs_tasks_trust.json
 }
 
 data "aws_iam_policy_document" "task" {
+  statement {
+    sid       = "AnomalyQueue"
+    actions   = ["sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:GetQueueAttributes"]
+    resources = [aws_sqs_queue.anomalies.arn]
+  }
+
   statement {
     sid = "Anomalies"
     actions = [

@@ -1,6 +1,7 @@
 # fukuda-nwc-poc - phase 2 analytics root module. A Spark streaming job on EMR Serverless reads the Telegraf messages
 # (topics metrics / traps) from MSK (terraform/stream) and stores them in S3 Tables (Iceberg, all topics), OpenSearch Serverless
-# (log topics) and Amazon Managed Service for Prometheus (metric topics) - see var.sinks.
+# (log topics) and Amazon Managed Service for Prometheus (metric topics) - see var.sinks. The same job detects link_down / trap anomalies,
+# writes them to the DynamoDB table of terraform/stream and puts an AnomalyOpened event on the default EventBridge bus (terraform/workflow listens).
 # The table bucket is the long-term record of the pipeline; DynamoDB (terraform/stream) keeps only the current anomalies.
 # Costs about 0.17 USD per hour while the streaming job runs (README) - ops/down.sh cancels the job and destroys this root.
 
@@ -35,9 +36,12 @@ locals {
   bucket_arn     = "arn:${local.partition}:s3:::${local.bucket}"
 
   # stream が無いと読む Kafka が無い。下の precondition で「stream を先に」と出す
-  msk_cluster_arn = try(data.terraform_remote_state.stream.outputs.msk_cluster_arn, "")
-  msk_sg_id       = try(data.terraform_remote_state.stream.outputs.msk_security_group_id, "")
-  bootstrap       = try(data.terraform_remote_state.stream.outputs.bootstrap_brokers, "")
+  msk_cluster_arn   = try(data.terraform_remote_state.stream.outputs.msk_cluster_arn, "")
+  msk_sg_id         = try(data.terraform_remote_state.stream.outputs.msk_security_group_id, "")
+  bootstrap         = try(data.terraform_remote_state.stream.outputs.bootstrap_brokers, "")
+  anomaly_table     = try(data.terraform_remote_state.stream.outputs.anomaly_table_name, "")
+  anomaly_table_arn = "arn:${local.partition}:dynamodb:${var.region}:${local.account_id}:table/${local.anomaly_table}"
+  event_bus_arn     = "arn:${local.partition}:events:${var.region}:${local.account_id}:event-bus/${var.event_bus}"
 
   # arn:aws:kafka:<region>:<account>:cluster/<name>/<uuid> → topic/<name>/<uuid>/* と group/<name>/<uuid>/*
   topic_arns = "${replace(local.msk_cluster_arn, ":cluster/", ":topic/")}/*"

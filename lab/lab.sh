@@ -98,7 +98,7 @@ case "${1:-}" in
     echo "$w"
     if systemctl is-active -q "*-telegraf.service" 2>/dev/null; then
       echo "== Telegraf（stream）=="
-      echo "  ポーリング（10 秒周期）と snmpd の linkDown トラップ（5 秒周期の monitor）が MSK に流れ、detector が DynamoDB に書く。"
+      echo "  ポーリング（10 秒周期）と snmpd の linkDown トラップ（5 秒周期の monitor）が MSK に流れ、analytics の Spark が異常を DynamoDB に書く（EventBridge にも出す）。"
       echo "  GUI の「異常一覧」か、エージェントに「今の異常は？」と聞くと hq-ce-01 eth1 の link_down が出る。戻すのは 'lab heal-main'"
     fi
     ;;

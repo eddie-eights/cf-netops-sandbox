@@ -6,7 +6,7 @@
   - トポロジ: 段（pe / ce / host）に分けて SVG に描き、機器を表で出す。元データはエージェントと同じ
     topology.py（Neptune があればそこから、無ければ data/ の静的データ）。Neptune のときはリンクの追加・削除と
     静的データからの投入がここでできる。lab（terraform/lab）には触らない
-  - 異常一覧: terraform/stream の detector が DynamoDB に書いた異常（anomalies.py）。未配備なら案内だけ出す
+  - 異常一覧: terraform/analytics の Spark が DynamoDB に書いた異常（anomalies.py）。未配備なら案内だけ出す
   - 承認: terraform/workflow のワーカーが出した修復案（proposals.py）を見て、承認か却下を書き戻す。未配備なら案内だけ出す
 
 agent/ の topology.py / anomalies.py / graph.py / proposals.py をそのまま同じディレクトリに置いて import する（terraform/main の出力 upload_web_command）。
@@ -304,7 +304,7 @@ with gr.Blocks(title=f"{TITLE} チャット") as demo:
             an_status = gr.Radio(["open", "resolved"], value="open", label="状態（open = 未解消）", scale=3)
             an_refresh = gr.Button("更新", scale=1)
         an_msg = gr.Markdown()
-        an_table = gr.Dataframe(pd.DataFrame(columns=ANOMALY_COLS), interactive=False, label="異常（detector が DynamoDB に書いたもの）")
+        an_table = gr.Dataframe(pd.DataFrame(columns=ANOMALY_COLS), interactive=False, label="異常（Spark が DynamoDB に書いたもの）")
         an_refresh.click(anomaly_table, [an_status], [an_msg, an_table])
         an_status.change(anomaly_table, [an_status], [an_msg, an_table])
         demo.load(anomaly_table, [an_status], [an_msg, an_table])

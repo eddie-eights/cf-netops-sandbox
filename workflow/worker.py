@@ -1,10 +1,13 @@
-"""フェーズ 3 のワーカー（Temporal on ECS Fargate）。異常を見つけたらエージェントに原因を調べさせ、修復案を出し、
-人が承認したら lab EC2 で直し、異常が消えるまで確かめる。
+"""フェーズ 3 のワーカー（Temporal on ECS Fargate。EKS は後回し、2026-09-17 ユーザー決定）。
+Spark が検知した異常（EventBridge → SQS）を受けてエージェントに原因を調べさせ、修復案を出し、人が承認したら lab EC2 で直し、異常が消えるまで確かめる。
 
+2026-09-17 ユーザー決定の流れ: Spark が異常を検知 → EventBridge にイベント（AnomalyOpened）→ SQS → ここ（agent = Temporal のワークフロー）が
+Neptune / S3 / OpenSearch / Prometheus を見て原因分析 → 修復の提案 → 人間の承認 → Temporal で実行。
 同じタスクの中の temporal コンテナ（temporal server start-dev、SQLite）に localhost:7233 でつなぐ。
 1 プロセスで 2 つを動かす:
-  - starter: POLL_INTERVAL 秒ごとに anomalies テーブルの open を見て、異常ごとに investigate-<anomaly_id> のワークフローを起こす
-    （同じ id は Temporal が二重起動を弾く。同じ first_seen の修復案が既にあれば起こさない）
+  - starter: ANOMALY_QUEUE_URL があれば SQS を long polling（20 秒）し、届いた AnomalyOpened ごとに investigate-<anomaly_id> のワークフローを起こす。
+    キューが無ければ従来どおり POLL_INTERVAL 秒ごとに anomalies テーブルの open を見る
+    （同じ id は Temporal が二重起動を弾く。同じ first_seen の修復案が既にあれば起こさない。SQS のメッセージは起こしたあとで消す）
   - worker: ワークフロー InvestigateAnomaly とアクティビティを回す
 
 ワークフローの段: get_anomaly → investigate（AgentCore Runtime に JSON で答えさせる）→ put_proposal（pending）
@@ -25,6 +28,7 @@ import uuid
 from datetime import timedelta
 
 ANOMALY_TABLE = os.environ.get("ANOMALY_TABLE", "")
+ANOMALY_QUEUE_URL = os.environ.get("ANOMALY_QUEUE_URL", "")  # terraform/workflow の events.tf。空ならテーブルを polling
 PROPOSAL_TABLE = os.environ.get("PROPOSAL_TABLE", "")
 AGENT_RUNTIME_ARN = os.environ.get("AGENT_RUNTIME_ARN", "")
 LAB_INSTANCE_ID = os.environ.get("LAB_INSTANCE_ID", "")
@@ -49,8 +53,10 @@ log = logging.getLogger("worker")
 def build_prompt(anomaly: dict) -> str:
     """エージェントに投げる質問。答えは JSON 1 個だけにさせる"""
     return (
-        "あなたはネットワーク運用の一次切り分け担当です。次の異常について、ツール（list_anomalies / neighbors / blast_radius など）で"
-        "状況を確かめてから、原因と処置を JSON で 1 つだけ返してください。説明文や Markdown は付けないでください。\n"
+        "あなたはネットワーク運用の一次切り分け担当です。次の異常について、ツールで状況を確かめてから、原因と処置を JSON で 1 つだけ返してください。"
+        "トポロジと影響範囲は neighbors / blast_radius（Neptune）、他の異常は list_anomalies、その機器のログは search_logs（OpenSearch）、"
+        "メトリクスの推移は query_metrics（Prometheus）、長期の履歴は query_history（S3）で見て、見えた事実だけを根拠に原因を書いてください。"
+        "説明文や Markdown は付けないでください。\n"
         f"異常: device_id={anomaly.get('device_id', '')} kind={anomaly.get('kind', '')} target={anomaly.get('target', '')} "
         f"detail={anomaly.get('detail', '')} first_seen_jst={anomaly.get('first_seen_jst', '')}\n"
         '返す形: {"cause": "原因（日本語 1〜2 文）", "action": "heal-main | check | none", "reason": "その処置を選んだ理由"}\n'
@@ -91,7 +97,7 @@ def dedupe_key(anomaly: dict) -> tuple[str, int]:
 
 def should_start(anomaly: dict, existing: dict | None) -> bool:
     """同じ異常（anomaly_id + first_seen）の修復案が既にあれば起こさない。無ければ起こす。
-    detector は再発した異常でも first_seen を残すので、同じ異常が一度 resolved → 再 open になると起こし直さない（既知の制限）"""
+    Spark（spark/snmp_sinks.py の detect）は resolved から開き直すと first_seen を残すので、同じ異常が一度 resolved → 再 open になると起こし直さない（既知の制限）"""
     if not anomaly.get("anomaly_id"):
         return False
     if not existing:
@@ -101,6 +107,25 @@ def should_start(anomaly: dict, existing: dict | None) -> bool:
 
 def workflow_id(anomaly_id: str) -> str:
     return f"investigate-{anomaly_id}"
+
+
+def anomaly_id_from_message(body: str) -> str:
+    """SQS のメッセージ本文（EventBridge のイベントそのまま）から anomaly_id を取る。読めなければ空"""
+    try:
+        data = json.loads(body or "")
+    except ValueError:
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    detail = data.get("detail")
+    if isinstance(detail, str):
+        try:
+            detail = json.loads(detail)
+        except ValueError:
+            return ""
+    if not isinstance(detail, dict):
+        return ""
+    return str(detail.get("anomaly_id") or "")
 
 
 # ---------------------------------------------------------------- AWS side (activities)
@@ -321,24 +346,61 @@ class InvestigateAnomaly:
         return "failed"
 
 
+async def start_for(client: Client, anomaly: dict) -> bool:
+    """1 つの異常についてワークフローを起こす（起こさない理由があれば False）"""
+    existing = await asyncio.to_thread(read_proposal, anomaly.get("anomaly_id", ""))
+    if not should_start(anomaly, existing):
+        return False
+    try:
+        await client.start_workflow(InvestigateAnomaly.run, anomaly["anomaly_id"],
+                                    id=workflow_id(anomaly["anomaly_id"]), task_queue=TASK_QUEUE)
+        log.info("started %s", workflow_id(anomaly["anomaly_id"]))
+        return True
+    except WorkflowAlreadyStartedError:
+        return False
+
+
+def receive_messages() -> list:
+    return _boto("sqs").receive_message(QueueUrl=ANOMALY_QUEUE_URL, MaxNumberOfMessages=10, WaitTimeSeconds=20).get("Messages", [])
+
+
+def delete_message(receipt: str) -> None:
+    _boto("sqs").delete_message(QueueUrl=ANOMALY_QUEUE_URL, ReceiptHandle=receipt)
+
+
+async def starter_queue(client: Client) -> None:
+    """SQS（EventBridge のルールが流す AnomalyOpened）を待つ。受け取ったら anomalies テーブルの最新を読んで起こし、メッセージを消す"""
+    for m in await asyncio.to_thread(receive_messages):
+        aid = anomaly_id_from_message(m.get("Body", ""))
+        if aid:
+            a = await asyncio.to_thread(read_anomaly, aid)
+            if a:
+                await start_for(client, a)
+            else:
+                log.warning("starter: anomaly %s がテーブルに無い（メッセージは消す）", aid)
+        else:
+            log.warning("starter: 読めないメッセージ（消す）: %s", str(m.get("Body", ""))[:200])
+        await asyncio.to_thread(delete_message, m["ReceiptHandle"])
+
+
+async def starter_table(client: Client) -> None:
+    """キューが無いとき（terraform/workflow の events.tf を配備していない）は open の一覧を polling"""
+    for a in await asyncio.to_thread(list_open_anomalies):
+        await start_for(client, a)
+    await asyncio.sleep(POLL_INTERVAL)
+
+
 async def starter(client: Client) -> None:
+    once = starter_queue if ANOMALY_QUEUE_URL else starter_table
     while True:
         try:
-            for a in await asyncio.to_thread(list_open_anomalies):
-                existing = await asyncio.to_thread(read_proposal, a["anomaly_id"])
-                if not should_start(a, existing):
-                    continue
-                try:
-                    await client.start_workflow(InvestigateAnomaly.run, a["anomaly_id"],
-                                                id=workflow_id(a["anomaly_id"]), task_queue=TASK_QUEUE)
-                    log.info("started %s", workflow_id(a["anomaly_id"]))
-                except WorkflowAlreadyStartedError:
-                    pass
+            await once(client)
         except (WorkflowFailureError, RuntimeError, OSError) as e:
             log.warning("starter: %s", str(e)[:300])
+            await asyncio.sleep(5)
         except Exception as e:  # noqa: BLE001 - boto の例外は種類が多いので落とさずログに出す
             log.warning("starter: %s: %s", type(e).__name__, str(e)[:300])
-        await asyncio.sleep(POLL_INTERVAL)
+            await asyncio.sleep(5)
 
 
 async def connect() -> Client:
@@ -358,7 +420,8 @@ async def main() -> None:
     client = await connect()
     worker = Worker(client, task_queue=TASK_QUEUE, workflows=[InvestigateAnomaly],
                     activities=[get_anomaly, investigate, put_proposal, get_decision, set_status, apply_on_lab, anomaly_resolved])
-    log.info("worker up: queue=%s poll=%ss approval_timeout=%smin lab=%s", TASK_QUEUE, POLL_INTERVAL, APPROVAL_TIMEOUT_MINUTES, LAB_INSTANCE_ID or "-")
+    log.info("worker up: queue=%s source=%s poll=%ss approval_timeout=%smin lab=%s", TASK_QUEUE,
+             "sqs" if ANOMALY_QUEUE_URL else "table", POLL_INTERVAL, APPROVAL_TIMEOUT_MINUTES, LAB_INSTANCE_ID or "-")
     await asyncio.gather(worker.run(), starter(client))
 
 

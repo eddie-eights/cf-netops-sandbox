@@ -1,7 +1,7 @@
 # ---------------------------------------------------------------- network
 resource "aws_security_group" "task" {
   name        = "${var.name_prefix}-workflow"
-  description = "Workflow task - HTTPS to the VPC endpoints of terraform/main (ECR, logs, DynamoDB gateway, SSM, AgentCore)"
+  description = "Workflow task - HTTPS to the VPC endpoints (ECR, logs, DynamoDB gateway, SSM, AgentCore, SQS)"
   vpc_id      = local.vpc_id
 
   tags = { Name = "${var.name_prefix}-workflow" }
@@ -9,7 +9,7 @@ resource "aws_security_group" "task" {
 
 resource "aws_vpc_security_group_egress_rule" "task_https" {
   security_group_id = aws_security_group.task.id
-  description       = "ECR / logs / DynamoDB / SSM / bedrock-agentcore endpoints"
+  description       = "ECR / logs / DynamoDB / SSM / bedrock-agentcore / sqs endpoints"
   ip_protocol       = "tcp"
   from_port         = 443
   to_port           = 443
@@ -85,6 +85,7 @@ resource "aws_ecs_task_definition" "workflow" {
         { name = "AWS_REGION", value = var.region },
         { name = "PARAM_PREFIX", value = local.param_prefix },
         { name = "ANOMALY_TABLE", value = local.anomaly_table },
+        { name = "ANOMALY_QUEUE_URL", value = aws_sqs_queue.anomalies.url },
         { name = "PROPOSAL_TABLE", value = aws_dynamodb_table.proposals.name },
         { name = "AGENT_RUNTIME_ARN", value = local.runtime_arn },
         { name = "LAB_INSTANCE_ID", value = local.lab_instance_id },

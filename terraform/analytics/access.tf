@@ -88,6 +88,20 @@ resource "aws_iam_role_policy" "emr" {
         Action   = "logs:DescribeLogGroups"
         Resource = "*"
       },
+      {
+        # 検知（spark/snmp_sinks.py の detect）: 異常テーブルに open / resolved を書く
+        Sid      = "AnomalyTable"
+        Effect   = "Allow"
+        Action   = "dynamodb:UpdateItem"
+        Resource = local.anomaly_table_arn
+      },
+      {
+        # 新しい異常を EventBridge の既定のバスに出す（terraform/workflow の events.tf が受ける）
+        Sid      = "AnomalyEvents"
+        Effect   = "Allow"
+        Action   = "events:PutEvents"
+        Resource = local.event_bus_arn
+      },
       ],
       # ---- 格納先ごと（sinks.tf。選んだものだけ）
       # 「cond ? [..] : []」は両辺の型が揃わず validate が落ちるので for … if で絞る

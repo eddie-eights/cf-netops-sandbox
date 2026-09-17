@@ -1,7 +1,7 @@
 # ---------------------------------------------------------------- security groups
 resource "aws_security_group" "msk" {
   name        = "${var.name_prefix}-msk"
-  description = "MSK brokers - Kafka IAM (9098) from the lab EC2, from MSK Connect and from the Lambda event source mapping (same group)"
+  description = "MSK brokers - Kafka IAM (9098) from the lab EC2, from MSK Connect and from the EMR Serverless workers (terraform/analytics)"
   vpc_id      = local.vpc_id
 
   tags = { Name = "${var.name_prefix}-msk" }
@@ -16,7 +16,7 @@ resource "aws_security_group" "msk" {
 
 resource "aws_vpc_security_group_egress_rule" "msk_https" {
   security_group_id = aws_security_group.msk.id
-  description       = "MSK Connect workers and the ESM ENIs - S3 gateway, logs / lambda / sts endpoints"
+  description       = "MSK Connect workers - S3 gateway, logs / sts endpoints"
   ip_protocol       = "tcp"
   from_port         = 443
   to_port           = 443
@@ -25,7 +25,7 @@ resource "aws_vpc_security_group_egress_rule" "msk_https" {
 
 resource "aws_vpc_security_group_egress_rule" "msk_kafka" {
   security_group_id = aws_security_group.msk.id
-  description       = "Kafka between brokers, Connect workers and ESM ENIs (all carry this group)"
+  description       = "Kafka between brokers and Connect workers (all carry this group)"
   ip_protocol       = "tcp"
   from_port         = 9092
   to_port           = 9098
@@ -34,7 +34,7 @@ resource "aws_vpc_security_group_egress_rule" "msk_kafka" {
 
 resource "aws_vpc_security_group_ingress_rule" "msk_self" {
   security_group_id            = aws_security_group.msk.id
-  description                  = "Brokers, MSK Connect workers and Lambda ESM ENIs talk to each other"
+  description                  = "Brokers and MSK Connect workers talk to each other"
   ip_protocol                  = "tcp"
   from_port                    = 9092
   to_port                      = 9098
@@ -52,7 +52,7 @@ resource "aws_vpc_security_group_ingress_rule" "msk_from_lab" {
 
 resource "aws_vpc_security_group_ingress_rule" "endpoints_from_msk" {
   security_group_id            = local.endpoint_sg_id
-  description                  = "MSK Connect worker logs and Lambda ESM through the endpoints of terraform/main"
+  description                  = "MSK Connect worker logs through the endpoints of terraform/main"
   ip_protocol                  = "tcp"
   from_port                    = 443
   to_port                      = 443
@@ -60,20 +60,20 @@ resource "aws_vpc_security_group_ingress_rule" "endpoints_from_msk" {
 }
 
 resource "aws_security_group" "stream_endpoints" {
-  count = var.create_lambda_endpoints ? 1 : 0
+  count = var.create_sts_endpoint ? 1 : 0
 
   name        = "${var.name_prefix}-stream-endpoints"
-  description = "lambda / sts interface endpoints - HTTPS from the MSK security group"
+  description = "sts interface endpoint - HTTPS from the MSK security group"
   vpc_id      = local.vpc_id
 
   tags = { Name = "${var.name_prefix}-stream-endpoints" }
 }
 
 resource "aws_vpc_security_group_ingress_rule" "stream_endpoints_from_msk" {
-  count = var.create_lambda_endpoints ? 1 : 0
+  count = var.create_sts_endpoint ? 1 : 0
 
   security_group_id            = aws_security_group.stream_endpoints[0].id
-  description                  = "HTTPS from the ESM ENIs and MSK Connect workers"
+  description                  = "HTTPS from the MSK Connect workers"
   ip_protocol                  = "tcp"
   from_port                    = 443
   to_port                      = 443
@@ -81,9 +81,10 @@ resource "aws_vpc_security_group_ingress_rule" "stream_endpoints_from_msk" {
 }
 
 # ---------------------------------------------------------------- VPC endpoints
-# ESM の ENI は MSK のサブネット / SG に置かれ、Lambda と STS へ届く必要がある（NAT が無いので interface endpoint。1 AZ で足りる）
+# MSK Connect のワーカーは MSK のサブネット / SG に置かれ、IAM ロールを引き受けるのに STS へ届く必要がある（NAT が無いので interface endpoint。1 AZ で足りる）。
+# 本当に要るかは確認できていない（2026-09-17）。detector Lambda を Spark に寄せたので lambda のエンドポイントは外した
 resource "aws_vpc_endpoint" "stream" {
-  for_each = var.create_lambda_endpoints ? toset(["lambda", "sts"]) : toset([])
+  for_each = var.create_sts_endpoint ? toset(["sts"]) : toset([])
 
   vpc_id              = local.vpc_id
   service_name        = "com.amazonaws.${var.region}.${each.key}"

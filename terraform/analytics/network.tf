@@ -10,8 +10,8 @@ resource "aws_security_group" "emr" {
 
   lifecycle {
     precondition {
-      condition     = local.msk_cluster_arn != "" && local.msk_sg_id != "" && local.bootstrap != ""
-      error_message = "terraform/stream の state（terraform/stream/terraform.tfstate）から msk_cluster_arn / msk_security_group_id / bootstrap_brokers が読めない。terraform/stream を先に apply する。"
+      condition     = local.msk_cluster_arn != "" && local.msk_sg_id != "" && local.bootstrap != "" && local.anomaly_table != ""
+      error_message = "terraform/stream の state（terraform/stream/terraform.tfstate）から msk_cluster_arn / msk_security_group_id / bootstrap_brokers / anomaly_table_name が読めない。terraform/stream を先に apply する。"
     }
   }
 }
@@ -36,7 +36,7 @@ resource "aws_vpc_security_group_egress_rule" "emr_self" {
 
 resource "aws_vpc_security_group_egress_rule" "emr_https" {
   security_group_id = aws_security_group.emr.id
-  description       = "S3 gateway endpoint (script, jars, checkpoint, logs, table data) and the s3tables / logs interface endpoints"
+  description       = "S3 gateway endpoint (script, jars, checkpoint, logs, table data), the DynamoDB gateway endpoint and the s3tables / logs / events interface endpoints"
   ip_protocol       = "tcp"
   from_port         = 443
   to_port           = 443
@@ -85,4 +85,18 @@ resource "aws_vpc_endpoint" "s3tables" {
   private_dns_enabled = true
 
   tags = { Name = "${var.name_prefix}-s3tables" }
+}
+
+# ---------------------------------------------------------------- VPC endpoint for EventBridge (PutEvents)
+# 検知クエリの driver が新しい異常を put_events する。NAT が無いので interface endpoint、EMR と同じ理由で 2 AZ（+$0.028/h）。
+# DynamoDB は terraform/stream のゲートウェイエンドポイント（無料）を通る
+resource "aws_vpc_endpoint" "events" {
+  vpc_id              = local.vpc_id
+  service_name        = "com.amazonaws.${var.region}.events"
+  vpc_endpoint_type   = "Interface"
+  subnet_ids          = slice(local.subnet_ids, 0, 2)
+  security_group_ids  = [local.endpoint_sg_id]
+  private_dns_enabled = true
+
+  tags = { Name = "${var.name_prefix}-events" }
 }

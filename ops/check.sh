@@ -34,7 +34,7 @@ done
 log "3. ops スクリプトの構文"
 bash -n ops/up.sh ops/down.sh ops/deploy-env.sh ops/check.sh ops/vscode-setup.sh
 if command -v python3 >/dev/null; then PY=(python3); else PY=(uv run --python 3.13 python); fi
-for p in ops/seed_graph.py spark/snmp_sinks.py workflow/worker.py tools/handler.py agent/mcp_client.py agent/proposals.py; do
+for p in ops/seed_graph.py spark/snmp_sinks.py workflow/worker.py tools/handler.py agent/mcp_client.py agent/proposals.py agent/evidence.py; do
   "${PY[@]}" -c 'import ast, sys; ast.parse(open(sys.argv[1], encoding="utf-8").read(), sys.argv[1])' "$p"
 done
 echo "構文エラーなし"

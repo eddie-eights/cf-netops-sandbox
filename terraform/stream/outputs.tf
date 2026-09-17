@@ -14,7 +14,7 @@ output "anomaly_table_name" {
 }
 
 output "msk_security_group_id" {
-  description = "Security group of the brokers, MSK Connect workers and the Lambda ESM ENIs"
+  description = "Security group of the brokers and MSK Connect workers (terraform/analytics opens 9098 from the EMR workers on it)"
   value       = aws_security_group.msk.id
 }
 
@@ -28,7 +28,7 @@ output "sink_prefix" {
   value       = "s3://${local.bucket}/stream/"
 }
 
-output "detector_logs" {
-  description = "Follow the detector Lambda logs"
-  value       = "aws logs tail /aws/lambda/${var.name_prefix}-detector --region ${var.region} --follow"
+output "anomaly_table_arn" {
+  description = "ARN of the anomaly table (terraform/analytics lets the Spark job write it, terraform/workflow lets the tools Lambda read it)"
+  value       = aws_dynamodb_table.anomalies.arn
 }

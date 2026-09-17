@@ -6,10 +6,8 @@
 # name_prefix = "fukuda-nwc-poc"
 # owner       = "fukuda"
 #
-# create_lambda_endpoints  = true
+# create_sts_endpoint      = true
 # create_dynamodb_endpoint = true
-#
-# device_map = "203.0.113.11=hq-ce-01,203.0.113.12=dc-ce-01,203.0.113.13=br1-ce-01,203.0.113.14=br2-ce-01"
 #
 # kafka_version        = "3.9.x"
 # broker_instance_type = "kafka.t3.small"

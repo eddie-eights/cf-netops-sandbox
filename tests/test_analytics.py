@@ -100,8 +100,8 @@ for act in ("s3tables:GetTableMetadataLocation", "s3tables:UpdateTableMetadataLo
 check("Kafka のトピック ARN は cluster → topic の置き換え", 'replace(local.msk_cluster_arn, ":cluster/", ":topic/")' in tf)
 
 # ---- 格納先（var.sinks。Kafka から 4 つに分ける設計のうち Spark の 3 本。Splunk は MSK Connect で後回し）
-check("variable sinks は list、既定 iceberg、3 つのどれかに絞る",
-      re.search(r'variable "sinks"[\s\S]*?type\s*=\s*list\(string\)[\s\S]*?default\s*=\s*\["iceberg"\][\s\S]*?validation', tf, re.S) is not None
+check("variable sinks は list、既定 3 つ（iceberg / opensearch / prometheus。2026-09-17 ユーザー決定）、3 つのどれかに絞る",
+      re.search(r'variable "sinks"[\s\S]*?type\s*=\s*list\(string\)[\s\S]*?default\s*=\s*\["iceberg",\s*"opensearch",\s*"prometheus"\][\s\S]*?validation', tf, re.S) is not None
       and re.search(r'variable "sinks"[\s\S]*?\["iceberg",\s*"opensearch",\s*"prometheus"\]', tf, re.S) is not None)
 check("variable metric_topics / log_topics（既定 metrics / traps、空を拒否）",
       re.search(r'variable "metric_topics"[\s\S]*?default\s*=\s*\["metrics"\][\s\S]*?validation', tf, re.S) is not None
@@ -131,14 +131,15 @@ check("remote write の URL は prometheus_endpoint + api/v1/remote_write",
 
 # ---- output（ops/up.sh と README a-3 がそのまま使う）
 for out in ("application_id", "runtime_role_arn", "table_identifier", "job_driver_json", "configuration_overrides_json", "list_job_runs_command", "list_tables_command",
-            "sinks", "opensearch_collection_endpoint", "prometheus_workspace_id", "prometheus_remote_write_url", "prometheus_query_url"):
+            "sinks", "opensearch_collection_endpoint", "prometheus_workspace_id", "prometheus_remote_write_url", "prometheus_query_url",
+            "anomaly_table_name", "opensearch_collection_name", "opensearch_collection_arn", "opensearch_index", "prometheus_workspace_arn", "events_endpoint_id"):
     check(f"output {out} がある", re.search(r'^output "' + out + r'"', tf, re.M) is not None)
 check("job_driver は S3 Tables のカタログを spark-submit の --conf で渡す",
       "software.amazon.s3tables.iceberg.S3TablesCatalog" in tf and "org.apache.iceberg.spark.SparkCatalog" in tf
       and "IcebergSparkSessionExtensions" in tf)
 args_block = re.search(r'entryPointArguments\s*=\s*concat\((.*?)\n\s*\)\n', tf, re.S)
 check("job_driver の引数は concat（共通 + 格納先ごとの for-if）", args_block is not None)
-for a in ("--bootstrap", "--checkpoint", "--sinks", "--region", "--metric-topics", "--log-topics"):
+for a in ("--bootstrap", "--checkpoint", "--sinks", "--region", "--metric-topics", "--log-topics", "--anomaly-table", "--device-map", "--event-bus"):
     check(f"job_driver の共通の引数に {a}", f'"{a}"' in args_block.group(1))
 check("job_driver の格納先の引数は選んだときだけ（for a in [...] : a if local.sink_*）",
       re.search(r'\["--iceberg-table",\s*local\.iceberg_table\] : a if local\.sink_iceberg', args_block.group(1)) is not None
@@ -159,6 +160,16 @@ check("ドライバーのログは CloudWatch、EMR の managed storage は使�
 tree = ast.parse(src, SRC)
 funcs = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
 check("parse_args / sink_topics / read_rows / build / main がある", {"parse_args", "sink_topics", "read_rows", "build", "main"} <= set(funcs))
+check("検知の関数（parse_device_map / device / events / anomaly_key / make_detect_sender）がある",
+      {"parse_device_map", "device", "events", "anomaly_key", "anomaly_detail", "make_detect_sender"} <= set(funcs))
+check("job_driver は --anomaly-table に stream の anomalies テーブル、--device-map と --event-bus に変数を渡す",
+      re.search(r'"--anomaly-table",\s*local\.anomaly_table,\s*"--device-map",\s*var\.device_map,\s*"--event-bus",\s*var\.event_bus', tf) is not None)
+check("precondition は stream の anomaly_table_name も見る", 'local.anomaly_table != ""' in tf and "anomaly_table_name が読めない" in tf)
+check("runtime role は anomalies テーブルに dynamodb:UpdateItem、既定のバスに events:PutEvents",
+      re.search(r'"dynamodb:UpdateItem"[\s\S]*?Resource = local\.anomaly_table_arn', tf) is not None
+      and re.search(r'"events:PutEvents"[\s\S]*?Resource = local\.event_bus_arn', tf) is not None)
+check("events のエンドポイント（Interface、2 AZ、private DNS）を持つ",
+      re.search(r'resource "aws_vpc_endpoint" "events"[\s\S]*?"com\.amazonaws\.\$\{var\.region\}\.events"[\s\S]*?vpc_endpoint_type\s*=\s*"Interface"[\s\S]*?slice\(local\.subnet_ids, 0, 2\)[\s\S]*?private_dns_enabled\s*=\s*true', tf, re.S) is not None)
 check("build の引数は spark / args（格納先ごとに Kafka を読む）", [a.arg for a in funcs["build"].args.args] == ["spark", "args"])
 check("pyspark はモジュールの先頭で import しない（テストと引数の検査を pyspark 無しで動かすため）",
       not any(isinstance(n, (ast.Import, ast.ImportFrom)) and "pyspark" in ast.dump(n) for n in tree.body))
@@ -334,8 +345,8 @@ for jar in ("spark-sql-kafka-0-10_2.12", "spark-token-provider-kafka-0-10_2.12",
 check("up.sh の SPARK_VERSION は emr_release_label の Spark（3.5.6）", re.search(r'^SPARK_VERSION=3\.5\.6$', up, re.M) is not None
       and "7.13.0 = Spark 3.5.6" in tf)
 check("up.sh のスクリプトは spark/snmp_sinks.py", re.search(r'^SPARK_SCRIPT=spark/snmp_sinks\.py$', up, re.M) is not None and "snmp_to_iceberg" not in up)
-check("up.sh は SINKS（既定 iceberg）を検査して terraform/analytics の sinks に渡す",
-      re.search(r'^SINKS="\$\{SINKS:-iceberg\}"$', up, re.M) is not None
+check("up.sh は SINKS（既定 iceberg,opensearch,prometheus）を検査して terraform/analytics の sinks に渡す",
+      re.search(r'^SINKS="\$\{SINKS:-iceberg,opensearch,prometheus\}"$', up, re.M) is not None
       and re.search(r'iceberg\|opensearch\|prometheus\)', up) is not None
       and 'tf_apply analytics -var "sinks=[$SINKS_TF]"' in up)
 check("up.sh は analytics を stream の後に apply し、job を STREAMING で起こす（名前は snmp-sinks）",
@@ -347,8 +358,10 @@ check("up.sh は PHASE=2 で SKIP_STREAM=1 なら analytics も飛ばす", re.se
 check("down.sh は job を cancel → stop-application → destroy analytics → destroy graph の順",
       down.index("cancel-job-run") < down.index("stop-application") < down.index("destroy_root analytics") < down.index("destroy_root graph") < down.index("destroy_root stream"))
 check("check.sh は spark/snmp_sinks.py を見る", "spark/snmp_sinks.py" in checksh and "snmp_to_iceberg" not in checksh)
-check("deploy.env.example に SINKS の行がある（既定 iceberg、3 つの説明）",
-      re.search(r'^#SINKS=iceberg$', env_example, re.M) is not None and all(s in env_example for s in ("iceberg", "opensearch", "prometheus")))
+check("up.sh の PHASE=3 は SKIP_ANALYTICS があれば止まる（Spark の検知が無いとワーカーが起きない）",
+      re.search(r'\n  3\)\n[\s\S]*?-n "\$SKIP_ANALYTICS"[\s\S]*?WORKFLOW=1 ;;', up) is not None)
+check("deploy.env.example に SINKS の行がある（既定 3 つ、それぞれの説明）",
+      re.search(r'^#SINKS=iceberg,opensearch,prometheus$', env_example, re.M) is not None and all(s in env_example for s in ("iceberg", "opensearch", "prometheus")))
 
 # outputs の JSON が本当に JSON になる形か（jsonencode の中身の構造を軽く見る）
 check("job_driver_json は sparkSubmit の 3 キー", all(k in tf for k in ("entryPoint ", "entryPointArguments", "sparkSubmitParameters")))

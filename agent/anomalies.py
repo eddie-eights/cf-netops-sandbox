@@ -1,4 +1,4 @@
-"""異常一覧（DynamoDB。terraform/stream の detector Lambda が書く）をエージェントのツールと画面に出す。
+"""異常一覧（DynamoDB。terraform/analytics の Spark ジョブ（spark/snmp_sinks.py の detect）が書く。2026-09-17 までは stream の detector Lambda）をエージェントのツールと画面に出す。
 
 テーブル名は環境変数 ANOMALY_TABLE、無ければ SSM の <PARAM_PREFIX>/anomaly-table（terraform/stream が書く）。
 どちらも無ければ「まだ配備されていない」を返して、フェーズ 1 のままの構成でも落ちない。
@@ -54,7 +54,7 @@ def _iso(epoch) -> str:
 
 
 def list_anomalies(status: str = "open", limit: int = 20) -> dict:
-    """status（open / resolved）の異常を新しい順に。detector が最後に見た時刻（last_seen）で並ぶ"""
+    """status（open / resolved）の異常を新しい順に。Spark が最後に見た時刻（last_seen）で並ぶ"""
     table = table_name()
     if not table:
         return {"error": "異常一覧はまだ配備されていない（terraform/stream を apply すると使える）", "anomalies": []}

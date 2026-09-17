@@ -1,6 +1,6 @@
 # fukuda-nwc-poc - phase 2 stream root module. MSK (2 brokers, IAM auth) receives SNMP polls and traps from Telegraf on the lab EC2 (terraform/lab),
-# a detector Lambda writes link_down / trap anomalies to DynamoDB, and MSK Connect keeps the raw messages in the asset bucket (S3 sink).
-# The chat runtime and web read the anomaly table. Costs about 0.13 USD per hour while it exists - destroy it the same day.
+# the Spark job of terraform/analytics writes link_down / trap anomalies to the DynamoDB table made here, and MSK Connect keeps the raw
+# messages in the asset bucket (S3 sink). The chat runtime, the web and the workflow tools read the anomaly table. Costs about 0.13 USD per hour while it exists - destroy it the same day.
 
 data "aws_caller_identity" "current" {}
 data "aws_partition" "current" {}

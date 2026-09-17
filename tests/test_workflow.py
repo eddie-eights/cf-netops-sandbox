@@ -76,6 +76,7 @@ import proposals  # noqa: E402
 import mcp_client  # noqa: E402
 import anomalies  # noqa: E402
 import topology  # noqa: E402
+import evidence  # noqa: E402
 import handler  # noqa: E402
 
 # ---- worker.py の純粋な関数
@@ -178,8 +179,10 @@ check("Gateway に無いツールの call はエラーの辞書", "error" in mcp
 
 # ---- tools.json と Python の TOOL_SPECS
 tools = json.loads(read("tools", "tools.json"))
-py_specs = {s["toolSpec"]["name"]: s["toolSpec"] for s in topology.TOOL_SPECS + anomalies.TOOL_SPECS}
-check("tools.json の 5 つは topology / anomalies の TOOL_SPECS と同じ名前", {t["name"] for t in tools} == set(py_specs))
+py_specs = {s["toolSpec"]["name"]: s["toolSpec"] for s in topology.TOOL_SPECS + anomalies.TOOL_SPECS + evidence.TOOL_SPECS}
+check("tools.json の 8 つは topology / anomalies / evidence の TOOL_SPECS と同じ名前", {t["name"] for t in tools} == set(py_specs) and len(tools) == 8)
+check("evidence のツールは search_logs / query_metrics / query_history", {s["toolSpec"]["name"] for s in evidence.TOOL_SPECS} == {"search_logs", "query_metrics", "query_history"})
+check("handler は evidence のツールも呼ぶ", "evidence.run_tool" in read("tools", "handler.py"))
 for t in tools:
     js = py_specs[t["name"]]["inputSchema"]["json"]
     check(f"{t['name']} の引数と必須が Python と同じ",
@@ -202,7 +205,10 @@ tf_files = sorted(n for n in os.listdir(TF_DIR) if n.endswith(".tf"))
 for name in tf_files:
     tf += read("terraform", "workflow", name) + "\n"
 check("ファイルは versions / providers / variables / locals / proposals / iam / ecs / gateway / outputs",
-      set(tf_files) == {"versions.tf", "providers.tf", "variables.tf", "locals.tf", "proposals.tf", "iam.tf", "ecs.tf", "gateway.tf", "outputs.tf"})
+      set(tf_files) == {"versions.tf", "providers.tf", "variables.tf", "locals.tf", "proposals.tf", "iam.tf", "ecs.tf", "gateway.tf", "events.tf", "outputs.tf"})
+check("graph と analytics の state は try で読む（無くても apply できる）",
+      '"${path.module}/../graph/terraform.tfstate"' in tf and '"${path.module}/../analytics/terraform.tfstate"' in tf
+      and re.search(r'try\(data\.terraform_remote_state\.analytics', tf) is not None)
 for root in ("main", "stream", "lab", "ecr"):
     check(f"{root} の state をローカルから読む", f'"${{path.module}}/../{root}/terraform.tfstate"' in tf)
 main_out = read("terraform", "main", "outputs.tf"); stream_out = read("terraform", "stream", "outputs.tf")
@@ -216,7 +222,7 @@ check("ecr の出力 worker_repository_url / temporal_repository_url がある",
 check("ECS のタスクは Fargate の ARM64", 'cpu_architecture        = "ARM64"' in tf and '"FARGATE"' in tf)
 check("temporal コンテナは start-dev を SQLite で、0.0.0.0 で待つ", '"server", "start-dev", "--ip", "0.0.0.0"' in tf and "--db-filename" in tf)
 check("worker は temporal の後に起き、localhost:7233 につなぐ", '"localhost:7233"' in tf and 'condition = "START"' in tf)
-for env in ("ANOMALY_TABLE", "PROPOSAL_TABLE", "AGENT_RUNTIME_ARN", "LAB_INSTANCE_ID", "POLL_INTERVAL", "APPROVAL_TIMEOUT_MINUTES", "VERIFY_ATTEMPTS", "PARAM_PREFIX"):
+for env in ("ANOMALY_TABLE", "ANOMALY_QUEUE_URL", "PROPOSAL_TABLE", "AGENT_RUNTIME_ARN", "LAB_INSTANCE_ID", "POLL_INTERVAL", "APPROVAL_TIMEOUT_MINUTES", "VERIFY_ATTEMPTS", "PARAM_PREFIX"):
     check(f"worker の環境変数 {env} を渡す", f'name = "{env}"' in tf or f'name  = "{env}"' in tf or re.search(rf'name\s*=\s*"{env}"', tf) is not None)
 check("タスクロールは Runtime の InvokeAgentRuntime と lab への ssm:SendCommand（AWS-RunShellScript だけ）",
       '"bedrock-agentcore:InvokeAgentRuntime"' in tf and '"ssm:SendCommand"' in tf and "document/AWS-RunShellScript" in tf)
@@ -227,7 +233,21 @@ check("Gateway は AWS_IAM 認可の MCP で、2025-06-18 を話す", 'authorize
 check("Gateway のターゲットは tools.json から inline schema を作る", 'jsondecode(file("${path.module}/../../tools/tools.json"))' in tf and 'dynamic "inline_payload"' in tf)
 check("tools Lambda は python3.13 arm64 で、handler.py / topology / anomalies / graph / data を zip にする",
       'runtime          = "python3.13"' in tf and 'architectures    = ["arm64"]' in tf
-      and all(f"../../{p}" in tf for p in ("tools/handler.py", "agent/topology.py", "agent/anomalies.py", "agent/graph.py", "agent/data/topology.json", "agent/data/devices.yaml")))
+      and all(f"../../{p}" in tf for p in ("tools/handler.py", "agent/topology.py", "agent/anomalies.py", "agent/evidence.py", "agent/graph.py", "agent/data/topology.json", "agent/data/devices.yaml")))
+check("tools Lambda は VPC の中（Neptune / OpenSearch / Prometheus に届く）で、OPENSEARCH_ENDPOINT / PROMETHEUS_QUERY_URL / ANOMALY_TABLE を渡す",
+      re.search(r'resource "aws_lambda_function" "tools"[\s\S]*?vpc_config \{', tf) is not None
+      and all(v in tf for v in ("OPENSEARCH_ENDPOINT", "OPENSEARCH_INDEX", "PROMETHEUS_QUERY_URL", "ANOMALY_TABLE")))
+check("tools Lambda のロールに aoss:APIAccessAll と aps:QueryMetrics、コレクションの data access policy",
+      '"aoss:APIAccessAll"' in tf and '"aps:QueryMetrics"' in tf and 'resource "aws_opensearchserverless_access_policy" "tools"' in tf)
+check("EventBridge のルールは netops.spark / AnomalyOpened を SQS（anomalies）へ、DLQ は 5 回で",
+      re.search(r'resource "aws_cloudwatch_event_rule" "anomalies"[\s\S]*?source\s*=\s*\["netops\.spark"\][\s\S]*?"detail-type"\s*=\s*\["AnomalyOpened"\]', tf) is not None
+      and 'resource "aws_sqs_queue" "anomalies"' in tf and 'resource "aws_sqs_queue" "anomalies_dlq"' in tf
+      and re.search(r'redrive_policy[\s\S]*?maxReceiveCount\s*=\s*5', tf) is not None
+      and 'resource "aws_cloudwatch_event_target" "anomalies"' in tf)
+check("キューのポリシーは events.amazonaws.com の SendMessage をそのルールに絞る", '"sqs:SendMessage"' in tf and "events.amazonaws.com" in tf and "aws_cloudwatch_event_rule.anomalies.arn" in tf)
+check("タスクロールは SQS の ReceiveMessage / DeleteMessage", '"sqs:ReceiveMessage", "sqs:DeleteMessage"' in tf)
+check("sqs のエンドポイントは create_sqs_endpoint で切れる", re.search(r'resource "aws_vpc_endpoint" "sqs"\s*\{\s*count = var\.create_sqs_endpoint \? 1 : 0', tf) is not None)
+check("output に anomaly_queue_url / anomaly_rule_name / tools_function_name", all(f'output "{o}"' in tf for o in ("anomaly_queue_url", "anomaly_rule_name", "tools_function_name")))
 check("Gateway の URL を SSM の gateway-url に書く", '"${local.param_prefix}/gateway-url"' in tf)
 check("aws_iam_role の description は ASCII だけ",
       all(d.isascii() for d in re.findall(r'resource "aws_iam_role"[\s\S]*?description\s*=\s*"([^"]*)"', tf)))
@@ -250,9 +270,19 @@ check("main の upload_web_command は proposals.py も上げる", "for f in top
 
 # ---- ops
 up = read("ops", "up.sh"); down = read("ops", "down.sh"); chk = read("ops", "check.sh")
-check("up.sh の PHASE=3 は WORKFLOW=1 で、SKIP_LAB / SKIP_STREAM があれば止まる",
-      re.search(r'\n  3\)\n[\s\S]*?SKIP_LAB[\s\S]*?WORKFLOW=1 ;;', up) is not None and 'PHASE は 1 か 2 か 3' in up)
-check("up.sh は workflow ルートを足し、費用に 5 セント足す", 'ROOTS="$ROOTS workflow"' in up and 'COST_CENTS=$((COST_CENTS + 5))' in up)
+check("up.sh の PHASE=3 は WORKFLOW=1 で、SKIP_LAB / SKIP_STREAM / SKIP_ANALYTICS があれば止まる",
+      re.search(r'\n  3\)\n[\s\S]*?SKIP_LAB[\s\S]*?SKIP_STREAM[\s\S]*?SKIP_ANALYTICS[\s\S]*?WORKFLOW=1 ;;', up) is not None and 'PHASE は 1 か 2 か 3' in up)
+# ---- starter: SQS のメッセージから anomaly_id
+check("anomaly_id_from_message は detail が dict でも JSON 文字列でも読む",
+      worker.anomaly_id_from_message(json.dumps({"detail": {"anomaly_id": "r1#link_down#eth1"}})) == "r1#link_down#eth1"
+      and worker.anomaly_id_from_message(json.dumps({"detail": json.dumps({"anomaly_id": "r1#link_down#eth1"})})) == "r1#link_down#eth1")
+check("anomaly_id_from_message はごみを空にする",
+      worker.anomaly_id_from_message("garbage") == "" and worker.anomaly_id_from_message("[1]") == ""
+      and worker.anomaly_id_from_message(json.dumps({"detail": "x"})) == "" and worker.anomaly_id_from_message(json.dumps({"detail": {}})) == "")
+check("starter は ANOMALY_QUEUE_URL があれば SQS（20 秒の long polling）、無ければテーブルを見る",
+      all(hasattr(worker, f) for f in ("start_for", "starter_queue", "starter_table", "receive_messages", "delete_message"))
+      and "WaitTimeSeconds=20" in read("workflow", "worker.py") and "starter_queue if ANOMALY_QUEUE_URL else starter_table" in read("workflow", "worker.py"))
+check("up.sh は workflow ルートを足し、費用に 6 セント足す（sqs のエンドポイント込み）", 'ROOTS="$ROOTS workflow"' in up and 'COST_CENTS=$((COST_CENTS + 6))' in up)
 check("up.sh は worker を buildx でビルドし、temporalio/temporal を ECR にミラーする",
       '--push workflow/' in up and 'docker pull --platform linux/arm64 "temporalio/temporal:$TEMPORAL_TAG"' in up and "$PREFIX-temporal:$TEMPORAL_TAG" in up)
 check("up.sh の TEMPORAL_TAG は terraform/workflow の temporal_image_tag の既定値と同じ",

@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # deploy.env の PHASE で指定したフェーズまでを 1 本で起こす。
 #   フェーズ 1（既定）  LLM + RAG で対話する。ECR・イメージ・本体・Web（README の手順 1〜5・7）
-#   フェーズ 2          フェーズ 1 に、データパイプライン lab（containerlab + Telegraf）→ stream（MSK → detector → DynamoDB）
-#                       → analytics（Spark on EMR Serverless → S3 Tables）と、graph（Neptune のトポロジと投入）を足す
-#   フェーズ 3          フェーズ 2 に workflow（Temporal on ECS Fargate のワーカー + AgentCore Gateway（MCP））を足す。
-#                       エージェントが異常の原因を調べて修復案を出し、Web の「承認」タブで人が承認すると lab で直す
+#   フェーズ 2          フェーズ 1 に、データパイプライン lab（containerlab + Telegraf）→ stream（MSK）
+#                       → analytics（Spark on EMR Serverless → S3 Tables / OpenSearch / Prometheus、異常検知 → DynamoDB + EventBridge）と、
+#                       graph（Neptune のトポロジと投入）を足す
+#   フェーズ 3          フェーズ 2 に workflow（Temporal on ECS Fargate のワーカー + AgentCore Gateway（MCP）+ EventBridge → SQS）を足す。
+#                       Spark の検知が EventBridge → SQS で届き、エージェントが Neptune / OpenSearch / Prometheus を見て原因を調べて修復案を出し、
+#                       Web の「承認」タブで人が承認すると Temporal が lab で直す
 # 毎日全部消す運用向け。何度打っても同じ状態に収束する（できているものは Terraform が差分なしで飛ばし、ECR にあるタグはビルドしない）。
 # Terraform の state はこの PC のリポジトリの中（terraform/<ルート>/terraform.tfstate）に置く。消すのは ops/down.sh。
 #
@@ -21,9 +23,11 @@
 #   PHASE                   どこまで作るか。1（既定）か 2 か 3（3 は 2 の全部 + workflow。lab と stream が要るので SKIP_LAB / SKIP_STREAM は書けない）
 #   SKIP_LAB=1              PHASE=2 で lab を作らない（stream は lab が要るので SKIP_STREAM=1 も要る）
 #   SKIP_STREAM=1           PHASE=2 で stream と analytics（stream の Kafka を読む）を作らない
-#   SKIP_ANALYTICS=1        PHASE=2 で analytics（Spark → S3 Tables）を作らない
-#   SINKS=iceberg           analytics の Spark の格納先（カンマ区切り。iceberg = 全トピック → S3 Tables（既定）、opensearch = traps → OpenSearch Serverless、
-#                           prometheus = metrics → Amazon Managed Service for Prometheus。terraform/analytics の var.sinks に渡す）
+#   SKIP_ANALYTICS=1        PHASE=2 で analytics（Spark → S3 Tables / OpenSearch / Prometheus と異常検知）を作らない。「異常一覧」は使えない
+#   SINKS=iceberg,opensearch,prometheus
+#                           analytics の Spark の格納先（カンマ区切り。既定は 3 つ全部。iceberg = 全トピック → S3 Tables、opensearch = traps → OpenSearch Serverless、
+#                           prometheus = metrics → Amazon Managed Service for Prometheus。terraform/analytics の var.sinks に渡す。
+#                           2026-09-17 ユーザー決定「SINKS に opensearch と prometheus を入れる。KB のコレクションと OCU を共有できなくても入れる」）
 #   SKIP_GRAPH=1            PHASE=2 で graph（Neptune）を作らない
 #   CREATE_S3_SINK=0        MSK Connect の S3 sink を作らない（Confluent の zip が取れないとき。ops/down.sh は state を見て合わせる）
 #   IMAGE_TAG               エージェント（PHASE=3 ではワーカーも）のイメージのタグ。既定 v1。ECR にそのタグが無いときだけ PC の docker buildx でビルドして push する（タグは上書きできない）
@@ -186,7 +190,7 @@ case "$CREATE_S3_SINK" in
   *) die "CREATE_S3_SINK は 1（作る。既定）か 0（作らない）（いまは「$CREATE_S3_SINK」）。まだ何も作っていない" ;;
 esac
 # analytics の Spark の格納先。terraform/analytics の var.sinks（list）にするので ["iceberg","opensearch"] の形に組む
-SINKS="${SINKS:-iceberg}"
+SINKS="${SINKS:-iceberg,opensearch,prometheus}"
 SINKS=$(printf '%s' "$SINKS" | tr -d ' ')
 SINKS_TF=""
 for s in $(printf '%s' "$SINKS" | tr ',' ' '); do
@@ -195,7 +199,7 @@ for s in $(printf '%s' "$SINKS" | tr ',' ' '); do
     *) die "SINKS は iceberg / opensearch / prometheus のカンマ区切り（いまは「$SINKS」）。まだ何も作っていない" ;;
   esac
 done
-[ -n "$SINKS_TF" ] || die "SINKS が空。iceberg / opensearch / prometheus を 1 つ以上（既定は iceberg）。まだ何も作っていない"
+[ -n "$SINKS_TF" ] || die "SINKS が空。iceberg / opensearch / prometheus を 1 つ以上（既定は 3 つ全部）。まだ何も作っていない"
 if [ -n "${WITH_LAB:-}" ]; then
   die "WITH_LAB は無くなった（lab はフェーズ 2 に入った）。lab だけ作るなら PHASE=2 と SKIP_STREAM=1 と SKIP_GRAPH=1。まだ何も作っていない"
 fi
@@ -221,8 +225,8 @@ case "$PHASE" in
       echo "SKIP_LAB と SKIP_STREAM と SKIP_GRAPH があるので、フェーズ 1 と同じものだけ作る"
     fi ;;
   3)
-    if [ -n "$SKIP_LAB" ] || [ -n "$SKIP_STREAM" ]; then
-      die "フェーズ 3 は lab と stream が要る（ワーカーが stream の異常テーブルを読み、lab の EC2 で直す）。SKIP_LAB / SKIP_STREAM を外す。まだ何も作っていない"
+    if [ -n "$SKIP_LAB" ] || [ -n "$SKIP_STREAM" ] || [ -n "$SKIP_ANALYTICS" ]; then
+      die "フェーズ 3 は lab と stream と analytics が要る（analytics の Spark が異常を検知して EventBridge に出し、ワーカーが stream の異常テーブルを読み、lab の EC2 で直す）。SKIP_LAB / SKIP_STREAM / SKIP_ANALYTICS を外す。まだ何も作っていない"
     fi
     WORKFLOW=1 ;;
   2B|2b) die "フェーズ 2B は 2026-09-17 にフェーズ 2 に入った（Spark → S3 Tables は PHASE=2 の analytics）。PHASE=2 にする" ;;
@@ -274,10 +278,11 @@ echo "PHASE=$PHASE"
 echo "作るルート: $ROOTS"
 # 待機時の 1 時間あたりの目安（セント。東京リージョンの税抜。単価は 2026-09-14〜15 に Price List API で確認。内訳は README「1 時間起動したときの試算」）。
 # フェーズ 1 = 52（Interface エンドポイント・OpenSearch Serverless・Web の EC2）、lab = 9、graph = 14、stream = 29（S3 sink 無しなら 15）、
-# analytics = 17（ストリーミングのジョブが動いている間の EMR Serverless の 2 vCPU + s3tables のエンドポイント 2 本。単価は 2026-09-17 に確認）
-#   + SINKS に prometheus があれば 3（aps-workspaces のエンドポイント 2 本。取り込みのサンプル課金は別）。opensearch はコレクションの OCU が
-#   フェーズ 1 のコレクションと共有されるか確認できていないので数に入れず、下で注意だけ出す（共有されなければ最大 +33）、
-# workflow = 5（Fargate ARM 1 vCPU / 2 GB のタスク 1 つ。Gateway と Lambda と DynamoDB は使った分だけ。単価は 2026-09-17 に確認）。
+# analytics = 20（ストリーミングのジョブが動いている間の EMR Serverless の 2 vCPU + s3tables のエンドポイント 2 本 + 異常検知の events エンドポイント 2 本。単価は 2026-09-17 に確認）
+#   + SINKS に prometheus があれば 3（aps-workspaces のエンドポイント 2 本。取り込みのサンプル課金は別）
+#   + SINKS に opensearch があれば 33（logs コレクションの OCU。フェーズ 1 のコレクションと共有されるか確認できていないので最大値で数える。
+#     2026-09-17 ユーザー決定で既定に入れた。共有されれば 0 に近づく）、
+# workflow = 6（Fargate ARM 1 vCPU / 2 GB のタスク 1 つ + sqs エンドポイント 1 本。Gateway と Lambda と DynamoDB と SQS は使った分だけ。単価は 2026-09-17 に確認）。
 # README の試算を変えたらここも変える
 COST_CENTS=52
 if [ -z "$SKIP_LAB" ]; then COST_CENTS=$((COST_CENTS + 9)); fi
@@ -286,15 +291,16 @@ if [ -z "$SKIP_STREAM" ]; then
   if [ "$CREATE_S3_SINK" = 1 ]; then COST_CENTS=$((COST_CENTS + 29)); else COST_CENTS=$((COST_CENTS + 15)); fi
 fi
 if [ -z "$SKIP_ANALYTICS" ]; then
-  COST_CENTS=$((COST_CENTS + 17))
+  COST_CENTS=$((COST_CENTS + 20))
   case ",$SINKS," in *,prometheus,*) COST_CENTS=$((COST_CENTS + 3)) ;; esac
+  case ",$SINKS," in *,opensearch,*) COST_CENTS=$((COST_CENTS + 33)) ;; esac
 fi
-if [ -n "$WORKFLOW" ]; then COST_CENTS=$((COST_CENTS + 5)); fi
+if [ -n "$WORKFLOW" ]; then COST_CENTS=$((COST_CENTS + 6)); fi
 COST_NOTE=$(printf '待機だけで約 $%d.%02d/h（約 %d 円/h。チャットの分は別）の時間課金。使い終わったら当日中に ops/down.sh を打つ' \
   $((COST_CENTS / 100)) $((COST_CENTS % 100)) $(((COST_CENTS * 150 + 50) / 100)))
 printf '\033[1;33m%s\033[0m\n' "$COST_NOTE"
 case ",$SINKS," in
-  *,opensearch,*) printf '\033[1;33m%s\033[0m\n' "SINKS に opensearch がある: OpenSearch Serverless のコレクションをもう 1 つ作る。OCU がフェーズ 1 のコレクションと共有されなければ最大 +\$0.33/h（README「1 時間起動したときの試算」）" ;;
+  *,opensearch,*) printf '\033[1;33m%s\033[0m\n' "SINKS に opensearch がある（既定）: OpenSearch Serverless の logs コレクションをもう 1 つ作る。OCU がフェーズ 1 のコレクションと共有されなければ最大 \$0.33/h で、上の目安はそれを含んでいる（README「1 時間起動したときの試算」）" ;;
 esac
 
 # ---- 1. ECR --------------------------------------------------------------------

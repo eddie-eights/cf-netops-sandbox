@@ -28,8 +28,8 @@ variable "owner" {
 }
 
 # ---------------------------------------------------------------- network (same VPC as terraform/main)
-variable "create_lambda_endpoints" {
-  description = "lambda and sts interface endpoints (1 AZ, first subnet). The MSK event source mapping of the detector needs them because the VPC has no NAT. Set false if the VPC already has them."
+variable "create_sts_endpoint" {
+  description = "sts interface endpoint (1 AZ, first subnet) for the MSK Connect workers, because the VPC has no NAT. Whether MSK Connect really needs it has not been verified (2026-09-17). Set false if the VPC already has one."
   type        = bool
   default     = true
 }
@@ -38,13 +38,6 @@ variable "create_dynamodb_endpoint" {
   description = "DynamoDB gateway endpoint (free) so the chat web EC2 reads the anomaly table without NAT. Set false if the VPC already has one."
   type        = bool
   default     = true
-}
-
-# ---------------------------------------------------------------- detector
-variable "device_map" {
-  description = "ip=device_id,... used by the detector when a message has no sysName tag (traps). Matches lab/wvs2.clab.yml.in and agent/data/devices.yaml."
-  type        = string
-  default     = "203.0.113.11=hq-ce-01,203.0.113.12=dc-ce-01,203.0.113.13=br1-ce-01,203.0.113.14=br2-ce-01"
 }
 
 # ---------------------------------------------------------------- MSK
@@ -66,7 +59,7 @@ variable "broker_instance_type" {
 }
 
 variable "log_retention_days" {
-  description = "Retention of the broker, detector and MSK Connect log groups."
+  description = "Retention of the broker and MSK Connect log groups."
   type        = number
   default     = 7
 

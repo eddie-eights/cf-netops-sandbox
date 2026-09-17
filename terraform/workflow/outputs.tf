@@ -13,6 +13,21 @@ output "proposal_table_name" {
   value       = aws_dynamodb_table.proposals.name
 }
 
+output "anomaly_queue_url" {
+  description = "SQS queue the AnomalyOpened events land in (the worker long-polls it)"
+  value       = aws_sqs_queue.anomalies.url
+}
+
+output "anomaly_rule_name" {
+  description = "EventBridge rule that routes AnomalyOpened (source netops.spark) to the queue"
+  value       = aws_cloudwatch_event_rule.anomalies.name
+}
+
+output "tools_function_name" {
+  description = "Tools Lambda behind the gateway (empty when create_gateway is false)"
+  value       = try(aws_lambda_function.tools[0].function_name, "")
+}
+
 output "task_role_name" {
   description = "IAM role of the worker"
   value       = aws_iam_role.task.name

@@ -28,8 +28,8 @@
 | フェーズ | 到達点 | 作る Terraform ルート | 立てている間の費用（東京・税抜・$1 = 150 円） | 状態 |
 |---|---|---|---|---|
 | 1（`PHASE=1`、既定） | LLM + RAG で対話する。閉域の VPC でチャットし、手順書を引いて答える | `terraform/ecr` → `terraform/main` | 置いておくだけ 約 $0.52/h（約 79 円） | **動く**（このリポジトリの本体） |
-| 2（`PHASE=2`） | データパイプライン。EC2 の中の疑似ネットワーク（containerlab）の SNMP を Telegraf が Kafka に流し、Spark が S3 Tables（Iceberg）に追記し続ける。異常は DynamoDB の一覧に出る。トポロジは Neptune で持って Web から編集する | フェーズ 1 に `terraform/lab` → `terraform/stream` → `terraform/analytics`、並行して `terraform/graph` | さらに約 $0.69/h（約 104 円。lab 0.09 + stream 0.29 + analytics 0.17 + graph 0.14） | 作ってある（使う日だけ作る。**AWS 上の apply は未確認**） |
-| 3（`PHASE=3`） | 異常の検知 → 原因調査 → 修復案を、エージェントが Temporal のワークフローで回し、**人が Web の「承認」タブで承認**してから lab で直して確かめる。エージェントのツールは AgentCore Gateway（MCP）経由 | フェーズ 2 に `terraform/workflow` | さらに約 $0.05/h（約 8 円。Temporal のサーバーとワーカーを ECS on Fargate の 1 タスク（ARM、1 vCPU / 2 GB）で動かす） | 作ってある（2026-09-17。使う日だけ作る。**AWS 上の apply は未確認**） |
+| 2（`PHASE=2`） | データパイプライン。EC2 の中の疑似ネットワーク（containerlab）の SNMP を Telegraf が Kafka に流し、Spark が S3 Tables（Iceberg）/ OpenSearch Serverless / Prometheus に書き続け、異常を検知して DynamoDB の一覧に出す（EventBridge にも出す）。トポロジは Neptune で持って Web から編集する | フェーズ 1 に `terraform/lab` → `terraform/stream` → `terraform/analytics`、並行して `terraform/graph` | さらに約 $1.08/h（約 162 円。lab 0.09 + stream 0.28 + analytics 0.20 + OpenSearch 最大 0.33 + Prometheus 0.03 + graph 0.14） | 作ってある（使う日だけ作る。**AWS 上の apply は未確認**） |
+| 3（`PHASE=3`） | Spark の検知が EventBridge → SQS で届き、エージェントが Neptune / OpenSearch / Prometheus を見て原因調査 → 修復案を Temporal のワークフローで回し、**人が Web の「承認」タブで承認**してから Temporal が lab で直して確かめる。エージェントのツールは AgentCore Gateway（MCP）経由 | フェーズ 2 に `terraform/workflow` | さらに約 $0.06/h（約 9 円。Temporal のサーバーとワーカーを ECS on Fargate の 1 タスク（ARM、1 vCPU / 2 GB）+ sqs エンドポイント 1 本） | 作ってある（2026-09-17。使う日だけ作る。**AWS 上の apply は未確認**） |
 
 費用は 1 時間立てたときの目安。内訳と前提は README の「1 時間起動したときの試算」にある（単価はフェーズ 1 が 2026-09-14、lab・graph・stream が 2026-09-15、analytics が 2026-09-17 に AWS Price List API と料金ページで確認した値）。
 どこまで作るかは `deploy.env` の `PHASE` で選ぶ（README の「毎日の起動と片付けをスクリプトで打つ」）。フェーズ 2 の一部だけ要らないときは `SKIP_LAB` / `SKIP_STREAM` / `SKIP_ANALYTICS` / `SKIP_GRAPH`。
@@ -86,11 +86,11 @@
 ```
 lab（EC2 の containerlab: FRR × 6 + snmpd × 4 + ホスト × 4）
   └─ Telegraf（SNMP 10 秒ポーリング + trap）─▶ stream（MSK、トピック metrics / traps）
-                                                 ├─▶ detector Lambda ─▶ DynamoDB の異常一覧（Web とエージェントが読む「いま」）
+                                                 ├─▶ analytics の Spark（detect）─▶ DynamoDB の異常一覧（Web とエージェントが読む「いま」）─▶ EventBridge の AnomalyOpened（フェーズ 3 の SQS へ）
                                                  ├─▶ MSK Connect（S3 sink）─▶ S3 の stream/（任意。CREATE_S3_SINK=0 で外す）
                                                  ├─▶ analytics（Spark on EMR Serverless）─ 全トピック ─▶ S3 Tables（Iceberg）の snmp_metrics（履歴の正本）
-                                                 ├─▶ analytics の Spark ─ traps（ログ）だけ ─▶ OpenSearch Serverless の snmp-logs（SINKS に opensearch。既定では作らない）
-                                                 └─▶ analytics の Spark ─ metrics だけ ─▶ Amazon Managed Service for Prometheus（SINKS に prometheus。既定では作らない）
+                                                 ├─▶ analytics の Spark ─ traps（ログ）だけ ─▶ OpenSearch Serverless の snmp-logs（SINKS に opensearch。既定で作る）
+                                                 └─▶ analytics の Spark ─ metrics だけ ─▶ Amazon Managed Service for Prometheus（SINKS に prometheus。既定で作る）
   4 本目の log + metrics → Splunk は Kafka の sink（MSK Connect）にする予定で後回し（2026-09-17 ユーザー決定「splunkは後回しでもOK」）
 graph（Neptune のトポロジ。Web の「トポロジ」タブから編集）
 ```
@@ -103,7 +103,7 @@ graph（Neptune のトポロジ。Web の「トポロジ」タブから編集）
 ### 何ができる
 
 - EC2 1 台の中に **FRR × 6 + snmpd × 4 + ホスト × 4** の疑似ネットワークを作る（lab）。SSM で入って `sudo lab check` / `sudo lab failover` / `sudo lab heal-main` を打つと、主回線の切り替えを再現できる。
-- lab の SNMP（10 秒ポーリング + linkUp/linkDown の trap）を Telegraf が MSK に流す（stream）。detector Lambda が `link_down` を DynamoDB に書き、Web の「異常一覧」タブとエージェントの `list_anomalies` がその表を読む。チャットで「今の異常は？」と聞ける。
+- lab の SNMP（10 秒ポーリング + linkUp/linkDown の trap）を Telegraf が MSK に流す（stream）。analytics の Spark（`spark/snmp_sinks.py` の detect。60 秒のマイクロバッチ）が `link_down` を DynamoDB に書き、開いた瞬間に EventBridge へ `AnomalyOpened` を出す。Web の「異常一覧」タブとエージェントの `list_anomalies` がその表を読む。チャットで「今の異常は？」と聞ける。
 - 同じトピックを **Spark（EMR Serverless）のストリーミングジョブ**が 60 秒ごとに **S3 Tables の Iceberg テーブル `snmp_metrics`** に追記し続ける（analytics）。Telegraf の JSON をそのまま行にする（`ts` / `topic` / `measurement` / `agent_host` / `host` / `tags_json` / `fields_json` / `ingested_at`）。
 - トポロジを **Neptune** に載せ（graph）、Web の「トポロジ」タブからリンクの追加・削除ができる。エージェントの答えにも反映される。
 
@@ -115,7 +115,7 @@ graph（Neptune のトポロジ。Web の「トポロジ」タブから編集）
 | stream | MSK は IAM 認証（9098）。異常の「いま」は **DynamoDB**（オンデマンド）。ブローカーとテーブル名は SSM パラメータ経由で lab と Web に渡す |
 | S3 sink | 任意。`CREATE_S3_SINK=0` にすると MSK Connect を作らず約 $0.14/h 下がる。履歴の正本は analytics の S3 Tables なので、外してもデータは残る |
 | analytics の実体 | **EMR Serverless**（Glue ではない。ジョブが無ければ 0、アプリケーションは器だけ）。ARM64、release `emr-7.13.0`（Spark 3.5.6。S3 Tables は 7.5.0 以上。2026-09-17 確認） |
-| analytics の格納先 | **Kafka から 4 つに分ける**（2026-09-17 ユーザー決定）。Spark が 3 本: iceberg = 全トピック → S3 Tables（既定）、opensearch = ログ（いまは `traps` だけ。Telegraf に syslog を足したら `logs` も）→ OpenSearch Serverless の TIMESERIES コレクション `<prefix>-logs`（VPC エンドポイント経由だけ）、prometheus = メトリクス（`metrics`）→ Amazon Managed Service for Prometheus `<prefix>-metrics`（remote write を SigV4 で）。格納先ごとに別のストリーミングクエリと checkpoint。4 本目の Splunk（log + metrics）は Spark を通さず MSK Connect の sink にする予定で後回し。`deploy.env` の `SINKS`（既定 `iceberg`）→ `terraform/analytics` の `var.sinks` |
+| analytics の格納先 | **Kafka から 4 つに分ける**（2026-09-17 ユーザー決定）。Spark が 3 本: iceberg = 全トピック → S3 Tables（既定）、opensearch = ログ（いまは `traps` だけ。Telegraf に syslog を足したら `logs` も）→ OpenSearch Serverless の TIMESERIES コレクション `<prefix>-logs`（VPC エンドポイント経由だけ）、prometheus = メトリクス（`metrics`）→ Amazon Managed Service for Prometheus `<prefix>-metrics`（remote write を SigV4 で）。格納先ごとに別のストリーミングクエリと checkpoint。4 本目の Splunk（log + metrics）は Spark を通さず MSK Connect の sink にする予定で後回し。`deploy.env` の `SINKS`（既定 `iceberg,opensearch,prometheus`。2026-09-17 ユーザー決定「SINKS に opensearch と prometheus を入れる。KB のコレクションと共有できなければこちらを優先」）→ `terraform/analytics` の `var.sinks` |
 | analytics のテーブル | **S3 Tables（Iceberg）**。テーブルバケット `<prefix>-tables`、namespace `netops`、テーブル `snmp_metrics`（namespace とテーブル名はアンダースコアだけ。ハイフン不可）。テーブルは Terraform で作る（destroy でバケットまで消せるように） |
 | analytics のジョブ | Structured Streaming、`--mode STREAMING`、60 秒トリガー、driver 1 + executor 1 の 2 vCPU。Kafka / MSK IAM / S3 Tables カタログの jar 6 本は `ops/up.sh` が Maven Central から取って `s3://<バケット>/analytics/jars/` に置く。起動は `ops/up.sh` の start-job-run（動いていれば起こさない） |
 | analytics のネットワーク | NAT が無いので S3 Tables の API は **interface エンドポイント `s3tables`（2 AZ）**、データ本体は main の S3 ゲートウェイエンドポイント。EMR の SG は inbound を自分自身からだけにする（0.0.0.0/0 の inbound があると EMR Serverless が拒否する） |
@@ -134,8 +134,8 @@ graph（Neptune のトポロジ。Web の「トポロジ」タブから編集）
 - lab の配線と Neptune のトポロジの同期（Neptune は手で編集するもので、lab を変えても追随しない）。
 - **BGP の状態の監視。**拾うのはインタフェースの up/down（ポーリングと trap）だけで、隣接や経路の変化は異常にならない。
 - Grafana などの可視化（**保留**。2026-09-17 ユーザー決定「OpenSearchとPrometheusはgrafanaで可視化したいけどそこは後回しでOK」）。異常一覧は DynamoDB の表をそのまま出す。OpenSearch Serverless / Prometheus の中身は VPC の中からしか届かない。
-- 異常の重み付けや相関（同時に落ちた複数のリンクを 1 件にまとめる、など）。detector Lambda（閾値判定 → DynamoDB）を残すか、Spark 側に寄せるか。
-- **（失効）OpenSearch の全文検索は入れない（2026-09-17 朝のユーザー決定「いれなくてOK」）。同日午後の「spark から s3 iceburg, splunk, open search + prometheus この3パターンに格納したい」「Kafka から 4 つに分ける」で置き換わり、ログ（`traps`）だけを Spark から OpenSearch Serverless の TIMESERIES コレクションに入れる形で実装した（`SINKS=opensearch`。既定では作らない）。**下の理由のうち「別に立てると OCU がもう 1 セット出る可能性」はそのまま残っている（確認できていない）。以下は当時の判断:
+- 異常の重み付けや相関（同時に落ちた複数のリンクを 1 件にまとめる、など）。閾値判定は 2026-09-17 に stream の detector Lambda から Spark（`spark/snmp_sinks.py` の detect）に寄せた。
+- **（失効）OpenSearch の全文検索は入れない（2026-09-17 朝のユーザー決定「いれなくてOK」）。同日午後の「spark から s3 iceburg, splunk, open search + prometheus この3パターンに格納したい」「Kafka から 4 つに分ける」で置き換わり、ログ（`traps`）だけを Spark から OpenSearch Serverless の TIMESERIES コレクションに入れる形で実装した（`SINKS` に `opensearch`。同日夕方のユーザー決定「SINKS に opensearch と prometheus を入れる。KB コレクションと共有できなければこちらを優先して」で既定に入れた）。**下の理由のうち「別に立てると OCU がもう 1 セット出る可能性」はそのまま残っている（確認できていない）。以下は当時の判断:
   Spark の後に Kafka のメッセージを OpenSearch にも入れる案（2026-09-16 の見直しの矢印にある「+ OpenSearch」）は、次の理由で見送った。フェーズ 1 のコレクションは `VECTORSEARCH` 型で、ID 指定の書き込み・`_update` は `SEARCH` 型だけ、`TIMESERIES` 型は upsert ができない
   （[Supported operations](https://docs.aws.amazon.com/opensearch-service/latest/developerguide/serverless-genref.html)、
   [Choosing a collection type](https://docs.aws.amazon.com/opensearch-service/latest/developerguide/serverless-overview.html)。2026-09-16 に確認）ので相乗りはできない見込み。
@@ -148,7 +148,10 @@ graph（Neptune のトポロジ。Web の「トポロジ」タブから編集）
 
 ## フェーズ 3 — Temporal でエージェントが調査し、人が承認して直す
 
-**2026-09-17 に着手した**（ユーザー決定「ECSで着手して」「agent gateway の MCP も一緒に」）。`terraform/workflow`（ECS on Fargate のタスク + DynamoDB の修復案テーブル + AgentCore Gateway（MCP）と tools Lambda）、`workflow/`（ワーカー）、`tools/`（Gateway のツール）、`agent/mcp_client.py` / `agent/proposals.py`、Web の「承認」タブ、`PHASE=3 ops/up.sh`、`tests/test_workflow.py`（100 項目）。手順は README の「workflow（フェーズ 3）」。**AWS 上の apply は未確認。**
+**2026-09-17 に着手した**（ユーザー決定「ECSで着手して」「agent gateway の MCP も一緒に」）。`terraform/workflow`（ECS on Fargate のタスク + DynamoDB の修復案テーブル + AgentCore Gateway（MCP）と tools Lambda）、`workflow/`（ワーカー）、`tools/`（Gateway のツール）、`agent/mcp_client.py` / `agent/proposals.py`、Web の「承認」タブ、`PHASE=3 ops/up.sh`、`tests/test_workflow.py`。手順は README の「workflow（フェーズ 3）」。**AWS 上の apply は未確認。**
+**2026-09-17 夕方のユーザー決定**「Spark が異常を検知したら EventBridge にイベント発行して、それを検知した agent が Neptune や S3、OpenSearch、Prometheus を見に行って原因分析 → 修復の提案 → 人間の承認 → Temporal で実行」
+「Step Functions じゃなくて Temporal（EKS）だった。ただいまの段階では EKS ではなく ECS で OK」で、入口を DynamoDB の polling から **EventBridge → SQS** に変え（`terraform/workflow/events.tf`）、
+エージェントに OpenSearch / Prometheus / S3 Tables を見るツール（`agent/evidence.py`）を足した。stream の detector Lambda は消し、検知は Spark（`spark/snmp_sinks.py` の detect）に寄せた。
 **2026-09-16 のユーザー決定**「原因調査は AI エージェントがする。人がするのは修復を実行する承認だけ」、
 **2026-09-17 のユーザー決定**「フェーズ 3 は Temporal でエージェントが原因調査して人間が承認するまで」で、
 旧 5A（調べる）と旧 5B（人が承認して直す）を 1 つのフェーズにまとめた。
@@ -156,20 +159,22 @@ graph（Neptune のトポロジ。Web の「トポロジ」タブから編集）
 ### 決まっていること
 
 - **異常の検知 → 原因の調査 → 修復案の提示 → 人の承認 → 修復 → 検証**を、1 本のワークフローとして **Temporal** で回す。
+- **入口は EventBridge → SQS**（2026-09-17 ユーザー決定）。Spark の driver が既定のバスに `netops.spark` / `AnomalyOpened` を出し、ルールが SQS `<prefix>-anomalies` に流す。ワーカーの starter が long polling で受けて `investigate-<anomaly_id>` を起こす。キューが無ければ（events.tf を出していなければ）60 秒ごとの DynamoDB polling に戻る。
+- **調査の材料は 4 つ。**Neptune（`neighbors` / `blast_radius`）、OpenSearch Serverless の logs（`search_logs`）、Prometheus（`query_metrics`）、S3 Tables の履歴（`query_history`。Athena をまだ出していないので案内だけ）。実体は `agent/evidence.py` で、Runtime と tools Lambda の両方が同じものを呼ぶ。
 - 調査の中身はエージェントが行う。**承認までは何も直さない。**
 - **承認は人が行う（HITL）。**承認を外すこと（Zero-Touch）は **pending**（2026-09-16 決定）。
 - 承認の後の段は 3 つ: AwaitApproval（承認待ち。却下と時間切れで終わる）→ Apply（直す）→ Verify（直ったか確かめる。数回まで）。**ロールバックは作らない。**
-- Temporal の置き場は **ECS on Fargate**（2026-09-16 ユーザー決定「一旦 ECS にしようか」）。
+- Temporal の置き場は **ECS on Fargate**（2026-09-16 ユーザー決定「一旦 ECS にしようか」、2026-09-17「ただいまの段階では EKS ではなく ECS で OK」）。
   - 最初は **EKS** だった（AgentCore と連携させたいため）。ところが AgentCore は API（`InvokeAgentRuntime`）で呼ぶので、**呼ぶ側が EKS でも ECS でも変わらない。**
   - EKS にすると、クラスタとエンドポイントで**月 ≒ $153〜$173 が上乗せ**になる。ECS ならどちらも 0 なので、ECS に変えた。
   - 「一旦」なので、Kubernetes の形で試す必要が出たら EKS に戻す。そのときの費用は下の「EKS に戻すとき」にある。
 - **チャットはワークフローに載せない。**同期のチャットを載せると 1 往復ごとに実行が要る。
-- **エージェントのツールは AgentCore Gateway（MCP、IAM 認証）に出す**（2026-09-17 ユーザー要望）。ツール定義は `tools/tools.json`、実体は tools Lambda（`tools/handler.py`。静的トポロジと DynamoDB の異常一覧）。Runtime は SSM の `gateway-url` があれば `tools/list` と `tools/call` を Gateway に投げ、無ければ（届かなければ）コンテナの中の同名の関数で答える。Gateway は `create_gateway=false` で外せる。
+- **エージェントのツールは AgentCore Gateway（MCP、IAM 認証）に出す**（2026-09-17 ユーザー要望）。ツール定義は `tools/tools.json`（8 つ）、実体は tools Lambda（`tools/handler.py`。2026-09-17 から VPC の中に置き、Neptune のトポロジ・DynamoDB の異常一覧・OpenSearch のログ・Prometheus のメトリクスに届く）。Runtime は SSM の `gateway-url` があれば `tools/list` と `tools/call` を Gateway に投げ、無ければ（届かなければ）コンテナの中の同名の関数で答える。Gateway は `create_gateway=false` で外せる。
 - **Web とワーカーは Temporal でつながない。**修復案テーブル（DynamoDB）の `status` を Web が書き、ワーカーがポーリングで読む。画面側に Temporal の SDK を入れず、Temporal を閉域の外に出さないため。
 
 ### 着手できる時期
 
-**フェーズ 2 の stream が動いていること**（異常が DynamoDB に出ること）が前提。**analytics の完成は待たない。**
+**フェーズ 2 の stream と analytics が動いていること**（Spark が異常を DynamoDB と EventBridge に出すこと）が前提（2026-09-17 に検知を Spark に寄せたので、analytics も要る）。
 調査の材料が増えるほど質は上がるが、閾値で出た異常だけでもワークフローは回せる。
 
 ### 入れるときに効く費用と前提

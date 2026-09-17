@@ -81,7 +81,7 @@ variable "log_retention_days" {
 
 # ---------------------------------------------------------------- workflow behaviour (worker environment)
 variable "poll_interval_seconds" {
-  description = "How often the worker scans the anomaly table for open anomalies and starts a workflow per anomaly."
+  description = "How often the worker scans the anomaly table for open anomalies when it has no SQS queue (ANOMALY_QUEUE_URL empty). With the queue (default) the worker long-polls SQS instead and this is only the retry interval after an error."
   type        = number
   default     = 60
 }
@@ -98,9 +98,15 @@ variable "verify_attempts" {
   default     = 6
 }
 
+variable "create_sqs_endpoint" {
+  description = "sqs interface endpoint (1 AZ, the task subnet) so the worker can receive the AnomalyOpened messages without a NAT. Set false if the VPC already has one."
+  type        = bool
+  default     = true
+}
+
 # ---------------------------------------------------------------- gateway (MCP)
 variable "create_gateway" {
-  description = "Create the AgentCore Gateway (MCP) with the tools Lambda. false keeps the workflow only; the chat runtime then uses its built-in tools."
+  description = "Create the AgentCore Gateway (MCP) with the tools Lambda (in the VPC: Neptune, OpenSearch Serverless, Prometheus, anomaly table). false keeps the workflow only; the chat runtime then uses its built-in tools."
   type        = bool
   default     = true
 }

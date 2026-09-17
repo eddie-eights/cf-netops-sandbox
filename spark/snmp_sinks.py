@@ -1,4 +1,4 @@
-"""Kafka（MSK、IAM 認証）のトピックを読み、選んだ格納先に流し続ける Spark Structured Streaming のジョブ（Kafka の 4 分岐のうち Spark の 3 本）。
+"""Kafka（MSK、IAM 認証）のトピックを読み、選んだ格納先に流し続け、異常を検知して EventBridge に出す Spark Structured Streaming のジョブ（Kafka の 4 分岐のうち Spark の 3 本 + 検知）。
 
 EMR Serverless の上で動く（terraform/analytics）。起動は ops/up.sh の a-3（start-job-run）で、引数は terraform/analytics の
 output job_driver_json が組み立てる（--bootstrap / --checkpoint / --sinks と、格納先ごとの --iceberg-table などの値）。
@@ -16,6 +16,13 @@ Telegraf の JSON 出力（outputs.kafka の data_format = "json"、json_timesta
   {"fields": {…}, "name": "<measurement>", "tags": {"agent_host": "…", "host": "…", …}, "timestamp": <秒>}
 の形。列に分けるのは timestamp / name / agent_host / host だけで、tags と fields は JSON 文字列のまま入れる
 （機器やメトリクスが増えてもテーブルの列を変えないため。terraform/analytics/tables.tf の列と同じ）。
+
+異常の検知（detect）は格納先とは別に常に動く 4 本目のクエリ（2026-09-17 ユーザー決定「Spark が異常を検知したら EventBridge にイベント発行」）:
+  metrics の interface で ifOperStatus が down のインタフェース（ポーリング）と、traps の linkDown（即時）を DynamoDB の異常テーブル
+  （terraform/stream の anomalies。キーは <機器>#<種別>#<インタフェース>）に open で書き、up に戻ったポーリングと linkUp で resolved にする。
+  新しく open になったときだけ EventBridge の既定のバスに Source netops.spark / DetailType AnomalyOpened を put_events する
+  （terraform/workflow の events.tf がルールで SQS に流し、Temporal の worker が調査ワークフローを起こす）。
+  機器名は sysName タグ > --device-map（IP=機器名,...）の順で引く。以前 terraform/stream の detector Lambda がしていたことをここに寄せた。
 
 HTTP の送信は driver でまとめて行う（マイクロバッチを collect する。PoC の量（機器数台、10 秒間隔）なら 1 分に数百行）。
 量が増えたら foreachPartition に移す。remote write の protobuf と snappy は外部ライブラリ無しで組む
@@ -56,6 +63,9 @@ def parse_args(argv):
     p.add_argument("--opensearch-endpoint", default="", help="opensearch: コレクションのエンドポイント（https://…）")
     p.add_argument("--opensearch-index", default=OPENSEARCH_INDEX, help="opensearch: インデックス名")
     p.add_argument("--prometheus-url", default="", help="prometheus: remote write の URL（…/api/v1/remote_write）")
+    p.add_argument("--anomaly-table", default="", help="detect: 異常を書く DynamoDB のテーブル名（terraform/stream の anomalies。空なら検知しない）")
+    p.add_argument("--device-map", default="", help="detect: agent_host の IP から機器名を引く表（IP=機器名,... 。sysName タグがあればそちら）")
+    p.add_argument("--event-bus", default="default", help="detect: 新しい異常を put_events する EventBridge のバス名")
     args = p.parse_args(argv)
     args.sinks = [s.strip() for s in args.sinks.split(",") if s.strip()]
     bad = [s for s in args.sinks if s not in SINKS]
@@ -68,6 +78,7 @@ def parse_args(argv):
                 p.error(f"--sinks に {s} があるので --{k.replace('_', '-')} が要る")
     if not args.checkpoint.endswith("/"):
         args.checkpoint += "/"
+    args.device_map = parse_device_map(args.device_map)
     for k in ("metric_topics", "log_topics"):
         setattr(args, k, ",".join(t.strip() for t in getattr(args, k).split(",") if t.strip()))
         if not getattr(args, k):
@@ -76,8 +87,8 @@ def parse_args(argv):
 
 
 def sink_topics(sink, metric_topics, log_topics):
-    """格納先が購読する Kafka のトピック（カンマ区切り）。iceberg は全部、prometheus はメトリクス、opensearch はログ"""
-    if sink == "iceberg":
+    """格納先が購読する Kafka のトピック（カンマ区切り）。iceberg と detect は全部、prometheus はメトリクス、opensearch はログ"""
+    if sink in ("iceberg", "detect"):
         return ",".join(dict.fromkeys(metric_topics.split(",") + log_topics.split(",")))
     if sink == "prometheus":
         return metric_topics
@@ -376,6 +387,123 @@ def make_prometheus_sender(url, region):
     return send
 
 
+# ---------------------------------------------------------------- detect（異常 → DynamoDB + EventBridge）
+LINK_DOWN, LINK_UP = ".1.3.6.1.6.3.1.1.5.3", ".1.3.6.1.6.3.1.1.5.4"   # IF-MIB linkDown / linkUp の trap OID
+EVENT_SOURCE = "netops.spark"
+EVENT_DETAIL_TYPE = "AnomalyOpened"
+
+
+def parse_device_map(text):
+    """"203.0.113.11=hq-ce-01,203.0.113.12=dc-ce-01" → {IP: 機器名}。= の無い要素は捨てる"""
+    return dict(p.split("=", 1) for p in (text or "").split(",") if "=" in p)
+
+
+def device(m, devmap):
+    """機器名。sysName タグ > device map（agent_host か source の IP）> IP そのもの > "?" """
+    t = m.get("tags") or {}
+    ip = t.get("agent_host") or t.get("source", "")
+    return t.get("sysName") or devmap.get(ip, ip or "?")
+
+
+def events(m, devmap):
+    """1 メトリクス（Telegraf の JSON）から (機器, 種別, インタフェース, 開く/閉じる, 元) の列を出す。関係ない行は []"""
+    if not isinstance(m, dict):
+        return []
+    name, f, t = m.get("name"), m.get("fields") or {}, m.get("tags") or {}
+    if name == "interface" and "ifOperStatus" in f:
+        ifn = str(t.get("ifDescr") or t.get("ifIndex") or "?")
+        if ifn.startswith("lo"):
+            return []
+        try:
+            down = int(float(f["ifOperStatus"])) == 2
+        except (TypeError, ValueError):
+            return []
+        return [(device(m, devmap), "link_down", ifn, down, "poll")]
+    if name == "snmp_trap":
+        oid = t.get("oid", "")
+        if oid in (LINK_DOWN, LINK_UP):
+            # MIB が無いと varbind の名前は数値 OID（末尾に ifIndex が付く）。ifDescr を優先し、無ければ ifIndex
+            ifn = "?"
+            for pre in ("ifDescr", ".1.3.6.1.2.1.2.2.1.2", "ifIndex", ".1.3.6.1.2.1.2.2.1.1"):
+                v = [v for k, v in f.items() if k == pre or k.startswith(pre + ".")]
+                if v:
+                    ifn = str(v[0])
+                    break
+            return [(device(m, devmap), "link_down", ifn, oid == LINK_DOWN, "trap")]
+        return [(device(m, devmap), "trap", oid, True, "trap")]
+    return []
+
+
+def anomaly_key(dev, kind, ifn):
+    return f"{dev}#{kind}#{ifn}"
+
+
+def anomaly_detail(kind, ifn, src):
+    return f"{ifn} is down ({src})" if kind == "link_down" else f"trap {ifn}"
+
+
+def make_detect_sender(table_name, devmap, region, event_bus, dynamodb=None, events_client=None):
+    """records（row_to_record の辞書）から異常を出し、DynamoDB に open / resolved を書き、新しく open になったものを EventBridge に出す。
+
+    dynamodb / events_client はテストで差し替える（無ければ boto3 で作る。EMR Serverless の Python に boto3 は入っている）。
+    同じマイクロバッチに同じキーが何度も出るときは最後の状態だけ書く（ポーリングは 10 秒間隔、トリガーは 60 秒）。
+    """
+    if dynamodb is None or events_client is None:
+        import boto3
+        dynamodb = dynamodb or boto3.client("dynamodb", region_name=region)
+        events_client = events_client or boto3.client("events", region_name=region)
+
+    def send(records):
+        now = int(time.time())
+        latest = {}
+        for rec in records:
+            if not isinstance(rec, dict):
+                continue
+            m = {"name": rec.get("measurement"), "tags": rec.get("tags") or {}, "fields": rec.get("fields") or {}}
+            for dev, kind, ifn, opened, src in events(m, devmap):
+                latest[anomaly_key(dev, kind, ifn)] = (dev, kind, ifn, opened, src)
+        opened_now = []
+        for key, (dev, kind, ifn, opened, src) in latest.items():
+            if opened:
+                r = dynamodb.update_item(
+                    TableName=table_name,
+                    Key={"anomaly_id": {"S": key}},
+                    UpdateExpression="SET device_id=:d, kind=:k, target=:i, #s=:o, last_seen=:n, #src=:p, first_seen=if_not_exists(first_seen,:n), detail=:t",
+                    ExpressionAttributeNames={"#s": "status", "#src": "source"},
+                    ExpressionAttributeValues={":d": {"S": dev}, ":k": {"S": kind}, ":i": {"S": ifn}, ":o": {"S": "open"},
+                                               ":n": {"N": str(now)}, ":p": {"S": src}, ":t": {"S": anomaly_detail(kind, ifn, src)}},
+                    ReturnValues="ALL_OLD",
+                )
+                before = (r.get("Attributes") or {}).get("status", {}).get("S")
+                if before != "open":   # 無かった、または resolved から開き直した
+                    first_seen = int(((r.get("Attributes") or {}).get("first_seen") or {}).get("N") or now)
+                    opened_now.append({"anomaly_id": key, "device_id": dev, "kind": kind, "target": ifn, "first_seen": now if before is None else first_seen,
+                                       "detail": anomaly_detail(kind, ifn, src), "source": src})
+            else:
+                try:
+                    dynamodb.update_item(
+                        TableName=table_name,
+                        Key={"anomaly_id": {"S": key}},
+                        ConditionExpression="#s = :o",
+                        UpdateExpression="SET #s=:r, resolved_at=:n, last_seen=:n",
+                        ExpressionAttributeNames={"#s": "status"},
+                        ExpressionAttributeValues={":o": {"S": "open"}, ":r": {"S": "resolved"}, ":n": {"N": str(now)}},
+                    )
+                except dynamodb.exceptions.ConditionalCheckFailedException:
+                    continue  # 開いていない異常の up は何もしない（正常時のポーリングは毎回ここ）
+        for i in range(0, len(opened_now), 10):   # PutEvents は 1 回 10 件まで
+            entries = [{"Source": EVENT_SOURCE, "DetailType": EVENT_DETAIL_TYPE, "EventBusName": event_bus, "Detail": json.dumps(o)}
+                       for o in opened_now[i:i + 10]]
+            r = events_client.put_events(Entries=entries)
+            if r.get("FailedEntryCount"):
+                log(f"detect: put_events で {r['FailedEntryCount']} 件失敗: {r.get('Entries')}")
+        if opened_now:
+            log("detect: 新しい異常 " + ", ".join(o["anomaly_id"] for o in opened_now))
+        return opened_now
+
+    return send
+
+
 # ---------------------------------------------------------------- クエリの組み立て
 def http_query(rows, name, checkpoint, sender):
     """マイクロバッチごとに driver で collect して sender に渡す foreachBatch のクエリ"""
@@ -415,6 +543,9 @@ def build(spark, args):
             queries.append(http_query(rows, s, args.checkpoint, make_opensearch_sender(args.opensearch_endpoint, args.opensearch_index, args.region)))
         elif s == "prometheus":
             queries.append(http_query(rows, s, args.checkpoint, make_prometheus_sender(args.prometheus_url, args.region)))
+    if args.anomaly_table:
+        rows = read_rows(spark, args.bootstrap, sink_topics("detect", args.metric_topics, args.log_topics))
+        queries.append(http_query(rows, "detect", args.checkpoint, make_detect_sender(args.anomaly_table, args.device_map, args.region, args.event_bus)))
     return queries
 
 
@@ -424,7 +555,8 @@ def main(argv):
 
     spark = SparkSession.builder.appName("snmp_sinks").getOrCreate()
     queries = build(spark, args)
-    log("格納先: " + ", ".join(f"{s}({sink_topics(s, args.metric_topics, args.log_topics)})" for s in args.sinks))
+    log("格納先: " + ", ".join(f"{s}({sink_topics(s, args.metric_topics, args.log_topics)})" for s in args.sinks)
+        + (f"; 検知: DynamoDB {args.anomaly_table} → EventBridge {args.event_bus}" if args.anomaly_table else "; 検知: なし（--anomaly-table が空）"))
     # 1 つのクエリが落ちても他は続ける。全部止まったら 1 で終わる（EMR Serverless の STREAMING モードがジョブごと起こし直す）
     failed = 0
     while any(q.isActive for q in queries):

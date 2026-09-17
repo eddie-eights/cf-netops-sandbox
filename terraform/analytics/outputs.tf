@@ -42,7 +42,8 @@ output "job_driver_json" {
       # 「cond ? [..] : []」は両辺の型が揃わず validate が落ちるので for … if で絞る
       entryPointArguments = concat(
         ["--bootstrap", local.bootstrap, "--checkpoint", "s3://${local.bucket}/${local.checkpoint}/", "--sinks", join(",", var.sinks), "--region", var.region,
-        "--metric-topics", local.metric_topics, "--log-topics", local.log_topics],
+          "--metric-topics", local.metric_topics, "--log-topics", local.log_topics,
+        "--anomaly-table", local.anomaly_table, "--device-map", var.device_map, "--event-bus", var.event_bus],
         [for a in ["--iceberg-table", local.iceberg_table] : a if local.sink_iceberg],
         [for a in ["--opensearch-endpoint", local.opensearch_endpoint, "--opensearch-index", local.opensearch_index] : a if local.sink_opensearch],
         [for a in ["--prometheus-url", local.prometheus_remote_write_url] : a if local.sink_prometheus],
@@ -112,6 +113,36 @@ output "prometheus_workspace_id" {
 output "prometheus_remote_write_url" {
   description = "remote write URL the job posts to (empty unless sinks has prometheus)"
   value       = local.prometheus_remote_write_url
+}
+
+output "anomaly_table_name" {
+  description = "DynamoDB table the detection query writes (from terraform/stream)"
+  value       = local.anomaly_table
+}
+
+output "opensearch_collection_name" {
+  description = "Name of the OpenSearch Serverless collection (terraform/workflow adds a read-only data access policy for the tools). Empty unless sinks has opensearch"
+  value       = local.sink_opensearch ? aws_opensearchserverless_collection.logs[0].name : ""
+}
+
+output "opensearch_collection_arn" {
+  description = "ARN of the OpenSearch Serverless collection (aoss:APIAccessAll for the tools Lambda). Empty unless sinks has opensearch"
+  value       = local.sink_opensearch ? aws_opensearchserverless_collection.logs[0].arn : ""
+}
+
+output "opensearch_index" {
+  description = "Index the log topics go to"
+  value       = local.opensearch_index
+}
+
+output "prometheus_workspace_arn" {
+  description = "ARN of the Prometheus workspace (aps:QueryMetrics for the tools Lambda). Empty unless sinks has prometheus"
+  value       = local.sink_prometheus ? aws_prometheus_workspace.metrics[0].arn : ""
+}
+
+output "events_endpoint_id" {
+  description = "events interface endpoint the driver puts AnomalyOpened through"
+  value       = aws_vpc_endpoint.events.id
 }
 
 output "prometheus_query_url" {

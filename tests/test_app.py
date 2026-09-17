@@ -93,7 +93,7 @@ r = app.invoke({"prompt": "%BGP-5-ADJCHANGE が出た"})
 rk = state["calls"][0][1]; ck = state["calls"][1][1]
 check("RERANK_MODEL_ARN が無ければリランクなしで HYBRID と件数だけ渡す", rk["retrievalConfiguration"]["vectorSearchConfiguration"] == {"numberOfResults": 3, "overrideSearchType": "HYBRID"} and rk["knowledgeBaseId"] == "KB12345678")
 check("Converse に guardrailConfig", ck["guardrailConfig"] == {"guardrailIdentifier": "gr123", "guardrailVersion": "1"})
-check("Converse にトポロジの 4 ツール + 異常一覧", [t["toolSpec"]["name"] for t in ck["toolConfig"]["tools"]] == ["list_devices", "neighbors", "blast_radius", "topology_graph", "list_anomalies"])
+check("Converse にトポロジの 4 ツール + 異常一覧 + 証拠の 3 ツール", [t["toolSpec"]["name"] for t in ck["toolConfig"]["tools"]] == ["list_devices", "neighbors", "blast_radius", "topology_graph", "list_anomalies", "search_logs", "query_metrics", "query_history"])
 last = ck["messages"][-1]
 check("質問は guardContent、資料は text", last["content"][1] == {"guardContent": {"text": {"text": "%BGP-5-ADJCHANGE が出た"}}} and "<documents>" in last["content"][0]["text"] and 'source="interface-errors.md"' in last["content"][0]["text"])
 check("初回は messages 1 件", len(ck["messages"]) == 1)

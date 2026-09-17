@@ -80,12 +80,25 @@ variable "log_retention_days" {
 variable "sinks" {
   description = "Where the Spark job stores the Telegraf messages: iceberg (all topics to S3 Tables, tables.tf), opensearch (log topics to an OpenSearch Serverless TIMESERIES collection made here), prometheus (metric topics to an Amazon Managed Service for Prometheus workspace made here). One streaming query per entry. Splunk is not a Spark sink (it will be an MSK Connect connector in terraform/stream, not built yet)"
   type        = list(string)
-  default     = ["iceberg"]
+  default     = ["iceberg", "opensearch", "prometheus"]
 
   validation {
     condition     = length(var.sinks) > 0 && length(setsubtract(var.sinks, ["iceberg", "opensearch", "prometheus"])) == 0
     error_message = "sinks は iceberg / opensearch / prometheus のリスト（1 つ以上）。"
   }
+}
+
+# ---------------------------------------------------------------- detection (Spark -> DynamoDB -> EventBridge)
+variable "device_map" {
+  description = "ip=device_id,... used by the detection query when a message has no sysName tag (traps). Matches lab/wvs2.clab.yml.in and agent/data/devices.yaml."
+  type        = string
+  default     = "203.0.113.11=hq-ce-01,203.0.113.12=dc-ce-01,203.0.113.13=br1-ce-01,203.0.113.14=br2-ce-01"
+}
+
+variable "event_bus" {
+  description = "EventBridge event bus the job puts AnomalyOpened events on. terraform/workflow subscribes to the same bus."
+  type        = string
+  default     = "default"
 }
 
 variable "metric_topics" {
