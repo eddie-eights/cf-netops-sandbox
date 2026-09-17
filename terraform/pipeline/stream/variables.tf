@@ -42,9 +42,14 @@ variable "create_dynamodb_endpoint" {
 
 # ---------------------------------------------------------------- MSK
 variable "kafka_version" {
-  description = "MSK provisioned Kafka version. 3.9.x is the recommended version (checked 2026-09-15)."
+  description = "MSK provisioned Kafka version, KRaft mode only (the .kraft suffix selects KRaft; Kafka 4 has no ZooKeeper mode). 4.1.x is the newest for Standard brokers, 4.2.x is Express brokers only (list-kafka-versions and the MSK supported versions page, checked 2026-09-18)."
   type        = string
-  default     = "3.9.x"
+  default     = "4.1.x.kraft"
+
+  validation {
+    condition     = can(regex("^([4-9]|[1-9][0-9])\\.[0-9]+\\.x\\.kraft$", var.kafka_version))
+    error_message = "kafka_version must be 4.0.x.kraft or newer (KRaft mode), e.g. 4.1.x.kraft."
+  }
 }
 
 variable "broker_instance_type" {

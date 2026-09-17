@@ -28,6 +28,8 @@ check("terraform/pipeline/stream は anomalies テーブルを持つ", re.search
 check("output に anomaly_table_name と anomaly_table_arn がある（analytics が読む）",
       'output "anomaly_table_name"' in tf and 'output "anomaly_table_arn"' in tf)
 check("detector_logs の output は無い", "detector_logs" not in tf)
+check("MSK は Kafka 4 以上の KRaft（kafka_version の既定が N.N.x.kraft で、検査が .kraft を強いる）",
+      re.search(r'variable "kafka_version" \{[^}]*default\s*=\s*"[4-9]\.\d+\.x\.kraft"', tf) is not None and "x\\\\.kraft$" in tf)
 
 # ---- spark/snmp_sinks.py を pyspark 無しで読む
 spec = importlib.util.spec_from_file_location("snmp_sinks", SRC)

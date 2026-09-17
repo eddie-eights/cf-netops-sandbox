@@ -1,4 +1,5 @@
 # ---------------------------------------------------------------- MSK
+# KRaft モード（var.kafka_version の末尾の .kraft）。ZooKeeper のノードは無く、メタデータは MSK が持つコントローラーに載る（追加料金なし）
 resource "aws_msk_configuration" "stream" {
   name           = "${var.name_prefix}-stream"
   kafka_versions = [var.kafka_version]

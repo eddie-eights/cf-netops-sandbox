@@ -9,7 +9,7 @@
 # create_sts_endpoint      = true
 # create_dynamodb_endpoint = true
 #
-# kafka_version        = "3.9.x"
+# kafka_version        = "4.1.x.kraft"
 # broker_instance_type = "kafka.t3.small"
 # log_retention_days   = 7
 #
