@@ -67,7 +67,7 @@ resource "aws_vpc_endpoint" "s3" {
     ]
   })
 
-  tags = { Name = "${var.name_prefix}-s3" }
+  tags = { Name = "${local.name_prefix}-s3" }
 }
 
 # ---------------------------------------------------------------- VPC endpoints for the chat web EC2 (1 AZ)
@@ -81,7 +81,7 @@ resource "aws_vpc_endpoint" "ssm" {
   subnet_ids          = [aws_subnet.a.id]
   security_group_ids  = local.ssm_endpoint_sg_ids
 
-  tags = { Name = "${var.name_prefix}-${each.value}" }
+  tags = { Name = "${local.name_prefix}-${each.value}" }
 }
 
 # ---------------------------------------------------------------- VPC endpoints shared by the features (2 AZ)
@@ -103,5 +103,5 @@ resource "aws_vpc_endpoint" "shared" {
   subnet_ids          = [aws_subnet.a.id, aws_subnet.b.id]
   security_group_ids  = [aws_security_group.endpoints.id]
 
-  tags = { Name = "${var.name_prefix}-${each.key}" }
+  tags = { Name = "${local.name_prefix}-${each.key}" }
 }

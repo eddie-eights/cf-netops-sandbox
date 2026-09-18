@@ -8,13 +8,13 @@
 
 **待機の時間課金は、土台 0.05 + 共用のエンドポイント 0.08（AGENT / lab / analytics のどれかを作るとき）+ AGENT 0.05（`CREATE_KB=1` なら +0.36）+ PIPELINE の lab（t4g.large）0.09 + stream（MSK kafka.m5.large × 2 / MSK Connect）0.71 + analytics（EMR Serverless / S3 Tables / エンドポイント）0.20 + OpenSearch Serverless の logs コレクション最大 0.33 + Prometheus 0.03 + graph（Neptune）0.14 + WORKFLOW 0.06 で、全部作ると約 $1.74/h**（「[1 時間起動したときの試算](cost.md)」。`ops/up.sh` も手順 0 で目安を出す）。**使い終わったら当日中に `ops/down.sh` を打つ。**
 
-初回だけ、設定のファイルを写す（`deploy.env` は配布物には入っていない）:
+初回だけ、設定のファイルを写す（`deploy.env` は配布物には入っていない）。写したら **`OWNER`（デプロイする人の名前。必須）の行の `#` を外して自分の名前に書き換える**:
 
 ```bash
 cp deploy.env.example deploy.env
 ```
 
-データパイプラインまで作る日は `deploy.env` の `PIPELINE=0` を `PIPELINE=1` に書き換えてから打つ（要らないルートがあれば `#SKIP_…=1` の行頭の `#` を外す）。`deploy.env` が無ければ土台と AGENT を作る:
+データパイプラインまで作る日は `deploy.env` の `PIPELINE=0` を `PIPELINE=1` に書き換えてから打つ（要らないルートがあれば `#SKIP_…=1` の行頭の `#` を外す）。機能を何も書かなければ土台と AGENT を作る:
 
 ```bash
 ops/up.sh
@@ -56,11 +56,11 @@ Terraform の確認プロンプトは出さずに進む（スクリプトの中�
 **S3 sink の zip が取れないとき。**zip は Confluent Hub から取り、ダウンロードに利用条件への同意が要ることがある。zip でないものが返ったら、`ops/up.sh` は案内を出して止まる。
 ブラウザで s-1 の URL から取って展開したフォルダの直下に同じ名前（`confluentinc-kafka-connect-s3-12.1.11.zip`）で置いて打ち直すか、S3 sink（MSK Connect）無しでよければ `deploy.env` に `CREATE_S3_SINK=0` を書いて打ち直す。
 
-`deploy.env` に書けるもの（全部任意。同じ名前の環境変数でも渡せて、空でない環境変数が `deploy.env` より優先。見本と説明は `deploy.env.example`）:
+`deploy.env` に書けるもの（**`OWNER` だけ必須**で、ほかは任意。同じ名前の環境変数でも渡せて、空でない環境変数が `deploy.env` より優先。見本と説明は `deploy.env.example`）:
 
 | キー | 意味 |
 |---|---|
-| `NAME_PREFIX` / `OWNER` | リソース名（`netops-poc-vpc` など）・SSM のパス（`/netops-poc/…`）・ECR のリポジトリ名・EC2 の systemd ユニット名・`Project` タグの接頭辞（既定 `netops-poc`。英小文字で始まる 2〜22 文字の英小文字・数字・ハイフンで、ハイフンは連続させず末尾にも置かない（OpenSearch Serverless の data access policy 名 `<接頭辞>-logs-read` が 32 文字に収まる長さ。ハイフンの制限は ECR のリポジトリ名）。AgentCore Runtime の名前だけはハイフンが使えないので `-` を `_` にした `netops_poc_agent` になる）と、`owner` タグの値（既定 `netops`。英数字と `.` `_` `-` の 1〜64 文字）。1 つの AWS アカウントを何人かで使うときは人ごとに変える。**作ったあとで変えない**（名前が変わったリソースを Terraform は別のものと見るので、打ち直すと全部作り直しになる。変えるなら先に `ops/down.sh`）。`ops/down.sh` も同じ `deploy.env` を読むので、書き換えずに打てば消す相手は揃う |
+| `OWNER` | **デプロイする人の名前。必須**（既定は無い。書かないと `ops/up.sh` / `ops/down.sh` が先頭で止まり、手で `terraform apply` を打つと値を聞かれる。英小文字で始まる 14 文字までの英小文字・数字・ハイフンで、ハイフンは連続させず末尾にも置かない）。リソース名（`<owner>-nwc-poc-vpc` など）・SSM のパス（`/<owner>-nwc-poc/…`）・ECR のリポジトリ名・EC2 の systemd ユニット名・`Project` タグの接頭辞はこの名前から `<owner>-nwc-poc` として作られ、`owner` タグにはこの名前がそのまま入る。1 つの AWS アカウントを何人かで使うときに、自分の名前で自分のリソースを探せるようにするための値（14 文字なのは、接頭辞が OpenSearch Serverless の data access policy 名 `<接頭辞>-logs-read` の 32 文字に収まる長さだから。ハイフンの制限は ECR のリポジトリ名）。AgentCore Runtime の名前だけはハイフンが使えないので `-` を `_` にした `<owner>_nwc_poc_agent` になる。**作ったあとで変えない**（名前が変わったリソースを Terraform は別のものと見るので、打ち直すと全部作り直しになる。変えるなら先に `ops/down.sh`）。`ops/down.sh` も同じ `deploy.env` を読むので、書き換えずに打てば消す相手は揃う |
 | `AGENT` | agent での分析を作るか。`1`（既定）で `terraform/agent`（AgentCore Runtime・ガードレール・bedrock のエンドポイント 3 本）を足す。Web の「チャット」タブが使える。約 $0.05/h（ecr.api / ecr.dkr / logs の共用のエンドポイント 約 $0.08/h は土台の側で、AGENT か lab か analytics を作るときにかかる） |
 | `PIPELINE` | データパイプラインとトポロジを作るか。`1` で lab / stream / analytics / graph を足す（既定 `0`）。Web の「トポロジ」「異常一覧」タブが動く。約 $1.50/h（`SINK_*` が既定のとき。`SKIP_*` / `SINK_*` で減らせる） |
 | `WORKFLOW` | Temporal での実行を作るか。`1` で workflow を足す（既定 `0`）。AGENT と lab / stream / analytics が要るので、`AGENT=1` と `PIPELINE=1` にし、`SKIP_LAB` / `SKIP_STREAM` / `SKIP_ANALYTICS` とは一緒に書けない。約 $0.06/h |
@@ -92,7 +92,7 @@ ops/down.sh
 ```
 
 「[片付け](deploy-manual.md)」と同じ順（workflow → analytics（Spark のジョブを止めてから）→ graph → stream → lab → agent → main → ecr → Runtime のロググループ）で、**state にリソースが載っているルートだけ** destroy する（作っていないルートは飛ばす。`deploy.env` の `AGENT` / `PIPELINE` / `WORKFLOW` / `CREATE_KB` / `SKIP_*` / `CREATE_S3_SINK` は見ないので、`PIPELINE=0` に戻した後でも前に作った lab / stream / analytics / graph / workflow まで消す）。
-バケットは中身ごと、ECR はイメージごと消える（`KEEP_ECR=1` のときは ECR を残す）。最後に `Project=netops-poc` のタグが付いたものが残っていないかを出す（何も出なければ全部消えている）。
+バケットは中身ごと、ECR はイメージごと消える（`KEEP_ECR=1` のときは ECR を残す）。最後に `Project=netops-nwc-poc` のタグが付いたものが残っていないかを出す（何も出なければ全部消えている）。
 graph と workflow は VPC の中に Lambda を持つ。Lambda は関数を消しても ENI が `available` のまま 20〜40 分残ることがあり、その間は SG とサブネットが消えない（2026-09-18 に graph の destroy が 20 分以上止まった）。`ops/down.sh` はこの 2 つを消している間、その関数の `available` な ENI だけを裏で消し続ける（実機では未確認）。
 ECR を残すか消すかは `deploy.env` の `KEEP_ECR`（環境変数でもよい）で選ぶ。残すと翌朝の `ops/up.sh` がビルドを飛ばせる（保管料は月数円。Runtime はイメージが無いと作れないので、翌朝ビルドし直す時間が惜しいならこちら）。
 
@@ -110,7 +110,7 @@ KEEP_ECR=1 ops/down.sh
 
 - `terraform/<ルート>/terraform.tfstate` を**消さない**。消すと Terraform は作ったものを忘れ、`ops/down.sh` が「無い」と言って飛ばし、AWS にリソースと課金が残る。次の `ops/up.sh` は同じ名前がぶつかって `AlreadyExists` で落ちる。
 - **up と down は同じ PC で打つ。**別の PC には state が無いので、同じことが起きる。PC を替えるときは、元の PC で `ops/down.sh` を済ませてから。
-- 消してしまったときは、コンソールで `netops-poc` の名前とタグのリソースを手で消す（「[名前とタグ](architecture.md)」の `get-resources` で探す）。
+- 消してしまったときは、コンソールで `netops-nwc-poc` の名前とタグのリソースを手で消す（「[名前とタグ](architecture.md)」の `get-resources` で探す）。
 
 どちらも bash スクリプトなので、Windows は WSL のシェルから打つ。以下は、スクリプトの中身を 1 つずつ手で打つときの説明でもある。
 
@@ -118,7 +118,7 @@ KEEP_ECR=1 ops/down.sh
 
 | 書き方 | 意味 | 例 |
 |---|---|---|
-| そのままの文字 | **実際の値。置き換えない** | `netops-poc`、`owner=netops`、`ap-northeast-1`、`v1`、ルートのディレクトリ名（`terraform/base/core` など） |
+| そのままの文字 | **実際の値。置き換えない** | `netops-nwc-poc`、`owner=netops`、`ap-northeast-1`、`v1`、ルートのディレクトリ名（`terraform/base/core` など） |
 | `$ACCOUNT_ID` `$KB_BUCKET` `$INSTANCE_ID` のように `$` で始まる | **あなたの環境の値が入った環境変数。**`$ACCOUNT_ID`（と、要るときだけ `$ADMIN_ARN`）は手順 0 で入れる。それ以外（`$REPO` `$KB_BUCKET` `$INSTANCE_ID` `$KB_ID` `$DS_ID` `$JOB_ID` `$LOG_GROUP` `$RUNTIME_ARN` `$LAB_INSTANCE_ID`）は **`terraform output` で取る値**で、使う枠の 1 行目に「取るコマンド + `echo`」を置いてある。枠ごと上から順にコピーして打てば、値を書き換える場所は無い（シェルが `$ACCOUNT_ID` を 12 桁の数字に置き換えて実行する） | `$ACCOUNT_ID` → `123456789012` のような 12 桁。`$INSTANCE_ID` → `i-0` で始まるインスタンス ID |
 | `<日本語>` の山括弧 | 手で書き換える場所（手順 0-1 と 0-3、「[社内 PC で使うとき](setup.md)」の 1、手順 6 の JSON だけ） | `<ロール名>` `<プロファイル>` `<アカウント ID>` |
 

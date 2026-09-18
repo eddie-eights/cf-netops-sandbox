@@ -5,7 +5,7 @@ resource "aws_vpc" "this" {
   enable_dns_support   = true
   enable_dns_hostnames = true
 
-  tags = { Name = "${var.name_prefix}-vpc" }
+  tags = { Name = "${local.name_prefix}-vpc" }
 }
 
 resource "aws_subnet" "a" {
@@ -14,7 +14,7 @@ resource "aws_subnet" "a" {
   cidr_block              = cidrsubnet(var.vpc_cidr, 8, 0)
   map_public_ip_on_launch = false
 
-  tags = { Name = "${var.name_prefix}-private-a" }
+  tags = { Name = "${local.name_prefix}-private-a" }
 }
 
 resource "aws_subnet" "b" {
@@ -23,13 +23,13 @@ resource "aws_subnet" "b" {
   cidr_block              = cidrsubnet(var.vpc_cidr, 8, 1)
   map_public_ip_on_launch = false
 
-  tags = { Name = "${var.name_prefix}-private-b" }
+  tags = { Name = "${local.name_prefix}-private-b" }
 }
 
 resource "aws_route_table" "private" {
   vpc_id = aws_vpc.this.id
 
-  tags = { Name = "${var.name_prefix}-private" }
+  tags = { Name = "${local.name_prefix}-private" }
 }
 
 resource "aws_route_table_association" "a" {

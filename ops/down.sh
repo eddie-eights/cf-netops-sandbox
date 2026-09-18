@@ -7,9 +7,9 @@
 #   KEEP_ECR=1 ops/down.sh   # ECR（イメージ）だけ残す。翌日の ops/up.sh でビルドを飛ばせる（保管料は月数円）
 #
 # ops/up.sh と同じ deploy.env（DEPLOY_ENV_FILE=<パス> で別のファイル）を読む。環境変数はファイルより優先。
-# ここで使うキー（任意）:
-#   NAME_PREFIX / OWNER  リソース名の接頭辞と owner タグ。既定は netops-poc / netops。**作ったときの ops/up.sh と同じ値にする**
-#              （deploy.env を書き換えずに打てば自動で揃う）。違う値だと Terraform が消す相手を取り違える
+# ここで使うキー（OWNER だけ必須で、ほかは任意）:
+#   OWNER      **必須。**デプロイした人の名前。リソース名の接頭辞と Project タグの <owner>-nwc-poc もここから作る。
+#              **作ったときの ops/up.sh と同じ値にする**（deploy.env を書き換えずに打てば自動で揃う）。違う値だと Terraform が消す相手を取り違える
 #   KEEP_ECR   ECR を残すか。1 = 残す、0 = 消す（既定）。それ以外の値は何も消さずに止まる
 #   AWS_PROFILE / AWS_CA_BUNDLE / OPENSEARCH_CACERT_FILE  ops/up.sh と同じ
 #
@@ -21,7 +21,7 @@
 set -uo pipefail
 
 REGION=ap-northeast-1
-# PREFIX と OWNER は deploy.env で変えられるので、確定するのは load_deploy_env のあと（手順 0 の resolve_name_prefix）
+# OWNER は deploy.env に書くので、OWNER と接頭辞 PREFIX=<owner>-nwc-poc が確定するのは load_deploy_env のあと（手順 0 の resolve_name_prefix。必須なので、無ければそこで止まる）
 . "$(dirname "$0")/deploy-env.sh"
 resolve_deploy_env_file  # DEPLOY_ENV_FILE の相対パスは、下の cd の前の場所から見る
 cd "$(dirname "$0")/.."
@@ -91,7 +91,7 @@ destroy_root() {  # destroy_root <ルート> [-var 名前=値 …]  消えたら
   # DependencyViolation は、消したサービスの ENI を AWS 側が片付けるまでの数分だけ出ることが多い。
   # 掴んでいるものを名指しで出しながら 3 回まで打ち直す（誰も使っていない ENI はその場で消える）
   for try in 1 2 3; do
-    if tf_logged "$root" destroy -input=false -auto-approve -var "name_prefix=$PREFIX" -var "owner=$OWNER" "$@"; then
+    if tf_logged "$root" destroy -input=false -auto-approve -var "owner=$OWNER" "$@"; then
       echo "terraform/$root: 消えた"
       return 0
     fi
@@ -135,7 +135,7 @@ destroy_lambda_root() {  # destroy_lambda_root <ルート> <VPC の中の Lambda
 
 log "0. 設定と道具と認証"
 load_deploy_env
-resolve_name_prefix  # PREFIX と OWNER。作ったときの ops/up.sh と同じ値でないと、Terraform が別のリソースを消しにいく（deploy.env を変えずに打つ）
+resolve_name_prefix  # OWNER と接頭辞 PREFIX。作ったときの ops/up.sh と同じ値でないと、Terraform が別のリソースを消しにいく（deploy.env を変えずに打つ）
 KEEP_ECR="${KEEP_ECR:-0}"
 case "$KEEP_ECR" in
   0) echo "KEEP_ECR=0: ECR もイメージごと消す（残すなら KEEP_ECR=1）" ;;
@@ -234,7 +234,7 @@ if has_resources base/core; then
       esac
     done < <(tf base/core state list 2>/dev/null)
     if [ "${#MAIN_TARGETS[@]}" -gt 0 ]; then
-      tf_logged base/core destroy -input=false -auto-approve -var "name_prefix=$PREFIX" -var "owner=$OWNER" "${MAIN_TARGETS[@]}" || {
+      tf_logged base/core destroy -input=false -auto-approve -var "owner=$OWNER" "${MAIN_TARGETS[@]}" || {
         FAILED_ROOTS="$FAILED_ROOTS base/core"
         echo "NG: terraform/base/core の ENI に関わらない部分が消えなかった（上のエラー）。先へ進んで、残りを消す"
       }

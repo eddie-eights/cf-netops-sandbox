@@ -1,6 +1,6 @@
 # ---------------------------------------------------------------- neptune
 resource "aws_neptune_cluster" "graph" {
-  cluster_identifier                  = "${var.name_prefix}-graph"
+  cluster_identifier                  = "${local.name_prefix}-graph"
   engine                              = "neptune"
   engine_version                      = var.engine_version
   port                                = 8182
@@ -17,7 +17,7 @@ resource "aws_neptune_cluster" "graph" {
 }
 
 resource "aws_neptune_cluster_instance" "graph" {
-  identifier                 = "${var.name_prefix}-graph-1"
+  identifier                 = "${local.name_prefix}-graph-1"
   cluster_identifier         = aws_neptune_cluster.graph.id
   engine                     = "neptune"
   instance_class             = var.instance_class
@@ -25,9 +25,9 @@ resource "aws_neptune_cluster_instance" "graph" {
   apply_immediately          = true
 }
 
-# topology.py / graph.py はここからエンドポイントを読む（環境変数 PARAM_PREFIX = /<name_prefix>。terraform/base/core が Runtime と Web に渡す）
+# topology.py / graph.py はここからエンドポイントを読む（環境変数 PARAM_PREFIX = /<接頭辞>。terraform/base/core が Runtime と Web に渡す）
 resource "aws_ssm_parameter" "endpoint" {
-  name        = "/${var.name_prefix}/neptune-endpoint"
+  name        = "/${local.name_prefix}/neptune-endpoint"
   type        = "String"
   value       = "${aws_neptune_cluster.graph.endpoint}:${aws_neptune_cluster.graph.port}"
   description = "Neptune writer endpoint host:port for the chat runtime and the web (terraform/pipeline/graph)"

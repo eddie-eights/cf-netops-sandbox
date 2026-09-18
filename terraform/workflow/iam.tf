@@ -17,7 +17,7 @@ data "aws_iam_policy_document" "ecs_tasks_trust" {
 }
 
 resource "aws_iam_role" "execution" {
-  name               = "${var.name_prefix}-workflow-exec"
+  name               = "${local.name_prefix}-workflow-exec"
   description        = "ECS task execution role of the workflow task (ECR pull, CloudWatch Logs)"
   assume_role_policy = data.aws_iam_policy_document.ecs_tasks_trust.json
 }
@@ -29,7 +29,7 @@ resource "aws_iam_role_policy_attachment" "execution" {
 
 # ---------------------------------------------------------------- task role (the worker)
 resource "aws_iam_role" "task" {
-  name               = "${var.name_prefix}-workflow-task"
+  name               = "${local.name_prefix}-workflow-task"
   description        = "Workflow worker - anomaly queue, anomaly and proposal tables, chat runtime, SSM Run Command on the lab EC2, ECS Exec"
   assume_role_policy = data.aws_iam_policy_document.ecs_tasks_trust.json
 }
@@ -114,7 +114,7 @@ data "aws_iam_policy_document" "task" {
 }
 
 resource "aws_iam_role_policy" "task" {
-  name   = "${var.name_prefix}-workflow-task"
+  name   = "${local.name_prefix}-workflow-task"
   role   = aws_iam_role.task.name
   policy = data.aws_iam_policy_document.task.json
 }

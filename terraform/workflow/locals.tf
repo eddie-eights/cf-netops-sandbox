@@ -7,6 +7,12 @@
 # The AgentCore Gateway (MCP) exposes the agent tools through a Lambda in the VPC so the runtime can read Neptune, the logs
 # collection and the metrics workspace over MCP. Costs about 0.06 USD per hour while it exists (Fargate + endpoints) - destroy it the same day.
 
+# リソース名の接頭辞であり Project タグの値。デプロイする人の名前（var.owner）から作るので、
+# 1 つの AWS アカウントを何人かで使っても、自分の名前で自分のリソースを探せる
+locals {
+  name_prefix = "${var.owner}-nwc-poc"
+}
+
 data "aws_caller_identity" "current" {}
 data "aws_partition" "current" {}
 
@@ -110,6 +116,6 @@ locals {
   worker_image   = "${local.worker_repository_url}:${var.worker_image_tag}"
   temporal_image = "${local.temporal_repository_url}:${var.temporal_image_tag}"
 
-  param_prefix = "/${var.name_prefix}"
-  log_group    = "/ecs/${var.name_prefix}-workflow"
+  param_prefix = "/${local.name_prefix}"
+  log_group    = "/ecs/${local.name_prefix}-workflow"
 }

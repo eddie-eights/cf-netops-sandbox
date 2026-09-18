@@ -2,7 +2,7 @@
 resource "aws_iam_role_policy" "graph_access" {
   for_each = local.reader_role_ids
 
-  name = "${var.name_prefix}-graph-access"
+  name = "${local.name_prefix}-graph-access"
   role = each.value
 
   policy = jsonencode({
@@ -25,7 +25,7 @@ resource "aws_iam_role_policy" "graph_access" {
         Sid      = "Parameters"
         Effect   = "Allow"
         Action   = "ssm:GetParameter"
-        Resource = "arn:${local.partition}:ssm:${var.region}:${local.account_id}:parameter/${var.name_prefix}/*"
+        Resource = "arn:${local.partition}:ssm:${var.region}:${local.account_id}:parameter/${local.name_prefix}/*"
       },
     ]
   })

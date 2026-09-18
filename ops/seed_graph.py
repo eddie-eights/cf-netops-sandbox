@@ -7,7 +7,7 @@ Neptune は出来た直後だとつながらないことがあるので、30 秒
   LAB_TOPOLOGY_B64  lab/lab_topology.py の出力（{"devices": [...], "links": [...]}）を base64 にしたもの。無ければ agent/data の静的データ
   GRAPH_REPLACE     1 なら Neptune に入っていても入れ直す（lab を変えたあとの同期。動的な status は消えて全部 UP に戻る）。
                     既定は空で、Neptune が空のときだけ入れる（初期ロード）
-  NAME_PREFIX       リソース名の接頭辞（deploy.env と同じ値。呼ぶ側が渡す）。Web の置き場と設定ファイルの名前に入る。既定 netops-poc
+  NAME_PREFIX       **必須。**リソース名の接頭辞（<owner>-nwc-poc。呼ぶ側の ops/up.sh / ops/sync-graph.sh が渡す）。Web の置き場と設定ファイルの名前に入る
 """
 import base64
 import json
@@ -15,7 +15,7 @@ import os
 import sys
 import time
 
-PREFIX = os.environ.get("NAME_PREFIX") or "netops-poc"
+PREFIX = os.environ.get("NAME_PREFIX") or sys.exit("NAME_PREFIX（リソース名の接頭辞 <owner>-nwc-poc）が要る")
 APP = f"/opt/{PREFIX}-web"
 
 # systemd の EnvironmentFile と同じく「名前=値」を 1 行ずつ読む（値に空白があるので source しない）

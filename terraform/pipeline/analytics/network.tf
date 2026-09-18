@@ -2,11 +2,11 @@
 # EMR Serverless は inbound に 0.0.0.0/0 が開いた SG を拒否する（AWS ドキュメント「Configuring VPC access」、2026-09-17 確認）。
 # ここは inbound を自分自身からだけにし、outbound は 443（S3 ゲートウェイ・S3 Tables / logs のエンドポイント）と 9098（MSK）だけ
 resource "aws_security_group" "emr" {
-  name        = "${var.name_prefix}-emr"
+  name        = "${local.name_prefix}-emr"
   description = "EMR Serverless workers - Kafka IAM (9098) to MSK, HTTPS to the S3 gateway and the VPC endpoints"
   vpc_id      = local.vpc_id
 
-  tags = { Name = "${var.name_prefix}-emr" }
+  tags = { Name = "${local.name_prefix}-emr" }
 
   lifecycle {
     precondition {
@@ -86,7 +86,7 @@ resource "aws_vpc_endpoint" "s3tables" {
   security_group_ids  = [local.endpoint_sg_id]
   private_dns_enabled = true
 
-  tags = { Name = "${var.name_prefix}-s3tables" }
+  tags = { Name = "${local.name_prefix}-s3tables" }
 }
 
 # ---------------------------------------------------------------- VPC endpoint for EventBridge (PutEvents)
@@ -100,5 +100,5 @@ resource "aws_vpc_endpoint" "events" {
   security_group_ids  = [local.endpoint_sg_id]
   private_dns_enabled = true
 
-  tags = { Name = "${var.name_prefix}-events" }
+  tags = { Name = "${local.name_prefix}-events" }
 }

@@ -80,7 +80,7 @@ resource "aws_opensearchserverless_collection" "logs" {
 
   name             = local.logs_collection
   type             = "TIMESERIES"
-  description      = "${var.name_prefix} SNMP traps and logs from the Spark job"
+  description      = "${local.name_prefix} SNMP traps and logs from the Spark job"
   standby_replicas = "DISABLED"
 
   tags = { Name = local.logs_collection }
@@ -113,5 +113,5 @@ resource "aws_vpc_endpoint" "aps" {
   security_group_ids  = [local.endpoint_sg_id]
   private_dns_enabled = true
 
-  tags = { Name = "${var.name_prefix}-aps" }
+  tags = { Name = "${local.name_prefix}-aps" }
 }

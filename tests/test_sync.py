@@ -110,7 +110,7 @@ zipped = set(re.findall(r'filename = "(\w+)\.py"', tf))
 needed = {m for m in re.findall(r"^import (\w+)$", read("agent", "graph.py"), re.M) if os.path.exists(os.path.join(ROOT, "agent", m + ".py"))}
 check(f"status.zip は graph.py が import する agent/ のモジュールを全部入れる（足りない: {sorted(needed - zipped)}）", needed and not (needed - zipped))
 check("EventBridge のルールは <接頭辞>.spark の AnomalyOpened と AnomalyResolved（Source を接頭辞ごとに変えて他の人の異常を拾わない）",
-      re.search(r'source\s*=\s*\["\$\{var\.name_prefix\}\.spark"\]', tf) and '"detail-type" = ["AnomalyOpened", "AnomalyResolved"]' in tf)
+      re.search(r'source\s*=\s*\["\$\{local\.name_prefix\}\.spark"\]', tf) and '"detail-type" = ["AnomalyOpened", "AnomalyResolved"]' in tf)
 check("Lambda は VPC の中で NEPTUNE_ENDPOINT を環境変数で持ち、ロググループは retention 付き",
       "vpc_config" in tf and "NEPTUNE_ENDPOINT = " in tf and "retention_in_days = var.log_retention_days" in tf)
 check("Lambda の SG は Neptune の 8182 へ出て、Neptune の SG がそこからの 8182 を受ける", 'resource "aws_vpc_security_group_egress_rule" "status_to_neptune"' in tf and 'resource "aws_vpc_security_group_ingress_rule" "neptune_from_status"' in tf)

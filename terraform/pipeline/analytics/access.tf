@@ -1,6 +1,6 @@
 # ---------------------------------------------------------------- runtime role of the Spark job
 resource "aws_iam_role" "emr" {
-  name        = "${var.name_prefix}-emr-runtime"
+  name        = "${local.name_prefix}-emr-runtime"
   description = "EMR Serverless job runtime - reads MSK, writes the sinks (S3 Tables, OpenSearch Serverless, Prometheus), reads the script and jars from the asset bucket"
 
   assume_role_policy = jsonencode({
@@ -18,7 +18,7 @@ resource "aws_iam_role" "emr" {
 }
 
 resource "aws_iam_role_policy" "emr" {
-  name = "${var.name_prefix}-emr-runtime"
+  name = "${local.name_prefix}-emr-runtime"
   role = aws_iam_role.emr.id
 
   policy = jsonencode({

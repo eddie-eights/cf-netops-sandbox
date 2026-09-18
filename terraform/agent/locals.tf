@@ -5,6 +5,12 @@
 # The VPC, the security groups, the S3 bucket, the chat web EC2 and the runtime IAM role come from terraform/base/core
 # (read through terraform_remote_state), so this root can be created and destroyed on its own while the base stays.
 
+# リソース名の接頭辞であり Project タグの値。デプロイする人の名前（var.owner）から作るので、
+# 1 つの AWS アカウントを何人かで使っても、自分の名前で自分のリソースを探せる
+locals {
+  name_prefix = "${var.owner}-nwc-poc"
+}
+
 data "aws_caller_identity" "current" {}
 data "aws_partition" "current" {}
 
@@ -56,12 +62,12 @@ locals {
 
   agent_image_uri = var.agent_image_uri != "" ? var.agent_image_uri : "${data.terraform_remote_state.ecr[0].outputs.agent_repository_url}:${var.agent_image_tag}"
 
-  collection_name = "${var.name_prefix}-kb"
+  collection_name = "${local.name_prefix}-kb"
   index_name      = "kb-index"
 
-  param_prefix = "/${var.name_prefix}"
+  param_prefix = "/${local.name_prefix}"
 
-  # AgentCore Runtime の名前にはハイフンが使えないので、接頭辞の - を _ にして _agent を付ける（netops-poc -> netops_poc_agent）。
+  # AgentCore Runtime の名前にはハイフンが使えないので、接頭辞の - を _ にして _agent を付ける（netops-nwc-poc -> netops_nwc_poc_agent）。
   # ops/down.sh も同じ規則でロググループ（/aws/bedrock-agentcore/runtimes/<この名前>-*）を探すので、変えるなら両方を合わせる
-  runtime_name = var.runtime_name != "" ? var.runtime_name : "${replace(var.name_prefix, "-", "_")}_agent"
+  runtime_name = var.runtime_name != "" ? var.runtime_name : "${replace(local.name_prefix, "-", "_")}_agent"
 }

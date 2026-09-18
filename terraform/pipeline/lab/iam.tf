@@ -1,6 +1,6 @@
 resource "aws_iam_role" "lab" {
-  name        = "${var.name_prefix}-lab"
-  description = "${var.name_prefix} lab EC2 - SSM managed node, pull lab images from ECR, read lab/ from the asset bucket"
+  name        = "${local.name_prefix}-lab"
+  description = "${local.name_prefix} lab EC2 - SSM managed node, pull lab images from ECR, read lab/ from the asset bucket"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -11,7 +11,7 @@ resource "aws_iam_role" "lab" {
     }]
   })
 
-  tags = { Name = "${var.name_prefix}-lab" }
+  tags = { Name = "${local.name_prefix}-lab" }
 }
 
 resource "aws_iam_role_policy_attachment" "lab_ssm" {
@@ -30,7 +30,7 @@ resource "aws_iam_role_policy" "lab_assets" {
         Sid      = "EcrPull"
         Effect   = "Allow"
         Action   = ["ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer", "ecr:BatchCheckLayerAvailability"]
-        Resource = "arn:${local.partition}:ecr:${var.region}:${local.account_id}:repository/${var.name_prefix}-lab-*"
+        Resource = "arn:${local.partition}:ecr:${var.region}:${local.account_id}:repository/${local.name_prefix}-lab-*"
       },
       {
         Sid      = "EcrToken"
@@ -58,6 +58,6 @@ resource "aws_iam_role_policy" "lab_assets" {
 }
 
 resource "aws_iam_instance_profile" "lab" {
-  name = "${var.name_prefix}-lab"
+  name = "${local.name_prefix}-lab"
   role = aws_iam_role.lab.name
 }

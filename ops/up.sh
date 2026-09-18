@@ -14,7 +14,7 @@
 # Terraform の state はこの PC の展開したフォルダの中（terraform/<ルート>/terraform.tfstate）に置く。消すのは ops/down.sh。
 #
 # 使い方（展開したフォルダの直下で。先に AWS CLI の認証を通しておく。IAM ユーザーなら長期キーのまま打つ）:
-#   cp deploy.env.example deploy.env  # 初回だけ。どの機能を作るかを deploy.env に書く（無ければ既定の AGENT=1 だけで動く）
+#   cp deploy.env.example deploy.env  # 初回だけ。デプロイする人の名前 OWNER（必須）とどの機能を作るかを deploy.env に書く（機能を書かなければ AGENT=1 だけ）
 #   ops/up.sh                         # deploy.env のとおりに作る。最後にポートフォワーディングを開いたまま止まる（Ctrl+C で閉じる）
 #   PIPELINE=1 ops/up.sh              # その回だけ変える（環境変数は deploy.env より優先）。初回は PIPELINE で 40〜60 分（MSK の作成が長い）
 #   DEPLOY_ENV_FILE=<パス> ops/up.sh  # 別の設定ファイルを読む
@@ -22,11 +22,12 @@
 # どの機能も時間課金（試算は docs/cost.md「1 時間起動したときの試算」）。使い終わったら当日中に ops/down.sh を打つ。
 # 機能を 0 にして打っても、前に作ったルートは消さない（消すのは ops/down.sh）。
 #
-# 設定できるキー（deploy.env か環境変数。全部任意。意味は deploy.env.example、読み方は ops/deploy-env.sh）:
-#   NAME_PREFIX             リソース名の接頭辞と Project タグの値。既定 netops-poc。英小文字で始まる 2〜22 文字の英小文字・数字・ハイフン（連続と末尾は不可）
+# 設定できるキー（deploy.env か環境変数。**OWNER だけ必須**で、ほかは任意。意味は deploy.env.example、読み方は ops/deploy-env.sh）:
+#   OWNER                   **必須。**デプロイする人の名前。英小文字で始まる 14 文字までの英小文字・数字・ハイフン（連続と末尾は不可）。
+#                           リソース名の接頭辞と Project タグの値は <owner>-nwc-poc になり、owner タグには OWNER がそのまま入る。
+#                           1 つの AWS アカウントを何人かで使うときに、自分の名前で自分のリソースを探せるようにするための値
 #                           （AgentCore Runtime の名前はハイフンが使えないので、- を _ にした <接頭辞>_agent になる）。
 #                           **作ったあとで変えると、Terraform は名前の違うリソースを作り直す**（先に ops/down.sh で消す）
-#   OWNER                   owner タグの値。既定 netops。英数字と . _ - だけの 1〜64 文字。NAME_PREFIX と同じく、変えると全リソースのタグが書き換わる
 #   AGENT=1                 agent での分析（既定 1）。terraform/agent を作る
 #   PIPELINE=1              データパイプライン（既定 0）。lab / stream / analytics / graph を作る（SKIP_* で減らせる）
 #   WORKFLOW=1              Temporal での実行（既定 0）。workflow を作る。AGENT と PIPELINE が要り、SKIP_LAB / SKIP_STREAM / SKIP_ANALYTICS は書けない
@@ -55,8 +56,8 @@
 set -euo pipefail
 
 REGION=ap-northeast-1
-# リソース名の接頭辞 PREFIX と owner タグの OWNER は deploy.env で変えられるので、確定するのは load_deploy_env のあと
-# （手順 0 の resolve_name_prefix。既定値と形の検査は ops/deploy-env.sh）
+# デプロイする人の名前 OWNER は deploy.env に書くので、OWNER と接頭辞 PREFIX=<owner>-nwc-poc が確定するのは
+# load_deploy_env のあと（手順 0 の resolve_name_prefix。必須なので、無ければそこで止まる。形の検査も ops/deploy-env.sh）
 # 下の 5 つは Terraform の変数の既定値に合わせてある（terraform/pipeline/lab の *_image_tag / containerlab_version / telegraf_version、
 # terraform/pipeline/stream の s3_sink_plugin_key）。変えるときは両方を変える
 FRR_TAG=10.2.1
@@ -118,7 +119,7 @@ tf_init() {  # tf_init <ルート>
 }
 tf_apply_only() {  # tf_apply_only <ルート> [-var 名前=値 …]  init 済みのルートを apply する
   local root="$1"; shift
-  tf_logged "$root" apply -input=false -auto-approve -var "name_prefix=$PREFIX" -var "owner=$OWNER" "$@" \
+  tf_logged "$root" apply -input=false -auto-approve -var "owner=$OWNER" "$@" \
     || die "terraform/$root の apply に失敗した（上のエラー。全文は $(tf_log_file "$root" apply)。docs/troubleshooting.md の「うまくいかないとき」。直したらもう一度 ops/up.sh）"
 }
 tf_apply() {  # tf_apply <ルート> [-var 名前=値 …]
@@ -192,7 +193,8 @@ trap on_exit EXIT
 # ---- 0. 道具と認証 -------------------------------------------------------------
 log "0. 設定と道具と認証を確かめる"
 load_deploy_env
-resolve_name_prefix  # PREFIX と OWNER。terraform の -var name_prefix / owner にそのまま渡す（下の tf_apply_only）
+resolve_name_prefix  # OWNER（必須。terraform の -var owner にそのまま渡す。下の tf_apply_only）と接頭辞 PREFIX=<owner>-nwc-poc
+log "   デプロイする人の名前: $OWNER（リソース名の接頭辞と Project タグは $PREFIX）"
 IMAGE_TAG="${IMAGE_TAG:-v1}"
 LOCAL_PORT="${LOCAL_PORT:-8080}"
 CREATE_S3_SINK="${CREATE_S3_SINK:-1}"

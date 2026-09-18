@@ -1,17 +1,17 @@
 # ---------------------------------------------------------------- network
 resource "aws_neptune_subnet_group" "graph" {
-  name        = "${var.name_prefix}-graph"
-  description = "${var.name_prefix} Neptune subnets"
+  name        = "${local.name_prefix}-graph"
+  description = "${local.name_prefix} Neptune subnets"
   subnet_ids  = local.subnet_ids
 }
 
 # 送信ルールは置かない（aws_security_group は作成時に既定の全許可の送信ルールを消す）。Neptune から外へ出る通信は無い
 resource "aws_security_group" "neptune" {
-  name        = "${var.name_prefix}-neptune"
-  description = "${var.name_prefix} Neptune - 8182 from the runtime and the web"
+  name        = "${local.name_prefix}-neptune"
+  description = "${local.name_prefix} Neptune - 8182 from the runtime and the web"
   vpc_id      = local.vpc_id
 
-  tags = { Name = "${var.name_prefix}-neptune" }
+  tags = { Name = "${local.name_prefix}-neptune" }
 }
 
 resource "aws_vpc_security_group_ingress_rule" "neptune_from_runtime" {

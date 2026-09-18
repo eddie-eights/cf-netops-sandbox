@@ -5,8 +5,8 @@
 ## workflow（WORKFLOW）: Temporal on ECS Fargate のワーカーと AgentCore Gateway（MCP）
 
 `WORKFLOW=1`（`AGENT=1` と `PIPELINE=1` も）の `ops/up.sh` が w-1 〜 w-4 を打つ。手で打つときは agent と PIPELINE の lab / stream / analytics が上がってから（graph が無ければトポロジは静的データ、`SINK_*` を 0 にするとそのツールは「配備されていない」を返す）。
-**しくみ。**ECS on Fargate の 1 タスクに temporal コンテナ（`temporal server start-dev`。データは SQLite でタスクの中）と worker コンテナ（`workflow/worker.py`）を入れる。
-Spark が異常を開くと EventBridge に `AnomalyOpened` が出て、ルールが SQS `netops-poc-anomalies` に流す。worker の starter がそれを long polling（20 秒）で受け、異常ごとに Temporal のワークフロー `investigate-<anomaly_id>` を起こす（SQS が無ければ 60 秒ごとに DynamoDB の `open` を見る）。ワークフローは AgentCore Runtime に原因と修復案を JSON で答えさせ、
+**しくみ。**ECS on Fargate の 1 タスクに temporal コンテナ（`temporal server start-dev`。データは SQLite でタスクの中）と worker コンテナ（`workflow/` の `worker.py` = Temporal の定義、`awsio.py` = AWS の呼び出し、`rules.py` = 判断だけの純粋関数）を入れる。
+Spark が異常を開くと EventBridge に `AnomalyOpened` が出て、ルールが SQS `netops-nwc-poc-anomalies` に流す。worker の starter がそれを long polling（20 秒）で受け、異常ごとに Temporal のワークフロー `investigate-<anomaly_id>` を起こす（SQS が無ければ 60 秒ごとに DynamoDB の `open` を見る）。ワークフローは AgentCore Runtime に原因と修復案を JSON で答えさせ、
 修復案テーブル（`terraform/workflow` の DynamoDB）に `pending` で置く。人が Web の「承認」タブで承認すると、SSM Run Command で lab の EC2 に `sudo lab heal-main`（か `sudo lab check`）を打ち、異常が `resolved` になるまで 30 秒おきに 6 回確かめて `verified` / `failed` にする。
 承認待ちのまま 2 時間（変数 `approval_timeout_minutes`）で `expired`。却下（`rejected`）なら何もしない。Web と worker は Temporal でつながず、修復案テーブルの `status` だけでやり取りする（worker がポーリング）。
 同じルートで AgentCore Gateway（MCP、IAM 認証）と tools Lambda を作り、Runtime は起動後 5 分以内に SSM の `gateway-url` を拾って、ツールの一覧と呼び出しを Gateway に投げる（`agent/mcp_client.py`。Gateway に届かなければコンテナの中のツールに戻る）。Gateway が要らなければ `-var create_gateway=false`。
@@ -92,7 +92,7 @@ aws ssm start-session --region ap-northeast-1 --target "$INSTANCE_ID" --document
 
 ### w-4. Web を再起動し、承認する
 
-Web は起動時に SSM の `proposal-table` を読むので、管理者のシェルで `sudo systemctl restart netops-poc-web`。Runtime は再起動しなくてよい（5 分以内に Gateway を拾う。すぐ使いたいなら Runtime を作り直す）。
+Web は起動時に SSM の `proposal-table` を読むので、管理者のシェルで `sudo systemctl restart netops-nwc-poc-web`。Runtime は再起動しなくてよい（5 分以内に Gateway を拾う。すぐ使いたいなら Runtime を作り直す）。
 lab で `sudo lab failover` などで異常を起こすと（lab-4）、Spark の次のマイクロバッチ（60 秒以内）で EventBridge → SQS を通ってワークフローが起き、数十秒でチャットの「承認」タブに修復案（原因・打つコマンド・理由）が `pending` で並ぶ。「承認して直す」を押すと `approved` → `applied` → `verified` / `failed` と進み、表の「状態」を変えて追える。
 Gateway に届いていないときは Runtime のログに `gateway tools/list failed, using local tools` が出て、コンテナの中のツールで答える。
 

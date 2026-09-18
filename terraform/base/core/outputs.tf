@@ -76,6 +76,6 @@ output "web_role_name" {
 
 # ---------------------------------------------------------------- commands
 output "upload_web_command" {
-  description = "Run in this repository after \"pip download\" into wheels/ (docs/deploy-manual.md step 4). Also copies the agent modules the web UI shares (toolkit / topology / anomalies / graph / proposals). The instance pulls web/ on every boot."
-  value       = "aws s3 cp web/app.py s3://${aws_s3_bucket.kb.bucket}/web/app.py && aws s3 cp web/requirements.txt s3://${aws_s3_bucket.kb.bucket}/web/requirements.txt && for f in toolkit topology anomalies graph proposals; do aws s3 cp agent/$f.py s3://${aws_s3_bucket.kb.bucket}/web/$f.py; done && aws s3 cp agent/data/ s3://${aws_s3_bucket.kb.bucket}/web/data/ --recursive && aws s3 sync wheels/ s3://${aws_s3_bucket.kb.bucket}/web/wheels/"
+  description = "Run in this repository after \"pip download\" into wheels/ (docs/deploy-manual.md step 4). Copies every web/*.py (app / config / chat / topology_view / incident_view) plus the agent modules the web UI shares (toolkit / topology / anomalies / graph / proposals). The instance pulls web/ on every boot."
+  value       = "aws s3 cp web/ s3://${aws_s3_bucket.kb.bucket}/web/ --recursive --exclude '*' --include '*.py' --include 'requirements.txt' && for f in toolkit topology anomalies graph proposals; do aws s3 cp agent/$f.py s3://${aws_s3_bucket.kb.bucket}/web/$f.py; done && aws s3 cp agent/data/ s3://${aws_s3_bucket.kb.bucket}/web/data/ --recursive && aws s3 sync wheels/ s3://${aws_s3_bucket.kb.bucket}/web/wheels/"
 }

@@ -19,7 +19,7 @@ output "anomaly_queue_url" {
 }
 
 output "anomaly_rule_name" {
-  description = "EventBridge rule that routes AnomalyOpened (source <name_prefix>.spark) to the queue"
+  description = "EventBridge rule that routes AnomalyOpened (source <prefix>.spark) to the queue"
   value       = aws_cloudwatch_event_rule.anomalies.name
 }
 
@@ -39,7 +39,7 @@ output "gateway_id" {
 }
 
 output "gateway_url" {
-  description = "MCP endpoint of the gateway (also in SSM <name_prefix>/gateway-url)"
+  description = "MCP endpoint of the gateway (also in SSM <prefix>/gateway-url)"
   value       = try(aws_bedrockagentcore_gateway.tools[0].gateway_url, "")
 }
 

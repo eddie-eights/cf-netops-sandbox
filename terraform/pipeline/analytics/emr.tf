@@ -3,7 +3,7 @@
 # ストリーミングのジョブは ops/up.sh が start-job-run で起こす（Terraform にジョブのリソースは無い。手打ちは output の job_driver_json / configuration_overrides_json。docs/pipeline.md の a-3）。
 # arm64 なのは lab / web の EC2 と同じ理由（単価が x86 より約 20% 低い。docs/cost.md「1 時間起動したときの試算」）
 resource "aws_emrserverless_application" "spark" {
-  name          = "${var.name_prefix}-spark"
+  name          = "${local.name_prefix}-spark"
   release_label = var.emr_release_label
   type          = "spark"
   architecture  = "ARM64"
@@ -34,7 +34,7 @@ resource "aws_emrserverless_application" "spark" {
     ignore_changes = [scheduler_configuration]
   }
 
-  tags = { Name = "${var.name_prefix}-spark" }
+  tags = { Name = "${local.name_prefix}-spark" }
 }
 
 # ジョブのドライバーのログ。start-job-run の monitoringConfiguration で指す（output の configuration_overrides_json）

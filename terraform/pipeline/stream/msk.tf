@@ -1,7 +1,7 @@
 # ---------------------------------------------------------------- MSK
 # KRaft モード（var.kafka_version の末尾の .kraft）。ZooKeeper のノードは無く、メタデータは MSK が持つコントローラーに載る（追加料金なし）
 resource "aws_msk_configuration" "stream" {
-  name           = "${var.name_prefix}-stream"
+  name           = "${local.name_prefix}-stream"
   kafka_versions = [var.kafka_version]
 
   server_properties = <<-EOT
@@ -14,12 +14,12 @@ resource "aws_msk_configuration" "stream" {
 }
 
 resource "aws_cloudwatch_log_group" "msk" {
-  name              = "/${var.name_prefix}/msk"
+  name              = "/${local.name_prefix}/msk"
   retention_in_days = var.log_retention_days
 }
 
 resource "aws_msk_cluster" "stream" {
-  cluster_name           = "${var.name_prefix}-stream"
+  cluster_name           = "${local.name_prefix}-stream"
   kafka_version          = var.kafka_version
   number_of_broker_nodes = 2
 
@@ -64,7 +64,7 @@ resource "aws_msk_cluster" "stream" {
     }
   }
 
-  tags = { Name = "${var.name_prefix}-stream" }
+  tags = { Name = "${local.name_prefix}-stream" }
 
   depends_on = [
     aws_vpc_security_group_egress_rule.msk_kafka,
@@ -74,7 +74,7 @@ resource "aws_msk_cluster" "stream" {
 
 # ブローカーのアドレスはクラスタ作成後にしか分からない。Telegraf（lab EC2）が起動時にここから読む
 resource "aws_ssm_parameter" "bootstrap" {
-  name        = "/${var.name_prefix}/msk-bootstrap"
+  name        = "/${local.name_prefix}/msk-bootstrap"
   type        = "String"
   value       = aws_msk_cluster.stream.bootstrap_brokers_sasl_iam
   description = "MSK bootstrap brokers (SASL/IAM, 9098). Read by Telegraf on the lab EC2 at start."

@@ -3,7 +3,7 @@ provider "aws" {
 
   default_tags {
     tags = {
-      Project = var.name_prefix
+      Project = local.name_prefix
       owner   = var.owner
     }
   }

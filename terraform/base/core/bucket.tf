@@ -3,10 +3,10 @@
 # 名前は kb のまま（ナレッジベースを作らなくても使う）。
 # force_destroy = true なので、docs/ web/ lab/ stream/ が残っていても terraform destroy で消える
 resource "aws_s3_bucket" "kb" {
-  bucket        = "${var.name_prefix}-kb-${local.account_id}"
+  bucket        = "${local.name_prefix}-kb-${local.account_id}"
   force_destroy = true
 
-  tags = { Name = "${var.name_prefix}-kb" }
+  tags = { Name = "${local.name_prefix}-kb" }
 }
 
 resource "aws_s3_bucket_public_access_block" "kb" {

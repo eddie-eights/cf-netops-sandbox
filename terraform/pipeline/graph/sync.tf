@@ -1,4 +1,4 @@
-# ---------------------------------------------------------------- dynamic status: EventBridge (<name_prefix>.spark) -> Lambda -> Neptune
+# ---------------------------------------------------------------- dynamic status: EventBridge (<prefix>.spark) -> Lambda -> Neptune
 # The Spark job of terraform/pipeline/analytics puts AnomalyOpened / AnomalyResolved on the default bus when a link goes down / comes back.
 # This rule sends both to a small Lambda in the VPC (graph/status_handler.py + agent/graph.py) that sets the property "status"
 # (DOWN / UP, ALARM for other traps) on the link edge or the device vertex. The web draws DOWN in red and the chat tools return it.
@@ -40,7 +40,7 @@ data "aws_iam_policy_document" "lambda_trust" {
 }
 
 resource "aws_iam_role" "status" {
-  name               = "${var.name_prefix}-graph-status"
+  name               = "${local.name_prefix}-graph-status"
   description        = "Status Lambda of terraform/pipeline/graph - writes the dynamic status of devices and links into Neptune"
   assume_role_policy = data.aws_iam_policy_document.lambda_trust.json
 }
@@ -49,7 +49,7 @@ data "aws_iam_policy_document" "status" {
   statement {
     sid       = "Logs"
     actions   = ["logs:CreateLogStream", "logs:PutLogEvents"]
-    resources = ["arn:${local.partition}:logs:${var.region}:${local.account_id}:log-group:/aws/lambda/${var.name_prefix}-graph-status:*"]
+    resources = ["arn:${local.partition}:logs:${var.region}:${local.account_id}:log-group:/aws/lambda/${local.name_prefix}-graph-status:*"]
   }
 
   # VPC の中で動くので ENI を作る（AWSLambdaVPCAccessExecutionRole と同じ中身。マネージドポリシーは付けない）
@@ -69,18 +69,18 @@ data "aws_iam_policy_document" "status" {
 }
 
 resource "aws_iam_role_policy" "status" {
-  name   = "${var.name_prefix}-graph-status"
+  name   = "${local.name_prefix}-graph-status"
   role   = aws_iam_role.status.name
   policy = data.aws_iam_policy_document.status.json
 }
 
 # 送信は Neptune の 8182 だけ（SSM は引かない。エンドポイントは環境変数で渡す）
 resource "aws_security_group" "status" {
-  name        = "${var.name_prefix}-graph-status"
-  description = "${var.name_prefix} status Lambda - 8182 to Neptune"
+  name        = "${local.name_prefix}-graph-status"
+  description = "${local.name_prefix} status Lambda - 8182 to Neptune"
   vpc_id      = local.vpc_id
 
-  tags = { Name = "${var.name_prefix}-graph-status" }
+  tags = { Name = "${local.name_prefix}-graph-status" }
 }
 
 resource "aws_vpc_security_group_egress_rule" "status_to_neptune" {
@@ -102,12 +102,12 @@ resource "aws_vpc_security_group_ingress_rule" "neptune_from_status" {
 }
 
 resource "aws_cloudwatch_log_group" "status" {
-  name              = "/aws/lambda/${var.name_prefix}-graph-status"
+  name              = "/aws/lambda/${local.name_prefix}-graph-status"
   retention_in_days = var.log_retention_days
 }
 
 resource "aws_lambda_function" "status" {
-  function_name    = "${var.name_prefix}-graph-status"
+  function_name    = "${local.name_prefix}-graph-status"
   role             = aws_iam_role.status.arn
   runtime          = "python3.13"
   architectures    = ["arm64"]
@@ -133,13 +133,13 @@ resource "aws_lambda_function" "status" {
 }
 
 resource "aws_cloudwatch_event_rule" "status" {
-  name        = "${var.name_prefix}-graph-status"
+  name        = "${local.name_prefix}-graph-status"
   description = "AnomalyOpened / AnomalyResolved from the Spark job (terraform/pipeline/analytics) to the status Lambda"
 
   event_pattern = jsonencode({
     # Source は接頭辞ごとに変わる（terraform/pipeline/analytics の locals.event_source が Spark に --event-source で渡す値）。
     # ここを netops.spark で固定すると、1 つの AWS アカウントを何人かで使ったとき他の人の異常でこの Lambda が動く
-    source        = ["${var.name_prefix}.spark"]
+    source        = ["${local.name_prefix}.spark"]
     "detail-type" = ["AnomalyOpened", "AnomalyResolved"]
   })
 }

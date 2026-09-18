@@ -1,11 +1,11 @@
 # 受信ルールは置かない。操作は SSM Session Manager（SSM Agent が内側から ssmmessages へつなぎに行く）。
 # lab のアドレス（203.0.113.0/24 / 172.16.0.0/16 / 10.x.0.0/24）は EC2 の中の docker network と veth に閉じていて VPC には出ない
 resource "aws_security_group" "lab" {
-  name        = "${var.name_prefix}-lab"
+  name        = "${local.name_prefix}-lab"
   description = "Lab EC2 - no inbound, outbound HTTPS only (SSM, ECR, S3 gateway)"
   vpc_id      = local.vpc_id
 
-  tags = { Name = "${var.name_prefix}-lab" }
+  tags = { Name = "${local.name_prefix}-lab" }
 }
 
 resource "aws_vpc_security_group_egress_rule" "lab_https" {

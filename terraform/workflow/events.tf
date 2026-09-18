@@ -5,24 +5,24 @@
 # SQS を挟む理由: ECS のタスクは EventBridge から直接叩けない（API ターゲットも Lambda も要らない一番安い経路。SQS は 100 万リクエスト/月まで無料）。
 
 resource "aws_cloudwatch_event_rule" "anomalies" {
-  name        = "${var.name_prefix}-anomalies"
+  name        = "${local.name_prefix}-anomalies"
   description = "AnomalyOpened from the Spark job (terraform/pipeline/analytics) to the workflow queue"
 
   event_pattern = jsonencode({
     # Source は接頭辞ごとに変わる（terraform/pipeline/analytics の locals.event_source が Spark に --event-source で渡す値）。
     # ここを netops.spark で固定すると、1 つの AWS アカウントを何人かで使ったとき他の人の異常でこのワークフローが動く
-    source        = ["${var.name_prefix}.spark"]
+    source        = ["${local.name_prefix}.spark"]
     "detail-type" = ["AnomalyOpened"]
   })
 }
 
 resource "aws_sqs_queue" "anomalies_dlq" {
-  name                      = "${var.name_prefix}-anomalies-dlq"
+  name                      = "${local.name_prefix}-anomalies-dlq"
   message_retention_seconds = 1209600 # 14 日（最大）。worker が 5 回受け取っても消さなかったものが来る
 }
 
 resource "aws_sqs_queue" "anomalies" {
-  name                       = "${var.name_prefix}-anomalies"
+  name                       = "${local.name_prefix}-anomalies"
   visibility_timeout_seconds = 120 # worker が start_workflow して delete するまで。超えたら別の受信で同じ workflow id を起こす（Temporal が二重起動を弾く）
   message_retention_seconds  = 86400
   receive_wait_time_seconds  = 20 # long polling（空のときの受信リクエストを減らす）
@@ -103,5 +103,5 @@ resource "aws_vpc_endpoint" "sqs" {
   security_group_ids  = [local.endpoint_sg_id]
   private_dns_enabled = true
 
-  tags = { Name = "${var.name_prefix}-sqs" }
+  tags = { Name = "${local.name_prefix}-sqs" }
 }

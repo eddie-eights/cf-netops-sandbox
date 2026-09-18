@@ -20,7 +20,7 @@ output "neptune_security_group_id" {
 
 output "next_step" {
   description = "Run on the web EC2 after apply (SSM session), then use the topology tab \"Neptune で編集\" to seed the static data"
-  value       = "sudo systemctl restart ${var.name_prefix}-web"
+  value       = "sudo systemctl restart ${local.name_prefix}-web"
 }
 
 output "status_function_name" {

@@ -4,9 +4,9 @@
 
 ## 変更するとき
 
-- **画面（`web/app.py`）を直すときは S3 に置いてインスタンスを再起動する**（手順 4）。apply は要らない。Web の起動のしかた（`templates/web_user_data.sh.tftpl`）を変えたときだけ `terraform/base/core` を apply する。**user_data が変わるとインスタンスが作り直され、インスタンス ID が変わる**（`user_data_replace_on_change`。Web は状態を持たないので中身は失われない）。手順 4・7 の枠は毎回出力から ID を取るのでそのまま打てばよいが、利用者に配った `start_session_command` は配り直す。
+- **画面（`web/` の `.py`）を直すときは S3 に置いてインスタンスを再起動する**（手順 4）。apply は要らない。Web の起動のしかた（`templates/web_user_data.sh.tftpl`）を変えたときだけ `terraform/base/core` を apply する。**user_data が変わるとインスタンスが作り直され、インスタンス ID が変わる**（`user_data_replace_on_change`。Web は状態を持たないので中身は失われない）。手順 4・7 の枠は毎回出力から ID を取るのでそのまま打てばよいが、利用者に配った `start_session_command` は配り直す。
 - **エージェントを更新するときは、新しいタグで push して `-var agent_image_tag=v2` で apply する**（`ops/up.sh` なら `IMAGE_TAG=v2`）。以後の apply にも毎回同じタグを付ける（付け忘れると既定の `v1` に戻す差分が出る）。`agent/data/` を変えたときも同じ（トポロジはイメージに入っている）。Web の「トポロジ」タブは S3 の `web/data/` を見るので、そちらも置き直す。
-- **ガードレールを変えたら、`terraform/agent/kb.tf` の `aws_bedrock_guardrail_version.r1` の `description` を `netops-poc r2` のように上げて apply する。**版は作ったときの中身で固定されるので、上げないと Runtime は古い版のまま判定する。
+- **ガードレールを変えたら、`terraform/agent/kb.tf` の `aws_bedrock_guardrail_version.r1` の `description` を `netops-nwc-poc r2` のように上げて apply する。**版は作ったときの中身で固定されるので、上げないと Runtime は古い版のまま判定する。
 - 手順書を変えたら、手順 4 をやり直す。apply は要らない。
 - AMI は apply のたびに SSM パラメータ（変数 `ami_ssm_parameter`）から最新の AL2023 を引く。新しい AMI が出ていると**インスタンスが作り直され、インスタンス ID が変わる**（上と同じ扱い）。apply の差分に `aws_instance.web` の `ami` が出ていたらこれ。
 - user_data のテンプレート（`templates/*.sh.tftpl`）は `templatefile` を通るので、シェルの `${…}` をそのまま書くと Terraform の変数として解釈される。シェルの変数は `$${…}`、`%{` は `%%{` と書く。
@@ -48,7 +48,7 @@ for t in test_app test_graph test_stream test_sync test_analytics test_workflow;
 
 EC2 に置く前に画面だけ見たいとき、または EC2 で立たない原因を切り分けるとき。チャットは AgentCore Runtime を呼ぶので、手順 3 が済んでいて認証（手順 0-1）が通っていることが要る。トポロジのタブは `agent/data/` の静的データで出る（Runtime が無ければチャットだけエラー表示になる）。
 
-環境変数は `.env.example` に全部並べてある（意味と、AWS 上で誰が入れるか）。写して `RUNTIME_ARN` だけ埋める。`.env` は配布物には入っていない（`.env.example` から自分で作る）。`web/app.py` は展開したフォルダ直下の `.env` を読む（`ENV_FILE=<パス>` で場所を変えられる。同じ名前は後の行が勝つ）。
+環境変数は `.env.example` に全部並べてある（意味と、AWS 上で誰が入れるか）。写して `RUNTIME_ARN` だけ埋める。`.env` は配布物には入っていない（`.env.example` から自分で作る）。Web は展開したフォルダ直下の `.env` を読む（読んでいるのは `web/config.py`。`ENV_FILE=<パス>` で場所を変えられる。同じ名前は後の行が勝つ）。
 
 ```bash
 cp .env.example .env
@@ -115,7 +115,7 @@ bash ops/vscode-setup.sh
 - Temporal の永続化。`temporal server start-dev` の SQLite はタスクの中にあり、タスクが入れ替わると（デプロイ・障害・`ops/down.sh`）実行履歴ごと消える。毎日消す運用なので置いていない。UI（8233）に認証も無く、SSM のポートフォワーディングでしか届かない。
 - Temporal のワーカーは ECS on Fargate に置いている。EKS は後回し（クラスタだけで $0.10/h）。
 - `query_history`（S3 Tables の履歴の検索）は Athena のワークグループとカタログの接続をまだ置いていないので、案内だけ返す。長期の履歴を調べるには Athena を足す。
-- 修復の対象は lab の EC2 で、打てるのは `sudo lab heal-main` と `sudo lab check` だけ（`workflow/worker.py` の `ALLOWED_ACTIONS`。エージェントがそれ以外を返したら `none` にする）。実機には何も打たない。
+- 修復の対象は lab の EC2 で、打てるのは `sudo lab heal-main` と `sudo lab check` だけ（`workflow/rules.py` の `ALLOWED_ACTIONS`。エージェントがそれ以外を返したら `none` にする）。実機には何も打たない。
 - Grafana などの可視化は保留。異常一覧と修復案は DynamoDB の表をそのまま出す。
 - Kafka から 4 つに分ける設計（2026-09-17）の 4 本目、log + metrics → Splunk。Spark を通さず Kafka の sink（MSK Connect の Splunk Connect for Kafka）にする予定で後回し。Splunk 自体も置いていない（Splunk Enterprise の公式コンテナイメージ `splunk/splunk` はあるが、arm64 のイメージがあるか、Free ライセンス（500 MB/日）で HEC が使えるかは確認できていない）。
 - OpenSearch Serverless と Prometheus（`SINK_OPENSEARCH` / `SINK_PROMETHEUS`。既定で作る）の可視化。Grafana は置いていない（後回し）。中身は VPC の中からしか届かないので、見るなら Web の EC2 から curl するか Grafana を足す。
@@ -165,7 +165,7 @@ bash ops/vscode-setup.sh
 - `aws_mskconnect_connector` の `kafkaconnect_version` に `2.7.1` が入るか（許される値の一覧を文書で確認できていない）。MSK Connect が S3 とログに届くのに、S3 ゲートウェイと logs エンドポイント以外の経路が要るか。
 - Telegraf の `outputs.kafka` の `AWS-MSK-IAM` が、1.40.0 より古い版でも使えるか（1.40.0 + インスタンスロール（IMDS）の資格情報は 2026-09-18 の一周で通った）。
 - Confluent の S3 sink 12.1.11 の zip を CustomPlugin として登録できるか（Confluent Community License。ダウンロードの URL と同意の要否）。
-- `web/app.py` は手元で `uv run --group web` の gradio 5.50.0 で読み込んで Blocks が組み上がることと、編集画面のハンドラの入力チェック（未選択・同じ機器・IF 無し・Neptune 未配備）までを確かめた（2026-09-17）。ブラウザでの操作と Neptune への実書き込みは EC2 で見る。Gremlin の形は `tests/test_graph.py`。
+- `web/app.py` は手元で `uv run --group web` の gradio 5.50.0 で読み込んで Blocks が組み上がることと、編集画面のハンドラ（`web/topology_view.py`）の入力チェック（未選択・同じ機器・IF 無し・Neptune 未配備）までを確かめた（2026-09-17）。ブラウザでの操作と Neptune への実書き込みは EC2 で見る。Gremlin の形は `tests/test_graph.py`。
 - boto3 の `neptunedata` クライアントが VPC モードの Runtime からクラスターの DNS 名で届くか（プライベート DNS。エンドポイントは要らない想定）。
 - `opensearch_index.kb` の作成が、データアクセスポリシーの反映待ちで 403 になることがあるか（ポリシーとコレクションの後に `time_sleep` で 60 秒待っているが、足りるかは未確認）。
 - `data.aws_iam_session_context` の `issuer_arn` が、Identity Center のロール（パス付き）でデータアクセスポリシーに効く形で取れるか。

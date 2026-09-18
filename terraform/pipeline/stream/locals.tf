@@ -2,6 +2,12 @@
 # the Spark job of terraform/pipeline/analytics writes link_down / trap anomalies to the DynamoDB table made here, and MSK Connect keeps the raw
 # messages in the asset bucket (S3 sink). The chat runtime, the web and the workflow tools read the anomaly table. Costs about 0.13 USD per hour while it exists - destroy it the same day.
 
+# リソース名の接頭辞であり Project タグの値。デプロイする人の名前（var.owner）から作るので、
+# 1 つの AWS アカウントを何人かで使っても、自分の名前で自分のリソースを探せる
+locals {
+  name_prefix = "${var.owner}-nwc-poc"
+}
+
 data "aws_caller_identity" "current" {}
 data "aws_partition" "current" {}
 

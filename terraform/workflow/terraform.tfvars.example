@@ -1,11 +1,14 @@
-# Copy to terraform.tfvars only when the defaults are not right. Every value except worker_image_tag has a default in variables.tf.
+# Copy to terraform.tfvars only when the defaults are not right. Every value except owner and worker_image_tag has a default in variables.tf.
 # terraform/base/core, terraform/pipeline/lab and terraform/pipeline/stream must be applied first (this root reads their state files), and
 # terraform/base/ecr must have the worker / temporal repositories (create_workflow_repositories = true, the default).
 # ops/up.sh passes worker_image_tag = IMAGE_TAG on the command line.
+# owner is the name of the person who deploys this copy and is REQUIRED: it has no default, so terraform asks for it
+# unless you uncomment the line below (with your own name), export TF_VAR_owner or pass -var owner=<name>.
+# Resource names and the Project tag become <owner>-nwc-poc (up to 14 lowercase letters, digits and single hyphens),
+# so several people can share one AWS account.
 #
 # region      = "ap-northeast-1"
-# name_prefix = "netops-poc"
-# owner       = "netops"
+# owner       = "efukuda"
 #
 # worker_image_tag   = "v1"
 # temporal_image_tag = "1.9.1"

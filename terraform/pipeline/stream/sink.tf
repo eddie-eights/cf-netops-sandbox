@@ -2,8 +2,8 @@
 resource "aws_iam_role" "connect" {
   count = var.create_s3_sink ? 1 : 0
 
-  name        = "${var.name_prefix}-connect"
-  description = "${var.name_prefix} MSK Connect - read the topics, write objects under stream/ in the asset bucket"
+  name        = "${local.name_prefix}-connect"
+  description = "${local.name_prefix} MSK Connect - read the topics, write objects under stream/ in the asset bucket"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -13,7 +13,7 @@ resource "aws_iam_role" "connect" {
       Action    = "sts:AssumeRole"
       Condition = {
         StringEquals = { "aws:SourceAccount" = local.account_id }
-        ArnLike      = { "aws:SourceArn" = "arn:${local.partition}:kafkaconnect:${var.region}:${local.account_id}:connector/${var.name_prefix}-s3-sink/*" }
+        ArnLike      = { "aws:SourceArn" = "arn:${local.partition}:kafkaconnect:${var.region}:${local.account_id}:connector/${local.name_prefix}-s3-sink/*" }
       }
     }]
   })
@@ -62,7 +62,7 @@ resource "aws_iam_role_policy" "connect" {
 resource "aws_cloudwatch_log_group" "connect" {
   count = var.create_s3_sink ? 1 : 0
 
-  name              = "/${var.name_prefix}/connect"
+  name              = "/${local.name_prefix}/connect"
   retention_in_days = var.log_retention_days
 }
 
@@ -78,7 +78,7 @@ data "aws_s3_objects" "plugin" {
 resource "aws_mskconnect_custom_plugin" "s3_sink" {
   count = var.create_s3_sink ? 1 : 0
 
-  name         = "${var.name_prefix}-s3-sink"
+  name         = "${local.name_prefix}-s3-sink"
   description  = "Confluent S3 sink connector (zip from Confluent Hub, uploaded to the asset bucket)"
   content_type = "ZIP"
 
@@ -100,7 +100,7 @@ resource "aws_mskconnect_custom_plugin" "s3_sink" {
 resource "aws_mskconnect_connector" "s3_sink" {
   count = var.create_s3_sink ? 1 : 0
 
-  name                       = "${var.name_prefix}-s3-sink"
+  name                       = "${local.name_prefix}-s3-sink"
   description                = "metrics, traps and logs topics to s3://<bucket>/stream/<topic>/dt=.../hour=.../ as JSON lines, rotated every minute"
   kafkaconnect_version       = var.kafka_connect_version
   service_execution_role_arn = aws_iam_role.connect[0].arn

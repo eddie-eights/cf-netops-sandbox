@@ -13,7 +13,7 @@ resource "aws_iam_role_policy" "runtime" {
           Sid      = "EcrPull"
           Effect   = "Allow"
           Action   = ["ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer"]
-          Resource = "arn:${local.partition}:ecr:${var.region}:${local.account_id}:repository/${var.name_prefix}-*"
+          Resource = "arn:${local.partition}:ecr:${var.region}:${local.account_id}:repository/${local.name_prefix}-*"
         },
         {
           Sid      = "EcrToken"
@@ -101,7 +101,7 @@ resource "aws_iam_role_policy" "runtime" {
 
 resource "aws_bedrockagentcore_agent_runtime" "agent" {
   agent_runtime_name = local.runtime_name
-  description        = "${var.name_prefix} chat agent"
+  description        = "${local.name_prefix} chat agent"
   role_arn           = local.runtime_role_arn
 
   agent_runtime_artifact {
@@ -146,7 +146,7 @@ resource "aws_bedrockagentcore_agent_runtime" "agent" {
     { for k, v in { RERANK_MODEL_ARN = local.rerank_model_arn } : k => v if local.kb && local.rerank },
   )
 
-  tags = { Name = "${var.name_prefix}-agent" }
+  tags = { Name = "${local.name_prefix}-agent" }
 
   # VPC endpoints ができてから Runtime を作らせる（イメージ取得とログ出力がエンドポイント経由。ecr / logs は terraform/base/core が先に作ってある）
   depends_on = [
@@ -165,7 +165,7 @@ resource "aws_ssm_parameter" "runtime_arn" {
   type        = "String"
   value       = aws_bedrockagentcore_agent_runtime.agent.agent_runtime_arn
 
-  tags = { Name = "${var.name_prefix}-runtime-arn" }
+  tags = { Name = "${local.name_prefix}-runtime-arn" }
 }
 
 resource "aws_iam_role_policy" "web_invoke_runtime" {

@@ -2,7 +2,7 @@
 resource "aws_iam_role_policy" "anomalies_read" {
   for_each = local.reader_role_names
 
-  name = "${var.name_prefix}-anomalies-read"
+  name = "${local.name_prefix}-anomalies-read"
   role = each.value
 
   policy = jsonencode({
@@ -18,14 +18,14 @@ resource "aws_iam_role_policy" "anomalies_read" {
         Sid      = "Parameters"
         Effect   = "Allow"
         Action   = "ssm:GetParameter"
-        Resource = "arn:${local.partition}:ssm:${var.region}:${local.account_id}:parameter/${var.name_prefix}/*"
+        Resource = "arn:${local.partition}:ssm:${var.region}:${local.account_id}:parameter/${local.name_prefix}/*"
       },
     ]
   })
 }
 
 resource "aws_iam_role_policy" "stream_produce" {
-  name = "${var.name_prefix}-stream-produce"
+  name = "${local.name_prefix}-stream-produce"
   role = local.lab_role_name
 
   policy = jsonencode({
@@ -48,7 +48,7 @@ resource "aws_iam_role_policy" "stream_produce" {
         Sid      = "Bootstrap"
         Effect   = "Allow"
         Action   = "ssm:GetParameter"
-        Resource = "arn:${local.partition}:ssm:${var.region}:${local.account_id}:parameter/${var.name_prefix}/msk-bootstrap"
+        Resource = "arn:${local.partition}:ssm:${var.region}:${local.account_id}:parameter/${local.name_prefix}/msk-bootstrap"
       },
     ]
   })

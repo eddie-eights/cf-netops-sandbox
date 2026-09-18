@@ -65,7 +65,7 @@ resource "aws_opensearchserverless_collection" "kb" {
 
   name        = local.collection_name
   type        = "VECTORSEARCH"
-  description = "${var.name_prefix} knowledge base"
+  description = "${local.name_prefix} knowledge base"
   # スタンバイを切ると最小 OCU が半分になる（検証用。可用性は下がる）
   standby_replicas = "DISABLED"
 
@@ -134,8 +134,8 @@ resource "opensearch_index" "kb" {
 resource "aws_iam_role" "kb" {
   count = local.kb ? 1 : 0
 
-  name        = "${var.name_prefix}-kb"
-  description = "Service role for the ${var.name_prefix} Bedrock knowledge base"
+  name        = "${local.name_prefix}-kb"
+  description = "Service role for the ${local.name_prefix} Bedrock knowledge base"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -150,7 +150,7 @@ resource "aws_iam_role" "kb" {
     }]
   })
 
-  tags = { Name = "${var.name_prefix}-kb" }
+  tags = { Name = "${local.name_prefix}-kb" }
 }
 
 locals {
@@ -230,8 +230,8 @@ resource "aws_iam_role_policy" "kb" {
 resource "aws_bedrockagent_knowledge_base" "kb" {
   count = local.kb ? 1 : 0
 
-  name        = "${var.name_prefix}-kb"
-  description = "${var.name_prefix} runbooks (markdown)"
+  name        = "${local.name_prefix}-kb"
+  description = "${local.name_prefix} runbooks (markdown)"
   role_arn    = aws_iam_role.kb[0].arn
 
   knowledge_base_configuration {
@@ -254,7 +254,7 @@ resource "aws_bedrockagent_knowledge_base" "kb" {
     }
   }
 
-  tags = { Name = "${var.name_prefix}-kb" }
+  tags = { Name = "${local.name_prefix}-kb" }
 
   depends_on = [opensearch_index.kb, aws_iam_role_policy.kb]
 }
@@ -264,7 +264,7 @@ resource "aws_bedrockagent_data_source" "docs" {
   count = local.kb ? 1 : 0
 
   knowledge_base_id    = aws_bedrockagent_knowledge_base.kb[0].id
-  name                 = "${var.name_prefix}-docs"
+  name                 = "${local.name_prefix}-docs"
   description          = "Markdown files under s3://<bucket>/docs/"
   data_deletion_policy = "RETAIN"
 
@@ -281,8 +281,8 @@ resource "aws_bedrockagent_data_source" "docs" {
 # Classic 階層は英語・フランス語・スペイン語だけ。日本語を判定させるには Standard 階層にする。
 # Standard 階層はクロスリージョン推論が必須で、判定は APAC の他リージョンで行われることがある
 resource "aws_bedrock_guardrail" "this" {
-  name                      = "${var.name_prefix}-guardrail"
-  description               = "${var.name_prefix} content filters and prompt attack filter"
+  name                      = "${local.name_prefix}-guardrail"
+  description               = "${local.name_prefix} content filters and prompt attack filter"
   blocked_input_messaging   = "この質問にはお答えできません。業務に関する内容で聞き直してください。"
   blocked_outputs_messaging = "回答にガードレールで止める内容が含まれたため、表示しません。聞き方を変えてください。"
 
@@ -327,11 +327,11 @@ resource "aws_bedrock_guardrail" "this" {
     }
   }
 
-  tags = { Name = "${var.name_prefix}-guardrail" }
+  tags = { Name = "${local.name_prefix}-guardrail" }
 }
 
 # 版は作成時点のガードレールを固定する。ガードレールを変えたら description の r1 を r2 に上げて、版を作り直させる
 resource "aws_bedrock_guardrail_version" "r1" {
   guardrail_arn = aws_bedrock_guardrail.this.guardrail_arn
-  description   = "${var.name_prefix} r1"
+  description   = "${local.name_prefix} r1"
 }

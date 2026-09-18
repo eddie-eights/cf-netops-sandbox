@@ -8,7 +8,7 @@ resource "aws_instance" "lab" {
   associate_public_ip_address = false
 
   user_data = templatefile("${path.module}/templates/lab_user_data.sh.tftpl", {
-    name_prefix          = var.name_prefix
+    name_prefix          = local.name_prefix
     region               = var.region
     account_id           = local.account_id
     bucket               = local.bucket
@@ -35,13 +35,13 @@ resource "aws_instance" "lab" {
     delete_on_termination = true
 
     tags = {
-      Name    = "${var.name_prefix}-lab"
-      Project = var.name_prefix
+      Name    = "${local.name_prefix}-lab"
+      Project = local.name_prefix
       owner   = var.owner
     }
   }
 
-  tags = { Name = "${var.name_prefix}-lab" }
+  tags = { Name = "${local.name_prefix}-lab" }
 
   depends_on = [
     aws_iam_role_policy_attachment.lab_ssm,

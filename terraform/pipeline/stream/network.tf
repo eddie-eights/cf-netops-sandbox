@@ -1,10 +1,10 @@
 # ---------------------------------------------------------------- security groups
 resource "aws_security_group" "msk" {
-  name        = "${var.name_prefix}-msk"
+  name        = "${local.name_prefix}-msk"
   description = "MSK brokers - Kafka IAM (9098) from the lab EC2, from MSK Connect and from the EMR Serverless workers (terraform/pipeline/analytics)"
   vpc_id      = local.vpc_id
 
-  tags = { Name = "${var.name_prefix}-msk" }
+  tags = { Name = "${local.name_prefix}-msk" }
 
   lifecycle {
     precondition {
@@ -62,11 +62,11 @@ resource "aws_vpc_security_group_ingress_rule" "endpoints_from_msk" {
 resource "aws_security_group" "stream_endpoints" {
   count = var.create_sts_endpoint ? 1 : 0
 
-  name        = "${var.name_prefix}-stream-endpoints"
+  name        = "${local.name_prefix}-stream-endpoints"
   description = "sts interface endpoint - HTTPS from the MSK security group"
   vpc_id      = local.vpc_id
 
-  tags = { Name = "${var.name_prefix}-stream-endpoints" }
+  tags = { Name = "${local.name_prefix}-stream-endpoints" }
 }
 
 resource "aws_vpc_security_group_ingress_rule" "stream_endpoints_from_msk" {
@@ -93,7 +93,7 @@ resource "aws_vpc_endpoint" "stream" {
   subnet_ids          = [local.subnet_ids[0]]
   security_group_ids  = [aws_security_group.stream_endpoints[0].id]
 
-  tags = { Name = "${var.name_prefix}-${each.key}" }
+  tags = { Name = "${local.name_prefix}-${each.key}" }
 }
 
 resource "aws_vpc_endpoint" "dynamodb" {
@@ -104,5 +104,5 @@ resource "aws_vpc_endpoint" "dynamodb" {
   vpc_endpoint_type = "Gateway"
   route_table_ids   = local.route_table_ids
 
-  tags = { Name = "${var.name_prefix}-dynamodb" }
+  tags = { Name = "${local.name_prefix}-dynamodb" }
 }

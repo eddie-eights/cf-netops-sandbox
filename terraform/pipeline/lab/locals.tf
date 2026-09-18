@@ -3,6 +3,12 @@
 # Images come from ECR (terraform/base/ecr), the containerlab rpm and configs from the S3 bucket of terraform/base/core. Stop the instance when not in use.
 # If the Telegraf rpm is also in lab/, Telegraf polls the CE routers over SNMP, receives their traps and writes to MSK (terraform/pipeline/stream).
 
+# リソース名の接頭辞であり Project タグの値。デプロイする人の名前（var.owner）から作るので、
+# 1 つの AWS アカウントを何人かで使っても、自分の名前で自分のリソースを探せる
+locals {
+  name_prefix = "${var.owner}-nwc-poc"
+}
+
 data "aws_caller_identity" "current" {}
 data "aws_partition" "current" {}
 

@@ -1,11 +1,11 @@
 # ---------------------------------------------------------------- security groups
 # 受信ルールは置かない。ブラウザは SSM のポートフォワーディングで来る（SSM Agent が内側から ssmmessages へつなぎに行く）
 resource "aws_security_group" "web" {
-  name        = "${var.name_prefix}-web"
+  name        = "${local.name_prefix}-web"
   description = "Chat web EC2 - no inbound, outbound HTTPS only"
   vpc_id      = aws_vpc.this.id
 
-  tags = { Name = "${var.name_prefix}-web" }
+  tags = { Name = "${local.name_prefix}-web" }
 }
 
 resource "aws_vpc_security_group_egress_rule" "web_https" {
@@ -18,11 +18,11 @@ resource "aws_vpc_security_group_egress_rule" "web_https" {
 }
 
 resource "aws_security_group" "runtime" {
-  name        = "${var.name_prefix}-runtime"
+  name        = "${local.name_prefix}-runtime"
   description = "AgentCore Runtime ENIs - outbound HTTPS only"
   vpc_id      = aws_vpc.this.id
 
-  tags = { Name = "${var.name_prefix}-runtime" }
+  tags = { Name = "${local.name_prefix}-runtime" }
 }
 
 # VPC endpoints と S3 gateway（S3 のパブリック IP 帯）へ出る。NAT が無いのでインターネットには出られない
@@ -37,11 +37,11 @@ resource "aws_vpc_security_group_egress_rule" "runtime_https" {
 
 # 条件を付けない。terraform/pipeline/lab / terraform/pipeline/stream が remote state で受け取り、443 の受信ルールを足すため（出力は常に要る）
 resource "aws_security_group" "endpoints" {
-  name        = "${var.name_prefix}-endpoints"
+  name        = "${local.name_prefix}-endpoints"
   description = "Interface endpoints created by terraform/base/core - HTTPS from the chat web and the runtime"
   vpc_id      = aws_vpc.this.id
 
-  tags = { Name = "${var.name_prefix}-endpoints" }
+  tags = { Name = "${local.name_prefix}-endpoints" }
 }
 
 resource "aws_vpc_security_group_ingress_rule" "endpoints_from_web" {
@@ -73,11 +73,11 @@ resource "aws_vpc_security_group_egress_rule" "endpoints_none" {
 resource "aws_security_group" "client" {
   count = var.create_ssm_endpoints && var.client_cidr != "" ? 1 : 0
 
-  name        = "${var.name_prefix}-client"
+  name        = "${local.name_prefix}-client"
   description = "ssm and ssmmessages endpoints - HTTPS from corporate PCs"
   vpc_id      = aws_vpc.this.id
 
-  tags = { Name = "${var.name_prefix}-client" }
+  tags = { Name = "${local.name_prefix}-client" }
 }
 
 resource "aws_vpc_security_group_ingress_rule" "client_https" {

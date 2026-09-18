@@ -2,8 +2,7 @@
 # netops-poc - AWS に触らずに打てる検査をまとめて打つ。docs/development.md の「手元で確かめる」と同じ内容。
 #   1. terraform fmt -check -recursive
 #   2. 8 つのルートで init -backend=false + validate（provider を取るだけで state には触らない）
-#   3. ops スクリプトの構文（bash -n と、EC2 の上で打つ ops/seed_graph.py、EMR Serverless で打つ spark/snmp_sinks.py、
-#      ECS で打つ workflow/worker.py、Lambda の tools/handler.py、agent/ の mcp_client.py と proposals.py）
+#   3. スクリプトの構文（ops/*.sh は bash -n、リポジトリの .py は全部 ast.parse）
 #   4. 模擬テスト 6 本（AWS に触れない）
 # 最後の行が「すべて通過」なら健全。途中で落ちたらそこで止まる。
 set -euo pipefail
@@ -34,9 +33,11 @@ done
 log "3. ops スクリプトの構文"
 bash -n ops/up.sh ops/down.sh ops/deploy-env.sh ops/check.sh ops/vscode-setup.sh
 if command -v python3 >/dev/null; then PY=(python3); else PY=(uv run --python 3.13 python); fi
-for p in ops/seed_graph.py spark/snmp_sinks.py workflow/worker.py tools/handler.py agent/toolkit.py agent/mcp_client.py agent/proposals.py agent/evidence.py; do
-  "${PY[@]}" -c 'import ast, sys; ast.parse(open(sys.argv[1], encoding="utf-8").read(), sys.argv[1])' "$p"
-done
+# .py は名指しにせず全部見る（名指しにすると、ファイルを足したときに検査から漏れる）
+find agent ops spark tests tools web workflow -name '*.py' -not -path '*/__pycache__/*' -print0 |
+  xargs -0 "${PY[@]}" -c 'import ast, sys
+for f in sys.argv[1:]:
+    ast.parse(open(f, encoding="utf-8").read(), f)'
 echo "構文エラーなし"
 
 log "4. 模擬テスト"

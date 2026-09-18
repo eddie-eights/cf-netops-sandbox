@@ -18,7 +18,7 @@ resource "aws_vpc_endpoint" "runtime" {
   subnet_ids          = local.subnet_ids
   security_group_ids  = [local.endpoint_sg_id]
 
-  tags = { Name = "${var.name_prefix}-${each.key}" }
+  tags = { Name = "${local.name_prefix}-${each.key}" }
 }
 
 # Retrieve（Knowledge Base）の経路。KB を作らないときは要らない
@@ -32,7 +32,7 @@ resource "aws_vpc_endpoint" "bedrock_agent_runtime" {
   subnet_ids          = local.subnet_ids
   security_group_ids  = [local.endpoint_sg_id]
 
-  tags = { Name = "${var.name_prefix}-bedrock-agent-runtime" }
+  tags = { Name = "${local.name_prefix}-bedrock-agent-runtime" }
 }
 
 # ---------------------------------------------------------------- VPC endpoint the chat web EC2 invokes the runtime through (1 AZ)
@@ -46,5 +46,5 @@ resource "aws_vpc_endpoint" "agentcore" {
   subnet_ids          = [local.instance_subnet]
   security_group_ids  = [local.endpoint_sg_id]
 
-  tags = { Name = "${var.name_prefix}-bedrock-agentcore" }
+  tags = { Name = "${local.name_prefix}-bedrock-agentcore" }
 }

@@ -112,7 +112,7 @@ check("locals に sink_iceberg / sink_opensearch / sink_prometheus",
       all(re.search(r'sink_' + s + r'\s*=\s*contains\(var\.sinks,\s*"' + s + r'"\)', tf) for s in ("iceberg", "opensearch", "prometheus")))
 check("OpenSearch Serverless は TIMESERIES のコレクション <prefix>-logs（count で作る）",
       re.search(r'resource "aws_opensearchserverless_collection" "logs"[\s\S]*?count\s*=\s*local\.sink_opensearch \? 1 : 0[\s\S]*?type\s*=\s*"TIMESERIES"', tf, re.S) is not None
-      and re.search(r'logs_collection\s*=\s*"\$\{var\.name_prefix\}-logs"', tf) is not None)
+      and re.search(r'logs_collection\s*=\s*"\$\{local\.name_prefix\}-logs"', tf) is not None)
 check("OpenSearch のコレクションは公開せず VPC エンドポイントからだけ",
       re.search(r'resource "aws_opensearchserverless_vpc_endpoint" "logs"', tf) is not None
       and re.search(r'"logs_network"[\s\S]*?AllowFromPublic\s*=\s*false[\s\S]*?SourceVPCEs\s*=\s*\[aws_opensearchserverless_vpc_endpoint\.logs\[0\]\.id\]', tf, re.S) is not None)
@@ -121,7 +121,7 @@ check("OpenSearch のデータアクセスは EMR の実行ロールだけ、snm
       and re.search(r'opensearch_index\s*=\s*"snmp-logs"', tf) is not None)
 check("Prometheus はワークスペース <prefix>-metrics と aps-workspaces の interface エンドポイント（2 AZ）",
       re.search(r'resource "aws_prometheus_workspace" "metrics"[\s\S]*?count\s*=\s*local\.sink_prometheus \? 1 : 0[\s\S]*?alias\s*=\s*local\.metrics_workspace', tf, re.S) is not None
-      and re.search(r'metrics_workspace\s*=\s*"\$\{var\.name_prefix\}-metrics"', tf) is not None
+      and re.search(r'metrics_workspace\s*=\s*"\$\{local\.name_prefix\}-metrics"', tf) is not None
       and re.search(r'resource "aws_vpc_endpoint" "aps"[\s\S]*?count\s*=\s*local\.sink_prometheus \? 1 : 0[\s\S]*?"com\.amazonaws\.\$\{var\.region\}\.aps-workspaces"[\s\S]*?slice\(local\.subnet_ids, 0, 2\)', tf, re.S) is not None)
 check("runtime role に aoss:APIAccessAll と aps:RemoteWrite（格納先を選んだときだけ。for-if で count 0 のときの index を避ける）",
       re.search(r'"aoss:APIAccessAll"[\s\S]*?local\.sink_opensearch \? aws_opensearchserverless_collection\.logs\[0\]\.arn : ""[\s\S]*?\] : s if local\.sink_opensearch\]', tf, re.S) is not None
@@ -388,7 +388,10 @@ check("up.sh は動いているジョブがあれば起こさない", "--states 
 check("up.sh は PIPELINE=1 で SKIP_STREAM=1 なら analytics も飛ばす", re.search(r'SKIP_STREAM=1 なので analytics も作らない[^\n]*\n\s*SKIP_ANALYTICS=1', up) is not None)
 check("down.sh は job を cancel → stop-application → destroy analytics → destroy graph の順",
       down.index("cancel-job-run") < down.index("stop-application") < down.index("destroy_root pipeline/analytics") < down.index("destroy_lambda_root pipeline/graph") < down.index("destroy_root pipeline/stream"))
-check("check.sh は spark/snmp_sinks.py を見る", "spark/snmp_sinks.py" in checksh and "snmp_to_iceberg" not in checksh)
+# .py は名指しで並べず find で全部見る（名指しだとファイルを足したときに構文検査から漏れる）
+check("check.sh は spark/ の .py を構文検査に入れ、spark/snmp_sinks.py がある",
+      re.search(r"find [\w /]*\bspark\b [^\n]*-name '\*\.py'", checksh) is not None
+      and os.path.isfile(os.path.join(ROOT, "spark", "snmp_sinks.py")) and "snmp_to_iceberg" not in checksh)
 check("up.sh の WORKFLOW=1 は SKIP_ANALYTICS があれば止まる（Spark の検知が無いとワーカーが起きない）",
       re.search(r'if \[ -n "\$WORKFLOW" \]; then\n[\s\S]*?-n "\$SKIP_ANALYTICS"[\s\S]*?die "WORKFLOW は lab と stream と analytics が要る', up) is not None)
 check("up.sh は PIPELINE=0 なら lab / stream / analytics / graph を全部飛ばす",

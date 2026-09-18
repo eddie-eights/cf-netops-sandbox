@@ -1,8 +1,8 @@
-"""機能 WORKFLOW（terraform/workflow、workflow/worker.py、agent/proposals.py、agent/mcp_client.py、tools/）の模擬テスト。
-AWS にも Temporal にも触れない。temporalio と boto3 を差し替えて worker.py を読み、純粋な関数（プロンプト・JSON の読み取り・
-許可リスト・二重起動の判定）と、proposals.decide の条件、mcp_client の応答の読み取り、tools.json と Python の TOOL_SPECS の一致、
-Terraform と ops スクリプトのつながりを見る。実行は python3 tests/test_workflow.py（依存は無い）。"""
-import ast, json, os, re, sys, types
+"""機能 WORKFLOW（terraform/workflow、workflow/（rules / awsio / worker）、agent/proposals.py、agent/mcp_client.py、tools/）の模擬テスト。
+AWS にも Temporal にも触れない。temporalio と boto3 を差し替えて 3 つのモジュールを読み、純粋な関数（プロンプト・JSON の読み取り・
+許可リスト・二重起動の判定 = rules）と AWS 呼び出しの形（awsio）、proposals.decide の条件、mcp_client の応答の読み取り、
+tools.json と Python の TOOL_SPECS の一致、Terraform と ops スクリプトのつながりを見る。実行は python3 tests/test_workflow.py（依存は無い）。"""
+import ast, contextlib, json, os, re, sys, types
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 TF_DIR = os.path.join(ROOT, "terraform", "workflow")
@@ -58,6 +58,9 @@ t_activity = types.ModuleType("temporalio.activity"); t_activity.defn = _passthr
 t_workflow = types.ModuleType("temporalio.workflow")
 t_workflow.defn = _passthrough; t_workflow.run = _passthrough; t_workflow.signal = _passthrough
 t_workflow.execute_activity = None; t_workflow.wait_condition = None; t_workflow.now = None; t_workflow.info = None
+# worker.py は自作モジュールを workflow.unsafe.imports_passed_through() で囲んで読む（Temporal のサンドボックス対策）。
+# 素通しの context manager を置いておかないと import の時点で落ちる
+t_workflow.unsafe = types.SimpleNamespace(imports_passed_through=contextlib.nullcontext)
 t_client = types.ModuleType("temporalio.client"); t_client.Client = object; t_client.WorkflowFailureError = Exception
 t_common = types.ModuleType("temporalio.common"); t_common.RetryPolicy = lambda **k: k
 t_exc = types.ModuleType("temporalio.exceptions"); t_exc.WorkflowAlreadyStartedError = Exception
@@ -72,7 +75,9 @@ os.environ.update({"ANOMALY_TABLE": "anom", "PROPOSAL_TABLE": "prop", "AGENT_RUN
 sys.path.insert(0, os.path.join(ROOT, "workflow"))
 sys.path.insert(0, os.path.join(ROOT, "agent"))
 sys.path.insert(0, os.path.join(ROOT, "tools"))
-import worker  # noqa: E402
+import worker  # noqa: E402 - Temporal のワークフローとアクティビティ
+import awsio  # noqa: E402 - 環境変数と AWS 呼び出し
+import rules  # noqa: E402 - 判断だけの純粋関数
 import proposals  # noqa: E402
 import mcp_client  # noqa: E402
 import anomalies  # noqa: E402
@@ -80,47 +85,50 @@ import topology  # noqa: E402
 import evidence  # noqa: E402
 import handler  # noqa: E402
 
-# ---- worker.py の純粋な関数
+# ---- workflow/rules.py の純粋な関数
 anomaly = {"anomaly_id": "hq-ce-01#link_down#eth1", "device_id": "hq-ce-01", "kind": "link_down", "target": "eth1",
            "first_seen": 1700000000, "detail": "ifOperStatus down", "first_seen_jst": "2023-11-15 07:13:20"}
-prompt = worker.build_prompt(anomaly)
+prompt = rules.build_prompt(anomaly)
 check("プロンプトに機器・種別・対象が入る", all(s in prompt for s in ("hq-ce-01", "link_down", "eth1")))
 check("プロンプトは JSON 1 個を求め、action の 3 択を示す", '"action"' in prompt and "heal-main | check | none" in prompt)
 check("応答の中の JSON を拾う（前後に文があっても）",
-      worker.parse_agent_json('確認しました。\n{"cause": "eth1 が down", "action": "heal-main", "reason": "主回線"}\n以上')
+      rules.parse_agent_json('確認しました。\n{"cause": "eth1 が down", "action": "heal-main", "reason": "主回線"}\n以上')
       == {"cause": "eth1 が down", "action": "heal-main", "reason": "主回線"})
-check("JSON が無ければ action=none で本文を理由に残す", worker.parse_agent_json("わかりません")["action"] == "none"
-      and worker.parse_agent_json("わかりません")["reason"] == "わかりません")
-check("壊れた JSON でも落ちない", worker.parse_agent_json("{bad json")["action"] == "none")
-check("cause は 1000 字で切る", len(worker.parse_agent_json(json.dumps({"cause": "x" * 5000}))["cause"]) == 1000)
-check("heal-main は sudo lab heal-main", worker.normalize_action("heal-main") == ("heal-main", "sudo lab heal-main"))
-check("check は sudo lab check", worker.normalize_action("check") == ("check", "sudo lab check"))
+check("JSON が無ければ action=none で本文を理由に残す", rules.parse_agent_json("わかりません")["action"] == "none"
+      and rules.parse_agent_json("わかりません")["reason"] == "わかりません")
+check("壊れた JSON でも落ちない", rules.parse_agent_json("{bad json")["action"] == "none")
+check("cause は 1000 字で切る", len(rules.parse_agent_json(json.dumps({"cause": "x" * 5000}))["cause"]) == 1000)
+check("heal-main は sudo lab heal-main", rules.normalize_action("heal-main") == ("heal-main", "sudo lab heal-main"))
+check("check は sudo lab check", rules.normalize_action("check") == ("check", "sudo lab check"))
 check("許可リストに無い処置は none でコマンド空（rm -rf / も fail-main も）",
-      worker.normalize_action("rm -rf /") == ("none", "") and worker.normalize_action("fail-main") == ("none", "")
-      and worker.normalize_action("") == ("none", ""))
-check("ALLOWED_ACTIONS は lab/lab.sh のサブコマンド", all(f"  {a})" in read("lab", "lab.sh") for a in worker.ALLOWED_ACTIONS))
-check("修復案が無ければ起こす", worker.should_start(anomaly, None) and worker.should_start(anomaly, {}))
-check("同じ first_seen の修復案があれば起こさない", not worker.should_start(anomaly, {"first_seen": 1700000000, "status": "verified"}))
-check("first_seen が違えば（別の発生）起こす", worker.should_start(anomaly, {"first_seen": 1600000000}))
-check("anomaly_id が無ければ起こさない", not worker.should_start({}, None))
-check("ワークフロー id は investigate-<anomaly_id>", worker.workflow_id("a#b#c") == "investigate-a#b#c")
-check("DynamoDB の型付けは N / S / BOOL で、空文字は - にする",
-      worker._typed(1) == {"N": "1"} and worker._typed(True) == {"BOOL": True} and worker._typed("x") == {"S": "x"} and worker._typed("") == {"S": "-"})
+      rules.normalize_action("rm -rf /") == ("none", "") and rules.normalize_action("fail-main") == ("none", "")
+      and rules.normalize_action("") == ("none", ""))
+check("ALLOWED_ACTIONS は lab/lab.sh のサブコマンド", all(f"  {a})" in read("lab", "lab.sh") for a in rules.ALLOWED_ACTIONS))
+check("修復案が無ければ起こす", rules.should_start(anomaly, None) and rules.should_start(anomaly, {}))
+check("同じ first_seen の修復案があれば起こさない", not rules.should_start(anomaly, {"first_seen": 1700000000, "status": "verified"}))
+check("first_seen が違えば（別の発生）起こす", rules.should_start(anomaly, {"first_seen": 1600000000}))
+check("anomaly_id が無ければ起こさない", not rules.should_start({}, None))
+check("ワークフロー id は investigate-<anomaly_id>", rules.workflow_id("a#b#c") == "investigate-a#b#c")
+# rules.py に boto3 / temporalio を持ち込むと、このテストも Temporal のサンドボックスも動かなくなる（分割の理由そのもの）
+check("rules.py は標準ライブラリ（json / re）しか読まない",
+      set(re.findall(r"^import (\w+)", read("workflow", "rules.py"), re.M)) == {"json", "re"})
 
-# ---- worker.py の AWS 呼び出し（差し替えで記録）
+# ---- workflow/awsio.py の AWS 呼び出し（差し替えで記録）
+check("DynamoDB の型付けは N / S / BOOL で、空文字は - にする",
+      awsio._typed(1) == {"N": "1"} and awsio._typed(True) == {"BOOL": True} and awsio._typed("x") == {"S": "x"} and awsio._typed("") == {"S": "-"})
 calls.clear()
 fake["query"] = {"Items": [{"anomaly_id": {"S": "a#b#c"}, "status": {"S": "open"}, "first_seen": {"N": "1"}}]}
-rows = worker.list_open_anomalies()
+rows = awsio.list_open_anomalies()
 check("open の異常を status-last_seen-index で新しい順に読む", rows == [{"anomaly_id": "a#b#c", "status": "open", "first_seen": 1}]
       and calls[-1][2]["IndexName"] == "status-last_seen-index" and calls[-1][2]["ScanIndexForward"] is False and calls[-1][2]["TableName"] == "anom")
 calls.clear()
-worker.update_proposal("p1", {"status": "applied", "apply_output": "ok"})
+awsio.update_proposal("p1", {"status": "applied", "apply_output": "ok"})
 kw = calls[-1][2]
 check("update_proposal は status / apply_output / updated_at を SET する",
       calls[-1][:2] == ("dynamodb", "update_item") and kw["TableName"] == "prop" and kw["UpdateExpression"].startswith("SET ")
       and set(kw["ExpressionAttributeNames"].values()) == {"status", "apply_output", "updated_at"})
 calls.clear()
-worker.write_proposal({"proposal_id": "p1", "status": "pending", "first_seen": 1, "nothing": None})
+awsio.write_proposal({"proposal_id": "p1", "status": "pending", "first_seen": 1, "nothing": None})
 check("write_proposal は None を落として put_item する", calls[-1][1] == "put_item" and "nothing" not in calls[-1][2]["Item"]
       and calls[-1][2]["Item"]["first_seen"] == {"N": "1"})
 
@@ -129,17 +137,20 @@ class FakeBody:
     def read(self): return json.dumps(self.data).encode()
 calls.clear()
 fake["invoke_agent_runtime"] = {"response": FakeBody({"status": "success", "response": '{"cause":"c","action":"check","reason":"r"}'})}
-text = worker.ask_agent("q")
+text = awsio.ask_agent("q")
 kw = calls[-1][2]
 check("Runtime を InvokeAgentRuntime（qualifier DEFAULT、JSON の prompt、33 字以上の runtimeSessionId）で呼ぶ",
       calls[-1][:2] == ("bedrock-agentcore", "invoke_agent_runtime") and kw["qualifier"] == "DEFAULT"
       and json.loads(kw["payload"]) == {"prompt": "q"} and len(kw["runtimeSessionId"]) >= 33 and "action" in text)
 fake["invoke_agent_runtime"] = {"response": FakeBody({"status": "error", "message": "x"})}
 try:
-    worker.ask_agent("q"); bad = False
+    awsio.ask_agent("q"); bad = False
 except RuntimeError:
     bad = True
 check("Runtime が error を返したら例外（Temporal が再試行する）", bad)
+# 分割しても worker.py からは awsio / rules 経由で全部に届く（Temporal のサンドボックスを通すため imports_passed_through で囲む）
+check("worker.py は awsio / rules を imports_passed_through で読む",
+      re.search(r"with workflow\.unsafe\.imports_passed_through\(\):\n\s*import awsio\n\s*import rules", read("workflow", "worker.py")) is not None)
 
 # ---- proposals.py
 calls.clear()
@@ -275,7 +286,7 @@ check("tools Lambda のロールの修復案は Query / GetItem / Scan だけ（
 check("tools Lambda のロールに aoss:APIAccessAll と aps:QueryMetrics、コレクションの data access policy",
       '"aoss:APIAccessAll"' in tf and '"aps:QueryMetrics"' in tf and 'resource "aws_opensearchserverless_access_policy" "tools"' in tf)
 check("EventBridge のルールは <接頭辞>.spark / AnomalyOpened を SQS（anomalies）へ、DLQ は 5 回で",
-      re.search(r'resource "aws_cloudwatch_event_rule" "anomalies"[\s\S]*?source\s*=\s*\["\$\{var\.name_prefix\}\.spark"\][\s\S]*?"detail-type"\s*=\s*\["AnomalyOpened"\]', tf) is not None
+      re.search(r'resource "aws_cloudwatch_event_rule" "anomalies"[\s\S]*?source\s*=\s*\["\$\{local\.name_prefix\}\.spark"\][\s\S]*?"detail-type"\s*=\s*\["AnomalyOpened"\]', tf) is not None
       and 'resource "aws_sqs_queue" "anomalies"' in tf and 'resource "aws_sqs_queue" "anomalies_dlq"' in tf
       and re.search(r'redrive_policy[\s\S]*?maxReceiveCount\s*=\s*5', tf) is not None
       and 'resource "aws_cloudwatch_event_target" "anomalies"' in tf)
@@ -293,16 +304,35 @@ check("agent/app.py は Gateway のツールを先に、無ければコンテナ
 check("agent/Dockerfile は toolkit.py / mcp_client.py / proposals.py を入れる",
       all(f"{m}.py" in read("agent", "Dockerfile").split("COPY app.py")[1].split("\n")[0] for m in ("toolkit", "mcp_client", "proposals")))
 check("workflow/Dockerfile は非 root で worker.py を打つ", "USER worker" in read("workflow", "Dockerfile") and '["python", "worker.py"]' in read("workflow", "Dockerfile"))
+# 1 つずつ COPY すると、足したファイルを入れ忘れて起動時に ModuleNotFoundError になる（分割で 3 本になった）
+check("workflow/Dockerfile は *.py をまとめて入れる", "COPY *.py ./" in read("workflow", "Dockerfile"))
 check("workflow/requirements.txt は temporalio と boto3 を固定する", "temporalio==" in read("workflow", "requirements.txt") and "boto3>=" in read("workflow", "requirements.txt"))
-ast.parse(read("workflow", "worker.py"))
+for _f in ("worker.py", "awsio.py", "rules.py"):
+    ast.parse(read("workflow", _f))
 ecr_tf = read("terraform", "base", "ecr", "main.tf")
 check("terraform/base/ecr は worker / temporal のリポジトリを作る", '"worker", "temporal"' in ecr_tf and 'resource "aws_ecr_repository" "workflow"' in ecr_tf)
 
-# ---- web の承認タブ
+# ---- web（app.py は画面の組み立てだけ。タブの中身は分けてある）
 web = read("web", "app.py")
+web_srcs = sorted(n for n in os.listdir(os.path.join(ROOT, "web")) if n.endswith(".py"))
+check("web は app / config / chat / topology_view / incident_view に分かれる",
+      set(web_srcs) == {"app.py", "config.py", "chat.py", "topology_view.py", "incident_view.py"})
+# user_data は $APP/src/app.py の 1 行目で置き間違いを見るので、app.py の import gradio は行頭のまま動かさない
+check("app.py には行頭の import gradio がある（user_data の置き間違い検出が見ている）",
+      re.search(r"^import gradio as gr$", web, re.M) is not None
+      and 'grep -q "^import gradio"' in read("terraform", "base", "core", "templates", "web_user_data.sh.tftpl"))
+incident = read("web", "incident_view.py")
 check("Web に「承認」タブがあり、proposals.decide で approved / rejected を書く",
-      'gr.Tab("承認")' in web and 'decide_proposal(i, "approved", s)' in web and 'decide_proposal(i, "rejected", s)' in web and "import proposals" in web)
-check("main の upload_web_command は Web が import する agent のモジュールを全部上げる", "for f in toolkit topology anomalies graph proposals" in main_out)
+      'gr.Tab("承認")' in web and 'decide_proposal(i, "approved", s)' in web and 'decide_proposal(i, "rejected", s)' in web
+      and "import proposals" in incident and "proposals.decide(" in incident)
+# 入れ忘れても apply は通り、EC2 の起動時に ModuleNotFoundError になる（tools.zip と同じ事故）。
+# web/*.py は upload_web_command が web/ ごと上げるので、確かめるのは agent/ から借りるモジュールの側
+web_shared = set()
+for n in web_srcs:
+    web_shared |= {i for i in re.findall(r"^import (\w+)", read("web", n), re.M) if os.path.exists(os.path.join(ROOT, "agent", i + ".py"))}
+uploaded = set(re.search(r"for f in ([\w ]+); do", main_out).group(1).split())
+check(f"main の upload_web_command は Web が import する agent のモジュールを全部上げる（足りない: {sorted(web_shared - uploaded)}）",
+      web_shared and not (web_shared - uploaded))
 
 # ---- ops
 up = read("ops", "up.sh"); down = read("ops", "down.sh"); chk = read("ops", "check.sh")
@@ -314,14 +344,16 @@ check("deploy-env.sh の読めるキーは機能の 3 つ + CREATE_KB + TF_VERBO
       and not re.search(r'\bPHASE\b|\bWITH_LAB\b|\bWITH_STREAM\b', up))
 # ---- starter: SQS のメッセージから anomaly_id
 check("anomaly_id_from_message は detail が dict でも JSON 文字列でも読む",
-      worker.anomaly_id_from_message(json.dumps({"detail": {"anomaly_id": "r1#link_down#eth1"}})) == "r1#link_down#eth1"
-      and worker.anomaly_id_from_message(json.dumps({"detail": json.dumps({"anomaly_id": "r1#link_down#eth1"})})) == "r1#link_down#eth1")
+      rules.anomaly_id_from_message(json.dumps({"detail": {"anomaly_id": "r1#link_down#eth1"}})) == "r1#link_down#eth1"
+      and rules.anomaly_id_from_message(json.dumps({"detail": json.dumps({"anomaly_id": "r1#link_down#eth1"})})) == "r1#link_down#eth1")
 check("anomaly_id_from_message はごみを空にする",
-      worker.anomaly_id_from_message("garbage") == "" and worker.anomaly_id_from_message("[1]") == ""
-      and worker.anomaly_id_from_message(json.dumps({"detail": "x"})) == "" and worker.anomaly_id_from_message(json.dumps({"detail": {}})) == "")
+      rules.anomaly_id_from_message("garbage") == "" and rules.anomaly_id_from_message("[1]") == ""
+      and rules.anomaly_id_from_message(json.dumps({"detail": "x"})) == "" and rules.anomaly_id_from_message(json.dumps({"detail": {}})) == "")
 check("starter は ANOMALY_QUEUE_URL があれば SQS（20 秒の long polling）、無ければテーブルを見る",
-      all(hasattr(worker, f) for f in ("start_for", "starter_queue", "starter_table", "receive_messages", "delete_message"))
-      and "WaitTimeSeconds=20" in read("workflow", "worker.py") and "starter_queue if ANOMALY_QUEUE_URL else starter_table" in read("workflow", "worker.py"))
+      all(hasattr(worker, f) for f in ("start_for", "starter_queue", "starter_table"))
+      and all(hasattr(awsio, f) for f in ("receive_messages", "delete_message"))
+      and "WaitTimeSeconds=20" in read("workflow", "awsio.py")
+      and "starter_queue if awsio.ANOMALY_QUEUE_URL else starter_table" in read("workflow", "worker.py"))
 check("up.sh は workflow ルートを足し、費用に 6 セント足す（sqs のエンドポイント込み）", 'ROOTS="$ROOTS workflow"' in up and 'COST_CENTS=$((COST_CENTS + 6))' in up)
 check("up.sh は worker を buildx でビルドし、temporalio/temporal を ECR にミラーする",
       '--push workflow/' in up and 'docker pull --platform linux/arm64 "temporalio/temporal:$TEMPORAL_TAG"' in up and "$PREFIX-temporal:$TEMPORAL_TAG" in up)
@@ -331,7 +363,10 @@ check("up.sh は workflow を apply して services-stable を待ち、Temporal 
       'tf_apply workflow -var "worker_image_tag=$IMAGE_TAG"' in up and 'aws ecs wait services-stable' in up and 'AWS-StartPortForwardingSessionToRemoteHost' in up)
 check("down.sh は workflow を最初に消す（必須変数はダミーで渡す）",
       down.index('destroy_lambda_root workflow') < down.index('destroy_root pipeline/analytics') and 'worker_image_tag=${IMAGE_TAG:-destroy}' in down)
-check("check.sh は workflow ルートとこのテストを見る", "workflow)" in chk and "tests/test_workflow.py" in chk and "workflow/worker.py" in chk)
+# .py を名指しで並べると、ファイルを足したときに構文検査から漏れる（分割で 7 本増えた）。find に任せているかを見る
+check("check.sh は workflow ルートとこのテストを見て、.py は名指しせず find で全部見る",
+      "workflow)" in chk and "tests/test_workflow.py" in chk
+      and re.search(r"find [\w /]*\bworkflow\b [^\n]*-name '\*\.py'", chk) is not None and "ast.parse(" in chk)
 check("deploy.env.example は AGENT=1 / PIPELINE=0 / WORKFLOW=0 を既定にし、CREATE_KB を説明する（古い PHASE の行は載せない）",
       re.search(r"^AGENT=1\n^PIPELINE=0\n^WORKFLOW=0$", read("deploy.env.example"), re.M) is not None
       and re.search(r"^#CREATE_KB=0$", read("deploy.env.example"), re.M) is not None and re.search(r"^#?\s*PHASE=", read("deploy.env.example"), re.M) is None
@@ -365,7 +400,7 @@ check("KB は create_knowledge_base（既定 false）の count で作り、Runti
 check("Runtime の ARN は agent が SSM に書き、web はそれを読む（main は runtime_arn を user_data に渡さない）",
       'resource "aws_ssm_parameter" "runtime_arn"' in agent_tf and 'name        = "${local.param_prefix}/runtime-arn"' in agent_tf
       and "runtime_arn" not in read("terraform", "base", "core", "templates", "web_user_data.sh.tftpl")
-      and 'toolkit.Param("RUNTIME_ARN", "runtime-arn")' in web
+      and 'toolkit.Param("RUNTIME_ARN", "runtime-arn")' in read("web", "chat.py")
       and 'ssm:GetParameter' in main_tf)
 check("agent は web のロールに InvokeAgentRuntime を付け、main の runtime ロールにポリシーを足す",
       'role = local.web_role_name' in agent_tf and 'bedrock-agentcore:InvokeAgentRuntime' in agent_tf and 'role = local.runtime_role_name' in agent_tf
@@ -384,7 +419,6 @@ check("up.sh は main の後に agent を apply し、CREATE_KB のときだけ�
 wsrc = read("workflow", "worker.py")
 check("承認待ちの wait_condition は TimeoutError を握って表を見直す（漏らすとワークフロー失敗）",
       "except asyncio.TimeoutError" in wsrc and wsrc.index("wait_condition(") < wsrc.index("except asyncio.TimeoutError"))
-web = read("web", "app.py")
 check("承認タブの注記はワークフローが Temporal であることを言い、表は折り返し、id は表から選べる",
       "Temporal" in web and "wrap=True" in web and "pr_id = gr.Dropdown(" in web and "proposal_detail" in web)
 

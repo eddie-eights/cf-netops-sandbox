@@ -1,5 +1,5 @@
 # ---------------------------------------------------------------- AgentCore Gateway (MCP) + tools Lambda
-# The chat runtime (agent/app.py) lists the tools through the gateway URL (SSM <name_prefix>/gateway-url) and calls them over MCP
+# The chat runtime (agent/app.py) lists the tools through the gateway URL (SSM <prefix>/gateway-url) and calls them over MCP
 # instead of its built-in functions. The Lambda runs the same agent/topology.py, agent/anomalies.py, agent/evidence.py and
 # agent/proposals.py inside the VPC (subnet a), so it reads Neptune (terraform/pipeline/graph), the logs collection and the metrics
 # workspace (terraform/pipeline/analytics), the anomaly table (terraform/pipeline/stream) and the proposal table (proposals.tf).
@@ -59,7 +59,7 @@ data "aws_iam_policy_document" "lambda_trust" {
 resource "aws_iam_role" "tools" {
   count = var.create_gateway ? 1 : 0
 
-  name               = "${var.name_prefix}-tools"
+  name               = "${local.name_prefix}-tools"
   description        = "Tools Lambda behind the MCP gateway - reads the anomaly and proposal tables, Neptune, the logs collection and the metrics workspace"
   assume_role_policy = data.aws_iam_policy_document.lambda_trust.json
 }
@@ -68,7 +68,7 @@ data "aws_iam_policy_document" "tools" {
   statement {
     sid       = "Logs"
     actions   = ["logs:CreateLogStream", "logs:PutLogEvents"]
-    resources = ["arn:${local.partition}:logs:${var.region}:${local.account_id}:log-group:/aws/lambda/${var.name_prefix}-tools:*"]
+    resources = ["arn:${local.partition}:logs:${var.region}:${local.account_id}:log-group:/aws/lambda/${local.name_prefix}-tools:*"]
   }
 
   statement {
@@ -130,11 +130,11 @@ data "aws_iam_policy_document" "tools" {
 resource "aws_security_group" "tools" {
   count = var.create_gateway ? 1 : 0
 
-  name        = "${var.name_prefix}-tools"
+  name        = "${local.name_prefix}-tools"
   description = "Tools Lambda - HTTPS to the VPC endpoints (DynamoDB gateway, SSM, aoss, aps, logs) and 8182 to Neptune"
   vpc_id      = local.vpc_id
 
-  tags = { Name = "${var.name_prefix}-tools" }
+  tags = { Name = "${local.name_prefix}-tools" }
 }
 
 resource "aws_vpc_security_group_egress_rule" "tools_https" {
@@ -185,7 +185,7 @@ resource "aws_vpc_security_group_ingress_rule" "endpoints_from_tools" {
 resource "aws_opensearchserverless_access_policy" "tools" {
   count = var.create_gateway && local.opensearch_collection_name != "" ? 1 : 0
 
-  name        = "${var.name_prefix}-logs-read"
+  name        = "${local.name_prefix}-logs-read"
   type        = "data"
   description = "Tools Lambda and chat runtime read the logs collection"
 
@@ -209,7 +209,7 @@ resource "aws_opensearchserverless_access_policy" "tools" {
 resource "aws_iam_role_policy" "tools" {
   count = var.create_gateway ? 1 : 0
 
-  name   = "${var.name_prefix}-tools"
+  name   = "${local.name_prefix}-tools"
   role   = aws_iam_role.tools[0].name
   policy = data.aws_iam_policy_document.tools.json
 }
@@ -217,14 +217,14 @@ resource "aws_iam_role_policy" "tools" {
 resource "aws_cloudwatch_log_group" "tools" {
   count = var.create_gateway ? 1 : 0
 
-  name              = "/aws/lambda/${var.name_prefix}-tools"
+  name              = "/aws/lambda/${local.name_prefix}-tools"
   retention_in_days = var.log_retention_days
 }
 
 resource "aws_lambda_function" "tools" {
   count = var.create_gateway ? 1 : 0
 
-  function_name    = "${var.name_prefix}-tools"
+  function_name    = "${local.name_prefix}-tools"
   role             = aws_iam_role.tools[0].arn
   runtime          = "python3.13"
   architectures    = ["arm64"]
@@ -273,7 +273,7 @@ data "aws_iam_policy_document" "gateway_trust" {
     condition {
       test     = "ArnLike"
       variable = "aws:SourceArn"
-      values   = ["arn:${local.partition}:bedrock-agentcore:${var.region}:${local.account_id}:gateway/${var.name_prefix}-tools-*"]
+      values   = ["arn:${local.partition}:bedrock-agentcore:${var.region}:${local.account_id}:gateway/${local.name_prefix}-tools-*"]
     }
   }
 }
@@ -281,7 +281,7 @@ data "aws_iam_policy_document" "gateway_trust" {
 resource "aws_iam_role" "gateway" {
   count = var.create_gateway ? 1 : 0
 
-  name               = "${var.name_prefix}-gateway"
+  name               = "${local.name_prefix}-gateway"
   description        = "AgentCore Gateway role - invokes the tools Lambda"
   assume_role_policy = data.aws_iam_policy_document.gateway_trust.json
 }
@@ -297,7 +297,7 @@ data "aws_iam_policy_document" "gateway" {
 resource "aws_iam_role_policy" "gateway" {
   count = var.create_gateway ? 1 : 0
 
-  name   = "${var.name_prefix}-gateway"
+  name   = "${local.name_prefix}-gateway"
   role   = aws_iam_role.gateway[0].name
   policy = data.aws_iam_policy_document.gateway.json
 }
@@ -305,8 +305,8 @@ resource "aws_iam_role_policy" "gateway" {
 resource "aws_bedrockagentcore_gateway" "tools" {
   count = var.create_gateway ? 1 : 0
 
-  name            = "${var.name_prefix}-tools"
-  description     = "${var.name_prefix} agent tools (MCP)"
+  name            = "${local.name_prefix}-tools"
+  description     = "${local.name_prefix} agent tools (MCP)"
   role_arn        = aws_iam_role.gateway[0].arn
   authorizer_type = "AWS_IAM"
   protocol_type   = "MCP"

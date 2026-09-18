@@ -40,11 +40,11 @@
 
 ```bash
 aws ec2 describe-network-interfaces --region ap-northeast-1 \
-  --filters Name=description,Values='VPC Endpoint Interface vpce-*' Name=tag:Project,Values=netops-poc \
+  --filters Name=description,Values='VPC Endpoint Interface vpce-*' Name=tag:Project,Values=netops-nwc-poc \
   --query 'NetworkInterfaces[].[Description,PrivateIpAddress]' --output table
 ```
 
-ENI にタグが付かず上で何も出ないときは、`aws ec2 describe-vpc-endpoints --filters Name=tag:Project,Values=netops-poc` で `NetworkInterfaceIds` を見て、その ID で引く。
+ENI にタグが付かず上で何も出ないときは、`aws ec2 describe-vpc-endpoints --filters Name=tag:Project,Values=netops-nwc-poc` で `NetworkInterfaceIds` を見て、その ID で引く。
 **Route 53 Resolver のインバウンドエンドポイントは別料金**で、下の試算に含めていない。
 
 ### Terraform を打つ PC 側
@@ -62,7 +62,7 @@ ENI にタグが付かず上で何も出ないときは、`aws ec2 describe-vpc-
 | AWS CLI v2 と Session Manager plugin が **WSL 側**に入っている | `aws --version` と `session-manager-plugin` を WSL のシェルで打つ。Windows 側にだけ入れても WSL の `aws ssm start-session` からは見えない（Linux 版の deb / rpm を WSL に入れる） |
 | Terraform 1.11 以上が **WSL 側**に入っている | `terraform version`。入っていなければ下の HashiCorp の apt リポジトリから入れる |
 | docker で arm64 のビルドができる | `docker buildx ls` の `Platforms` に `linux/arm64` があること。Docker Desktop（WSL2 backend）なら最初からある。**WSL に直接 Docker Engine を入れる場合**は下の 3 点 |
-| 改行が LF のまま | `lab/lab.sh` と `web/app.py` は EC2 の Linux で動くので、CRLF になっていると `set -euo pipefail\r` で落ちる。配布された zip は **WSL の中で展開**する（`/mnt/c` 配下でなく `~` 配下）。Windows のエディタで開いて保存し直すと CRLF になることがある。`file lab/lab.sh` に `CRLF` が出なければよい |
+| 改行が LF のまま | `lab/lab.sh` と `web/` の `.py` は EC2 の Linux で動くので、CRLF になっていると `set -euo pipefail\r` で落ちる。配布された zip は **WSL の中で展開**する（`/mnt/c` 配下でなく `~` 配下）。Windows のエディタで開いて保存し直すと CRLF になることがある。`file lab/lab.sh` に `CRLF` が出なければよい |
 | （Docker Engine を WSL に直接入れるとき）docker.com の apt リポジトリから入れる | Ubuntu 標準の `docker.io` には buildx が無い。`docker-ce docker-ce-cli containerd.io docker-buildx-plugin` を入れ、`sudo usermod -aG docker $USER` の後にシェルを開き直す |
 | （同）dockerd が起動している | `/etc/wsl.conf` に `[boot]` `systemd=true` を書いて `wsl --shutdown` で入り直すと `systemctl enable --now docker` が使える。systemd を使わないなら毎回 `sudo service docker start` |
 | （同）arm64 の QEMU を登録する | `docker run --privileged --rm tonistiigi/binfmt --install arm64` を 1 回打つ（WSL を再起動すると消えるので、`docker buildx ls` に `linux/arm64` が無ければ打ち直す）。エージェントのイメージは AgentCore Runtime の要件で arm64 必須なので、これが無いと手順 2 が通らない |
@@ -171,7 +171,7 @@ EOF2
 `terraform/base/core` は VPC と、どの機能も使うエンドポイント（`create_ssm_endpoints` / `create_s3_gateway_endpoint` / `create_shared_endpoints`）を作り、`terraform/agent` は bedrock のエンドポイント（`create_runtime_endpoints` / `create_kb_endpoint` / `create_agentcore_endpoint`）を作る。6 つとも**既定の `true` のまま**にする。`create_shared_endpoints` は ecr.api / ecr.dkr / logs × 2 AZ で、Runtime と lab の EC2 がイメージを取り、Spark と MSK Connect と ECS がログを出すのに使う（2026-09-18 に `terraform/agent` から移した。それまでは `AGENT=0 PIPELINE=1` で lab がイメージを取れなかった）。`ops/up.sh` は AGENT も lab も analytics も作らないときだけ `false` で打つ
 （`false` は、既存の VPC に載せ替えたときのための名残）。
 
-**VPC の中から S3 に出る経路は S3 ゲートウェイだけ**で、そのポリシーが許す先は 3 つ。`terraform/base/core` のバケット `netops-poc-kb-…`（EC2 が `web/` を取る、lab が `lab/` を取る、MSK Connect が `stream/` に書く）、
+**VPC の中から S3 に出る経路は S3 ゲートウェイだけ**で、そのポリシーが許す先は 3 つ。`terraform/base/core` のバケット `netops-nwc-poc-kb-…`（EC2 が `web/` を取る、lab が `lab/` を取る、MSK Connect が `stream/` に書く）、
 ECR のレイヤー置き場（Runtime のイメージ取得）、AL2023 の dnf リポジトリ（`/usr/bin/python3` は 3.9 のままなので、起動時に `dnf install python3.13` で 3.13 を入れる）。
 バケットに対する操作の絞り込みはゲートウェイではなく各ロールの IAM ポリシーで行う（2026-09-15 にゲートウェイ側で絞っていて `s3:ListBucket` が落ち、EC2 が `web/` を取れなかった。同日に直した）。
 

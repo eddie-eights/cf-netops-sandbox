@@ -1,10 +1,10 @@
 # ---------------------------------------------------------------- network
 resource "aws_security_group" "task" {
-  name        = "${var.name_prefix}-workflow"
+  name        = "${local.name_prefix}-workflow"
   description = "Workflow task - HTTPS to the VPC endpoints (ECR, logs, DynamoDB gateway, SSM, AgentCore, SQS)"
   vpc_id      = local.vpc_id
 
-  tags = { Name = "${var.name_prefix}-workflow" }
+  tags = { Name = "${local.name_prefix}-workflow" }
 }
 
 resource "aws_vpc_security_group_egress_rule" "task_https" {
@@ -27,7 +27,7 @@ resource "aws_vpc_security_group_ingress_rule" "endpoints_from_task" {
 
 # ---------------------------------------------------------------- cluster / logs
 resource "aws_ecs_cluster" "workflow" {
-  name = "${var.name_prefix}-workflow"
+  name = "${local.name_prefix}-workflow"
 
   setting {
     name  = "containerInsights"
@@ -42,7 +42,7 @@ resource "aws_cloudwatch_log_group" "workflow" {
 
 # ---------------------------------------------------------------- task definition (Temporal dev server + worker in one task)
 resource "aws_ecs_task_definition" "workflow" {
-  family                   = "${var.name_prefix}-workflow"
+  family                   = "${local.name_prefix}-workflow"
   requires_compatibilities = ["FARGATE"]
   network_mode             = "awsvpc"
   cpu                      = var.task_cpu
@@ -117,7 +117,7 @@ resource "aws_ecs_task_definition" "workflow" {
 }
 
 resource "aws_ecs_service" "workflow" {
-  name            = "${var.name_prefix}-workflow"
+  name            = "${local.name_prefix}-workflow"
   cluster         = aws_ecs_cluster.workflow.id
   task_definition = aws_ecs_task_definition.workflow.arn
   desired_count   = var.desired_count

@@ -5,6 +5,12 @@
 # The table bucket is the long-term record of the pipeline; DynamoDB (terraform/pipeline/stream) keeps only the current anomalies.
 # Costs about 0.17 USD per hour while the streaming job runs (docs/cost.md) - ops/down.sh cancels the job and destroys this root.
 
+# リソース名の接頭辞であり Project タグの値。デプロイする人の名前（var.owner）から作るので、
+# 1 つの AWS アカウントを何人かで使っても、自分の名前で自分のリソースを探せる
+locals {
+  name_prefix = "${var.owner}-nwc-poc"
+}
+
 data "aws_caller_identity" "current" {}
 data "aws_partition" "current" {}
 
@@ -54,8 +60,8 @@ locals {
   logs_prefix   = "${local.s3_prefix}/logs"
   checkpoint    = "${local.s3_prefix}/checkpoint"
   catalog_name  = "s3tables"
-  log_group     = "/aws/emr-serverless/${var.name_prefix}"
-  table_bucket  = "${var.name_prefix}-tables"
+  log_group     = "/aws/emr-serverless/${local.name_prefix}"
+  table_bucket  = "${local.name_prefix}-tables"
   iceberg_table = "${local.catalog_name}.${var.namespace}.${var.table_name}"
   # iceberg を選ばないときはテーブルバケットも s3tables のエンドポイントも作らない（tables.tf / network.tf）
   table_bucket_arn = local.sink_iceberg ? aws_s3tables_table_bucket.tables[0].arn : ""
@@ -67,15 +73,15 @@ locals {
 
   # put_events の Source（spark/snmp_sinks.py の --event-source）。terraform/workflow と terraform/pipeline/graph の
   # ルールが同じ式で待ち受ける。バスは既定の 1 本を共有するので、ここを接頭辞ごとに変えないと他の人の異常が自分のルールに当たる
-  event_source = "${var.name_prefix}.spark"
+  event_source = "${local.name_prefix}.spark"
 
   # どのトピックがメトリクスでどれがログか（spark/snmp_sinks.py の --metric-topics / --log-topics。iceberg は両方、prometheus はメトリクス、opensearch はログ）
   metric_topics = join(",", var.metric_topics)
   log_topics    = join(",", var.log_topics)
 
-  logs_collection   = "${var.name_prefix}-logs"    # OpenSearch Serverless のコレクション（ログ）
-  opensearch_index  = "snmp-logs"                  # spark/snmp_sinks.py の OPENSEARCH_INDEX と同じ
-  metrics_workspace = "${var.name_prefix}-metrics" # Prometheus のワークスペースの alias（メトリクス）
+  logs_collection   = "${local.name_prefix}-logs"    # OpenSearch Serverless のコレクション（ログ）
+  opensearch_index  = "snmp-logs"                    # spark/snmp_sinks.py の OPENSEARCH_INDEX と同じ
+  metrics_workspace = "${local.name_prefix}-metrics" # Prometheus のワークスペースの alias（メトリクス）
 
   opensearch_endpoint = local.sink_opensearch ? aws_opensearchserverless_collection.logs[0].collection_endpoint : ""
   # prometheus_endpoint は https://aps-workspaces.<region>.amazonaws.com/workspaces/<id>/ で終わる

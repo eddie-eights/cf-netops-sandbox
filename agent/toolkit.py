@@ -22,7 +22,7 @@ from datetime import datetime, timedelta, timezone
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
 
-# SSM のパラメータ名の頭（/<name_prefix>）。Terraform が環境変数で渡す。空なら SSM は引かない
+# SSM のパラメータ名の頭（/<接頭辞>）。Terraform が環境変数で渡す。空なら SSM は引かない
 PARAM_PREFIX = os.environ.get("PARAM_PREFIX", "")
 REGION = os.environ.get("AWS_REGION") or os.environ.get("BEDROCK_REGION") or None
 JST = timezone(timedelta(hours=9))

@@ -4,12 +4,12 @@ output "msk_cluster_arn" {
 }
 
 output "bootstrap_brokers" {
-  description = "SASL/IAM bootstrap brokers (also in SSM /<name_prefix>/msk-bootstrap)"
+  description = "SASL/IAM bootstrap brokers (also in SSM /<prefix>/msk-bootstrap)"
   value       = aws_msk_cluster.stream.bootstrap_brokers_sasl_iam
 }
 
 output "anomaly_table_name" {
-  description = "DynamoDB table of the anomaly list (also in SSM /<name_prefix>/anomaly-table)"
+  description = "DynamoDB table of the anomaly list (also in SSM /<prefix>/anomaly-table)"
   value       = aws_dynamodb_table.anomalies.name
 }
 

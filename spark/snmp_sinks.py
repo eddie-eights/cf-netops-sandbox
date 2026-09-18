@@ -393,7 +393,7 @@ def make_prometheus_sender(url, region):
 
 # ---------------------------------------------------------------- detect（異常 → DynamoDB + EventBridge）
 LINK_DOWN, LINK_UP = ".1.3.6.1.6.3.1.1.5.3", ".1.3.6.1.6.3.1.1.5.4"   # IF-MIB linkDown / linkUp の trap OID
-EVENT_SOURCE = "netops.spark"          # --event-source の既定。terraform は name_prefix に合わせて <接頭辞>.spark を渡す
+EVENT_SOURCE = "netops.spark"          # --event-source の既定。terraform は接頭辞に合わせて <接頭辞>.spark を渡す
 EVENT_DETAIL_TYPE = "AnomalyOpened"
 EVENT_RESOLVED_TYPE = "AnomalyResolved"   # open → resolved にした瞬間に出す（terraform/pipeline/graph の status Lambda が回線を UP に戻す）
 

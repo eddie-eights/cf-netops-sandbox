@@ -5,7 +5,7 @@
 スクリプトを使わず 1 ルートずつ手で打つときの説明。`ops/up.sh` / `ops/down.sh` の中身はここのコマンドそのもので、
 手で打つときは apply のたびに差分が出て `yes` と打つまで止まる。
 **コマンドはすべて展開したフォルダの直下で打つ**（`terraform -chdir=terraform/<ルート>` と `web/` などのパスが直下から見た位置になっている）。
-ここに出てくるリソース名は既定の接頭辞 `netops-poc` のもの。変えるなら全部の apply に同じ `-var name_prefix=<接頭辞>`（と `-var owner=<名前>`）を付ける（`ops/up.sh` なら `deploy.env` の `NAME_PREFIX` / `OWNER` 1 か所で済む）。
+ここに出てくるリソース名は、デプロイする人の名前が `netops` だったときの接頭辞 `netops-nwc-poc` で書いてある。接頭辞は `<owner>-nwc-poc` なので、自分の名前を入れればその名前の接頭辞になる（`ops/up.sh` なら `deploy.env` の `OWNER` 1 か所で決まる）。
 
 ### 0. 自分の環境の値を環境変数に入れる
 
@@ -14,6 +14,15 @@ lab-1 のレジストリ名が `.dkr.ecr.…` のように欠けたり、手順 
 値そのものは配布物に書けないので、ここで自分の環境から取る。
 
 **環境変数はターミナルごと。**別のターミナルを開いたり、閉じて開き直したりしたら、0-1 から打ち直す（0-5 にファイルに残す方法がある）。
+
+**まず自分の名前を入れる。**変数 `owner`（デプロイする人の名前）には既定値が無いので、入れずに打つと `terraform apply` のたびに値を聞かれて止まる。
+`TF_VAR_owner` に入れておけば、以降の apply が全部この名前で通る（apply ごとに `-var owner=<自分の名前>` を付けても同じ）。
+リソース名と `Project` タグの接頭辞はこの名前から `<owner>-nwc-poc` になり、`owner` タグにはこの名前がそのまま入るので、1 つの AWS アカウントを何人かで使っても自分のリソースを探せる。
+英小文字で始まる 14 文字までの英小文字・数字・ハイフン（ハイフンは連続させず末尾にも置かない）。**作ったあとで変えない**（名前が変わったリソースを Terraform は別のものと見るので、全部作り直しになる）。
+
+```bash
+export TF_VAR_owner=<自分の名前>
+```
 
 #### 0-1. 認証を通す
 
@@ -113,10 +122,10 @@ echo "$ADMIN_ARN"
 #### 0-4. 入っているか、最後にまとめて確かめる
 
 ```bash
-echo "ACCOUNT_ID=$ACCOUNT_ID"; echo "ADMIN_ARN=$ADMIN_ARN"
+echo "TF_VAR_owner=$TF_VAR_owner"; echo "ACCOUNT_ID=$ACCOUNT_ID"; echo "ADMIN_ARN=$ADMIN_ARN"
 ```
 
-`ACCOUNT_ID=` の右に値が出ていれば手順 1 へ。`ADMIN_ARN=` は 0-3 を飛ばしたなら空でよい。
+`TF_VAR_owner=` と `ACCOUNT_ID=` の右に値が出ていれば手順 1 へ。`ADMIN_ARN=` は 0-3 を飛ばしたなら空でよい。
 （`$INSTANCE_ID` `$KB_BUCKET` `$LOG_GROUP` など `terraform output` で取る値は、apply する手順 3 より前には存在しないので、ここでは入れない。使う枠の 1 行目で毎回取る。）
 
 #### 0-5. 毎回打ちたくないとき（任意）
@@ -125,6 +134,7 @@ echo "ACCOUNT_ID=$ACCOUNT_ID"; echo "ADMIN_ARN=$ADMIN_ARN"
 
 ```bash
 cat > ~/.netops-poc.env <<EOF2
+export TF_VAR_owner=$TF_VAR_owner
 export ACCOUNT_ID=$ACCOUNT_ID
 export ADMIN_ARN=$ADMIN_ARN
 EOF2
@@ -133,7 +143,7 @@ EOF2
 次回からは、0-1（認証）の後にこれを打つだけでよい。`terraform output` で取る値（`$INSTANCE_ID` など）はファイルに入れなくてよい（各枠の 1 行目で取り直す）。
 
 ```bash
-source ~/.netops-poc.env; echo "ACCOUNT_ID=$ACCOUNT_ID"; echo "ADMIN_ARN=$ADMIN_ARN"
+source ~/.netops-poc.env; echo "TF_VAR_owner=$TF_VAR_owner"; echo "ACCOUNT_ID=$ACCOUNT_ID"; echo "ADMIN_ARN=$ADMIN_ARN"
 ```
 
 ### 1. ECR リポジトリを作る
@@ -153,8 +163,8 @@ push 先のリポジトリ URL を出力から見ておく（手順 2 の 1 行�
 terraform -chdir=terraform/base/ecr output -raw agent_repository_url; echo
 ```
 
-`123456789012.dkr.ecr.ap-northeast-1.amazonaws.com/netops-poc-agent` の形（先頭の 12 桁は `$ACCOUNT_ID` と同じ）で出ればよい。
-既定（変数 `create_lab_repositories = true`）で lab 用の `netops-poc-lab-frr` / `-lab-snmpd` / `-lab-multitool` も一緒にできる。
+`123456789012.dkr.ecr.ap-northeast-1.amazonaws.com/netops-nwc-poc-agent` の形（先頭の 12 桁は `$ACCOUNT_ID` と同じ）で出ればよい。
+既定（変数 `create_lab_repositories = true`）で lab 用の `netops-nwc-poc-lab-frr` / `-lab-snmpd` / `-lab-multitool` も一緒にできる。
 
 ### 2. イメージをビルドして push する
 
@@ -240,7 +250,7 @@ terraform -chdir=terraform/agent output
 | 出力（ルート） | 何の値 | 使う手順（環境変数） |
 |---|---|---|
 | `web_instance_id`（base/core） | Web を動かす EC2 のインスタンス ID（`i-0` で始まる） | 4 の再起動、7 のポートフォワーディング（`$INSTANCE_ID`） |
-| `kb_bucket_name`（base/core） | S3 バケット名。`netops-poc-kb-` + アカウント ID | 4、lab-2、s-1（`$KB_BUCKET`） |
+| `kb_bucket_name`（base/core） | S3 バケット名。`netops-nwc-poc-kb-` + アカウント ID | 4、lab-2、s-1（`$KB_BUCKET`） |
 | `start_session_command`（base/core） | 7 のコマンドにインスタンス ID を埋めた完成形 | 7。利用者に配るときはこちらをコピーして渡す（利用者の PC には state も環境変数も無い） |
 | `upload_web_command`（base/core） | 4 のコマンドにバケット名を埋めた完成形 | 4。手順 4 の枠と同じ内容なので、どちらを打ってもよい |
 | `chat_url`（base/core） | `http://localhost:8080/` | 7 |
@@ -266,13 +276,13 @@ uv run --python 3.13 --with pip python -m pip download --only-binary=:all: \
 
 uv には `pip download` に当たるものが無いので、使い捨ての環境に pip を入れて打つ（`--with pip`）。uv を使わない端末なら先頭を `python3 -m pip download` に替える（python3 と pip が要る）。
 
-置くのは 5 種類。`web/app.py`、その依存の一覧、**`agent/` の 5 モジュール（`toolkit.py` `topology.py` `anomalies.py` `graph.py` `proposals.py`。Web の「トポロジ」「異常一覧」「承認」タブが import する。置き忘れると Web が `ModuleNotFoundError` で立たない）**、静的トポロジの `agent/data/`、上で取った `wheels/`。
-1 行目で手順 3 の出力 `kb_bucket_name` を `$KB_BUCKET` に入れる（`echo` で `netops-poc-kb-` で始まる名前が出ること）。
+置くのは 4 種類。**`web/` の `.py` を全部**（`app.py` `config.py` `chat.py` `topology_view.py` `incident_view.py`）と依存の一覧、**`agent/` の 5 モジュール（`toolkit.py` `topology.py` `anomalies.py` `graph.py` `proposals.py`。Web の「チャット」「トポロジ」「異常一覧」「承認」タブが import する）**、静的トポロジの `agent/data/`、上で取った `wheels/`。
+**`.py` を 1 本ずつ名指しで置かない。**置き忘れたファイルがあっても S3 のコピー自体は成功し、EC2 が起動したあとに `ModuleNotFoundError` で Web が立たなくなる。下の 2 行目はワイルドカードで `web/*.py` をまとめて置く形にしてある。
+1 行目で手順 3 の出力 `kb_bucket_name` を `$KB_BUCKET` に入れる（`echo` で `netops-nwc-poc-kb-` で始まる名前が出ること）。
 
 ```bash
 KB_BUCKET=$(terraform -chdir=terraform/base/core output -raw kb_bucket_name); echo "$KB_BUCKET"
-aws s3 cp web/app.py "s3://$KB_BUCKET/web/app.py"
-aws s3 cp web/requirements.txt "s3://$KB_BUCKET/web/requirements.txt"
+aws s3 cp web/ "s3://$KB_BUCKET/web/" --recursive --exclude '*' --include '*.py' --include 'requirements.txt'
 for f in toolkit topology anomalies graph proposals; do aws s3 cp agent/$f.py "s3://$KB_BUCKET/web/$f.py"; done
 aws s3 cp agent/data/ "s3://$KB_BUCKET/web/data/" --recursive
 aws s3 sync wheels/ "s3://$KB_BUCKET/web/wheels/"
@@ -285,7 +295,7 @@ INSTANCE_ID=$(terraform -chdir=terraform/base/core output -raw web_instance_id);
 aws ec2 reboot-instances --region ap-northeast-1 --instance-ids "$INSTANCE_ID"
 ```
 
-上の `aws s3` の 5 行は出力 `upload_web_command`（バケット名を埋めて 1 行にしたもの）と同じ。`web/app.py` を直したときも同じ手順（置いて再起動）。`wheels/` は配布物に入っていない（手順 4 の `pip download` で作る）。
+上の `aws s3` の 4 行は出力 `upload_web_command`（バケット名を埋めて 1 行にしたもの）と同じ。`web/` の `.py` を直したときも同じ手順（置いて再起動）。`wheels/` は配布物に入っていない（手順 4 の `pip download` で作る）。
 
 **手順書（`CREATE_KB=1` / `create_knowledge_base=true` のときだけ。既定では作らないので、この段落は飛ばす）。**`kb-docs/` を S3 に置いて、取り込みジョブを流す。**ナレッジベースは S3 を自動で見に行かない。**md を足したり直したりしたら、置き直して取り込みをやり直す。
 S3 と Bedrock の API を呼ぶので、インターネットか AWS の API に届く端末で行う。コマンドは出力 `upload_docs_command` と `start_ingestion_command` にもある。
@@ -315,14 +325,14 @@ aws bedrock-agent get-ingestion-job --region ap-northeast-1 \
 ### 5. Runtime のロググループに保持期間とタグを付ける
 
 `AGENT=1` のときだけ。Runtime のロググループは AgentCore が作るので、Terraform の管理外になる。既定は無期限保持。
-名前は出力 `runtime_log_group_name`（`/aws/bedrock-agentcore/runtimes/netops_poc_agent-<英数字 10 桁>-DEFAULT` の形）。下の 1 行目がそれを `$LOG_GROUP` に入れる（`echo` でこの形が出ること）。**まだ無ければ、手順 7 で 1 回チャットした後に行う**（`ResourceNotFoundException` が出たらまだ無い）。
+名前は出力 `runtime_log_group_name`（`/aws/bedrock-agentcore/runtimes/netops_nwc_poc_agent-<英数字 10 桁>-DEFAULT` の形）。下の 1 行目がそれを `$LOG_GROUP` に入れる（`echo` でこの形が出ること）。**まだ無ければ、手順 7 で 1 回チャットした後に行う**（`ResourceNotFoundException` が出たらまだ無い）。
 
 ```bash
 LOG_GROUP=$(terraform -chdir=terraform/agent output -raw runtime_log_group_name); echo "$LOG_GROUP"
 aws logs put-retention-policy --region ap-northeast-1 --log-group-name "$LOG_GROUP" --retention-in-days 7
 aws logs tag-resource --region ap-northeast-1 \
   --resource-arn "arn:aws:logs:ap-northeast-1:$ACCOUNT_ID:log-group:$LOG_GROUP" \
-  --tags Project=netops-poc,owner=netops
+  --tags Project=netops-nwc-poc,owner=netops
 ```
 
 ### 6. 利用者に権限を渡す
@@ -339,7 +349,7 @@ aws logs tag-resource --region ap-northeast-1 \
       "Action": "ssm:StartSession",
       "Resource": "arn:aws:ec2:ap-northeast-1:<アカウント ID>:instance/*",
       "Condition": {
-        "StringEquals": { "ssm:resourceTag/Project": "netops-poc" },
+        "StringEquals": { "ssm:resourceTag/Project": "netops-nwc-poc" },
         "BoolIfExists": { "ssm:SessionDocumentAccessCheck": "true" }
       }
     },
@@ -369,7 +379,7 @@ aws logs tag-resource --region ap-northeast-1 \
 
 ```bash
 aws ssm describe-instance-information --region ap-northeast-1 \
-  --filters Key=tag:Project,Values=netops-poc \
+  --filters Key=tag:Project,Values=netops-nwc-poc \
   --query 'InstanceInformationList[].[InstanceId,PingStatus,AgentVersion]' --output table
 ```
 

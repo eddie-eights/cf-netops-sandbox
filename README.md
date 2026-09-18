@@ -7,7 +7,7 @@
 ブラウザからは **SSM Session Manager のポートフォワーディング**で入る。NAT Gateway・EIP・パブリック IP・ロードバランサ・証明書は使わない。
 EC2 のセキュリティグループに**受信ルールは 1 つも無い**。
 
-**何を作るかは `deploy.env` の 3 つの機能で選ぶ**（`cp deploy.env.example deploy.env` で写して書く）。機能は互いに独立で、要るものだけ `1` にする。`deploy.env` が無ければ土台と AGENT を作る。
+**何を作るかは `deploy.env` の 3 つの機能で選ぶ**（`cp deploy.env.example deploy.env` で写して書く）。機能は互いに独立で、要るものだけ `1` にする。機能を何も書かなければ土台と AGENT を作る。`deploy.env` には**デプロイする人の名前 `OWNER` が要る**（リソース名と `Project` タグの接頭辞が `<owner>-nwc-poc` になり、1 つの AWS アカウントを何人かで使っても自分のリソースを探せる）。
 
 | 何 | できること | 作るもの（`terraform/` の下） | 待機の時間課金（東京） |
 |---|---|---|---|
@@ -62,7 +62,7 @@ terraform/
 1. 道具を入れる。AWS CLI v2 / Terraform 1.11 以上 / Docker（arm64 のビルドができる buildx）/ Session Manager plugin / python3 か uv（「[前提](docs/setup.md)」）。
 2. AWS に入る。`aws login --profile <プロファイル>` か `aws configure sso`、または IAM ユーザーの長期キー（`aws configure`）。スクリプトは `credential_process` で Terraform に渡すので、環境変数に鍵を出さなくてよい。**IAM ユーザーの一時セッション（`sts get-session-token`）では IAM の API が呼べず apply が落ちる**ので、`ops/up.sh` が見つけて先頭で止まる。
 3. 配布された zip を **Linux 側のホーム**に展開する（WSL2 は `/mnt/c` ではなく `~`。`/mnt/c` だと Docker のビルドと `wheels/` の展開が遅くなる）。展開したフォルダに入ってから以降を打つ。
-4. `cp deploy.env.example deploy.env` で写し、要る機能を `1` にする。
+4. `cp deploy.env.example deploy.env` で写し、**`OWNER` の行の `#` を外して自分の名前を書き**（必須。リソース名と `Project` タグの接頭辞が `<owner>-nwc-poc` になり、自分の名前で AWS のリソースを探せる）、要る機能を `1` にする。
 5. `ops/up.sh` を打つ。手順 0 で作るルートと 1 時間あたりの目安を出し、土台 → 機能の順に apply する。終わると Web への SSM ポートフォワーディングが開く（`http://localhost:8080`）。
 6. 使い終わったら **当日中に** `ops/down.sh`。
 
@@ -92,7 +92,7 @@ ops/down.sh
 
 | キー | 何 |
 |---|---|
-| `NAME_PREFIX` / `OWNER` | リソース名・SSM のパス・`Project` タグの接頭辞（既定 `netops-poc`）と `owner` タグ（既定 `netops`）。1 つの AWS アカウントを何人かで使うときは人ごとに変えると混ざらない。**作ったあとで変えない**（名前が変わると Terraform が別のものと見て全部作り直しになる） |
+| `OWNER` | **デプロイする人の名前。必須**（書かないと `ops/up.sh` が先頭で止まる。英小文字で始まる 14 文字までの英小文字・数字・ハイフン）。リソース名・SSM のパス・`Project` タグの接頭辞はこの名前から `<owner>-nwc-poc` として作られ、`owner` タグにはこの名前がそのまま入る。1 つの AWS アカウントを何人かで使っても、自分の名前で自分のリソースを探せる。**作ったあとで変えない**（名前が変わると Terraform が別のものと見て全部作り直しになる） |
 | `AGENT` / `PIPELINE` / `WORKFLOW` | 作る機能（上の表）。既定は `AGENT=1` だけ |
 | `CREATE_KB` | ナレッジベース（手順書の検索）を作る。+$0.36/h |
 | `SKIP_LAB` / `SKIP_STREAM` / `SKIP_ANALYTICS` / `SKIP_GRAPH` | `PIPELINE=1` のうち、このルートを作らない |
@@ -112,7 +112,7 @@ ops/down.sh
 
 - `terraform/<ルート>/terraform.tfstate` を**消さない**。消すと Terraform は作ったものを忘れ、`ops/down.sh` が「無い」と言って飛ばし、AWS にリソースと課金が残る。次の `ops/up.sh` は同じ名前がぶつかって `AlreadyExists` で落ちる。
 - **up と down は同じ PC で打つ。**別の PC には state が無いので、同じことが起きる。PC を替えるときは、元の PC で `ops/down.sh` を済ませてから。
-- 消してしまったときは、コンソールで `netops-poc`（`NAME_PREFIX` を変えたならその値）の名前とタグのリソースを手で消す（「[名前とタグ](docs/architecture.md)」の `get-resources` で探す）。
+- 消してしまったときは、コンソールで `<owner>-nwc-poc`（`deploy.env` の `OWNER` から作った接頭辞）の名前とタグのリソースを手で消す（「[名前とタグ](docs/architecture.md)」の `get-resources` で探す）。
 - **機能を `0` に戻して打っても、前に作ったルートは消さない。**消すのは `ops/down.sh` だけ。
 
 うまく動かないときは「[うまくいかないとき](docs/troubleshooting.md)」。

@@ -1,7 +1,7 @@
 # ---------------------------------------------------------------- proposal table (one item per anomaly, "いま" の状態)
 # proposal_id = anomaly_id. status: pending → approved / rejected（人）→ applied → verified / failed（ワーカー）, expired（時間切れ）
 resource "aws_dynamodb_table" "proposals" {
-  name         = "${var.name_prefix}-proposals"
+  name         = "${local.name_prefix}-proposals"
   billing_mode = "PAY_PER_REQUEST"
   hash_key     = "proposal_id"
 
@@ -75,7 +75,7 @@ data "aws_iam_policy_document" "reader_access" {
 resource "aws_iam_role_policy" "reader_access" {
   for_each = local.reader_role_names
 
-  name   = "${var.name_prefix}-workflow-access"
+  name   = "${local.name_prefix}-workflow-access"
   role   = each.value
   policy = data.aws_iam_policy_document.reader_access.json
 }
@@ -90,7 +90,7 @@ data "aws_iam_policy_document" "decide_access" {
 }
 
 resource "aws_iam_role_policy" "decide_access" {
-  name   = "${var.name_prefix}-workflow-decide"
+  name   = "${local.name_prefix}-workflow-decide"
   role   = local.web_role_name
   policy = data.aws_iam_policy_document.decide_access.json
 }

@@ -5,27 +5,15 @@ variable "region" {
   default     = "ap-northeast-1"
 }
 
-variable "name_prefix" {
-  description = "Prefix for resource names and the value of the Project tag (up to 22 characters). Same value as terraform/base/core."
-  type        = string
-  default     = "netops-poc"
-
-  validation {
-    # 一番きついのは OpenSearch Serverless の data access policy 名（32 文字まで）で、一番長い接尾辞は terraform/workflow の <name_prefix>-logs-read（10 文字）。だから 22 文字に抑える
-    # ハイフンの連続と末尾のハイフンも弾く（ECR のリポジトリ名が受け付けない）
-    condition     = can(regex("^[a-z][a-z0-9]*(-[a-z0-9]+)*$", var.name_prefix)) && length(var.name_prefix) >= 2 && length(var.name_prefix) <= 22
-    error_message = "name_prefix must be 2-22 lowercase letters, digits and single hyphens, starting with a letter and not ending with one."
-  }
-}
-
 variable "owner" {
-  description = "Value of the owner tag. Same value as terraform/base/core."
+  description = "Required. Name of the person who deploys this copy. Resource names and the Project tag are <owner>-nwc-poc, so each person can find their own resources in the console. Same value in every root module."
   type        = string
-  default     = "netops"
 
   validation {
-    condition     = can(regex("^[A-Za-z0-9._-]{1,64}$", var.owner))
-    error_message = "owner must match ^[A-Za-z0-9._-]{1,64}$."
+    # 接頭辞は <owner>-nwc-poc。OpenSearch Serverless の data access policy 名が 32 文字までで、一番長い接尾辞は terraform/workflow の <接頭辞>-logs-read（10 文字）なので接頭辞は 22 文字まで。-nwc-poc の 8 文字を引いて owner は 14 文字まで
+    # ハイフンの連続と末尾のハイフンも弾く（ECR のリポジトリ名が受け付けない）
+    condition     = can(regex("^[a-z][a-z0-9]*(-[a-z0-9]+)*$", var.owner)) && length(var.owner) <= 14
+    error_message = "owner must be 1-14 lowercase letters, digits and single hyphens, starting with a letter and not ending with one."
   }
 }
 
@@ -42,18 +30,18 @@ variable "agent_image_tag" {
 }
 
 variable "agent_image_uri" {
-  description = "Optional. Leave empty to use <terraform/base/ecr repository>:<agent_image_tag>. Set only to run an image from another repository, with tag, built for linux/arm64 (e.g. 123456789012.dkr.ecr.ap-northeast-1.amazonaws.com/netops-poc-agent:v1)."
+  description = "Optional. Leave empty to use <terraform/base/ecr repository>:<agent_image_tag>. Set only to run an image from another repository, with tag, built for linux/arm64 (e.g. 123456789012.dkr.ecr.ap-northeast-1.amazonaws.com/netops-nwc-poc-agent:v1)."
   type        = string
   default     = ""
 }
 
 variable "runtime_name" {
-  description = "Optional. AgentCore Runtime name (letters, digits and underscore only. Hyphens are not allowed). Leave empty to derive it from name_prefix: hyphens become underscores and _agent is appended (netops-poc -> netops_poc_agent)."
+  description = "Optional. AgentCore Runtime name (letters, digits and underscore only. Hyphens are not allowed). Leave empty to derive it from the prefix <owner>-nwc-poc: hyphens become underscores and _agent is appended (owner netops -> netops_nwc_poc_agent)."
   type        = string
   default     = ""
 
   validation {
-    # 空なら locals.tf が name_prefix から作る（^[a-z][a-z0-9-]{1,22}$ から作るので必ずこの形に収まる）
+    # 空なら locals.tf が接頭辞から作る（接頭辞は ^[a-z][a-z0-9-]{1,22}$ なので必ずこの形に収まる）
     condition     = var.runtime_name == "" || can(regex("^[a-zA-Z][a-zA-Z0-9_]{0,47}$", var.runtime_name))
     error_message = "runtime_name must match ^[a-zA-Z][a-zA-Z0-9_]{0,47}$."
   }

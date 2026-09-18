@@ -15,7 +15,8 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --trusted-host pypi.org --trusted-host files.pythonhosted.org --trusted-host pypi.python.org -r requirements.txt
 
-COPY worker.py .
+# worker.py / awsio.py / rules.py。1 つずつ書くと足したファイルを入れ忘れる（入れ忘れると起動時に ModuleNotFoundError）
+COPY *.py ./
 
 # root で動かさない
 RUN useradd --create-home --uid 10001 worker && chown -R worker:worker /app

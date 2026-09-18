@@ -4,8 +4,8 @@ data "aws_ssm_parameter" "al2023" {
 }
 
 resource "aws_iam_role" "web" {
-  name        = "${var.name_prefix}-web"
-  description = "${var.name_prefix} chat web EC2 - SSM managed node, reads web assets from S3 and the runtime ARN from SSM"
+  name        = "${local.name_prefix}-web"
+  description = "${local.name_prefix} chat web EC2 - SSM managed node, reads web assets from S3 and the runtime ARN from SSM"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -16,7 +16,7 @@ resource "aws_iam_role" "web" {
     }]
   })
 
-  tags = { Name = "${var.name_prefix}-web" }
+  tags = { Name = "${local.name_prefix}-web" }
 }
 
 resource "aws_iam_role_policy_attachment" "web_ssm" {
@@ -25,7 +25,7 @@ resource "aws_iam_role_policy_attachment" "web_ssm" {
 }
 
 # 画面のコード・静的データ・wheel は同じバケットの web/ に置く（docs/deploy-manual.md の手順 4）。docs/ は読ませない。
-# Runtime の ARN は terraform/agent が /<name_prefix>/runtime-arn に書き、web/app.py が 60 秒ごとに読む（agent を後から入れ替えても再起動が要らない）。
+# Runtime の ARN は terraform/agent が /<接頭辞>/runtime-arn に書き、web/app.py が 60 秒ごとに読む（agent を後から入れ替えても再起動が要らない）。
 # InvokeAgentRuntime の許可は terraform/agent がこのロールに足す
 resource "aws_iam_role_policy" "web_assets" {
   name = "web-assets"
@@ -50,14 +50,14 @@ resource "aws_iam_role_policy" "web_assets" {
       {
         Effect   = "Allow"
         Action   = "ssm:GetParameter"
-        Resource = "arn:${local.partition}:ssm:${var.region}:${local.account_id}:parameter/${var.name_prefix}/*"
+        Resource = "arn:${local.partition}:ssm:${var.region}:${local.account_id}:parameter/${local.name_prefix}/*"
       },
     ]
   })
 }
 
 resource "aws_iam_instance_profile" "web" {
-  name = "${var.name_prefix}-web"
+  name = "${local.name_prefix}-web"
   role = aws_iam_role.web.name
 }
 
@@ -72,7 +72,7 @@ resource "aws_instance" "web" {
   associate_public_ip_address = false
 
   user_data = templatefile("${path.module}/templates/web_user_data.sh.tftpl", {
-    name_prefix = var.name_prefix
+    name_prefix = local.name_prefix
     region      = var.region
     bucket      = aws_s3_bucket.kb.bucket
   })
@@ -91,13 +91,13 @@ resource "aws_instance" "web" {
     delete_on_termination = true
 
     tags = {
-      Name    = "${var.name_prefix}-web"
-      Project = var.name_prefix
+      Name    = "${local.name_prefix}-web"
+      Project = local.name_prefix
       owner   = var.owner
     }
   }
 
-  tags = { Name = "${var.name_prefix}-web" }
+  tags = { Name = "${local.name_prefix}-web" }
 
   # 起動スクリプトが S3 gateway と ssm エンドポイントを使うので、先に作らせる
   depends_on = [
