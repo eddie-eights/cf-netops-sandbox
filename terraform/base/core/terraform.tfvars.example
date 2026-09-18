@@ -1,9 +1,9 @@
-# Copy to terraform.tfvars (gitignored) only when the defaults are not right. Every value has a default in variables.tf.
+# Copy to terraform.tfvars only when the defaults are not right. Every value has a default in variables.tf.
 # ops/up.sh passes owner (and vpc_cidr / client_cidr when set) with -var. The agent settings moved to terraform/agent.
 #
 # region      = "ap-northeast-1"
-# name_prefix = "fukuda-nwc-poc"
-# owner       = "fukuda"
+# name_prefix = "netops-poc"
+# owner       = "netops"
 #
 # vpc_cidr    = "10.0.0.0/16"
 # az_id_a     = "apne1-az1"

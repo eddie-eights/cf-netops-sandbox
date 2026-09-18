@@ -1,15 +1,13 @@
 #!/usr/bin/env bash
-# VS Code の拡張を入れる。AWS には触らない。
+# docs/vscode/extensions.txt に並べた VS Code の拡張を入れる。AWS には触らない。
 #
-#   bash ops/vscode-setup.sh          … docs/vscode/extensions.txt の [repo]（このリポジトリに要るものだけ）
-#   ALL=1 bash ops/vscode-setup.sh    … [repo] + [extra]（手元の PC と同じ全部）
+#   bash ops/vscode-setup.sh
 #
 # 設定そのもの（ユーザー設定・キー割り当て）は貼り付けで入れる。docs/development.md「VS Code の設定」を見る。
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 LIST=docs/vscode/extensions.txt
-ALL="${ALL:-0}"
 
 if ! command -v code >/dev/null 2>&1; then
   echo "code コマンドが見つからない。" >&2
@@ -18,14 +16,8 @@ if ! command -v code >/dev/null 2>&1; then
   exit 1
 fi
 
-# [repo] だけ、または全部を取り出す（# 以降と空行を落とす）
-if [ "$ALL" = "1" ]; then
-  WANT=$(sed 's/#.*//; s/[[:space:]]//g' "$LIST" | grep -v '^\[' | grep -v '^$' | sort -u)
-  echo "全部（[repo] + [extra]）を入れる"
-else
-  WANT=$(awk '/^\[repo\]/{f=1;next} /^\[/{f=0} f' "$LIST" | sed 's/#.*//; s/[[:space:]]//g' | grep -v '^$' | sort -u)
-  echo "[repo] だけ入れる（全部入れるなら ALL=1 を頭に付ける）"
-fi
+# 拡張 ID だけ取り出す（# 以降のコメントと空行を落とす）
+WANT=$(sed 's/#.*//; s/[[:space:]]//g' "$LIST" | grep -v '^$' | sort -u)
 
 INSTALLED=$(code --list-extensions 2>/dev/null | tr 'A-Z' 'a-z' || true)
 

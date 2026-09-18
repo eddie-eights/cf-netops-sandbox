@@ -47,7 +47,7 @@
 
 PIPELINE（`PIPELINE=1`）は上に含めていない。単価は東京リージョンの税抜で、2026-09-15（analytics は 2026-09-17）に AWS Price List API と料金ページで確認した。
 
-**PIPELINE の 4 ルート（lab + stream + analytics + graph）は約 $1.08/h（約 162 円）、1 か月置くと約 $789（約 118,000 円）**なので、使う日に作って当日中に消す。内訳は lab + graph が約 $0.23/h、stream が約 $0.28/h、analytics が約 $0.20/h、`SINK_OPENSEARCH` の OpenSearch Serverless が最大 $0.33/h と Prometheus が $0.03/h。
+**PIPELINE の 4 ルート（lab + stream + analytics + graph）は約 $1.50/h（約 225 円）、1 か月置くと約 $1,095（約 164,000 円）**なので、使う日に作って当日中に消す。内訳は lab + graph が約 $0.23/h、stream が約 $0.71/h、analytics が約 $0.20/h、`SINK_OPENSEARCH` の OpenSearch Serverless が最大 $0.33/h と Prometheus が $0.03/h。
 
 | lab + graph の項目 | 単価 | 1 時間 |
 |---|---|---|
@@ -99,8 +99,8 @@ MSK Connect を作らなければ（`CREATE_S3_SINK=0`）stream は約 $0.57/h�
 | 置いておくだけ | 約 $0.18（約 27 円） | **約 $131（約 19,700 円）** |
 | 置いておくだけ + `CREATE_KB=1` | 約 $0.54（約 81 円） | 約 $394（約 59,100 円） |
 | 土台だけ（AGENT を destroy。共用のエンドポイントも作らない） | 約 $0.05（約 8 円） | 約 $37（約 5,500 円） |
-| `AGENT=0 PIPELINE=1`（土台 + 共用のエンドポイント + PIPELINE、`SINK_*` 既定） | 約 $1.21（約 182 円） | 約 $883（約 132,500 円） |
-| 全部（AGENT + PIPELINE + WORKFLOW、`SINK_*` 既定） | 約 $1.32（約 198 円） | 約 $964（約 144,600 円） |
+| `AGENT=0 PIPELINE=1`（土台 + 共用のエンドポイント + PIPELINE、`SINK_*` 既定） | 約 $1.63（約 245 円） | 約 $1,190（約 178,500 円） |
+| 全部（AGENT + PIPELINE + WORKFLOW、`SINK_*` 既定） | 約 $1.74（約 261 円） | 約 $1,270（約 190,500 円） |
 
 注意すること。
 

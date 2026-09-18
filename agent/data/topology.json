@@ -1,5 +1,5 @@
 {
-  "_comment": "トポロジの初期値。中身はローカル lab（app/wvs2-lab/wvs2.clab.yml）と 1 対 1（2026-09-12 に既定シードを lab へ切替。ここが唯一のシードで lab 側にコピーは置かない）。すべて架空のアドレスと帯域。nodes/links の形はローカルネットワーク担当と 2026-09-11 に合意した。links は a < b で正規化する（無向リンクを 1 行で持つため）。a_if / b_if は ifTable の ifDescr と同じ文字列（ifIndex は veth のグローバル採番で再 deploy のたびに変わるので使わない）。kind は ebgp/ibgp/l2/mgmt、role は ebgp のときだけ primary/secondary（他は null。seed 側で空文字に丸める）。**階層を決めるのは node.role だけで、layer は持たない**（2026-09-11 決定。二重に持つと必ずズレる。段の順は frontend の ROLE_ORDER = core / pe / distribution / aggregation / access / ce / host）。",
+  "_comment": "トポロジの初期値。中身は lab/wanlab.clab.yml.in と 1 対 1（ここが唯一のシードで lab 側にコピーは置かない）。すべて架空のアドレスと帯域。nodes / links の形は lab/lab_topology.py が作るものと同じ。links は a < b で正規化する（無向リンクを 1 行で持つため）。a_if / b_if は ifTable の ifDescr と同じ文字列（ifIndex は veth のグローバル採番で再 deploy のたびに変わるので使わない）。kind は ebgp/ibgp/l2/mgmt、role は ebgp のときだけ primary/secondary（他は null。seed 側で空文字に丸める）。**階層を決めるのは node.role だけで、layer は持たない**（2026-09-11 決定。二重に持つと必ずズレる。段の順は frontend の ROLE_ORDER = core / pe / distribution / aggregation / access / ce / host）。",
   "nodes": [
     { "device_id": "carrier-pe-01", "site": "carrier", "role": "pe", "asn": 65000 },
     { "device_id": "carrier-pe-02", "site": "carrier", "role": "pe", "asn": 65000 },

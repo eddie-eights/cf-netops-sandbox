@@ -1,8 +1,8 @@
-// 手元の PC（Mac）のユーザー設定。社用 PC の VS Code に同じものを入れるための控え。
+// VS Code のユーザー設定の例。
 // 入れ方: VS Code で Ctrl+Shift+P →「基本設定: ユーザー設定を開く (JSON)」→ この中身を貼る。
 // 既に設定があるなら、丸ごと上書きせず要るところだけ足す。
 //
-// 手元では入れているが、ここには入れていない設定（要るなら自分で足す。理由は README「VS Code の設定」）:
+// あえて入れていない設定（要るなら自分で足す。理由は docs/development.md「VS Code の設定」）:
 //   claudeCode.allowDangerouslySkipPermissions / security.workspace.trust.untrustedFiles
 //   security.promptForLocalFileProtocolHandling / claudeCode.claudeProcessWrapper
 {

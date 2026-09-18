@@ -161,11 +161,11 @@ check("一覧は status-updated_at-index を新しい順に読み、JST の列�
 fake["scan"] = {"Items": []}
 check("all は Scan", proposals.list_proposals("all")["count"] == 0 and calls[-1][1] == "scan")
 os.environ["PROPOSAL_TABLE"] = ""
-proposals._cache["table"] = ""
+proposals.TABLE.cached = ""
 check("テーブルが無ければ案内だけ返す", "error" in proposals.list_proposals() and "error" in proposals.decide("p1", "approved"))
 os.environ["PROPOSAL_TABLE"] = "prop"
 
-# エージェントのツール（読むだけ。cf-netops-sandbox#1 の B。2026-09-18）
+# エージェントのツール（読むだけ。2026-09-18）
 calls.clear()
 fake["scan"] = {"Items": [
     {"proposal_id": {"S": "p1"}, "device_id": {"S": "hq-ce-01"}, "status": {"S": "verified"}, "updated_at": {"N": "1700000000"}},
@@ -195,8 +195,8 @@ tools = json.loads(read("tools", "tools.json"))
 py_specs = {s["toolSpec"]["name"]: s["toolSpec"] for s in topology.TOOL_SPECS + anomalies.TOOL_SPECS + evidence.TOOL_SPECS + proposals.TOOL_SPECS}
 check("tools.json の 9 つは topology / anomalies / evidence / proposals の TOOL_SPECS と同じ名前", {t["name"] for t in tools} == set(py_specs) and len(tools) == 9)
 check("evidence のツールは search_logs / query_metrics / query_history", {s["toolSpec"]["name"] for s in evidence.TOOL_SPECS} == {"search_logs", "query_metrics", "query_history"})
-check("handler は evidence と proposals のツールも呼ぶ",
-      all(s in read("tools", "handler.py") for s in ("evidence.run_tool", "proposals.run_tool")))
+check("handler は topology / anomalies / evidence / proposals のツールを名前で振り分ける",
+      "MODULES = (topology, anomalies, evidence, proposals)" in read("tools", "handler.py"))
 for t in tools:
     js = py_specs[t["name"]]["inputSchema"]["json"]
     check(f"{t['name']} の引数と必須が Python と同じ",
@@ -251,22 +251,31 @@ reader_doc = re.search(r'data "aws_iam_policy_document" "reader_access" \{[\s\S]
 check("UpdateItem は web のロールにだけ付き、reader_access（Runtime も入る）には入れない",
       reader_doc is not None and '"dynamodb:UpdateItem"' not in reader_doc.group(0)
       and re.search(r'data "aws_iam_policy_document" "decide_access"[\s\S]*?"dynamodb:UpdateItem"', tf) is not None
-      and 'role   = data.terraform_remote_state.main.outputs.web_role_name' in tf)
+      and re.search(r'resource "aws_iam_role_policy" "decide_access"[\s\S]*?role   = local\.web_role_name', tf) is not None)
 check("Gateway は AWS_IAM 認可の MCP で、2025-06-18 を話す", 'authorizer_type = "AWS_IAM"' in tf and 'protocol_type   = "MCP"' in tf and '"2025-06-18"' in tf)
 check("Gateway のターゲットは tools.json から inline schema を作る", 'jsondecode(file("${path.module}/../../tools/tools.json"))' in tf and 'dynamic "inline_payload"' in tf)
-check("tools Lambda は python3.13 arm64 で、handler.py / topology / anomalies / proposals / graph / data を zip にする",
+check("tools Lambda は python3.13 arm64 で、handler.py / toolkit / topology / anomalies / proposals / graph / data を zip にする",
       'runtime          = "python3.13"' in tf and 'architectures    = ["arm64"]' in tf
-      and all(f"../../{p}" in tf for p in ("tools/handler.py", "agent/topology.py", "agent/anomalies.py", "agent/evidence.py", "agent/proposals.py", "agent/graph.py", "agent/data/topology.json", "agent/data/devices.yaml")))
+      and all(f"../../{p}" in tf for p in ("tools/handler.py", "agent/toolkit.py", "agent/topology.py", "agent/anomalies.py", "agent/evidence.py", "agent/proposals.py", "agent/graph.py", "agent/data/topology.json", "agent/data/devices.yaml")))
+# 入れ忘れても apply も plan も通り、実行時に ModuleNotFoundError になる。だから「入っている」ではなく「足りていないものが無い」を見る:
+# zip に入れたモジュールが import する agent/ のモジュールが、全部 tools_files に並んでいるか
+zipped = set(re.findall(r'"\.\./\.\./agent/(\w+)\.py"', tf))
+needed = set()
+for src in [("tools", "handler.py")] + [("agent", m + ".py") for m in zipped]:
+    needed |= {i for i in re.findall(r"^import (\w+)$", read(*src), re.M) if os.path.exists(os.path.join(ROOT, "agent", i + ".py"))}
+check(f"tools.zip は入れたモジュールが import する agent/ のモジュールを全部入れる（足りない: {sorted(needed - zipped)}）", zipped and not (needed - zipped))
 check("tools Lambda は VPC の中（Neptune / OpenSearch / Prometheus に届く）で、OPENSEARCH_ENDPOINT / PROMETHEUS_QUERY_URL / ANOMALY_TABLE / PROPOSAL_TABLE を渡す",
       re.search(r'resource "aws_lambda_function" "tools"[\s\S]*?vpc_config \{', tf) is not None
       and all(v in tf for v in ("OPENSEARCH_ENDPOINT", "OPENSEARCH_INDEX", "PROMETHEUS_QUERY_URL", "ANOMALY_TABLE", "PROPOSAL_TABLE")))
 # 修復案は読むだけ（UpdateItem は web ロールだけ。承認は画面の承認タブで人が決める）
+proposals_read = re.search(r'sid\s*=\s*"ProposalsRead"[\s\S]*?\n  \}', tf)  # ステートメント 1 つぶん（terraform fmt の桁揃えに依存しないよう粗く取る）
 check("tools Lambda のロールの修復案は Query / GetItem / Scan だけ（UpdateItem は付けない）",
-      re.search(r'sid       = "ProposalsRead"\s*\n\s*actions   = \["dynamodb:Query", "dynamodb:GetItem", "dynamodb:Scan"\]', tf) is not None)
+      proposals_read is not None and "UpdateItem" not in proposals_read.group(0)
+      and all(a in proposals_read.group(0) for a in ("dynamodb:Query", "dynamodb:GetItem", "dynamodb:Scan")))
 check("tools Lambda のロールに aoss:APIAccessAll と aps:QueryMetrics、コレクションの data access policy",
       '"aoss:APIAccessAll"' in tf and '"aps:QueryMetrics"' in tf and 'resource "aws_opensearchserverless_access_policy" "tools"' in tf)
-check("EventBridge のルールは netops.spark / AnomalyOpened を SQS（anomalies）へ、DLQ は 5 回で",
-      re.search(r'resource "aws_cloudwatch_event_rule" "anomalies"[\s\S]*?source\s*=\s*\["netops\.spark"\][\s\S]*?"detail-type"\s*=\s*\["AnomalyOpened"\]', tf) is not None
+check("EventBridge のルールは <接頭辞>.spark / AnomalyOpened を SQS（anomalies）へ、DLQ は 5 回で",
+      re.search(r'resource "aws_cloudwatch_event_rule" "anomalies"[\s\S]*?source\s*=\s*\["\$\{var\.name_prefix\}\.spark"\][\s\S]*?"detail-type"\s*=\s*\["AnomalyOpened"\]', tf) is not None
       and 'resource "aws_sqs_queue" "anomalies"' in tf and 'resource "aws_sqs_queue" "anomalies_dlq"' in tf
       and re.search(r'redrive_policy[\s\S]*?maxReceiveCount\s*=\s*5', tf) is not None
       and 'resource "aws_cloudwatch_event_target" "anomalies"' in tf)
@@ -281,7 +290,8 @@ check("Fargate のタスクは 1 vCPU / 2 GB が既定（≒ $0.05/h）", 'defau
 check("ログの保持期間を書く", "retention_in_days = var.log_retention_days" in tf)
 check("mcp_client は SigV4 のサービス名 bedrock-agentcore で署名する", '"bedrock-agentcore"' in read("agent", "mcp_client.py"))
 check("agent/app.py は Gateway のツールを先に、無ければコンテナ内の関数を使う", "mcp_client.tool_specs() or TOOL_SPECS" in read("agent", "app.py") and "mcp_client.has(name)" in read("agent", "app.py"))
-check("agent/Dockerfile は mcp_client.py と proposals.py を入れる", "mcp_client.py proposals.py" in read("agent", "Dockerfile"))
+check("agent/Dockerfile は toolkit.py / mcp_client.py / proposals.py を入れる",
+      all(f"{m}.py" in read("agent", "Dockerfile").split("COPY app.py")[1].split("\n")[0] for m in ("toolkit", "mcp_client", "proposals")))
 check("workflow/Dockerfile は非 root で worker.py を打つ", "USER worker" in read("workflow", "Dockerfile") and '["python", "worker.py"]' in read("workflow", "Dockerfile"))
 check("workflow/requirements.txt は temporalio と boto3 を固定する", "temporalio==" in read("workflow", "requirements.txt") and "boto3>=" in read("workflow", "requirements.txt"))
 ast.parse(read("workflow", "worker.py"))
@@ -292,14 +302,16 @@ check("terraform/base/ecr は worker / temporal のリポジトリを作る", '"
 web = read("web", "app.py")
 check("Web に「承認」タブがあり、proposals.decide で approved / rejected を書く",
       'gr.Tab("承認")' in web and 'decide_proposal(i, "approved", s)' in web and 'decide_proposal(i, "rejected", s)' in web and "import proposals" in web)
-check("main の upload_web_command は proposals.py も上げる", "for f in topology anomalies graph proposals" in main_out)
+check("main の upload_web_command は Web が import する agent のモジュールを全部上げる", "for f in toolkit topology anomalies graph proposals" in main_out)
 
 # ---- ops
 up = read("ops", "up.sh"); down = read("ops", "down.sh"); chk = read("ops", "check.sh")
 check("up.sh の WORKFLOW=1 は AGENT と PIPELINE が要り、SKIP_LAB / SKIP_STREAM / SKIP_ANALYTICS があれば止まる",
       re.search(r'if \[ -n "\$WORKFLOW" \]; then\n\s*if \[ -z "\$AGENT" \]; then[\s\S]*?if \[ -z "\$PIPELINE" \]; then[\s\S]*?SKIP_LAB[\s\S]*?SKIP_STREAM[\s\S]*?SKIP_ANALYTICS', up) is not None)
-check("up.sh は古い PHASE を機能に読み替える（3 → 全部 1）", re.search(r'^\s*3\) AGENT=1; PIPELINE=1; WORKFLOW=1 ;;', up, re.M) is not None and 'PHASE は 1 か 2 か 3' in up)
-check("deploy-env.sh は PIPELINE / AGENT / WORKFLOW / CREATE_KB を読む", all(k in read("ops", "deploy-env.sh").split('DEPLOY_ENV_KEYS="')[1].split('"')[0].split() for k in ("PIPELINE", "AGENT", "WORKFLOW", "CREATE_KB", "PHASE")))
+check("deploy-env.sh の読めるキーは機能の 3 つ + CREATE_KB + TF_VERBOSE で、古いキー（PHASE / SINKS / WITH_*）は持たない",
+      (lambda keys: all(k in keys for k in ("PIPELINE", "AGENT", "WORKFLOW", "CREATE_KB", "TF_VERBOSE"))
+       and not any(k in keys for k in ("PHASE", "SINKS", "WITH_LAB", "WITH_STREAM")))(read("ops", "deploy-env.sh").split('DEPLOY_ENV_KEYS="')[1].split('"')[0].split())
+      and not re.search(r'\bPHASE\b|\bWITH_LAB\b|\bWITH_STREAM\b', up))
 # ---- starter: SQS のメッセージから anomaly_id
 check("anomaly_id_from_message は detail が dict でも JSON 文字列でも読む",
       worker.anomaly_id_from_message(json.dumps({"detail": {"anomaly_id": "r1#link_down#eth1"}})) == "r1#link_down#eth1"
@@ -320,7 +332,7 @@ check("up.sh は workflow を apply して services-stable を待ち、Temporal 
 check("down.sh は workflow を最初に消す（必須変数はダミーで渡す）",
       down.index('destroy_lambda_root workflow') < down.index('destroy_root pipeline/analytics') and 'worker_image_tag=${IMAGE_TAG:-destroy}' in down)
 check("check.sh は workflow ルートとこのテストを見る", "workflow)" in chk and "tests/test_workflow.py" in chk and "workflow/worker.py" in chk)
-check("deploy.env.example は AGENT=1 / PIPELINE=0 / WORKFLOW=0 を既定にし、CREATE_KB を説明する（古い PHASE の行は載せない。2026-09-18）",
+check("deploy.env.example は AGENT=1 / PIPELINE=0 / WORKFLOW=0 を既定にし、CREATE_KB を説明する（古い PHASE の行は載せない）",
       re.search(r"^AGENT=1\n^PIPELINE=0\n^WORKFLOW=0$", read("deploy.env.example"), re.M) is not None
       and re.search(r"^#CREATE_KB=0$", read("deploy.env.example"), re.M) is not None and re.search(r"^#?\s*PHASE=", read("deploy.env.example"), re.M) is None
       and "workflow" in read("deploy.env.example"))
@@ -332,6 +344,12 @@ check("terraform の出力は tf_logged で絞り、全文を ops/logs に残す
       "tf_logged()" in _envsh and 'tee "$logf"' in _envsh and 'if [ -n "$TF_VERBOSE" ]' in _envsh
       and 'tf_logged "$root" apply' in read("ops", "up.sh") and 'tf_logged "$root" destroy' in down
       and re.search(r"^set -e?uo pipefail", down, re.M) is not None)
+# TF_VERBOSE=1 のときログを残さないと、down.sh が DependencyViolation と掴んでいる SG を読めず打ち直しが効かない
+check("tf_logged は TF_VERBOSE=1 の枝でも全文を ops/logs に残す", _envsh[_envsh.index("tf_logged() {"):].count('tee "$logf"') == 2)
+check("down.sh は 1 ルートが消えなくても止まらず、残りを消してから最後にまとめて出す（止まると後ろの EC2 が動いたまま残る）",
+      "FAILED_ROOTS=" in down and 'FAILED_ROOTS="$FAILED_ROOTS $root"' in down
+      and re.search(r'if \[ -n "\$FAILED_ROOTS" \]; then[\s\S]*?exit 1', down) is not None
+      and re.search(r'destroy_root\(\)[\s\S]*?\n\}', down).group(0).count("die ") == 0)
 # ---- terraform/agent と terraform/base/core の分担
 agent_files = set(n for n in os.listdir(os.path.join(ROOT, "terraform", "agent")) if n.endswith(".tf"))
 check("terraform/agent のファイルは versions / providers / variables / locals / network / runtime / kb / outputs",
@@ -346,7 +364,8 @@ check("KB は create_knowledge_base（既定 false）の count で作り、Runti
       and re.search(r'local\.kb \? \{\n\s*KNOWLEDGE_BASE_ID', agent_tf) is not None)
 check("Runtime の ARN は agent が SSM に書き、web はそれを読む（main は runtime_arn を user_data に渡さない）",
       'resource "aws_ssm_parameter" "runtime_arn"' in agent_tf and 'name        = "${local.param_prefix}/runtime-arn"' in agent_tf
-      and "runtime_arn" not in read("terraform", "base", "core", "templates", "web_user_data.sh.tftpl") and 'def runtime_arn()' in web and '/runtime-arn' in web
+      and "runtime_arn" not in read("terraform", "base", "core", "templates", "web_user_data.sh.tftpl")
+      and 'toolkit.Param("RUNTIME_ARN", "runtime-arn")' in web
       and 'ssm:GetParameter' in main_tf)
 check("agent は web のロールに InvokeAgentRuntime を付け、main の runtime ロールにポリシーを足す",
       'role = local.web_role_name' in agent_tf and 'bedrock-agentcore:InvokeAgentRuntime' in agent_tf and 'role = local.runtime_role_name' in agent_tf

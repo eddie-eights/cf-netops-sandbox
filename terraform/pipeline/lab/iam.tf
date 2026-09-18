@@ -1,6 +1,6 @@
 resource "aws_iam_role" "lab" {
   name        = "${var.name_prefix}-lab"
-  description = "fukuda-nwc-poc lab EC2 - SSM managed node, pull lab images from ECR, read lab/ from the asset bucket"
+  description = "${var.name_prefix} lab EC2 - SSM managed node, pull lab images from ECR, read lab/ from the asset bucket"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"

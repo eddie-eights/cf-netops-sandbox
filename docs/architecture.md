@@ -2,8 +2,8 @@
 
 ← [README](../README.md)
 
-図解（構成図・通信の順番・作るリソース・費用）は [`20260914-fukuda-nwc-poc-architecture.html`](20260914-fukuda-nwc-poc-architecture.html)。GitHub ではソースが表示されるので、clone してブラウザで開く（`docs/design-system/` を同じ場所に置いたまま）。
-フェーズごとの概要（どこまで作ってあって、何が決まっていないか）は [`phases.md`](phases.md)。
+図解（構成図・通信の順番・作るリソース・費用）は [`20260914-netops-poc-architecture.html`](20260914-netops-poc-architecture.html)。ブラウザで開く（`docs/design-system/` を同じ場所に置いたまま）。
+機能ごとの概要（どこまで作ってあって、何が決まっていないか）は [`phases.md`](phases.md)。
 
 ```
 利用者の PC
@@ -39,13 +39,13 @@ Web の部品（利用者が手で行う）: web/app.py + agent/data/ + wheels/ 
                                                                  ├▶ Spark ─ traps / logs（ログ）だけ ─▶ OpenSearch Serverless の snmp-logs（SINK_OPENSEARCH。既定で作る）
                                                                  ├▶ Spark ─ metrics だけ ─▶ Amazon Managed Service for Prometheus（SINK_PROMETHEUS。既定で作る）
                                                                  └▶ Spark の detect ─ link_down を見つける ─▶ DynamoDB の異常テーブル（terraform/pipeline/stream）─▶ Web の「異常一覧」/ エージェントの list_anomalies
-                                                                                                        └▶ EventBridge に AnomalyOpened（source netops.spark。WORKFLOW の SQS が受ける）
-    Kafka から 4 つに分ける設計（2026-09-17）の 4 本目、log + metrics → Splunk は Kafka の sink（MSK Connect）にする予定で後回し。Grafana での可視化も後回し
+                                                                                                        └▶ EventBridge に AnomalyOpened（source <接頭辞>.spark。WORKFLOW の SQS が受ける）
+    Kafka から 4 つに分ける設計の 4 本目、log + metrics → Splunk は Kafka の sink（MSK Connect）にする予定で後回し。Grafana での可視化も後回し
   Neptune（terraform/pipeline/graph）─ Gremlin（boto3 neptunedata、IAM 認証）─▶ エージェントの topology.py と Web の「トポロジ」タブ（図・表・リンクの追加削除）
 
 Temporal での実行（WORKFLOW=1。terraform/workflow の 1 ルート。AGENT と PIPELINE の lab / stream / analytics が要る。graph が無ければトポロジは静的、SINK_* を 0 にするとそのツールは「配備されていない」を返す）:
   ECS on Fargate（ARM64、1 タスク = temporal コンテナ（temporal server start-dev、SQLite）+ worker コンテナ）を同じ VPC のプライベートサブネットに置く
-  EventBridge のルール（netops.spark / AnomalyOpened）─▶ SQS ─ worker の starter が long polling（20 秒）─▶ 異常ごとに Temporal のワークフロー investigate-<anomaly_id>
+  EventBridge のルール（`<接頭辞>.spark` / AnomalyOpened）─▶ SQS ─ worker の starter が long polling（20 秒）─▶ 異常ごとに Temporal のワークフロー investigate-<anomaly_id>
     （SQS が無ければ 60 秒ごとに DynamoDB の異常テーブルの open を見る。5 回失敗したメッセージは DLQ へ）
     ─ AgentCore Runtime を呼んで原因と修復案（JSON）を得る ─▶ DynamoDB の修復案テーブル（status = pending）─▶ Web の「承認」タブ
     ─ 人が承認（approved）─▶ SSM Run Command で lab の EC2 に `sudo lab heal-main` / `sudo lab check` ─▶ 異常が resolved になるまで 30 秒おきに確かめる ─▶ verified / failed
@@ -59,7 +59,7 @@ Temporal での実行（WORKFLOW=1。terraform/workflow の 1 ルート。AGENT 
 
 | ファイル | 動く場所 | 何をするか | 環境変数を入れるもの |
 |---|---|---|---|
-| `web/app.py` | **EC2**（`fukuda-nwc-poc-web.service`、127.0.0.1:8080） | Gradio の画面（チャット・トポロジ・異常一覧）。チャットは boto3 の `invoke_agent_runtime` で Runtime に投げるだけで、モデルもナレッジベースも直接は呼ばない | `terraform/base/core` の user_data（`templates/web_user_data.sh.tftpl`）が `/etc/fukuda-nwc-poc-web.env` に書く（`AWS_REGION` / `PARAM_PREFIX` など）。Runtime の ARN は `terraform/agent` が書く SSM の `<prefix>/runtime-arn` を 60 秒キャッシュで読む（agent を作り直しても EC2 は作り直さない） |
+| `web/app.py` | **EC2**（`netops-poc-web.service`、127.0.0.1:8080） | Gradio の画面（チャット・トポロジ・異常一覧）。チャットは boto3 の `invoke_agent_runtime` で Runtime に投げるだけで、モデルもナレッジベースも直接は呼ばない | `terraform/base/core` の user_data（`templates/web_user_data.sh.tftpl`）が `/etc/netops-poc-web.env` に書く（`AWS_REGION` / `PARAM_PREFIX` など）。Runtime の ARN は `terraform/agent` が書く SSM の `<prefix>/runtime-arn` を 60 秒キャッシュで読む（agent を作り直しても EC2 は作り直さない） |
 | `agent/app.py` | **AgentCore Runtime のコンテナ**（手順 2 で ECR に push したイメージ） | `BedrockAgentCoreApp`。`POST /invocations` を受けて Retrieve → Converse → ツールを回す。画面は無い | `terraform/agent/runtime.tf` の `environment_variables`（`MODEL_ID` / `GUARDRAIL_ID` など。`KNOWLEDGE_BASE_ID` は `CREATE_KB=1` のときだけ） |
 
 **`agent/app.py` を EC2 に置かない**（S3 の `web/app.py` に上書きしない）。置くと `KeyError: 'MODEL_ID'` で落ちるか、立ってもブラウザが `404 Not Found` になり、EC2 のロールに `bedrock:Retrieve` / `bedrock:InvokeModel` が無いのでその先にも進めない。無いのは意図した形で、それらは Runtime のロール（`runtime.tf` の `aws_iam_role.runtime`）が持つ。EC2 のロールに足して直さない。`terraform/base/core` の user_data は起動時にこれを検出し、`is not web/app.py` と cloud-init のログに出して止まる。
@@ -77,17 +77,17 @@ Temporal での実行（WORKFLOW=1。terraform/workflow の 1 ルート。AGENT 
 | `terraform/pipeline/graph/` | PIPELINE。Neptune（db.t4g.medium × 1、IAM 認証）と、`terraform/base/core` のロールへの Gremlin 権限、Spark の検知（EventBridge）を受けて機器と回線の `status` を書く Lambda（`graph/status_handler.py`）。`network.tf`（SG とサブネットグループ）/ `neptune.tf` / `access.tf`（ロールへの権限）/ `sync.tf`（Lambda と EventBridge）/ `locals.tf`。`terraform/base/core` の state を読む。無ければ静的データで動く |
 | `terraform/workflow/` | WORKFLOW。`ecs.tf`（ECS クラスタ・タスク定義（temporal + worker の 2 コンテナ、ARM64、1 vCPU / 2 GB）・サービス・SG・ロググループ）/ `proposals.tf`（DynamoDB の修復案テーブルと SSM の `proposal-table`、Web と Runtime のロールへの読み書き権限）/ `iam.tf`（タスクのロール。Runtime の呼び出し、lab の EC2 への `AWS-RunShellScript` だけ）/ `events.tf`（EventBridge のルール `AnomalyOpened` → SQS `<prefix>-anomalies` と DLQ、`sqs` の interface エンドポイント）/ `gateway.tf`（AgentCore Gateway（MCP、IAM 認証）と VPC の中の tools Lambda、SSM の `gateway-url`。`create_gateway=false` で外せる）/ `locals.tf`。`terraform/base/ecr` / `main` / `agent` / `lab` / `stream` の state を読み、`graph` / `analytics` は有れば読む |
 | `workflow/` | ワーカーのコンテナ（`worker.py` / `Dockerfile` / `requirements.txt`。Python 3.13、`temporalio` SDK、arm64）。starter（SQS の `AnomalyOpened` を受けてワークフローを起こす。キューが無ければ DynamoDB を 60 秒ごとに見る）とワークフロー（調査 → 修復案 → 承認待ち → lab で修復 → 確認）が 1 プロセス |
-| `tools/` | Gateway のツール（`tools.json` が MCP のツール定義 8 つ、`handler.py` が Lambda の本体。`agent/` の `topology.py` / `graph.py` / `anomalies.py` / `evidence.py` と `data/` を同じ zip に入れる） |
-| `terraform/<ルート>/terraform.tfvars.example` | 変数と既定値の一覧。既定のままでよい。変えたいときだけ同じ場所の `terraform.tfvars` に写す（gitignore 済み） |
-| `terraform/<ルート>/terraform.tfstate` | apply すると PC にできる state（gitignore 済み）。**Terraform が何を作ったかの記録で、これを消すと destroy できなくなる。**ARN などが平文で入るので共有しない。apply した PC に残るので、destroy もその PC で打つ（「[毎日の起動と片付けをスクリプトで打つ](deploy.md)」の注意） |
-| `agent/` | Runtime に載せるコンテナ（Python 3.13、`bedrock-agentcore` SDK、arm64）。`topology.py` がトポロジのツール（Neptune → 静的の順）、`graph.py` が Neptune の読み書き、`anomalies.py` が異常一覧のツール、`evidence.py` が調査の証拠のツール（`search_logs` = OpenSearch Serverless、`query_metrics` = Prometheus、`query_history` = S3 Tables（Athena 未配備なので案内だけ））、`mcp_client.py` が Gateway（MCP）の tools/list と tools/call（SigV4。無ければコンテナの中のツールに戻る）、`proposals.py` が修復案の読み書き（Web と共用）、`data/` が静的トポロジ（`devices.yaml` / `topology.json`、架空の 10 台） |
+| `tools/` | Gateway のツール（`tools.json` が MCP のツール定義 9 つ、`handler.py` が Lambda の本体。`agent/` の `toolkit.py` / `topology.py` / `graph.py` / `anomalies.py` / `evidence.py` / `proposals.py` と `data/topology.json` を同じ zip に入れる。一覧は `terraform/workflow/gateway.tf` の `tools_files`） |
+| `terraform/<ルート>/terraform.tfvars.example` | 変数と既定値の一覧。既定のままでよい。変えたいときだけ同じ場所の `terraform.tfvars` に写す（配布物には入っていない） |
+| `terraform/<ルート>/terraform.tfstate` | apply すると PC にできる state（配布物には入っていない）。**Terraform が何を作ったかの記録で、これを消すと destroy できなくなる。**ARN などが平文で入るので共有しない。apply した PC に残るので、destroy もその PC で打つ（「[デプロイの詳しい説明](deploy.md)」の注意） |
+| `agent/` | Runtime に載せるコンテナ（Python 3.13、`bedrock-agentcore` SDK、arm64）。`toolkit.py` が全モジュール共通の土台（リージョン・SSM パラメータの読み出し・boto3 クライアント。Runtime / tools Lambda / Web の EC2 / graph の status Lambda の 4 か所で動く）、`topology.py` がトポロジのツール（Neptune → 静的の順）、`graph.py` が Neptune の読み書き、`anomalies.py` が異常一覧のツール、`evidence.py` が調査の証拠のツール（`search_logs` = OpenSearch Serverless、`query_metrics` = Prometheus、`query_history` = S3 Tables（Athena 未配備なので案内だけ））、`mcp_client.py` が Gateway（MCP）の tools/list と tools/call（SigV4。無ければコンテナの中のツールに戻る）、`proposals.py` が修復案の読み書き（Web と共用）、`data/` が静的トポロジ（`devices.yaml` / `topology.json`、架空の 10 台） |
 | `web/` | EC2 で動かす Gradio の画面（`app.py`。チャット・トポロジ・異常一覧・承認）と依存（`requirements.txt`）。`agent/` の 5 モジュールと一緒に S3 に置く（出力 `upload_web_command`） |
 | `.env.example` | 環境変数の一覧（Web / エージェント / lab。意味と AWS 上で誰が入れるか）。AWS 上では Terraform（user_data と Runtime の環境変数）が書くので手で用意しない。EC2 で Web が立たないときの見比べ先で、手元で `web/app.py` を動かすときは `.env` に写して使う（「[Web を手元で動かす](development.md)」） |
-| `deploy.env.example` | `ops/up.sh` / `ops/down.sh` の設定の見本（どの機能を作るか、ECR を残すかなど）。`cp deploy.env.example deploy.env` で写して書く。`deploy.env` は gitignore 済みで、無ければ土台と AGENT を作る |
-| `lab/` | lab の材料。`wvs2.clab.yml.in`（containerlab の定義。イメージ名は起動時に埋める）、`frr/`、`snmpd/`（Dockerfile と設定。trap の送信も）、`telegraf.conf.in`（ポーリングと trap 受信、FRR のログの tail → MSK の `metrics` / `traps` / `logs`）、`lab.sh`、`lab_topology.py`（定義から Neptune に入れる機器と回線を作る。「[Neptune のトポロジを lab から作る](pipeline.md)」） |
+| `deploy.env.example` | `ops/up.sh` / `ops/down.sh` の設定の見本（どの機能を作るか、ECR を残すかなど）。`cp deploy.env.example deploy.env` で写して書く。`deploy.env` は配布物には入っていないので自分で作る。無ければ土台と AGENT を作る |
+| `lab/` | lab の材料。`wanlab.clab.yml.in`（containerlab の定義。イメージ名は起動時に埋める）、`frr/`、`snmpd/`（Dockerfile と設定。trap の送信も）、`telegraf.conf.in`（ポーリングと trap 受信、FRR のログの tail → MSK の `metrics` / `traps` / `logs`）、`lab.sh`、`lab_topology.py`（定義から Neptune に入れる機器と回線を作る。「[Neptune のトポロジを lab から作る](pipeline.md)」） |
 | `graph/` | `status_handler.py`。`terraform/pipeline/graph` の Lambda で、Spark の検知（EventBridge の `AnomalyOpened` / `AnomalyResolved`）を受けて Neptune の機器と回線の `status` を書く。`agent/graph.py` と一緒に zip になる |
 | `kb-docs/` | ナレッジベースに入れる手順書の例（架空の md 3 つ。`CREATE_KB=1` のときだけ使う） |
-| `ops/` | `up.sh`（`deploy.env` の `AGENT` / `PIPELINE` / `WORKFLOW` で選んだ機能を、手順 1〜7・lab・graph・stream・analytics・workflow の順に 1 本で打つ）と `down.sh`（片付けをまとめて打つ）。毎日消して作り直す運用向け（「[毎日の起動と片付けをスクリプトで打つ](deploy.md)」）。`deploy-env.sh` は 2 本が読む `deploy.env` の読み込み（シェルとしては実行しない）。`seed_graph.py` は `up.sh` が Web の EC2 の上で打つ Neptune への投入（`lab/lab_topology.py` が lab の定義から作った機器と回線を受け取る）。`sync-graph.sh` は起動後にトポロジを入れ直す（「[Neptune のトポロジを lab から作る](pipeline.md)」）。`check.sh` は AWS に触らない検査をまとめて打つ（「[手元で確かめる](development.md)」）。`vscode-setup.sh` は VS Code の設定を入れる（「VS Code の設定」） |
+| `ops/` | `up.sh`（`deploy.env` の `AGENT` / `PIPELINE` / `WORKFLOW` で選んだ機能を、手順 1〜7・lab・graph・stream・analytics・workflow の順に 1 本で打つ）と `down.sh`（片付けをまとめて打つ）。毎日消して作り直す運用向け（「[デプロイの詳しい説明](deploy.md)」）。`deploy-env.sh` は 2 本が読む `deploy.env` の読み込み（シェルとしては実行しない）。`seed_graph.py` は `up.sh` が Web の EC2 の上で打つ Neptune への投入（`lab/lab_topology.py` が lab の定義から作った機器と回線を受け取る）。`sync-graph.sh` は起動後にトポロジを入れ直す（「[Neptune のトポロジを lab から作る](pipeline.md)」）。`check.sh` は AWS に触らない検査をまとめて打つ（「[手元で確かめる](development.md)」）。`vscode-setup.sh` は VS Code の設定を入れる（「VS Code の設定」） |
 | `tests/` | 模擬テスト（AWS に触れない。打ち方は「[手元で確かめる](development.md)」）。`test_app.py`（エージェント）、`test_graph.py`（Neptune の読み書き・動的な状態・静的への切り戻し）、`test_sync.py`（lab の定義からのトポロジ、状態を書く Lambda、`terraform/pipeline/graph` の配線）、`test_stream.py`（Spark の検知（`spark/snmp_sinks.py` の detect）と `terraform/pipeline/stream` の配線）、`test_analytics.py`（`terraform/pipeline/analytics` と Spark のスクリプトの整合）、`test_workflow.py`（ワーカー・修復案・MCP クライアント・tools Lambda と `terraform/workflow` の配線） |
 
 ## なぜこの形にしたか
@@ -106,7 +106,7 @@ Temporal での実行（WORKFLOW=1。terraform/workflow の 1 ルート。AGENT 
 
 ### ナレッジベースとガードレール
 
-ナレッジベースは `CREATE_KB=1`（`terraform/agent` の `create_knowledge_base=true`）のときだけ作る。既定では作らず、エージェントはモデルとトポロジのツールだけで答える（OpenSearch Serverless の最小 OCU $0.33/h を避けるため。2026-09-17 ユーザー決定）。以下は作るときの形。
+ナレッジベースは `CREATE_KB=1`（`terraform/agent` の `create_knowledge_base=true`）のときだけ作る。既定では作らず、エージェントはモデルとトポロジのツールだけで答える（OpenSearch Serverless の最小 OCU $0.33/h を避けるため）。以下は作るときの形。
 
 | 決めたこと | 理由 |
 |---|---|
@@ -134,13 +134,13 @@ Temporal での実行（WORKFLOW=1。terraform/workflow の 1 ルート。AGENT 
 
 ## 名前とタグ
 
-- リソース名は `fukuda-nwc-poc-<何>`（変数 `name_prefix`）。Runtime 名だけはハイフンが使えないので `fukuda_nwc_poc_agent`。
-- タグを付けられるリソースには全部 `Project=fukuda-nwc-poc`・`owner=fukuda`（変数 `owner`）を付ける。各ルートの `providers.tf` の `default_tags` で付けるので、リソースごとに書き忘れることは無い。`Name` は個別に付けている。
+- リソース名は `netops-poc-<何>`（変数 `name_prefix`。`deploy.env` の `NAME_PREFIX` で変えられる）。Runtime 名だけはハイフンが使えないので `netops_poc_agent`。
+- タグを付けられるリソースには全部 `Project=netops-poc`・`owner=netops`（変数 `owner`。`deploy.env` の `OWNER`）を付ける。各ルートの `providers.tf` の `default_tags` で付けるので、リソースごとに書き忘れることは無い。`Name` は個別に付けている。
 - 作ったものの一覧はこれで出る。
 
 ```bash
 aws resourcegroupstaggingapi get-resources --region ap-northeast-1 \
-  --tag-filters Key=Project,Values=fukuda-nwc-poc \
+  --tag-filters Key=Project,Values=netops-poc \
   --query 'ResourceTagMappingList[].ResourceARN' --output table
 ```
 
@@ -154,7 +154,7 @@ OpenSearch Serverless のセキュリティポリシー・アクセスポリシ�
 |---|---|---|
 | 誰がいつセッションを開いたか | CloudTrail の `StartSession` / `TerminateSession` | 組織の CloudTrail の設定 |
 | エージェントの実行ログ | CloudWatch Logs `/aws/bedrock-agentcore/runtimes/<agent_runtime_id>-DEFAULT`（出力 `runtime_log_group_name`） | 手順 5 で 7 日に設定。付けないと無期限 |
-| チャット Web の呼び出し失敗 | EC2 の journald（`journalctl -u fukuda-nwc-poc-web`） | インスタンスの中だけ。終了すると消える |
+| チャット Web の呼び出し失敗 | EC2 の journald（`journalctl -u netops-poc-web`） | インスタンスの中だけ。終了すると消える |
 | 取り込みの結果（失敗したファイル） | `aws bedrock-agent get-ingestion-job` の `statistics` と `failureReasons` | ジョブの履歴として残る |
 | ガードレールで止めたか | Runtime のログの `stop=guardrail_intervened` | Runtime のロググループと同じ |
 

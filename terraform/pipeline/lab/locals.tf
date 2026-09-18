@@ -1,7 +1,7 @@
-# fukuda-nwc-poc - optional lab root module. One EC2 (Amazon Linux 2023 arm64) runs Docker + containerlab with the wvs2 topology
+# netops-poc - optional lab root module. One EC2 (Amazon Linux 2023 arm64) runs Docker + containerlab with the wanlab topology
 # (6 FRR routers with BGP, 4 snmpd sidecars, 4 hosts, all fictional addresses). Reached with SSM Session Manager.
 # Images come from ECR (terraform/base/ecr), the containerlab rpm and configs from the S3 bucket of terraform/base/core. Stop the instance when not in use.
-# Phase 2: if the Telegraf rpm is also in lab/, Telegraf polls the CE routers over SNMP, receives their traps and writes to MSK (terraform/pipeline/stream).
+# If the Telegraf rpm is also in lab/, Telegraf polls the CE routers over SNMP, receives their traps and writes to MSK (terraform/pipeline/stream).
 
 data "aws_caller_identity" "current" {}
 data "aws_partition" "current" {}

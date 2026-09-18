@@ -6,21 +6,22 @@ variable "region" {
 }
 
 variable "name_prefix" {
-  description = "Prefix for resource names and the value of the Project tag (up to 25 characters). Same value as terraform/base/ecr and terraform/agent."
+  description = "Prefix for resource names and the value of the Project tag (up to 22 characters). Same value as terraform/base/ecr and terraform/agent."
   type        = string
-  default     = "fukuda-nwc-poc"
+  default     = "netops-poc"
 
   validation {
-    # OpenSearch Serverless のコレクション名（name_prefix-kb）が 28 文字までなので 25 文字に抑える
-    condition     = can(regex("^[a-z][a-z0-9-]{1,24}$", var.name_prefix))
-    error_message = "name_prefix must match ^[a-z][a-z0-9-]{1,24}$."
+    # 一番きついのは OpenSearch Serverless の data access policy 名（32 文字まで）で、一番長い接尾辞は terraform/workflow の <name_prefix>-logs-read（10 文字）。だから 22 文字に抑える
+    # ハイフンの連続と末尾のハイフンも弾く（ECR のリポジトリ名が受け付けない）
+    condition     = can(regex("^[a-z][a-z0-9]*(-[a-z0-9]+)*$", var.name_prefix)) && length(var.name_prefix) >= 2 && length(var.name_prefix) <= 22
+    error_message = "name_prefix must be 2-22 lowercase letters, digits and single hyphens, starting with a letter and not ending with one."
   }
 }
 
 variable "owner" {
   description = "Value of the owner tag. Same value as terraform/base/ecr and terraform/agent."
   type        = string
-  default     = "fukuda"
+  default     = "netops"
 
   validation {
     condition     = can(regex("^[A-Za-z0-9._-]{1,64}$", var.owner))

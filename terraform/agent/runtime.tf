@@ -60,7 +60,7 @@ resource "aws_iam_role_policy" "runtime" {
           Action = ["bedrock-agentcore:GetWorkloadAccessToken", "bedrock-agentcore:GetWorkloadAccessTokenForJWT"]
           Resource = [
             "arn:${local.partition}:bedrock-agentcore:${var.region}:${local.account_id}:workload-identity-directory/default",
-            "arn:${local.partition}:bedrock-agentcore:${var.region}:${local.account_id}:workload-identity-directory/default/workload-identity/${var.runtime_name}-*",
+            "arn:${local.partition}:bedrock-agentcore:${var.region}:${local.account_id}:workload-identity-directory/default/workload-identity/${local.runtime_name}-*",
           ]
         },
         {
@@ -100,8 +100,8 @@ resource "aws_iam_role_policy" "runtime" {
 }
 
 resource "aws_bedrockagentcore_agent_runtime" "agent" {
-  agent_runtime_name = var.runtime_name
-  description        = "fukuda-nwc-poc chat agent"
+  agent_runtime_name = local.runtime_name
+  description        = "${var.name_prefix} chat agent"
   role_arn           = local.runtime_role_arn
 
   agent_runtime_artifact {

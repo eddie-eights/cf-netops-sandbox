@@ -3,7 +3,7 @@
 # テーブルは Terraform で作る（terraform destroy でバケットまで消せるように。テーブルが残るとバケットは消えない）。
 # 列は Telegraf の JSON（{"fields":{…},"name":"…","tags":{…},"timestamp":秒}）をそのまま持つ。
 # tags と fields は JSON 文字列のまま入れる（機器やメトリクスが増えても列を変えないため。列の型は Iceberg のプリミティブだけ）
-# var.sinks に iceberg があるときだけ作る（deploy.env の SINK_S3。2026-09-17 ユーザー決定「s3, open search, prometheus のデプロイをそれぞれ 1 と 0 で」）
+# var.sinks に iceberg があるときだけ作る（deploy.env の SINK_S3。格納先は 1 つずつ 1 / 0 で選べる）
 resource "aws_s3tables_table_bucket" "tables" {
   count = local.sink_iceberg ? 1 : 0
 

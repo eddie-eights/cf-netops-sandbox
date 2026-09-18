@@ -63,10 +63,7 @@ data "aws_iam_policy_document" "task" {
       "dynamodb:PutItem",
       "dynamodb:UpdateItem",
     ]
-    resources = [
-      aws_dynamodb_table.proposals.arn,
-      "${aws_dynamodb_table.proposals.arn}/index/*",
-    ]
+    resources = local.proposal_table_arns
   }
 
   statement {

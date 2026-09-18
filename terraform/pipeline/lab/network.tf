@@ -19,7 +19,7 @@ resource "aws_vpc_security_group_egress_rule" "lab_https" {
 
 resource "aws_vpc_security_group_egress_rule" "lab_kafka" {
   security_group_id = aws_security_group.lab.id
-  description       = "Phase 2 - Kafka with IAM auth to the MSK brokers of terraform/pipeline/stream (private IPs in this VPC, no NAT)"
+  description       = "Kafka with IAM auth to the MSK brokers of terraform/pipeline/stream (private IPs in this VPC, no NAT)"
   ip_protocol       = "tcp"
   from_port         = 9098
   to_port           = 9098

@@ -33,7 +33,7 @@ output "jars_s3_prefix" {
   value       = "s3://${local.bucket}/${local.jars_prefix}/"
 }
 
-# start-job-run の引数。ops/up.sh はこれと同じものを組み立てる。手で打つときは README の a-3
+# start-job-run の引数。ops/up.sh はこの出力をそのまま --job-driver に渡す。手で打つときは docs/pipeline.md の a-3
 output "job_driver_json" {
   description = "jobDriver for start-job-run (script, sinks and their endpoints, jars, catalog)"
   value = jsonencode({
@@ -43,7 +43,9 @@ output "job_driver_json" {
       entryPointArguments = concat(
         ["--bootstrap", local.bootstrap, "--checkpoint", "s3://${local.bucket}/${local.checkpoint}/", "--sinks", join(",", var.sinks), "--region", var.region,
           "--metric-topics", local.metric_topics, "--log-topics", local.log_topics,
-        "--anomaly-table", local.anomaly_table, "--device-map", var.device_map, "--event-bus", var.event_bus],
+          # Source を接頭辞ごとに変える。既定のバスは 1 つの AWS アカウントで共有なので、ここを固定にすると
+          # 他の人の異常が自分の workflow / graph のルールに当たる（ルール名は接頭辞付きでも event_pattern は別）
+        "--anomaly-table", local.anomaly_table, "--device-map", var.device_map, "--event-bus", var.event_bus, "--event-source", local.event_source],
         [for a in ["--iceberg-table", local.iceberg_table] : a if local.sink_iceberg],
         [for a in ["--opensearch-endpoint", local.opensearch_endpoint, "--opensearch-index", local.opensearch_index] : a if local.sink_opensearch],
         [for a in ["--prometheus-url", local.prometheus_remote_write_url] : a if local.sink_prometheus],

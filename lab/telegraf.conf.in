@@ -66,7 +66,7 @@
   version = "2c"
   timeout = "5s"
 
-# ---- 機器のログ。FRR のコンテナに syslogd は無いので、frr.conf の log file を EC2 のディレクトリに bind して（wvs2.clab.yml.in）ここで tail する。
+# ---- 機器のログ。FRR のコンテナに syslogd は無いので、frr.conf の log file を EC2 のディレクトリに bind して（wanlab.clab.yml.in）ここで tail する。
 # 1 行は「2026/09/18 10:00:00 BGP: [XXXXX-XXXXX] %ADJCHANGE: neighbor 172.16.1.1 ... Down ...」の形。時刻は読んだ時刻を使う
 # （コンテナの TZ に tzdata が効いているか確かめていないので、行の中の時刻は文字列のまま log_time に入れる）。形に合わない行（折り返しの続き）は捨てる
 [[inputs.tail]]

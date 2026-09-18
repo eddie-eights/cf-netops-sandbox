@@ -1,83 +1,54 @@
 """修復案（DynamoDB。terraform/workflow のワーカーが書く）を画面に出し、人の承認・却下を書き戻す。
 
 テーブル名は環境変数 PROPOSAL_TABLE、無ければ SSM の <PARAM_PREFIX>/proposal-table（terraform/workflow が書く）。
-どちらも無ければ「まだ配備されていない」を返して、フェーズ 1 / 2 のままの構成でも落ちない。
+どちらも無ければ「まだ配備されていない」を返して、WORKFLOW を作っていない構成でも落ちない。
 項目: proposal_id（= anomaly_id）, anomaly_id, device_id, kind, target, first_seen（異常の発生時刻）,
 status（pending → approved / rejected（人）→ applied → verified / failed（ワーカー）、expired（時間切れ））,
 cause, action（heal-main / check / none）, command, reason, agent_response, workflow_id,
 created_at / updated_at / decided_at（epoch 秒）, decided_by, apply_output, verify_note。
 承認・却下は status = pending のときだけ通る（ConditionExpression）。ワーカーは Temporal のシグナルではなく、
 このテーブルの status をポーリングして進む（画面と Temporal を直接つながない）。
+DynamoDB の読み方（クライアントの使い回し・表名・整形）は agent/toolkit.py に置いてある（anomalies.py と共通）。
 """
 
-import os
 import time
-from datetime import datetime, timezone, timedelta
 
-import boto3
 from botocore.exceptions import BotoCoreError, ClientError
 
-PARAM_PREFIX = os.environ.get("PARAM_PREFIX", "")
-REGION = os.environ.get("AWS_REGION") or os.environ.get("BEDROCK_REGION") or None
-INDEX = "status-updated_at-index"
+import toolkit
+
+INDEX = "status-updated_at-index"  # GSI。パーティションキーが status、ソートキーが updated_at
 STATUSES = ("pending", "approved", "rejected", "applied", "verified", "failed", "expired")
-DECISIONS = ("approved", "rejected")
-TTL = 60
-JST = timezone(timedelta(hours=9))
-_cache = {"table": "", "checked": 0.0}
-
-
-def table_name() -> str:
-    env = os.environ.get("PROPOSAL_TABLE", "")
-    if env:
-        return env
-    if _cache["table"] or time.time() - _cache["checked"] < TTL or not PARAM_PREFIX:
-        return _cache["table"]
-    _cache["checked"] = time.time()
-    try:
-        _cache["table"] = boto3.client("ssm", region_name=REGION).get_parameter(
-            Name=f"{PARAM_PREFIX}/proposal-table")["Parameter"]["Value"]
-    except (ClientError, BotoCoreError):
-        _cache["table"] = ""
-    return _cache["table"]
-
-
-def _plain(item: dict) -> dict:
-    out = {}
-    for k, v in item.items():
-        if "S" in v:
-            out[k] = v["S"]
-        elif "N" in v:
-            out[k] = int(v["N"]) if v["N"].lstrip("-").isdigit() else float(v["N"])
-        elif "BOOL" in v:
-            out[k] = v["BOOL"]
-    return out
-
-
-def _iso(epoch) -> str:
-    return datetime.fromtimestamp(int(epoch), JST).strftime("%Y-%m-%d %H:%M:%S") if epoch else ""
+QUERYABLE = STATUSES + ("all",)  # 一覧で指定できる値（all は全部）
+DECISIONS = ("approved", "rejected")  # 人が決められるのはこの 2 つだけ
+TABLE = toolkit.Param("PROPOSAL_TABLE", "proposal-table")  # 表の名前（環境変数か SSM）
 
 
 def _decorate(p: dict) -> dict:
+    """epoch 秒の項目に、読める形（JST）を並べて足す"""
     for k in ("created_at", "updated_at", "decided_at", "first_seen"):
-        p[f"{k}_jst"] = _iso(p.get(k))
+        p[f"{k}_jst"] = toolkit.jst(p.get(k))
     return p
 
 
 def list_proposals(status: str = "pending", limit: int = 50, device_id: str = "") -> dict:
-    """status の修復案を新しい順に（updated_at）。status が all なら全件（Scan）。device_id があればその機器だけ"""
-    table = table_name()
+    """status の修復案を新しい順に（updated_at）。status が all なら全件（Scan）。device_id があればその機器だけ。
+
+    all だけ Scan なのは、GSI のパーティションキーが status で、7 つの status を 1 回の Query では取れないため
+    （7 回 Query するより 1 往復の Scan のほうが安い。この PoC の表は数十件）。
+    """
+    table = TABLE.value()
     if not table:
         return {"error": "修復案はまだ配備されていない（terraform/workflow を apply すると使える）", "proposals": []}
+    status = status if status in QUERYABLE else "pending"
     limit = max(1, min(int(limit), 100))
-    read = 100 if device_id else limit  # 機器で絞るときは多めに読んでから絞る（この PoC の表は数十件）
-    client = boto3.client("dynamodb", region_name=REGION)
+    read = toolkit.read_count(device_id, limit)
+    client = toolkit.client("dynamodb")
     try:
         if status == "all":
             res = client.scan(TableName=table, Limit=read)
             items = sorted(res.get("Items", []), key=lambda i: int(i.get("updated_at", {}).get("N", "0")), reverse=True)
         else:
-            status = status if status in STATUSES else "pending"
             res = client.query(
                 TableName=table, IndexName=INDEX, KeyConditionExpression="#s = :s",
                 ExpressionAttributeNames={"#s": "status"}, ExpressionAttributeValues={":s": {"S": status}},
@@ -85,27 +56,26 @@ def list_proposals(status: str = "pending", limit: int = 50, device_id: str = ""
             items = res.get("Items", [])
     except (ClientError, BotoCoreError) as e:
         return {"error": f"修復案を読めない: {str(e)[:200]}", "proposals": []}
-    proposals = [_decorate(_plain(i)) for i in items]
-    if device_id:
-        proposals = [p for p in proposals if p.get("device_id") == device_id]
-    proposals = proposals[:limit]
+    # 機器で絞って limit 件に切ってから整形する（返さない行を整形しても捨てるだけなので）
+    proposals = [_decorate(toolkit.plain(i)) for i in toolkit.narrow(items, device_id, limit)]
     return {"status": status, "count": len(proposals), "proposals": proposals}
 
 
 def get_proposal(proposal_id: str) -> dict:
-    table = table_name()
+    """1 件だけ引く（画面の承認タブが、決める直前の状態を確かめるのに使う）。無ければ空の辞書"""
+    table = TABLE.value()
     if not table:
         return {}
     try:
-        res = boto3.client("dynamodb", region_name=REGION).get_item(TableName=table, Key={"proposal_id": {"S": proposal_id}})
+        res = toolkit.client("dynamodb").get_item(TableName=table, Key={"proposal_id": {"S": proposal_id}})
     except (ClientError, BotoCoreError):
         return {}
-    return _decorate(_plain(res["Item"])) if "Item" in res else {}
+    return _decorate(toolkit.plain(res["Item"])) if "Item" in res else {}
 
 
 def decide(proposal_id: str, decision: str, decided_by: str = "web") -> dict:
     """pending の修復案を approved / rejected にする。pending でなければ何もしない（誰かが先に決めた・ワーカーが進めた）"""
-    table = table_name()
+    table = TABLE.value()
     if not table:
         return {"error": "修復案はまだ配備されていない（terraform/workflow を apply すると使える）"}
     if decision not in DECISIONS:
@@ -114,7 +84,7 @@ def decide(proposal_id: str, decision: str, decided_by: str = "web") -> dict:
         return {"error": "proposal_id が空"}
     now = int(time.time())
     try:
-        boto3.client("dynamodb", region_name=REGION).update_item(
+        toolkit.client("dynamodb").update_item(
             TableName=table, Key={"proposal_id": {"S": proposal_id}},
             UpdateExpression="SET #s = :d, decided_by = :b, decided_at = :n, updated_at = :n",
             ConditionExpression="#s = :p",
@@ -132,9 +102,8 @@ def decide(proposal_id: str, decision: str, decided_by: str = "web") -> dict:
 # ---------------------------------------------------------------- エージェントのツール（読むだけ）
 # 承認・却下（decide）はツールにしない。人が画面の承認タブで決めるのが HITL の線で、チャットからは決めさせない（2026-09-18）
 def _tool_list_proposals(status: str = "all", limit: int = 20, device_id: str = "") -> dict:
-    """画面は pending が既定だが、チャットで聞かれるのはたいてい履歴なので all を既定にする"""
-    return list_proposals(status=status if status in STATUSES or status == "all" else "all",
-                          limit=limit, device_id=device_id)
+    """list_proposals の既定値だけを変えたもの。画面は pending が既定だが、チャットで聞かれるのはたいてい履歴なので all"""
+    return list_proposals(status=status, limit=limit, device_id=device_id)
 
 
 TOOL_SPECS = [
@@ -152,13 +121,4 @@ TOOL_SPECS = [
     }},
 ]
 TOOLS = {"list_proposals": _tool_list_proposals}
-
-
-def run_tool(name: str, args: dict) -> dict:
-    fn = TOOLS.get(name)
-    if fn is None:
-        return {"error": f"unknown tool {name}"}
-    try:
-        return fn(**{k: v for k, v in (args or {}).items() if k in fn.__code__.co_varnames})
-    except (TypeError, ValueError) as e:
-        return {"error": str(e)}
+run_tool = toolkit.runner(TOOLS)

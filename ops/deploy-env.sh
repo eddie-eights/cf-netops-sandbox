@@ -1,5 +1,5 @@
 # ops/up.sh と ops/down.sh が読み込む（単独では打たない）。deploy.env（ops/up.sh と ops/down.sh の設定）を読む関数を定義する。
-# 呼ぶ側で log / die を定義し、リポジトリの直下に cd してから load_deploy_env を呼ぶ。
+# 呼ぶ側で log / die を定義し、展開したフォルダの直下に cd してから load_deploy_env を呼ぶ。
 #
 # ファイルはシェルとして実行しない（source しない）。1 行に 1 つの「キー=値」だけを読む:
 #   - 空行と、# で始まる行は飛ばす。値の後ろの「 # …」（空白の後ろの #）もコメント
@@ -10,12 +10,11 @@
 #   - 同じ名前の環境変数が空でなければ、ファイルの値は使わない（`PIPELINE=1 ops/up.sh` はファイルの PIPELINE より優先）。
 #     ファイルの 1 を環境変数で打ち消すときは空ではなく 0 を渡す（`SKIP_GRAPH=0 ops/up.sh`）
 #   - 知らないキーと、同じキーの 2 回目は止まる（打ち間違いで違う機能を作らないため）
-# ファイルの場所は既定でリポジトリ直下の deploy.env。DEPLOY_ENV_FILE=<パス> で変えられる（相対パスは打った場所から）。
+# ファイルの場所は既定で展開したフォルダ直下の deploy.env。DEPLOY_ENV_FILE=<パス> で変えられる（相対パスは打った場所から）。
 
-# 読めるキー。機能は PIPELINE / AGENT / WORKFLOW の 3 つ（2026-09-17）。PHASE は古い書き方で、ops/up.sh が機能に読み替えて注意を出す。
-# WITH_LAB（2026-09-16）と WITH_STREAM（2026-09-17）は無くなったキーで、ops/up.sh が案内を出して止まる
-DEPLOY_ENV_KEYS="PIPELINE AGENT WORKFLOW CREATE_KB PHASE SKIP_LAB SKIP_STREAM SKIP_ANALYTICS SKIP_GRAPH CREATE_S3_SINK SINK_S3 SINK_OPENSEARCH SINK_PROMETHEUS SINKS IMAGE_TAG ADMIN_ARN
-VPC_CIDR CLIENT_CIDR OPENSEARCH_CACERT_FILE LOCAL_PORT NO_PORTFORWARD KEEP_ECR AWS_PROFILE AWS_CA_BUNDLE WITH_LAB WITH_STREAM"
+# 読めるキー（意味は deploy.env.example）。これ以外のキーが書いてあれば止まる
+DEPLOY_ENV_KEYS="NAME_PREFIX OWNER PIPELINE AGENT WORKFLOW CREATE_KB SKIP_LAB SKIP_STREAM SKIP_ANALYTICS SKIP_GRAPH CREATE_S3_SINK SINK_S3 SINK_OPENSEARCH SINK_PROMETHEUS IMAGE_TAG ADMIN_ARN
+VPC_CIDR CLIENT_CIDR OPENSEARCH_CACERT_FILE LOCAL_PORT NO_PORTFORWARD KEEP_ECR TF_VERBOSE AWS_PROFILE AWS_CA_BUNDLE"
 
 # DEPLOY_ENV_FILE の相対パスを、cd する前の場所から見た絶対パスにする。呼ぶ側が cd の前に打つ
 resolve_deploy_env_file() {
@@ -100,6 +99,21 @@ load_deploy_env() {
   if [ -n "$from_env" ]; then echo "  環境変数が先にあったので、ファイルの値を使わなかったキー:$from_env"; fi
 }
 
+# resolve_name_prefix  deploy.env の NAME_PREFIX / OWNER（無ければ既定値）を PREFIX / OWNER に入れる。load_deploy_env のあとに呼ぶ。
+# PREFIX はリソース名の接頭辞と Project タグの値、OWNER は owner タグの値で、そのまま terraform の -var と AWS CLI のタグに渡る。
+# 形は terraform/base/core の variables.tf の validation と同じものをここでも見る（terraform を起こす前に止めるため）。
+#   name_prefix … OpenSearch Serverless の data access policy 名が 32 文字までで、一番長い接尾辞が terraform/workflow の
+#                 <接頭辞>-logs-read（10 文字）なので 22 文字まで。ハイフンの連続と末尾のハイフンは ECR のリポジトリ名が受け付けない
+#   owner       … タグの値に使える文字のうち、この PoC が使うもの
+resolve_name_prefix() {
+  PREFIX="${NAME_PREFIX:-netops-poc}"
+  OWNER="${OWNER:-netops}"
+  [[ "$PREFIX" =~ ^[a-z][a-z0-9]*(-[a-z0-9]+)*$ && ${#PREFIX} -ge 2 && ${#PREFIX} -le 22 ]] \
+    || die "NAME_PREFIX は英小文字で始まる 2〜22 文字の英小文字・数字・ハイフンで、ハイフンは連続せず末尾にも置けない（いまは「${PREFIX}」）"
+  [[ "$OWNER" =~ ^[A-Za-z0-9._-]{1,64}$ ]] \
+    || die "OWNER は英数字と . _ - だけの 1〜64 文字（いまは「${OWNER}」）"
+}
+
 # flag_value <変数名>  1 / true / yes なら 1、0 / false / no / 空なら空にそろえる。それ以外の値は止まる
 flag_value() {
   local name="$1" v
@@ -118,8 +132,13 @@ TF_KEEP='^(Plan:|Apply complete|Destroy complete|No changes)|Error|^[│╷╵]|
 tf_log_file() { echo "ops/logs/tf-${1//\//-}-$2.log"; }
 tf_logged() { # <ルート> <apply|destroy> <引数…>。終了コードは terraform のもの（呼ぶ側の pipefail が前提）
   local root="$1" verb="$2"; shift 2
-  if [ -n "$TF_VERBOSE" ]; then tf "$root" "$verb" "$@"; return; fi
   local logf; logf=$(tf_log_file "$root" "$verb")
   mkdir -p ops/logs
+  # TF_VERBOSE=1 でも全文をファイルに残す（画面に出すだけにすると、ops/down.sh がログから
+  # DependencyViolation と掴んでいる SG を読めず、打ち直しが効かなくなる）
+  if [ -n "$TF_VERBOSE" ]; then
+    tf "$root" "$verb" -no-color "$@" 2>&1 | tee "$logf"
+    return
+  fi
   tf "$root" "$verb" -no-color -compact-warnings "$@" 2>&1 | tee "$logf" | { grep --line-buffered -E "$TF_KEEP" || true; }
 }

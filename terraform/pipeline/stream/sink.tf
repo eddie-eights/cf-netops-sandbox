@@ -3,7 +3,7 @@ resource "aws_iam_role" "connect" {
   count = var.create_s3_sink ? 1 : 0
 
   name        = "${var.name_prefix}-connect"
-  description = "fukuda-nwc-poc MSK Connect - read the topics, write objects under stream/ in the asset bucket"
+  description = "${var.name_prefix} MSK Connect - read the topics, write objects under stream/ in the asset bucket"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -92,7 +92,7 @@ resource "aws_mskconnect_custom_plugin" "s3_sink" {
   lifecycle {
     precondition {
       condition     = contains(data.aws_s3_objects.plugin[0].keys, var.s3_sink_plugin_key)
-      error_message = "s3://<kb_bucket_name of terraform/base/core>/<s3_sink_plugin_key> に Confluent S3 sink の zip が無い。README の s-1 で置いてから apply する（シンク無しで立てるなら -var create_s3_sink=false）。"
+      error_message = "s3://<kb_bucket_name of terraform/base/core>/<s3_sink_plugin_key> に Confluent S3 sink の zip が無い。docs/pipeline.md の s-1 で置いてから apply する（シンク無しで立てるなら -var create_s3_sink=false）。"
     }
   }
 }

@@ -1,10 +1,10 @@
-# Copy to terraform.tfvars (gitignored) only when the defaults are not right. Every value has a default in variables.tf.
+# Copy to terraform.tfvars only when the defaults are not right. Every value has a default in variables.tf.
 # terraform/base/core and terraform/pipeline/lab must be applied first (this root reads their state files).
-# With create_s3_sink = true the Confluent S3 sink zip must be in the asset bucket before apply (README s-1).
+# With create_s3_sink = true the Confluent S3 sink zip must be in the asset bucket before apply (docs/pipeline.md s-1).
 #
 # region      = "ap-northeast-1"
-# name_prefix = "fukuda-nwc-poc"
-# owner       = "fukuda"
+# name_prefix = "netops-poc"
+# owner       = "netops"
 #
 # create_sts_endpoint      = true
 # create_dynamodb_endpoint = true

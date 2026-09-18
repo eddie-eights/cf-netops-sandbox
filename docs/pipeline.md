@@ -4,26 +4,26 @@
 
 ## lab（PIPELINE）: containerlab + FRR を EC2 で動かす
 
-ローカル PoC の `wvs2` lab（本社・DC・支店 2 か所の CE、キャリア PE 2 台、snmpd、ホスト。すべて架空のアドレス）を、同じ VPC の EC2 1 台で動かす。
+`lab/` の containerlab の構成（本社・DC・支店 2 か所の CE、キャリア PE 2 台、snmpd、ホスト。すべて架空のアドレス）を、同じ VPC の EC2 1 台で動かす。
 BGP の主副切替と SNMP の見え方を手で確かめるためのもので、**Web やエージェントとはつながっていない。**使わないときは止める。
 `deploy.env` に `PIPELINE=1` を書いた `ops/up.sh` は lab-1〜lab-3 を打つ（lab を外すなら `SKIP_LAB=1`、lab だけ要って Neptune が要らなければ `SKIP_GRAPH=1`）。以下はその中身と、入ってからの使い方。
 
 ### lab-1. イメージを ECR に置く
 
-手順 1 の `terraform/base/ecr` は既定（変数 `create_lab_repositories = true`）で `fukuda-nwc-poc-lab-frr` / `-lab-snmpd` / `-lab-multitool` も作っているので、ECR 側の準備は要らない。
+手順 1 の `terraform/base/ecr` は既定（変数 `create_lab_repositories = true`）で `netops-poc-lab-frr` / `-lab-snmpd` / `-lab-multitool` も作っているので、ECR 側の準備は要らない。
 インターネットに出られる端末で、**arm64 のイメージ**を取って push する。snmpd だけはビルドする。
 
 ```bash
 REG="$ACCOUNT_ID.dkr.ecr.ap-northeast-1.amazonaws.com"
 aws ecr get-login-password --region ap-northeast-1 | docker login --username AWS --password-stdin "$REG"
 docker pull --platform linux/arm64 quay.io/frrouting/frr:10.2.1
-docker tag quay.io/frrouting/frr:10.2.1 "$REG/fukuda-nwc-poc-lab-frr:10.2.1" && docker push "$REG/fukuda-nwc-poc-lab-frr:10.2.1"
+docker tag quay.io/frrouting/frr:10.2.1 "$REG/netops-poc-lab-frr:10.2.1" && docker push "$REG/netops-poc-lab-frr:10.2.1"
 docker pull --platform linux/arm64 ghcr.io/srl-labs/network-multitool:v0.10.0
-docker tag ghcr.io/srl-labs/network-multitool:v0.10.0 "$REG/fukuda-nwc-poc-lab-multitool:v0.10.0" && docker push "$REG/fukuda-nwc-poc-lab-multitool:v0.10.0"
-docker buildx build --platform linux/arm64 -t "$REG/fukuda-nwc-poc-lab-snmpd:v1" --push lab/snmpd/
+docker tag ghcr.io/srl-labs/network-multitool:v0.10.0 "$REG/netops-poc-lab-multitool:v0.10.0" && docker push "$REG/netops-poc-lab-multitool:v0.10.0"
+docker buildx build --platform linux/arm64 -t "$REG/netops-poc-lab-snmpd:v1" --push lab/snmpd/
 ```
 
-snmpd のビルドは apk なので `--trusted-host` に当たるものが無い。社内ネットワークで `apk add` が証明書で落ちたら、WSL の `/usr/local/share/ca-certificates/corp-root.crt` を `lab/snmpd/certs/` にコピーして打ち直す（ビルド中だけ読む。gitignore 済み）。
+snmpd のビルドは apk なので `--trusted-host` に当たるものが無い。社内ネットワークで `apk add` が証明書で落ちたら、WSL の `/usr/local/share/ca-certificates/corp-root.crt` を `lab/snmpd/certs/` にコピーして打ち直す（ビルド中だけ読む。配布物には入っていない）。
 
 ### lab-2. 設定と containerlab の rpm を S3 に置く
 
@@ -32,7 +32,7 @@ snmpd のビルドは apk なので `--trusted-host` に当たるものが無い
 ```bash
 KB_BUCKET=$(terraform -chdir=terraform/base/core output -raw kb_bucket_name); echo "$KB_BUCKET"
 curl -LO https://github.com/srl-labs/containerlab/releases/download/v0.79.0/containerlab_0.79.0_linux_arm64.rpm
-aws s3 sync lab/ "s3://$KB_BUCKET/lab/" --exclude "wvs2.clab.yml"
+aws s3 sync lab/ "s3://$KB_BUCKET/lab/" --exclude "wanlab.clab.yml"
 aws s3 cp containerlab_0.79.0_linux_arm64.rpm "s3://$KB_BUCKET/lab/"
 ```
 
@@ -76,25 +76,25 @@ sudo lab telegraf-status     # Telegraf のサービスの状態と直近のロ�
 sudo lab clab inspect --all  # containerlab をそのまま呼ぶ
 ```
 
-機器に直接入るとき（コンテナ名は `clab-wvs2-` + 機器名）。
+機器に直接入るとき（コンテナ名は `clab-wanlab-` + 機器名）。
 
 ```bash
 sudo docker ps --format '{{.Names}}\t{{.Status}}'
-sudo docker exec -it clab-wvs2-hq-ce-01 vtysh          # FRR の CLI（show bgp summary / show ip route）
-sudo docker exec -it clab-wvs2-hq-ce-01 vtysh -c 'show bgp summary'
+sudo docker exec -it clab-wanlab-hq-ce-01 vtysh          # FRR の CLI（show bgp summary / show ip route）
+sudo docker exec -it clab-wanlab-hq-ce-01 vtysh -c 'show bgp summary'
 ```
 
 サービスとして見るとき（lab と Telegraf は systemd のサービス）。
 
 ```bash
-systemctl is-active fukuda-nwc-poc-lab fukuda-nwc-poc-telegraf
-sudo journalctl -u fukuda-nwc-poc-lab -n 50 --no-pager
-sudo journalctl -u fukuda-nwc-poc-telegraf -n 50 --no-pager
+systemctl is-active netops-poc-lab netops-poc-telegraf
+sudo journalctl -u netops-poc-lab -n 50 --no-pager
+sudo journalctl -u netops-poc-telegraf -n 50 --no-pager
 sudo tail -n 50 /var/log/cloud-init-output.log         # 起動時（Docker と containerlab の導入、イメージの取得）のログ
-sudo systemctl restart fukuda-nwc-poc-lab              # トポロジを上げ直す
+sudo systemctl restart netops-poc-lab              # トポロジを上げ直す
 ```
 
-起動に失敗したら上の `cloud-init-output.log` と `journalctl -u fukuda-nwc-poc-lab` を見る。ECR から取れないとき（`docker pull` がタイムアウトする）は次の 2 つ。
+起動に失敗したら上の `cloud-init-output.log` と `journalctl -u netops-poc-lab` を見る。ECR から取れないとき（`docker pull` がタイムアウトする）は次の 2 つ。
 
 - `terraform/base/core` に `ecr.api` / `ecr.dkr` のエンドポイントがあるか（`create_shared_endpoints`。既定は `true`。`ops/up.sh` は lab か analytics を作るなら `true` で打つ）。
 - エンドポイントの SG に lab の SG からの 443 が足されているか（`terraform/pipeline/lab` が `terraform/base/core` の state から SG を取って足す。手で SG を直していないか）。
@@ -121,7 +121,7 @@ terraform -chdir=terraform/pipeline/lab destroy
 
 ## stream / analytics / graph（PIPELINE）: lab → MSK → Spark → S3 Tables / OpenSearch / Prometheus と異常検知、Neptune のトポロジ
 
-stream は lab の SNMP（ポーリングと trap）と FRR のログを MSK に流し（トピック `metrics` / `traps` / `logs`）、DynamoDB の異常テーブルを持つ（書くのは analytics の Spark。2026-09-17 までの detector Lambda は消した）。
+stream は lab の SNMP（ポーリングと trap）と FRR のログを MSK に流し（トピック `metrics` / `traps` / `logs`）、DynamoDB の異常テーブルを持つ（書くのは analytics の Spark）。
 analytics は MSK のトピックを Spark（EMR Serverless）のストリーミングジョブで読み、全部を S3 Tables（Iceberg）のテーブル `snmp_metrics` に、`traps` と `logs` を OpenSearch Serverless の `snmp-logs` に、`metrics` を Amazon Managed Service for Prometheus に 60 秒ごとに流す（`deploy.env` の `SINK_S3` / `SINK_OPENSEARCH` / `SINK_PROMETHEUS`。既定は 3 つ全部）。履歴の正本は S3 Tables。
 同じジョブの detect が `link_down` を DynamoDB の異常テーブルに open / resolved で書き、開いた瞬間に EventBridge へ `AnomalyOpened` を出す（WORKFLOW の SQS が受ける）。Web の「異常一覧」とエージェントの `list_anomalies` がその表を読む。
 graph はトポロジを Neptune に置く。静的な構成（機器と回線）は lab の定義から作って入れ、動的な状態（UP / DOWN）は Spark の検知を EventBridge → Lambda で書く（「Neptune のトポロジを lab から作る」）。Web の「トポロジ」タブから編集でき、エージェントのトポロジのツールもそこを読む。
@@ -164,11 +164,11 @@ plan の段階で次のどちらかが出たら、そのとおりに直してか
 | `terraform/pipeline/lab の state（terraform/pipeline/lab/terraform.tfstate）から lab_security_group_id / lab_role_name が読めない` | lab-3 を先に apply する（この PC で） |
 | `s3://<バケット名>/stream/confluentinc-kafka-connect-s3-12.1.11.zip に Confluent S3 sink の zip が無い` | s-1 の zip を置く。シンク無しで立てるなら `-var create_s3_sink=false` |
 
-MSK の作成に 20〜30 分かかる。出来上がると SSM の `/fukuda-nwc-poc/msk-bootstrap`（ブローカー）と `/fukuda-nwc-poc/anomaly-table` が書かれ、lab の Telegraf と Web / エージェントはそこから読む（`terraform/pipeline/analytics` はテーブル名を state から読む）。
+MSK の作成に 20〜30 分かかる。出来上がると SSM の `/netops-poc/msk-bootstrap`（ブローカー）と `/netops-poc/anomaly-table` が書かれ、lab の Telegraf と Web / エージェントはそこから読む（`terraform/pipeline/analytics` はテーブル名を state から読む）。
 
 ### s-3. lab の Telegraf を動かす
 
-lab の EC2 は起動のたびに s-1 で置いた rpm を入れて `fukuda-nwc-poc-telegraf` サービスを作るので、**すでに lab が動いていれば再起動するだけでよい**（1 行目は lab-4 と同じ）。lab をまだ作っていなければ lab-3 を打つ（変数 `telegraf_version` は既定の `1.40.0` のまま）。
+lab の EC2 は起動のたびに s-1 で置いた rpm を入れて `netops-poc-telegraf` サービスを作るので、**すでに lab が動いていれば再起動するだけでよい**（1 行目は lab-4 と同じ）。lab をまだ作っていなければ lab-3 を打つ（変数 `telegraf_version` は既定の `1.40.0` のまま）。
 
 ```bash
 LAB_INSTANCE_ID=$(terraform -chdir=terraform/pipeline/lab output -raw lab_instance_id); echo "$LAB_INSTANCE_ID"
@@ -191,7 +191,7 @@ Web の「異常一覧」タブか、チャットで「今の異常は？」と�
 ### a-1. Spark の jar とスクリプトを S3 に置く
 
 Spark が Kafka（MSK の IAM 認証）と S3 Tables を読み書きするための jar 6 本を Maven Central から取り、`spark/snmp_sinks.py` と一緒に `terraform/base/core` のバケットの `analytics/` に置く。**a-2 の apply より前に置く**（ジョブがここから読む）。
-版は `ops/up.sh` の `JAR_URLS`（Spark 3.5.6 = EMR Serverless の `emr-7.13.0`）と揃える。`jars/` は gitignore 済み。
+版は `ops/up.sh` の `JAR_URLS`（Spark 3.5.6 = EMR Serverless の `emr-7.13.0`）と揃える。`jars/` は配布物には入っていない（`ops/up.sh` が無いときだけ取る）。
 
 ```bash
 KB_BUCKET=$(terraform -chdir=terraform/base/core output -raw kb_bucket_name); echo "$KB_BUCKET"
@@ -212,9 +212,9 @@ aws s3 sync jars/ "s3://$KB_BUCKET/analytics/jars/" --exclude "*" --include "*.j
 ### a-2. terraform/pipeline/analytics を apply する
 
 VPC / サブネット / バケットは `terraform/base/core` の state から、MSK のクラスターと SG とブローカーは `terraform/pipeline/stream` の state から読む（stream が無いと precondition で止まる）。
-作るのは S3 Tables のテーブルバケット `fukuda-nwc-poc-tables`（namespace `netops`、テーブル `snmp_metrics`）、EMR Serverless の Spark アプリケーション（ARM64、`emr-7.13.0`、アイドル 15 分で止まる）、ジョブの実行ロール、EMR の SG（MSK の SG に 9098 の受信を足す）、`s3tables` と `events`（EventBridge の PutEvents）の interface エンドポイント（2 AZ）、DynamoDB の異常テーブルへの書き込み権限。数分。
+作るのは S3 Tables のテーブルバケット `netops-poc-tables`（namespace `netops`、テーブル `snmp_metrics`）、EMR Serverless の Spark アプリケーション（ARM64、`emr-7.13.0`、アイドル 15 分で止まる）、ジョブの実行ロール、EMR の SG（MSK の SG に 9098 の受信を足す）、`s3tables` と `events`（EventBridge の PutEvents）の interface エンドポイント（2 AZ）、DynamoDB の異常テーブルへの書き込み権限。数分。
 
-格納先は変数 `sinks`（既定 `["iceberg", "opensearch", "prometheus"]` の 3 つ全部）で選ぶ。`opensearch` があると OpenSearch Serverless の TIMESERIES コレクション `fukuda-nwc-poc-logs`（VPC エンドポイント経由だけ。インデックス `snmp-logs` は最初の書き込みで作られる）、`prometheus` があると Amazon Managed Service for Prometheus のワークスペース `fukuda-nwc-poc-metrics` と `aps-workspaces` の interface エンドポイント（2 AZ）も作る。
+格納先は変数 `sinks`（既定 `["iceberg", "opensearch", "prometheus"]` の 3 つ全部）で選ぶ。`opensearch` があると OpenSearch Serverless の TIMESERIES コレクション `netops-poc-logs`（VPC エンドポイント経由だけ。インデックス `snmp-logs` は最初の書き込みで作られる）、`prometheus` があると Amazon Managed Service for Prometheus のワークスペース `netops-poc-metrics` と `aps-workspaces` の interface エンドポイント（2 AZ）も作る。
 `ops/up.sh` は `deploy.env` の `SINK_S3` / `SINK_OPENSEARCH` / `SINK_PROMETHEUS` をこの変数に組んで渡す。`iceberg` を外すと S3 Tables のテーブルバケットと `s3tables` のエンドポイントも作らない。手で打つときは既定のままなら `-var` は要らず、減らすなら apply に `-var 'sinks=["iceberg"]'` を付ける（`--metric-topics` / `--log-topics` は変数 `metric_topics` / `log_topics`。既定 `metrics` / `traps` と `logs`）。
 
 ```bash
@@ -247,10 +247,10 @@ OVERRIDES=$(terraform -chdir=terraform/pipeline/analytics output -raw configurat
 ```
 
 ```bash
-aws emr-serverless start-job-run --region ap-northeast-1 --application-id "$APP_ID" --execution-role-arn "$ROLE_ARN" --name snmp-sinks --mode STREAMING --job-driver "$JOB_DRIVER" --configuration-overrides "$OVERRIDES" --tags Project=fukuda-nwc-poc,owner=fukuda
+aws emr-serverless start-job-run --region ap-northeast-1 --application-id "$APP_ID" --execution-role-arn "$ROLE_ARN" --name snmp-sinks --mode STREAMING --job-driver "$JOB_DRIVER" --configuration-overrides "$OVERRIDES" --tags Project=netops-poc,owner=netops
 ```
 
-起動に 2〜5 分。様子は `list_job_runs_command` の出力のコマンドで見る（`RUNNING` になれば読んでいる。`FAILED` ならロググループ `/aws/emr-serverless/fukuda-nwc-poc` のドライバーの stderr）。テーブルに行が入ったかは `list_tables_command` と Athena（S3 Tables のカタログ `s3tablescatalog`）で見る。
+起動に 2〜5 分。様子は `list_job_runs_command` の出力のコマンドで見る（`RUNNING` になれば読んでいる。`FAILED` ならロググループ `/aws/emr-serverless/netops-poc` のドライバーの stderr）。テーブルに行が入ったかは `list_tables_command` と Athena（S3 Tables のカタログ `s3tablescatalog`）で見る。
 
 ```bash
 terraform -chdir=terraform/pipeline/analytics output -raw list_job_runs_command; echo
@@ -307,16 +307,16 @@ terraform -chdir=terraform/pipeline/graph init
 terraform -chdir=terraform/pipeline/graph apply
 ```
 
-10〜15 分。出来上がると SSM の `/fukuda-nwc-poc/neptune-endpoint` が書かれる。次にやることは出力 `next_step` にも出る。
+10〜15 分。出来上がると SSM の `/netops-poc/neptune-endpoint` が書かれる。次にやることは出力 `next_step` にも出る。
 
 ### g-2. Web を再起動して静的データを投入する
 
-Web は起動時に SSM を読むので、管理者のシェルで `sudo systemctl restart fukuda-nwc-poc-web`（`s-2` の後にも一度）。エージェントは呼び出しのたびに読む（60 秒キャッシュ）。
+Web は起動時に SSM を読むので、管理者のシェルで `sudo systemctl restart netops-poc-web`（`s-2` の後にも一度）。エージェントは呼び出しのたびに読む（60 秒キャッシュ）。
 `ops/up.sh` の手順 8 は lab の定義から作った 10 台と 10 本を入れる（「Neptune のトポロジを lab から作る」）。手で入れるなら「トポロジ」タブの「Neptune で編集」を開き、「静的データを投入」で 10 台と 10 本を入れる（Neptune の中身を全部消してから `agent/data/` を入れ直すので、編集をやり直すときにも使う）。以後はリンクの追加（機器 A / B は一覧から選び、インタフェースはその機器で使用中の名前から選ぶか新しい名前を打つ）と削除（既存リンクの一覧から 1 本選ぶ）がそこでできて、エージェントの答えにも反映される（次の質問から）。機器の追加・削除は画面に無いので、`agent/data/` を直して投入し直す。Neptune を消すと静的データに戻る。
 
 ### Neptune のトポロジを lab から作る
 
-Neptune に入る静的な構成は、lab の定義そのもの（`lab/wvs2.clab.yml.in` の `links:` と `lab/frr/<機器>.conf` の `router bgp` / `interface` の `description`）から `lab/lab_topology.py` が作る。
+Neptune に入る静的な構成は、lab の定義そのもの（`lab/wanlab.clab.yml.in` の `links:` と `lab/frr/<機器>.conf` の `router bgp` / `interface` の `description`）から `lab/lab_topology.py` が作る。
 機器の site と role は名前（`hq-ce-01` → `hq` / `ce`）、asn は `router bgp`、mgmt_ip は containerlab の `mgmt-ipv4`、監視対象かどうかは snmpd のサイドカーの相乗り先か、回線の種別は両端の role（host なら l2、pe 同士なら ibgp、ほかは ebgp）、主副と帯域は description（`primary` / `secondary` と `1G` / `100M` / `10G`）で決める。
 `agent/data/` の静的データと同じ内容になることを `tests/test_sync.py` が見ている（Neptune が無いとき（PIPELINE 無し、または `SKIP_GRAPH=1`）は静的データのまま動く）。
 
@@ -332,7 +332,7 @@ ops/sync-graph.sh
 ops/sync-graph.sh --replace
 ```
 
-動的な状態は別の経路で書く。Spark の検知が EventBridge に出す `AnomalyOpened` / `AnomalyResolved`（source `netops.spark`）を `terraform/pipeline/graph` のルールが受け、VPC の中の Lambda（`graph/status_handler.py`。`fukuda-nwc-poc-graph-status`）が Gremlin で `status` を書く。
+動的な状態は別の経路で書く。Spark の検知が EventBridge に出す `AnomalyOpened` / `AnomalyResolved`（source `<接頭辞>.spark`）を `terraform/pipeline/graph` のルールが受け、VPC の中の Lambda（`graph/status_handler.py`。`netops-poc-graph-status`）が Gremlin で `status` を書く。
 linkDown / linkUp（`kind` が `link_down`）はその機器のそのインタフェースが付く回線の辺に `DOWN` / `UP`、ほかの trap は機器の頂点に `ALARM` / `UP`。
 機器一覧・隣接・影響範囲のツールの答えに `status` が付き、Web の「トポロジ」タブでは赤い回線・赤い枠で出る（表の「状態」列も）。`ops/sync-graph.sh --replace` や「静的データを投入」で入れ直すと状態は消えて全部 UP に戻る（静的な構成だけを入れる）。
 Lambda のログは出力 `status_log_group_name` のロググループ（保持は `log_retention_days`、既定 7 日）。EventBridge は 1 分のあいだに Lambda が落ちれば 15 分・3 回まで再送する。

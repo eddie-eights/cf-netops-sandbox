@@ -1,7 +1,7 @@
 """lab の定義（containerlab のトポロジ + FRR の設定）から、Neptune に入れるトポロジ（機器と回線）を作る。
 
 設計の「静的なトポロジ構成の取得・同期（初期 & 定期ロード）」の PoC 版。実機なら LLDP / BGP / NETCONF で取るところを、
-lab には LLDP が無い（FRR）ので、機器の定義そのもの（wvs2.clab.yml.in の nodes / links と frr/<機器>.conf）から取る。
+lab には LLDP が無い（FRR）ので、機器の定義そのもの（wanlab.clab.yml.in の nodes / links と frr/<機器>.conf）から取る。
 出す形は agent/data（devices.yaml + topology.json）と同じで、graph.seed() にそのまま渡せる。agent/data と同じ 10 台・10 本になることは
 tests/test_sync.py が確かめる（lab を変えて agent/data を直し忘れるとテストが落ちる）。
 
@@ -200,7 +200,7 @@ def build(topo: dict, frr: dict) -> tuple[list[dict], list[dict]]:
 
 
 def load(lab_dir: str) -> tuple[list[dict], list[dict]]:
-    path = os.path.join(lab_dir, "wvs2.clab.yml.in")
+    path = os.path.join(lab_dir, "wanlab.clab.yml.in")
     with open(path, encoding="utf-8") as f:
         topo = load_yaml(f.read())
     frr = {}

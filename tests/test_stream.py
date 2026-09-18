@@ -40,11 +40,13 @@ mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 with open(SRC, encoding="utf-8") as f:
     src = f.read()
-check("argparse に --anomaly-table / --device-map / --event-bus がある",
-      all(f'"--{a}"' in src for a in ("anomaly-table", "device-map", "event-bus")))
+check("argparse に --anomaly-table / --device-map / --event-bus / --event-source がある",
+      all(f'"--{a}"' in src for a in ("anomaly-table", "device-map", "event-bus", "event-source")))
 check("build は --anomaly-table があるときだけ detect のクエリを足す",
       re.search(r'if args\.anomaly_table:[\s\S]*?http_query\(rows, "detect"', src) is not None)
-check("Source は netops.spark、DetailType は AnomalyOpened / AnomalyResolved", mod.EVENT_SOURCE == "netops.spark" and mod.EVENT_DETAIL_TYPE == "AnomalyOpened" and mod.EVENT_RESOLVED_TYPE == "AnomalyResolved")
+check("Source の既定は netops.spark（terraform は <接頭辞>.spark を渡す）、DetailType は AnomalyOpened / AnomalyResolved",
+      mod.EVENT_SOURCE == "netops.spark" and mod.EVENT_DETAIL_TYPE == "AnomalyOpened" and mod.EVENT_RESOLVED_TYPE == "AnomalyResolved"
+      and mod.parse_args(["--bootstrap", "b", "--checkpoint", "c", "--sinks", "iceberg", "--iceberg-table", "cat.ns.t"]).event_source == "netops.spark")
 check("parse_device_map は = の無い要素を捨てる",
       mod.parse_device_map("203.0.113.11=hq-ce-01,garbage,203.0.113.12=dc-ce-01") == {"203.0.113.11": "hq-ce-01", "203.0.113.12": "dc-ce-01"}
       and mod.parse_device_map("") == {})
@@ -114,7 +116,7 @@ class FakeEvents:
 def make():
     ddb, ev = FakeDynamo(), FakeEvents()
     send = mod.make_detect_sender("t", mod.parse_device_map("203.0.113.11=hq-ce-01,203.0.113.12=dc-ce-01"), "ap-northeast-1", "default",
-                                  dynamodb=ddb, events_client=ev)
+                                  "demo-poc.spark", dynamodb=ddb, events_client=ev)
     return send, ddb, ev
 
 
@@ -158,7 +160,7 @@ check("新しく open になったものだけ返し、AnomalyOpened を 1 件�
       [o["anomaly_id"] for o in opened] == [key] and len(ev.calls) == 1 and len(ev.calls[0]) == 1)
 entry = ev.calls[0][0]
 detail = json.loads(entry["Detail"])
-check("put_events の Source / DetailType / EventBusName", entry["Source"] == "netops.spark" and entry["DetailType"] == "AnomalyOpened" and entry["EventBusName"] == "default")
+check("put_events の Source（--event-source がそのまま入る）/ DetailType / EventBusName", entry["Source"] == "demo-poc.spark" and entry["DetailType"] == "AnomalyOpened" and entry["EventBusName"] == "default")
 check("Detail に anomaly_id / device_id / kind / target / first_seen / detail / source",
       detail == {"anomaly_id": key, "device_id": "hq-ce-01", "kind": "link_down", "target": "eth1", "first_seen": row["first_seen"],
                  "detail": "eth1 is down (poll)", "source": "poll"})
@@ -171,7 +173,7 @@ check("up → resolved（resolved_at が付く）",
       send([iface("203.0.113.11", "eth1", 1)]) == [] and ddb.plain(key)["status"] == "resolved" and "resolved_at" in ddb.plain(key))
 entry = ev.calls[-1][0]
 check("open → resolved で AnomalyResolved を 1 件出す（Detail に anomaly_id / device_id / kind / target / resolved_at / source）",
-      len(ev.calls) == 2 and len(ev.calls[1]) == 1 and entry["DetailType"] == "AnomalyResolved" and entry["Source"] == "netops.spark"
+      len(ev.calls) == 2 and len(ev.calls[1]) == 1 and entry["DetailType"] == "AnomalyResolved" and entry["Source"] == "demo-poc.spark"
       and json.loads(entry["Detail"]) == {"anomaly_id": key, "device_id": "hq-ce-01", "kind": "link_down", "target": "eth1",
                                           "resolved_at": ddb.plain(key)["resolved_at"], "source": "poll"})
 check("resolved のあとの up は何もしない（ConditionExpression。AnomalyResolved も出さない）",
@@ -229,7 +231,7 @@ frr_nodes = sorted(n[:-5] for n in os.listdir(os.path.join(ROOT, "lab", "frr")) 
 check("FRR の 6 台とも log file と bgp log-neighbor-changes を持つ", len(frr_nodes) == 6 and all(
       re.search(r"^log file /var/log/frr/frr\.log informational$", _read("lab", "frr", n + ".conf"), re.M)
       and re.search(r"^\s*bgp log-neighbor-changes$", _read("lab", "frr", n + ".conf"), re.M) for n in frr_nodes))
-clab = _read("lab", "wvs2.clab.yml.in")
+clab = _read("lab", "wanlab.clab.yml.in")
 check("containerlab は FRR の 6 台のログの置き場を bind する", all(f"- __LOG_DIR__/{n}:/var/log/frr" in clab for n in frr_nodes))
 labsh = _read("lab", "lab.sh")
 tele = _read("lab", "telegraf.conf.in")

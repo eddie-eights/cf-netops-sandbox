@@ -14,10 +14,11 @@ import time
 import urllib.error
 import urllib.request
 
-import boto3
 from botocore.auth import SigV4Auth
 from botocore.awsrequest import AWSRequest
 from botocore.exceptions import BotoCoreError, ClientError
+
+import toolkit
 
 PARAM_PREFIX = os.environ.get("PARAM_PREFIX", "")
 REGION = os.environ.get("AWS_REGION") or os.environ.get("BEDROCK_REGION") or "ap-northeast-1"
@@ -38,7 +39,7 @@ def gateway_url() -> str:
         return _cache["url"]
     _cache["checked"] = time.time()
     try:
-        _cache["url"] = boto3.client("ssm", region_name=REGION).get_parameter(
+        _cache["url"] = toolkit.client("ssm").get_parameter(
             Name=f"{PARAM_PREFIX}/gateway-url")["Parameter"]["Value"]
     except (ClientError, BotoCoreError):
         _cache["url"] = ""
@@ -70,7 +71,7 @@ def _post(url: str, body: dict) -> dict:
         "MCP-Protocol-Version": PROTOCOL_VERSION,
     }
     req = AWSRequest(method="POST", url=url, data=data, headers=headers)
-    creds = boto3.Session(region_name=REGION).get_credentials()
+    creds = toolkit.session().get_credentials()  # セッションは使い回す（RPC のたびに認証情報を取り直さない）
     if creds is None:
         raise RuntimeError("no AWS credentials for the gateway request")
     SigV4Auth(creds.get_frozen_credentials(), "bedrock-agentcore", REGION).add_auth(req)

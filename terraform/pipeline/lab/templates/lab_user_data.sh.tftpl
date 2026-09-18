@@ -30,7 +30,7 @@ fi
 command -v containerlab >/dev/null || dnf install -y $LAB/src/containerlab_${containerlab_version}_linux_arm64.rpm
 chmod 0755 $LAB/src/lab.sh
 ln -sfn $LAB/src/lab.sh /usr/local/bin/lab
-# フェーズ 2: Telegraf の rpm が lab/ にあれば入れる（無ければ何もしない。terraform/pipeline/stream が無くてもここは通る）
+# Telegraf の rpm が lab/ にあれば入れる（無ければ何もしない。terraform/pipeline/stream が無くてもここは通る）
 TELEGRAF_RPM=$LAB/src/telegraf-${telegraf_version}-1.aarch64.rpm
 if [ -f $TELEGRAF_RPM ] && ! rpm -q telegraf-${telegraf_version} >/dev/null 2>&1; then
   dnf install -y $TELEGRAF_RPM
@@ -48,7 +48,7 @@ __ENV__
 
 cat > /etc/systemd/system/${name_prefix}-lab.service <<__UNIT__
 [Unit]
-Description=${name_prefix} containerlab topology (wvs2)
+Description=${name_prefix} containerlab topology (wanlab)
 After=docker.service network-online.target
 Requires=docker.service
 
@@ -63,12 +63,12 @@ TimeoutStartSec=600
 WantedBy=multi-user.target
 __UNIT__
 
-# フェーズ 2: Telegraf。ExecStartPre で SSM の /<name_prefix>/msk-bootstrap を読んで設定を作る。terraform/pipeline/stream が無い間は
+# Telegraf。ExecStartPre で SSM の /<name_prefix>/msk-bootstrap を読んで設定を作る。terraform/pipeline/stream が無い間は
 # 失敗して 60 秒ごとに試し直す（トポロジには影響しない）。162/udp で trap を受けるので root で動かす
 if [ -f $TELEGRAF_RPM ]; then
   cat > /etc/systemd/system/${name_prefix}-telegraf.service <<__UNIT__
 [Unit]
-Description=${name_prefix} Telegraf - SNMP poll + trap from the lab to MSK (phase 2)
+Description=${name_prefix} Telegraf - SNMP poll + trap from the lab to MSK
 After=docker.service network-online.target ${name_prefix}-lab.service
 Wants=${name_prefix}-lab.service
 

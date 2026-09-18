@@ -8,18 +8,20 @@ variable "region" {
 variable "name_prefix" {
   description = "Same value as terraform/base/core (the IAM roles <name_prefix>-runtime / <name_prefix>-web get the DynamoDB policy)."
   type        = string
-  default     = "fukuda-nwc-poc"
+  default     = "netops-poc"
 
   validation {
-    condition     = can(regex("^[a-z][a-z0-9-]{1,24}$", var.name_prefix))
-    error_message = "name_prefix must match ^[a-z][a-z0-9-]{1,24}$."
+    # 一番きついのは OpenSearch Serverless の data access policy 名（32 文字まで）で、一番長い接尾辞は terraform/workflow の <name_prefix>-logs-read（10 文字）。だから 22 文字に抑える
+    # ハイフンの連続と末尾のハイフンも弾く（ECR のリポジトリ名が受け付けない）
+    condition     = can(regex("^[a-z][a-z0-9]*(-[a-z0-9]+)*$", var.name_prefix)) && length(var.name_prefix) >= 2 && length(var.name_prefix) <= 22
+    error_message = "name_prefix must be 2-22 lowercase letters, digits and single hyphens, starting with a letter and not ending with one."
   }
 }
 
 variable "owner" {
   description = "Value of the owner tag."
   type        = string
-  default     = "fukuda"
+  default     = "netops"
 
   validation {
     condition     = can(regex("^[A-Za-z0-9._-]{1,64}$", var.owner))
@@ -76,7 +78,7 @@ variable "log_retention_days" {
 
 # ---------------------------------------------------------------- MSK Connect S3 sink
 variable "create_s3_sink" {
-  description = "MSK Connect S3 sink (1 MCU, about 0.11 USD per hour). Needs the plugin zip at s3_sink_plugin_key before apply (README s-1). Set false to run without the sink."
+  description = "MSK Connect S3 sink (1 MCU, about 0.11 USD per hour). Needs the plugin zip at s3_sink_plugin_key before apply (docs/pipeline.md s-1). Set false to run without the sink."
   type        = bool
   default     = true
 }
@@ -88,7 +90,7 @@ variable "kafka_connect_version" {
 }
 
 variable "s3_sink_plugin_key" {
-  description = "Key of the Confluent S3 sink connector zip in the asset bucket of terraform/base/core (download from Confluent Hub and upload before apply, README s-1)."
+  description = "Key of the Confluent S3 sink connector zip in the asset bucket of terraform/base/core (download from Confluent Hub and upload before apply, docs/pipeline.md s-1)."
   type        = string
   default     = "stream/confluentinc-kafka-connect-s3-12.1.11.zip"
 

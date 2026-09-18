@@ -1,4 +1,4 @@
-"""terraform/pipeline/graph の Lambda（<prefix>-graph-status）。Spark の検知（EventBridge の netops.spark / AnomalyOpened と AnomalyResolved）を受けて、
+"""terraform/pipeline/graph の Lambda（<prefix>-graph-status）。Spark の検知（EventBridge の <接頭辞>.spark / AnomalyOpened と AnomalyResolved）を受けて、
 Neptune の機器と回線の動的な状態（property status）を書く。設計の「動的なステータス反映（トラップ / ログ → Lambda → Neptune の属性を UP → DOWN）」。
 
   AnomalyOpened   kind=link_down → 機器 device_id のインタフェース target が付く回線（辺）を DOWN

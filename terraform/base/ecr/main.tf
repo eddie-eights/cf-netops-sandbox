@@ -1,5 +1,5 @@
-# ECR repositories of fukuda-nwc-poc. The agent image (README step 2), the three lab images (README lab-1)
-# and the two workflow images (worker / temporal, README workflow-1) go here.
+# ECR repositories of netops-poc. The agent image (docs/deploy-manual.md step 2), the three lab images (docs/pipeline.md lab-1)
+# and the two workflow images (worker / temporal, docs/workflow.md w-1) go here.
 # force_delete = true so that `terraform destroy` removes the repositories together with their images (daily ops/down.sh).
 
 locals {

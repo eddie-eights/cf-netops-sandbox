@@ -6,12 +6,12 @@
 
 - **画面（`web/app.py`）を直すときは S3 に置いてインスタンスを再起動する**（手順 4）。apply は要らない。Web の起動のしかた（`templates/web_user_data.sh.tftpl`）を変えたときだけ `terraform/base/core` を apply する。**user_data が変わるとインスタンスが作り直され、インスタンス ID が変わる**（`user_data_replace_on_change`。Web は状態を持たないので中身は失われない）。手順 4・7 の枠は毎回出力から ID を取るのでそのまま打てばよいが、利用者に配った `start_session_command` は配り直す。
 - **エージェントを更新するときは、新しいタグで push して `-var agent_image_tag=v2` で apply する**（`ops/up.sh` なら `IMAGE_TAG=v2`）。以後の apply にも毎回同じタグを付ける（付け忘れると既定の `v1` に戻す差分が出る）。`agent/data/` を変えたときも同じ（トポロジはイメージに入っている）。Web の「トポロジ」タブは S3 の `web/data/` を見るので、そちらも置き直す。
-- **ガードレールを変えたら、`terraform/base/core/kb.tf` の `aws_bedrock_guardrail_version.r1` の `description` を `fukuda-nwc-poc r2` のように上げて apply する。**版は作ったときの中身で固定されるので、上げないと Runtime は古い版のまま判定する。
+- **ガードレールを変えたら、`terraform/agent/kb.tf` の `aws_bedrock_guardrail_version.r1` の `description` を `netops-poc r2` のように上げて apply する。**版は作ったときの中身で固定されるので、上げないと Runtime は古い版のまま判定する。
 - 手順書を変えたら、手順 4 をやり直す。apply は要らない。
 - AMI は apply のたびに SSM パラメータ（変数 `ami_ssm_parameter`）から最新の AL2023 を引く。新しい AMI が出ていると**インスタンスが作り直され、インスタンス ID が変わる**（上と同じ扱い）。apply の差分に `aws_instance.web` の `ami` が出ていたらこれ。
 - user_data のテンプレート（`templates/*.sh.tftpl`）は `templatefile` を通るので、シェルの `${…}` をそのまま書くと Terraform の変数として解釈される。シェルの変数は `$${…}`、`%{` は `%%{` と書く。
 - user_data の上限は 16 KB。Gradio の画面は S3 に置いているので、user_data には入れない。
-- 変数の既定を変えたいときは `terraform/<ルート>/terraform.tfvars.example` を `terraform.tfvars` に写して書く（gitignore 済み。`-var` より弱く、既定より強い）。
+- 変数の既定を変えたいときは `terraform/<ルート>/terraform.tfvars.example` を `terraform.tfvars` に写して書く（配布物には入っていない。`-var` より弱く、既定より強い）。
 
 ## 手元で確かめる
 
@@ -32,23 +32,23 @@ terraform fmt -check -recursive terraform
 ```
 
 ```bash
-for r in ecr main lab stream analytics graph workflow; do terraform -chdir=terraform/$r init -backend=false -input=false >/dev/null && terraform -chdir=terraform/$r validate || break; done
+for r in base/ecr base/core agent pipeline/lab pipeline/stream pipeline/analytics pipeline/graph workflow; do terraform -chdir=terraform/$r init -backend=false -input=false >/dev/null && terraform -chdir=terraform/$r validate || break; done
 ```
 
 ```bash
 for t in test_app test_graph test_stream test_sync test_analytics test_workflow; do uv run --group dev python tests/$t.py || break; done
 ```
 
-健全なら `fmt` は何も出さず、`validate` は 8 回 `Success! The configuration is valid.` を出し（workflow は非推奨の警告が付く）、テストはそれぞれ最後の行が `通過 48 / 失敗 0`、`通過 23 / 失敗 0`、`通過 44 / 失敗 0`、`通過 28 / 失敗 0`、`通過 173 / 失敗 0`、`通過 133 / 失敗 0` になる（`--group dev` は `agent/topology.py` が `devices.yaml` を読むための PyYAML）。
+健全なら `fmt` は何も出さず、`validate` は 8 回 `Success! The configuration is valid.` を出し（workflow は非推奨の警告が付く）、テストはそれぞれ最後の行が `通過 51 / 失敗 0`、`通過 23 / 失敗 0`、`通過 47 / 失敗 0`、`通過 28 / 失敗 0`、`通過 169 / 失敗 0`、`通過 141 / 失敗 0` になる（2026-09-18 の実測）（`--group dev` は `agent/topology.py` が `devices.yaml` を読むための PyYAML）。
 `init -backend=false` は provider を取るだけで、state には触らない（apply 済みの PC で打ってもよい）。
 `ops/up.sh` と `ops/down.sh`、EC2 の上で打つ `ops/seed_graph.py` は AWS に触らないと動かせないので、`ops/check.sh` は構文だけを見る。
-`pyproject.toml` と `uv.lock` はこの確認のためだけのもので、AWS に置く依存は `agent/requirements.txt` と `web/requirements.txt`。`.venv/` は gitignore してある。
+`pyproject.toml` と `uv.lock` はこの確認のためだけのもので、AWS に置く依存は `agent/requirements.txt` と `web/requirements.txt`。`.venv/` は手元にできるだけで、配布物には入っていない。
 
 ### Web を手元で動かす
 
 EC2 に置く前に画面だけ見たいとき、または EC2 で立たない原因を切り分けるとき。チャットは AgentCore Runtime を呼ぶので、手順 3 が済んでいて認証（手順 0-1）が通っていることが要る。トポロジのタブは `agent/data/` の静的データで出る（Runtime が無ければチャットだけエラー表示になる）。
 
-環境変数は `.env.example` に全部並べてある（意味と、AWS 上で誰が入れるか）。写して `RUNTIME_ARN` だけ埋める。`.env` は gitignore 済みで、`web/app.py` がリポジトリ直下の `.env` を読む（`ENV_FILE=<パス>` で場所を変えられる。同じ名前は後の行が勝つ）。
+環境変数は `.env.example` に全部並べてある（意味と、AWS 上で誰が入れるか）。写して `RUNTIME_ARN` だけ埋める。`.env` は配布物には入っていない（`.env.example` から自分で作る）。`web/app.py` は展開したフォルダ直下の `.env` を読む（`ENV_FILE=<パス>` で場所を変えられる。同じ名前は後の行が勝つ）。
 
 ```bash
 cp .env.example .env
@@ -70,15 +70,15 @@ uv run python web/app.py
 
 ## VS Code の設定（任意）
 
-手元の PC の VS Code と同じ設定・拡張を社用 PC に入れるためのファイルを置いてある。AWS には触らないので、飛ばしてもよい。
+このリポジトリを触るときの VS Code の設定・拡張を置いてある。AWS には触らないので、飛ばしてもよい。
 
 | ファイル | 中身 | どう使うか |
 |---|---|---|
-| `.vscode/settings.json` | このリポジトリを開いたときだけ効く設定（改行 LF、保存で terraform fmt、`.terraform` を検索から外す） | 何もしなくてよい。フォルダを開けば効く |
-| `.vscode/extensions.json` | このリポジトリに要る拡張の推奨 | フォルダを開くと「推奨する拡張機能をインストールしますか」と出る |
-| `docs/vscode/user-settings.json` | 手元の PC のユーザー設定 | 中身を貼る（下の 2） |
+| `.vscode/settings.json` | このフォルダを開いたときだけ効く設定（改行 LF、保存で terraform fmt、`.terraform` を検索から外す） | 何もしなくてよい。フォルダを開けば効く |
+| `.vscode/extensions.json` | このプロジェクトに要る拡張の推奨 | フォルダを開くと「推奨する拡張機能をインストールしますか」と出る |
+| `docs/vscode/user-settings.json` | ユーザー設定の例（見た目・Python・Terraform まわり） | 中身を貼る（下の 2） |
 | `docs/vscode/keybindings.json` | ターミナルで Shift+Enter を改行にするキー割り当て | 中身を貼る（下の 3） |
-| `docs/vscode/extensions.txt` | 拡張の一覧。`[repo]` がこのリポジトリ用、`[extra]` は手元の PC に入れている残り | `ops/vscode-setup.sh` が読む |
+| `docs/vscode/extensions.txt` | このプロジェクトに要る拡張の一覧 | `ops/vscode-setup.sh` が読む |
 | `ops/vscode-setup.sh` | 一覧を読んで `code --install-extension` を回すだけのスクリプト | 下の 1 |
 
 1. 拡張を入れる（WSL のターミナルで打つ）。`code` が無いと言われたら、VS Code で WSL のフォルダを開いてから、その中のターミナルで打つ。
@@ -87,28 +87,22 @@ uv run python web/app.py
 bash ops/vscode-setup.sh
 ```
 
-手元の PC と同じものを全部入れるなら（PHP や Azure など、このリポジトリに要らないものも入る）:
-
-```bash
-ALL=1 bash ops/vscode-setup.sh
-```
-
 2. ユーザー設定: VS Code で Ctrl+Shift+P →「基本設定: ユーザー設定を開く (JSON)」→ `docs/vscode/user-settings.json` の中身を貼る。既に設定があるなら、丸ごと上書きせず要るところだけ足す。
 
 3. キー割り当て: Ctrl+Shift+P →「基本設定: キーボードショートカットを開く (JSON)」→ `docs/vscode/keybindings.json` の中身を貼る。
 
-**手元では入れているが、この控えから外した設定。**社用 PC に既定で持ち込むものではないと判断した。要るなら自分で足す。
+**この例からはあえて外した設定。**既定で持ち込むものではないと判断した。要るなら自分で足す。
 
 | 設定 | 外した理由 |
 |---|---|
 | `claudeCode.allowDangerouslySkipPermissions` | 実行前の確認を飛ばす設定 |
 | `security.workspace.trust.untrustedFiles` を `open` | 信頼していないフォルダのファイルをそのまま開く設定 |
 | `security.promptForLocalFileProtocolHandling` を `false` | ローカルファイルを開くときの確認を消す設定 |
-| `claudeCode.claudeProcessWrapper` | 手元の PC の絶対パス。このリポジトリは public なので置かない |
+| `claudeCode.claudeProcessWrapper` | PC ごとの絶対パスになるので配布物には入れない |
 
 注意:
 
-- テーマ `One Dark Modern Classic` を出す拡張は、手元の拡張一覧に見当たらなかった（`code --list-extensions` に出ない形で入っているらしい）。同じ見た目にしたいなら Marketplace で名前で探して入れる。入っていなくても既定のテーマになるだけで、壊れはしない。
+- テーマ `One Dark Modern Classic` を出す拡張は `code --list-extensions` に出ない形で入ることがあり、`extensions.txt` には載せていない。同じ見た目にしたいなら Marketplace で名前で探して入れる。入っていなくても既定のテーマになるだけで、壊れはしない。
 - WSL では拡張が 2 か所に分かれる。Python や Terraform のように WSL 側に入るものと、テーマ・アイコン・日本語パックのように Windows 側に入るものがある。`ops/vscode-setup.sh` は WSL 側で打つ前提で、失敗したものは最後にまとめて出す。
 - SSL 検査のある回線では Marketplace のダウンロードが証明書エラーになることがある。そのときは Windows 側の VS Code から入れるか、Marketplace から `.vsix` を落として「VSIX からのインストール」を使う。
 
@@ -119,7 +113,7 @@ ALL=1 bash ops/vscode-setup.sh
 - 複数人の同時利用を想定した作り。t4g.small で数人程度まで（Gradio の同時実行は 4）。
 - BGP の状態の監視。stream で入るのはインタフェースの up/down（ポーリングと trap）だけで、BGP の隣接や経路の変化は異常にならない。
 - Temporal の永続化。`temporal server start-dev` の SQLite はタスクの中にあり、タスクが入れ替わると（デプロイ・障害・`ops/down.sh`）実行履歴ごと消える。毎日消す運用なので置いていない。UI（8233）に認証も無く、SSM のポートフォワーディングでしか届かない。
-- Temporal のワーカーは ECS on Fargate に置いている。ユーザー決定（2026-09-17「Temporal（EKS）だった。ただいまの段階では EKS ではなく ECS で OK」）のとおり EKS は後回し（クラスタだけで $0.10/h）。
+- Temporal のワーカーは ECS on Fargate に置いている。EKS は後回し（クラスタだけで $0.10/h）。
 - `query_history`（S3 Tables の履歴の検索）は Athena のワークグループとカタログの接続をまだ置いていないので、案内だけ返す。長期の履歴を調べるには Athena を足す。
 - 修復の対象は lab の EC2 で、打てるのは `sudo lab heal-main` と `sudo lab check` だけ（`workflow/worker.py` の `ALLOWED_ACTIONS`。エージェントがそれ以外を返したら `none` にする）。実機には何も打たない。
 - Grafana などの可視化は保留。異常一覧と修復案は DynamoDB の表をそのまま出す。
@@ -134,20 +128,20 @@ ALL=1 bash ops/vscode-setup.sh
 
 ## 確認したこと・確認できていないこと
 
-確認したこと（2026-09-14、lab・graph・stream は 2026-09-15、Terraform への移行と `deploy.env` による選び方は 2026-09-16、analytics と、フェーズ 1 / 2 / 3 から機能（AGENT / PIPELINE / WORKFLOW）への付け直しと `terraform/agent` の切り出しは 2026-09-17）。
+確認したこと（2026-09-14、lab・graph・stream は 2026-09-15、Terraform への移行と `deploy.env` による選び方は 2026-09-16、analytics と `terraform/agent` の切り出しは 2026-09-17）。
 
-- `ops/check.sh` が最後まで `すべて通過` で終わる（2026-09-16）。中身は次の 2 つと `bash -n`。
-- `deploy.env` の読み込みと機能の分け方を、偽の `aws` / `terraform` で `ops/up.sh` の手順 0 まで流した（2026-09-17）。ファイル無しで土台 + AGENT、`PIPELINE=1` で lab + stream + analytics + graph、`SKIP_STREAM` で analytics も外れ、`SKIP_ANALYTICS` / `SKIP_LAB` + `SKIP_STREAM` / `SKIP_GRAPH` で外れること。`WORKFLOW=1` で workflow が足され、`WORKFLOW=1` に `AGENT=0` / `PIPELINE=0` / `SKIP_LAB` / `SKIP_STREAM` / `SKIP_ANALYTICS` を書くと止まること。古い `PHASE=1 / 2 / 3` が機能に読み替えられ、`2B` / `5A`、`WITH_LAB` / `WITH_STREAM`、値の誤りで何も作らずに止まること。環境変数がファイルより優先されること。`ops/down.sh` がファイルの `KEEP_ECR` を読むこと（`tests/test_workflow.py`）。
+- `ops/check.sh` が最後まで `すべて通過` で終わる（2026-09-18）。中身は次の 2 つと `bash -n`。
+- `deploy.env` の読み込みと機能の分け方を、偽の `aws` / `terraform` で `ops/up.sh` の手順 0 まで流した（2026-09-17）。ファイル無しで土台 + AGENT、`PIPELINE=1` で lab + stream + analytics + graph、`SKIP_STREAM` で analytics も外れ、`SKIP_ANALYTICS` / `SKIP_LAB` + `SKIP_STREAM` / `SKIP_GRAPH` で外れること。`WORKFLOW=1` で workflow が足され、`WORKFLOW=1` に `AGENT=0` / `PIPELINE=0` / `SKIP_LAB` / `SKIP_STREAM` / `SKIP_ANALYTICS` を書くと止まること。知らないキーや値の誤りで何も作らずに止まること。環境変数がファイルより優先されること。`ops/down.sh` がファイルの `KEEP_ECR` を読むこと（`tests/test_workflow.py`）。
 - 8 つのルート（`base/ecr` / `base/core` / `agent` / `pipeline/lab` / `pipeline/stream` / `pipeline/analytics` / `pipeline/graph` / `workflow`）で `terraform init -backend=false` と `terraform validate` が通り、`terraform fmt -check -recursive` に差分が無い（Terraform 1.16.0、hashicorp/aws 6.64.0、opensearch-project/opensearch 2.6.0、hashicorp/time 0.14.2、hashicorp/archive 2.8.1。2026-09-17）。`terraform/agent` と `terraform/workflow` の plan は `terraform/base/core`（workflow は agent も）を apply した後でないと remote state が読めずに止まる（設計どおり）。
-- Spark の検知と graph の模擬テスト。`tests/test_stream.py`（34 項目、2026-09-17: `spark/snmp_sinks.py` の detect を pyspark 無しで動かし、機器名の引き方、ポーリングの open / resolved、`first_seen` を保つ、解消済みへの up を数えない、MIB 無しの trap から ifDescr を取る、linkUp で resolved、壊れたレコードを飛ばす、開いた瞬間だけ EventBridge に `AnomalyOpened` を、解消した瞬間だけ `AnomalyResolved` を出す。`terraform/pipeline/stream` から detector Lambda と lambda エンドポイントが消え、`anomaly_table_arn` を出すこと）、`tests/test_graph.py`（23 項目: SSM 未設定なら静的、GraphSON の読み替え、Neptune からの組み立て、失敗時と空のときの静的への切り戻し、`add_link` の正規化と重複拒否、`remove_link` / `add_device` / `seed` の Gremlin、`seed` が `status` を入れないこと、`set_status` が回線の両向きと機器に書くこと、`status` が機器一覧・隣接・影響範囲に出ること）、`tests/test_sync.py`（28 項目、2026-09-17: `lab/lab_topology.py` が lab の定義から作る機器と回線が `agent/data/` と同じであること（PyYAML があるときと無いとき）、帯域・主副・asn の読み取り、`ops/up.sh` / `sync-graph.sh` / `seed_graph.py` の受け渡し、`graph/status_handler.py` の `AnomalyOpened` / `AnomalyResolved` から `set_status` への写し（回線 / 機器 / 知らない型は無視）、`terraform/pipeline/graph` の zip・EventBridge のルール・VPC の Lambda・SG・IAM・ロググループ）。
-- analytics の静的テスト `tests/test_analytics.py`（169 項目、2026-09-17: `terraform/pipeline/analytics` が読む main / stream の出力が実際に定義されていること、EMR の SG に CIDR の受信が無いこと、S3 Tables のテーブルの列が `spark/snmp_sinks.py` の select の列と同じ順で同じ型であること、`start-job-run` に渡す JSON の Iceberg / S3 Tables の設定と `--sinks` / `--metric-topics` / `--log-topics`、`sinks` で OpenSearch Serverless のコレクション（TIMESERIES、VPC エンドポイントだけ）と Prometheus のワークスペース + `aps-workspaces` のエンドポイントが count で生えること、実行ロールの `aoss:APIAccessAll` / `aps:RemoteWrite`、Kafka の MSK IAM 認証のオプション 4 つ、格納先ごとの checkpoint と 60 秒トリガー、`sinks` の既定が 3 つ全部で `events` のエンドポイントと DynamoDB への書き込み権限が付くこと、`SINK_S3=0` で S3 Tables と `s3tables` のエンドポイントと実行ロールの `S3TablesCatalog` と Spark のカタログの設定が外れること、`ops/up.sh` の `SINK_S3` / `SINK_OPENSEARCH` / `SINK_PROMETHEUS` の判定（up.sh から切り出して bash で実際に動かす。全部 0 と、古い `SINKS` との併記は止まる）と jar 6 本が Spark 3.5.6 と揃っていること、up / down の順番。スクリプトは pyspark 無しで import して、引数の検査・トピックの振り分け・メトリクス名とラベル名の規則・remote write の protobuf と snappy（テストの中で手で復号する）・`_bulk` の文書を実際に動かす）。
-- workflow の静的テスト `tests/test_workflow.py`（131 項目、2026-09-17: ワーカーのプロンプトと JSON の読み取り、`ALLOWED_ACTIONS` が `lab/lab.sh` のサブコマンドにあること、起こす条件とワークフロー ID、DynamoDB の読み書きの形（GSI `status-updated_at-index`、承認は `pending` のときだけ通る条件式）、Runtime の呼び方（`qualifier=DEFAULT`、セッション ID 33 文字以上）、MCP クライアントの JSON / SSE の読み取りと `toolConfig` への変換、`tools/tools.json` が `agent/` のツール仕様と名前・引数・必須・説明まで同じであること、tools Lambda の振り分け、SQS のメッセージから `anomaly_id` を取ること、`terraform/workflow` の配線（EventBridge のルール → SQS と DLQ、ワーカーの `ANOMALY_QUEUE_URL` と受信 / 削除の権限、VPC の中の tools Lambda と `aoss` / `aps` の権限、ARM64 の Fargate、`start-dev` の SQLite、worker が temporal の起動を待つ、環境変数、IAM が `InvokeAgentRuntime` と `AWS-RunShellScript` だけ、Gateway の `AWS_IAM` / `MCP`、Lambda の zip の中身）、`ops/up.sh` / `down.sh` / `check.sh` と `deploy.env.example`）。
+- Spark の検知と graph の模擬テスト。`tests/test_stream.py`（47 項目、2026-09-18: `spark/snmp_sinks.py` の detect を pyspark 無しで動かし、機器名の引き方、ポーリングの open / resolved、`first_seen` を保つ、解消済みへの up を数えない、MIB 無しの trap から ifDescr を取る、linkUp で resolved、壊れたレコードを飛ばす、開いた瞬間だけ EventBridge に `AnomalyOpened` を、解消した瞬間だけ `AnomalyResolved` を出す。`terraform/pipeline/stream` から detector Lambda と lambda エンドポイントが消え、`anomaly_table_arn` を出すこと）、`tests/test_graph.py`（23 項目: SSM 未設定なら静的、GraphSON の読み替え、Neptune からの組み立て、失敗時と空のときの静的への切り戻し、`add_link` の正規化と重複拒否、`remove_link` / `add_device` / `seed` の Gremlin、`seed` が `status` を入れないこと、`set_status` が回線の両向きと機器に書くこと、`status` が機器一覧・隣接・影響範囲に出ること）、`tests/test_sync.py`（28 項目、2026-09-17: `lab/lab_topology.py` が lab の定義から作る機器と回線が `agent/data/` と同じであること（PyYAML があるときと無いとき）、帯域・主副・asn の読み取り、`ops/up.sh` / `sync-graph.sh` / `seed_graph.py` の受け渡し、`graph/status_handler.py` の `AnomalyOpened` / `AnomalyResolved` から `set_status` への写し（回線 / 機器 / 知らない型は無視）、`terraform/pipeline/graph` の zip・EventBridge のルール・VPC の Lambda・SG・IAM・ロググループ）。
+- analytics の静的テスト `tests/test_analytics.py`（169 項目、2026-09-17: `terraform/pipeline/analytics` が読む main / stream の出力が実際に定義されていること、EMR の SG に CIDR の受信が無いこと、S3 Tables のテーブルの列が `spark/snmp_sinks.py` の select の列と同じ順で同じ型であること、`start-job-run` に渡す JSON の Iceberg / S3 Tables の設定と `--sinks` / `--metric-topics` / `--log-topics`、`sinks` で OpenSearch Serverless のコレクション（TIMESERIES、VPC エンドポイントだけ）と Prometheus のワークスペース + `aps-workspaces` のエンドポイントが count で生えること、実行ロールの `aoss:APIAccessAll` / `aps:RemoteWrite`、Kafka の MSK IAM 認証のオプション 4 つ、格納先ごとの checkpoint と 60 秒トリガー、`sinks` の既定が 3 つ全部で `events` のエンドポイントと DynamoDB への書き込み権限が付くこと、`SINK_S3=0` で S3 Tables と `s3tables` のエンドポイントと実行ロールの `S3TablesCatalog` と Spark のカタログの設定が外れること、`ops/up.sh` の `SINK_S3` / `SINK_OPENSEARCH` / `SINK_PROMETHEUS` の判定（up.sh から切り出して bash で実際に動かす。全部 0 なら止まる）と jar 6 本が Spark 3.5.6 と揃っていること、up / down の順番。スクリプトは pyspark 無しで import して、引数の検査・トピックの振り分け・メトリクス名とラベル名の規則・remote write の protobuf と snappy（テストの中で手で復号する）・`_bulk` の文書を実際に動かす）。
+- workflow の静的テスト `tests/test_workflow.py`（141 項目、2026-09-18: ワーカーのプロンプトと JSON の読み取り、`ALLOWED_ACTIONS` が `lab/lab.sh` のサブコマンドにあること、起こす条件とワークフロー ID、DynamoDB の読み書きの形（GSI `status-updated_at-index`、承認は `pending` のときだけ通る条件式）、Runtime の呼び方（`qualifier=DEFAULT`、セッション ID 33 文字以上）、MCP クライアントの JSON / SSE の読み取りと `toolConfig` への変換、`tools/tools.json` が `agent/` のツール仕様と名前・引数・必須・説明まで同じであること、tools Lambda の振り分け、SQS のメッセージから `anomaly_id` を取ること、`terraform/workflow` の配線（EventBridge のルール → SQS と DLQ、ワーカーの `ANOMALY_QUEUE_URL` と受信 / 削除の権限、VPC の中の tools Lambda と `aoss` / `aps` の権限、ARM64 の Fargate、`start-dev` の SQLite、worker が temporal の起動を待つ、環境変数、IAM が `InvokeAgentRuntime` と `AWS-RunShellScript` だけ、Gateway の `AWS_IAM` / `MCP`、Lambda の zip の中身）、`ops/up.sh` / `down.sh` / `check.sh` と `deploy.env.example`）。
 - `temporalio/temporal` 1.9.1 のイメージが arm64 を含むこと（マニフェスト、2026-09-17）。
 - EMR Serverless の `emr-7.13.0` が Spark 3.5.6 であること、S3 Tables のカタログが `emr-7.5.0` 以上で使えること、jar 6 本が Maven Central にあること（HTTP 200）、S3 Tables のデータが `<uuid>--table-s3` という名前のバケットに置かれること、EMR Serverless が 0.0.0.0/0 の受信を持つ SG を拒否すること、`start-job-run` に `--mode STREAMING` があること（2026-09-17、AWS の文書）。
 - Telegraf の `inputs.snmp` は数値 OID とフィールド名を明示すれば MIB 無しで動き、`inputs.snmp_trap` は v2c を MIB 無しで受ける（varbind の名前は数値 OID）。`agent_host` タグは `source` に替わっている。net-snmp の `monitor` には `iquerySecName` と内部ユーザーが要る。
-- MSK は Kafka 4.1.x の KRaft モードで作る（`kafka_version = "4.1.x.kraft"`。Kafka 4 に ZooKeeper モードは無く、版の末尾の `.kraft` が KRaft の指定。Standard ブローカーで選べる最新が 4.1.x で、4.2.x は Express ブローカー専用。AWS の「推奨」の印は 3.9.x に付いたまま。`aws kafka list-kafka-versions` と MSK の supported versions のページで 2026-09-18 に確認。KRaft のコントローラーに追加料金は無い）。クライアントは Kafka 2.1 以降のプロトコルが要る（KIP-896）。MSK Connect 2.7.1、Spark の kafka-clients 3.x、Telegraf（sarama）はどれも満たすが、4.1.x.kraft では kafka.t3.small を `CreateCluster` が `Unsupported InstanceType specified. Valid values: [express.m7g.*, kafka.m5.*, kafka.m7g.*]` で拒否した（2026-09-18 実機）ので、ブローカーは kafka.m5.large にした（2026-09-18 ユーザー決定）。
+- MSK は Kafka 4.1.x の KRaft モードで作る（`kafka_version = "4.1.x.kraft"`。Kafka 4 に ZooKeeper モードは無く、版の末尾の `.kraft` が KRaft の指定。Standard ブローカーで選べる最新が 4.1.x で、4.2.x は Express ブローカー専用。AWS の「推奨」の印は 3.9.x に付いたまま。`aws kafka list-kafka-versions` と MSK の supported versions のページで 2026-09-18 に確認。KRaft のコントローラーに追加料金は無い）。クライアントは Kafka 2.1 以降のプロトコルが要る（KIP-896）。MSK Connect 2.7.1、Spark の kafka-clients 3.x、Telegraf（sarama）はどれも満たすが、4.1.x.kraft では kafka.t3.small を `CreateCluster` が `Unsupported InstanceType specified. Valid values: [express.m7g.*, kafka.m5.*, kafka.m7g.*]` で拒否した（2026-09-18 実機）ので、ブローカーは kafka.m5.large にした。
 - Neptune の最新が 1.4.8.0、Neptune の IAM アクションが `neptune-db:*DataViaQuery`、`aws_msk_configuration` の版を `latest_revision` で渡すこと、Lambda の MSK イベントソースが NAT 無しの VPC では lambda と sts のエンドポイントを要ること、MSK Connect の信頼先が `kafkaconnect.amazonaws.com` であること。
-- `agent/app.py` と `agent/topology.py` を、boto3 と SDK を差し替えた模擬テスト（`tests/test_app.py`）で確かめた。46 項目（2026-09-17 に Web の編集画面の選択肢 `interfaces` / `link_choices` の 5 項目を足した）: ハイブリッド検索の指定、リランクの有無で `rerankingConfiguration` を付け外しする、質問だけを `guardContent` に入れる、ガードレールで止めた往復を履歴に残さない、参照元の付け方、検索とモデルの失敗、履歴の長さ、ツールの仕様が `toolConfig` に載ること、`toolUse` → `toolResult` の往復、往復の上限（5 回）、無い機器の扱い、トポロジ関数の結果、ツールが 8 つ（トポロジ 4 + 異常一覧 + 証拠 3）、`list_anomalies` が未配備で error を返す、振り分け。
+- `agent/app.py` と `agent/topology.py` を、boto3 と SDK を差し替えた模擬テスト（`tests/test_app.py`）で確かめた。51 項目（2026-09-17 に Web の編集画面の選択肢 `interfaces` / `link_choices` の 5 項目を足した）: ハイブリッド検索の指定、リランクの有無で `rerankingConfiguration` を付け外しする、質問だけを `guardContent` に入れる、ガードレールで止めた往復を履歴に残さない、参照元の付け方、検索とモデルの失敗、履歴の長さ、ツールの仕様が `toolConfig` に載ること、`toolUse` → `toolResult` の往復、往復の上限（5 回）、無い機器の扱い、トポロジ関数の結果、ツールが 8 つ（トポロジ 4 + 異常一覧 + 証拠 3）、`list_anomalies` が未配備で error を返す、振り分け。
 - `web/app.py` を手元（Python 3.14、gradio 5.50.0）で起動し、画面が出ることと、Runtime の呼び出しが `AccessDenied` のときにエラー表示になることを確かめた。
 - `web/requirements.txt` の依存が arm64 / cp313 の wheel で全部取れること（`pip download`、58 個、132 MB。numpy は manylinux_2_28 で、AL2023 の glibc 2.34 で動く）。
 - FRR 10.2.1・network-multitool v0.10.0・alpine 3.20 のイメージが arm64 を含むこと（マニフェスト）。containerlab v0.79.0 に `linux_arm64.rpm` があること。
@@ -164,12 +158,12 @@ ALL=1 bash ops/vscode-setup.sh
 
 確認できていないこと。
 
-- **実環境への apply。**上はすべて手元の静的検査と模擬テストで、`terraform/agent` に切り出した後の形は AWS 上で apply していない（切り出す前の `terraform/base/core` 一体の形は 2026-09-16〜17 に動いた）。PIPELINE の 4 ルートも同じで、lab の起動、Telegraf → MSK の IAM 認証、MSK Connect、Spark のジョブ、S3 Tables / OpenSearch Serverless / Prometheus への書き込み、Spark の検知（DynamoDB と EventBridge）、Neptune への Gremlin は実環境で通していない。Mac からの通しの apply も打っていない。
+- **繰り返しの apply と、細かい項目の作り込み。**8 ルートの通しの apply は 2026-09-18 に AWS 上で 1 回通し、lab の起動・Telegraf → MSK の IAM 認証・Spark のジョブ・S3 Tables への書き込み・Spark の検知（DynamoDB と EventBridge）・Neptune への Gremlin・承認から修復までを一周させた（そのとき見つけた 4 点は直してある）。**確かめたのはその 1 回の一周だけで**、下に挙げた項目ごとの確認や、別のアカウント・別の PC からの打ち直しは見ていない。
 - workflow の次の点。Gateway（MCP）に VPC モードの Runtime と Fargate のタスクから届くか（Gateway のエンドポイントは公開で、閉域からは `bedrock-agentcore` の interface エンドポイント経由になる想定。届かなければ Runtime はコンテナの中のツールに戻る）。組織の SCP / IAM が ECS / Fargate / AgentCore Gateway / Lambda を止めていないか。`temporal server start-dev` が Fargate の中で `--ip 0.0.0.0` で上がり、worker が `localhost:7233` に付けるか。`temporalio` 1.33.0 の SDK と Temporal サーバー 1.9.1 の組み合わせ。SSM Run Command が lab の EC2 で `sudo lab heal-main` を通し、異常が resolved に変わるまでの時間が確認の 6 回 × 30 秒に収まるか。Nova 2 Lite が求めた JSON の形で修復案を返すか（返さなければ `action=none` の案になる）。EMR Serverless の driver から `events` の interface エンドポイント経由で PutEvents が通るか。EventBridge のルールから SQS へ届き、ワーカーが `sqs` の interface エンドポイント経由で long polling できるか。VPC の中の tools Lambda から Neptune（SG の穴）/ OpenSearch Serverless（`aoss` エンドポイント、コレクションの network policy）/ Prometheus（`aps-workspaces` エンドポイントで `query_range`）に届くか。OpenSearch Serverless の logs コレクションの OCU が `CREATE_KB=1` のコレクションと共有されるか（されなければ +$0.33/h）。Spark が書く文書の `@timestamp` を `search_logs` がそのまま range で引けるか。
-- analytics の次の点。`emr-7.13.0` に S3 Tables のカタログの jar が同梱されているか（同梱なら `s3-tables-catalog-for-iceberg-runtime` を足すと衝突する可能性がある）。Kafka の jar 6 本の組み合わせで Structured Streaming の Kafka ソースが動くか。閉域から S3 Tables に届くか（`s3tables` の interface エンドポイントと、S3 ゲートウェイエンドポイントの `*--table-s3` の許可）。Lake Formation の設定が要るか。EMR の SG に自分自身からの受信が要るか。組織の SCP / IAM が EMR Serverless / S3 Tables を止めていないか。
+- analytics の次の点。EMR の SG に自分自身からの受信が要るか。組織の SCP / IAM が EMR Serverless / S3 Tables を止めていないか。2026-09-18 の一周では、jar 6 本の組み合わせで Structured Streaming の Kafka ソースが動き（`emr-7.13.0` に同梱の S3 Tables のカタログとの衝突も起きず）、閉域から S3 Tables に書けた（`s3tables` の interface エンドポイントと、S3 ゲートウェイエンドポイントの `*--table-s3` の許可）。Lake Formation の設定は要らなかった。
 - `templatefile` で展開した user_data（`web_user_data.sh.tftpl` / `lab_user_data.sh.tftpl`）が `bash -n` を通るか。展開後のシェルを手元で取り出して確かめていない。
 - `aws_mskconnect_connector` の `kafkaconnect_version` に `2.7.1` が入るか（許される値の一覧を文書で確認できていない）。MSK Connect が S3 とログに届くのに、S3 ゲートウェイと logs エンドポイント以外の経路が要るか。
-- Telegraf 1.40.0 の `outputs.kafka` の `AWS-MSK-IAM` が、インスタンスロール（IMDS）の資格情報で動くか。もっと古い版で使えるかも未確認。
+- Telegraf の `outputs.kafka` の `AWS-MSK-IAM` が、1.40.0 より古い版でも使えるか（1.40.0 + インスタンスロール（IMDS）の資格情報は 2026-09-18 の一周で通った）。
 - Confluent の S3 sink 12.1.11 の zip を CustomPlugin として登録できるか（Confluent Community License。ダウンロードの URL と同意の要否）。
 - `web/app.py` は手元で `uv run --group web` の gradio 5.50.0 で読み込んで Blocks が組み上がることと、編集画面のハンドラの入力チェック（未選択・同じ機器・IF 無し・Neptune 未配備）までを確かめた（2026-09-17）。ブラウザでの操作と Neptune への実書き込みは EC2 で見る。Gremlin の形は `tests/test_graph.py`。
 - boto3 の `neptunedata` クライアントが VPC モードの Runtime からクラスターの DNS 名で届くか（プライベート DNS。エンドポイントは要らない想定）。

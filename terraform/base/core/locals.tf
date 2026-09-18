@@ -1,4 +1,4 @@
-# fukuda-nwc-poc - base root module shared by the three features (pipeline / agent / workflow). VPC without NAT, EIP,
+# netops-poc - base root module shared by the three features (pipeline / agent / workflow). VPC without NAT, EIP,
 # public IP or load balancer (2 private subnets, S3 gateway endpoint, ssm / ssmmessages endpoints), the security groups,
 # the chat web EC2 (Gradio: chat + topology figure + device table, 127.0.0.1 only, reached through SSM Session Manager
 # port forwarding), the shared S3 bucket and the IAM roles the features attach policies to.

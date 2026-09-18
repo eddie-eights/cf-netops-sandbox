@@ -1,14 +1,14 @@
 # SNMP を投げる対象の初期値。**正本は backend の devices テーブル**で、これはその初期化用。
-# 中身はローカル lab（app/wvs2-lab。containerlab + FRR）の 10 台そのもの（2026-09-12 に既定シードを lab へ切替）。
-# 項目名はローカルネットワーク担当と 2026-09-11 に合意した形（変えるときは両方で合わせる）。
-# wvs2.clab.yml を変えたらここも直す（ここが唯一のシード。lab 側にコピーは置かない）。
+# 中身は lab/（containerlab + FRR）の 10 台そのもの。
+# 項目名は lab/lab_topology.py が作る形と揃える（変えるときは両方で合わせる）。
+# wanlab.clab.yml を変えたらここも直す（ここが唯一のシード。lab 側にコピーは置かない）。
 #
 # - mgmt_ip は containerlab の mgmt ネットワーク netops-lab（203.0.113.0/24）上のアドレス。
 #   collector を同じ docker network に載せればこの IP で 161/udp に届く。
-# - snmp_community は lab 固定の public。実機の値は書かない（CLAUDE.md「書かないもの」）。
+# - snmp_community は lab 固定の public。実機の値は書かない。
 # - device_id は snmpd の sysName と同じ値。SNMP 側からも突き合わせられる。
 # - PE は拠点を持たないキャリア網側の機器なので site: carrier。
-#   1 台が複数拠点を収容するため <拠点名>-pe-NN にはできない（app/wvs2-lab/README.md「命名」参照）。
+#   1 台が複数拠点を収容するため <拠点名>-pe-NN にはできない。
 # - links は device_id への外部キーなので、topology.json に出る機器は全部ここに要る。
 #   ポーリングしない PE と LAN 端末も enabled: false で行として置く。
 devices:

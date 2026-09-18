@@ -1,4 +1,4 @@
-# fukuda-nwc-poc - workflow root module (feature "workflow"). One ECS on Fargate task (ARM64, 1 vCPU / 2 GB) runs the Temporal dev server
+# netops-poc - workflow root module (feature "workflow"). One ECS on Fargate task (ARM64, 1 vCPU / 2 GB) runs the Temporal dev server
 # and a Python worker in the VPC of terraform/base/core. The Spark job of terraform/pipeline/analytics puts an AnomalyOpened event on EventBridge
 # when it opens an anomaly; events.tf routes it to an SQS queue and the worker starts one workflow per anomaly. The workflow asks the
 # chat runtime (AgentCore) for a cause and a fix (the runtime looks at Neptune / OpenSearch / Prometheus through the MCP tools),
@@ -76,8 +76,14 @@ locals {
   subnet_id      = data.terraform_remote_state.main.outputs.instance_subnet_id # サブネット a（ssm / bedrock-agentcore のエンドポイントがある方）
   endpoint_sg_id = data.terraform_remote_state.main.outputs.endpoint_security_group_id
   # agent が無いとワークフローが原因を聞く先が無い。下の precondition で「agent を先に」と出す
-  runtime_arn       = try(data.terraform_remote_state.agent.outputs.agent_runtime_arn, "")
-  reader_role_names = toset([data.terraform_remote_state.main.outputs.runtime_role_name, data.terraform_remote_state.main.outputs.web_role_name])
+  runtime_arn = try(data.terraform_remote_state.agent.outputs.agent_runtime_arn, "")
+
+  # 修復案を読む 2 つのロール（チャットの Runtime と Web の EC2）。書けるのは web だけ（proposals.tf の decide_access）
+  web_role_name     = data.terraform_remote_state.main.outputs.web_role_name
+  reader_role_names = toset([data.terraform_remote_state.main.outputs.runtime_role_name, local.web_role_name])
+
+  # 修復案テーブルとその GSI。3 つのポリシー（tools Lambda / ワーカー / 読む側のロール）が同じものを指す
+  proposal_table_arns = [aws_dynamodb_table.proposals.arn, "${aws_dynamodb_table.proposals.arn}/index/*"]
 
   # stream が無いと異常が無い。下の precondition で「stream を先に」と出す
   anomaly_table     = try(data.terraform_remote_state.stream.outputs.anomaly_table_name, "")

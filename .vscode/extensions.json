@@ -1,5 +1,5 @@
 // このリポジトリを VS Code で開いたときに出る推奨拡張。
-// 同じ並びを docs/vscode/extensions.txt の [repo] 節にも置いてある（ops/vscode-setup.sh が読むのはそちら）。
+// 同じ並びを docs/vscode/extensions.txt にも置いてある（ops/vscode-setup.sh が読むのはそちら）。
 {
   "recommendations": [
     "hashicorp.terraform",

@@ -4,13 +4,14 @@
 
 スクリプトを使わず 1 ルートずつ手で打つときの説明。`ops/up.sh` / `ops/down.sh` の中身はここのコマンドそのもので、
 手で打つときは apply のたびに差分が出て `yes` と打つまで止まる。
-**コマンドはすべてリポジトリの直下で打つ**（`terraform -chdir=terraform/<ルート>` と `web/` などのパスが直下から見た位置になっている）。
+**コマンドはすべて展開したフォルダの直下で打つ**（`terraform -chdir=terraform/<ルート>` と `web/` などのパスが直下から見た位置になっている）。
+ここに出てくるリソース名は既定の接頭辞 `netops-poc` のもの。変えるなら全部の apply に同じ `-var name_prefix=<接頭辞>`（と `-var owner=<名前>`）を付ける（`ops/up.sh` なら `deploy.env` の `NAME_PREFIX` / `OWNER` 1 か所で済む）。
 
 ### 0. 自分の環境の値を環境変数に入れる
 
 **手順 1 以降のコマンドは、この手順で入れた認証と環境変数を前提にしている。**飛ばすと `$ACCOUNT_ID` が空文字になり、
 lab-1 のレジストリ名が `.dkr.ecr.…` のように欠けたり、手順 5 のタグ付けが ARN の形が違うと言って落ちたりする。
-値そのものは公開リポジトリに書けないので、ここで自分の環境から取る。
+値そのものは配布物に書けないので、ここで自分の環境から取る。
 
 **環境変数はターミナルごと。**別のターミナルを開いたり、閉じて開き直したりしたら、0-1 から打ち直す（0-5 にファイルに残す方法がある）。
 
@@ -23,7 +24,7 @@ aws sts get-caller-identity
 ```
 
 **IAM ユーザーの一時セッションでは打たない。**`sts get-session-token` で取った一時セッション（MFA 用にサブシェルを開くツールが既定でこれを渡すことがある）では IAM の API が呼べず、
-名前付きの IAM ロールを作る `terraform apply`（手順 1 / 3 / lab / stream / graph）が認証エラーで落ちる（2026-09-15 に会社 PC で CloudFormation 版で確認。Terraform も同じ認証情報で IAM の API を呼ぶ）。
+名前付きの IAM ロールを作る `terraform apply`（手順 1 / 3 / lab / stream / graph）が認証エラーで落ちる（2026-09-15 に会社 PC で確認。Terraform も同じ認証情報で IAM の API を呼ぶ）。
 IAM ユーザーなら長期キー（`aws configure`）のまま打つ。`ops/up.sh` はこれを見つけて先頭で止まる。
 
 `aws configure` の長期キー、または SSO ログインで入っているなら、この 0-1 は飛ばして 0-2 へ。`aws login` で入っているときは、下の段落だけ済ませる。
@@ -33,13 +34,13 @@ IAM ユーザーなら長期キー（`aws configure`）のまま打つ。`ops/up
 `~/.aws/config` に足す 3 行（`<aws login したプロファイル>` は `aws login --profile` に付けた名前。付けていなければ `default`）:
 
 ```ini
-[profile fukuda-nwc-poc-terraform]
+[profile netops-poc-terraform]
 credential_process = aws configure export-credentials --profile <aws login したプロファイル> --format process
 region = ap-northeast-1
 ```
 
 ```bash
-export AWS_PROFILE=fukuda-nwc-poc-terraform
+export AWS_PROFILE=netops-poc-terraform
 ```
 
 ```bash
@@ -120,10 +121,10 @@ echo "ACCOUNT_ID=$ACCOUNT_ID"; echo "ADMIN_ARN=$ADMIN_ARN"
 
 #### 0-5. 毎回打ちたくないとき（任意）
 
-値をファイルに残し、ターミナルを開くたびに読み込む。**このファイルはアカウント ID を含むので、リポジトリの中に置かない**（ホームに置く）。
+値をファイルに残し、ターミナルを開くたびに読み込む。**このファイルはアカウント ID を含むので、展開したフォルダの中に置かない**（ホームに置く）。
 
 ```bash
-cat > ~/.fukuda-nwc-poc.env <<EOF2
+cat > ~/.netops-poc.env <<EOF2
 export ACCOUNT_ID=$ACCOUNT_ID
 export ADMIN_ARN=$ADMIN_ARN
 EOF2
@@ -132,7 +133,7 @@ EOF2
 次回からは、0-1（認証）の後にこれを打つだけでよい。`terraform output` で取る値（`$INSTANCE_ID` など）はファイルに入れなくてよい（各枠の 1 行目で取り直す）。
 
 ```bash
-source ~/.fukuda-nwc-poc.env; echo "ACCOUNT_ID=$ACCOUNT_ID"; echo "ADMIN_ARN=$ADMIN_ARN"
+source ~/.netops-poc.env; echo "ACCOUNT_ID=$ACCOUNT_ID"; echo "ADMIN_ARN=$ADMIN_ARN"
 ```
 
 ### 1. ECR リポジトリを作る
@@ -152,8 +153,8 @@ push 先のリポジトリ URL を出力から見ておく（手順 2 の 1 行�
 terraform -chdir=terraform/base/ecr output -raw agent_repository_url; echo
 ```
 
-`123456789012.dkr.ecr.ap-northeast-1.amazonaws.com/fukuda-nwc-poc-agent` の形（先頭の 12 桁は `$ACCOUNT_ID` と同じ）で出ればよい。
-既定（変数 `create_lab_repositories = true`）で lab 用の `fukuda-nwc-poc-lab-frr` / `-lab-snmpd` / `-lab-multitool` も一緒にできる。
+`123456789012.dkr.ecr.ap-northeast-1.amazonaws.com/netops-poc-agent` の形（先頭の 12 桁は `$ACCOUNT_ID` と同じ）で出ればよい。
+既定（変数 `create_lab_repositories = true`）で lab 用の `netops-poc-lab-frr` / `-lab-snmpd` / `-lab-multitool` も一緒にできる。
 
 ### 2. イメージをビルドして push する
 
@@ -239,7 +240,7 @@ terraform -chdir=terraform/agent output
 | 出力（ルート） | 何の値 | 使う手順（環境変数） |
 |---|---|---|
 | `web_instance_id`（base/core） | Web を動かす EC2 のインスタンス ID（`i-0` で始まる） | 4 の再起動、7 のポートフォワーディング（`$INSTANCE_ID`） |
-| `kb_bucket_name`（base/core） | S3 バケット名。`fukuda-nwc-poc-kb-` + アカウント ID | 4、lab-2、s-1（`$KB_BUCKET`） |
+| `kb_bucket_name`（base/core） | S3 バケット名。`netops-poc-kb-` + アカウント ID | 4、lab-2、s-1（`$KB_BUCKET`） |
 | `start_session_command`（base/core） | 7 のコマンドにインスタンス ID を埋めた完成形 | 7。利用者に配るときはこちらをコピーして渡す（利用者の PC には state も環境変数も無い） |
 | `upload_web_command`（base/core） | 4 のコマンドにバケット名を埋めた完成形 | 4。手順 4 の枠と同じ内容なので、どちらを打ってもよい |
 | `chat_url`（base/core） | `http://localhost:8080/` | 7 |
@@ -265,14 +266,14 @@ uv run --python 3.13 --with pip python -m pip download --only-binary=:all: \
 
 uv には `pip download` に当たるものが無いので、使い捨ての環境に pip を入れて打つ（`--with pip`）。uv を使わない端末なら先頭を `python3 -m pip download` に替える（python3 と pip が要る）。
 
-置くのは 5 種類。`web/app.py`、その依存の一覧、**`agent/` の 3 モジュール（`topology.py` `anomalies.py` `graph.py`。Web の「トポロジ」「異常一覧」タブが import する。置き忘れると Web が `ModuleNotFoundError` で立たない）**、静的トポロジの `agent/data/`、上で取った `wheels/`。
-1 行目で手順 3 の出力 `kb_bucket_name` を `$KB_BUCKET` に入れる（`echo` で `fukuda-nwc-poc-kb-` で始まる名前が出ること）。
+置くのは 5 種類。`web/app.py`、その依存の一覧、**`agent/` の 5 モジュール（`toolkit.py` `topology.py` `anomalies.py` `graph.py` `proposals.py`。Web の「トポロジ」「異常一覧」「承認」タブが import する。置き忘れると Web が `ModuleNotFoundError` で立たない）**、静的トポロジの `agent/data/`、上で取った `wheels/`。
+1 行目で手順 3 の出力 `kb_bucket_name` を `$KB_BUCKET` に入れる（`echo` で `netops-poc-kb-` で始まる名前が出ること）。
 
 ```bash
 KB_BUCKET=$(terraform -chdir=terraform/base/core output -raw kb_bucket_name); echo "$KB_BUCKET"
 aws s3 cp web/app.py "s3://$KB_BUCKET/web/app.py"
 aws s3 cp web/requirements.txt "s3://$KB_BUCKET/web/requirements.txt"
-for f in topology anomalies graph proposals; do aws s3 cp agent/$f.py "s3://$KB_BUCKET/web/$f.py"; done
+for f in toolkit topology anomalies graph proposals; do aws s3 cp agent/$f.py "s3://$KB_BUCKET/web/$f.py"; done
 aws s3 cp agent/data/ "s3://$KB_BUCKET/web/data/" --recursive
 aws s3 sync wheels/ "s3://$KB_BUCKET/web/wheels/"
 ```
@@ -284,9 +285,9 @@ INSTANCE_ID=$(terraform -chdir=terraform/base/core output -raw web_instance_id);
 aws ec2 reboot-instances --region ap-northeast-1 --instance-ids "$INSTANCE_ID"
 ```
 
-上の `aws s3` の 5 行は出力 `upload_web_command`（バケット名を埋めて 1 行にしたもの）と同じ。`web/app.py` を直したときも同じ手順（置いて再起動）。`wheels/` は gitignore してある。
+上の `aws s3` の 5 行は出力 `upload_web_command`（バケット名を埋めて 1 行にしたもの）と同じ。`web/app.py` を直したときも同じ手順（置いて再起動）。`wheels/` は配布物に入っていない（手順 4 の `pip download` で作る）。
 
-**手順書（`CREATE_KB=1` / `create_knowledge_base=true` のときだけ。既定では作らないので、この段落は飛ばす）。**このリポジトリの `kb-docs/` を S3 に置いて、取り込みジョブを流す。**ナレッジベースは S3 を自動で見に行かない。**md を足したり直したりしたら、置き直して取り込みをやり直す。
+**手順書（`CREATE_KB=1` / `create_knowledge_base=true` のときだけ。既定では作らないので、この段落は飛ばす）。**`kb-docs/` を S3 に置いて、取り込みジョブを流す。**ナレッジベースは S3 を自動で見に行かない。**md を足したり直したりしたら、置き直して取り込みをやり直す。
 S3 と Bedrock の API を呼ぶので、インターネットか AWS の API に届く端末で行う。コマンドは出力 `upload_docs_command` と `start_ingestion_command` にもある。
 
 最初の 3 行で手順 3 の出力 `kb_bucket_name`（base/core）と `knowledge_base_id` / `data_source_id`（agent）を `$KB_BUCKET` / `$KB_ID` / `$DS_ID` に入れる（`echo` でバケット名と英数字 10 桁が 2 つ出ること。ID が空ならナレッジベースを作っていない）。最後の行は取り込みジョブを始めて、そのジョブ ID を `$JOB_ID` に入れる。
@@ -314,14 +315,14 @@ aws bedrock-agent get-ingestion-job --region ap-northeast-1 \
 ### 5. Runtime のロググループに保持期間とタグを付ける
 
 `AGENT=1` のときだけ。Runtime のロググループは AgentCore が作るので、Terraform の管理外になる。既定は無期限保持。
-名前は出力 `runtime_log_group_name`（`/aws/bedrock-agentcore/runtimes/fukuda_nwc_poc_agent-<英数字 10 桁>-DEFAULT` の形）。下の 1 行目がそれを `$LOG_GROUP` に入れる（`echo` でこの形が出ること）。**まだ無ければ、手順 7 で 1 回チャットした後に行う**（`ResourceNotFoundException` が出たらまだ無い）。
+名前は出力 `runtime_log_group_name`（`/aws/bedrock-agentcore/runtimes/netops_poc_agent-<英数字 10 桁>-DEFAULT` の形）。下の 1 行目がそれを `$LOG_GROUP` に入れる（`echo` でこの形が出ること）。**まだ無ければ、手順 7 で 1 回チャットした後に行う**（`ResourceNotFoundException` が出たらまだ無い）。
 
 ```bash
 LOG_GROUP=$(terraform -chdir=terraform/agent output -raw runtime_log_group_name); echo "$LOG_GROUP"
 aws logs put-retention-policy --region ap-northeast-1 --log-group-name "$LOG_GROUP" --retention-in-days 7
 aws logs tag-resource --region ap-northeast-1 \
   --resource-arn "arn:aws:logs:ap-northeast-1:$ACCOUNT_ID:log-group:$LOG_GROUP" \
-  --tags Project=fukuda-nwc-poc,owner=fukuda
+  --tags Project=netops-poc,owner=netops
 ```
 
 ### 6. 利用者に権限を渡す
@@ -338,7 +339,7 @@ aws logs tag-resource --region ap-northeast-1 \
       "Action": "ssm:StartSession",
       "Resource": "arn:aws:ec2:ap-northeast-1:<アカウント ID>:instance/*",
       "Condition": {
-        "StringEquals": { "ssm:resourceTag/Project": "fukuda-nwc-poc" },
+        "StringEquals": { "ssm:resourceTag/Project": "netops-poc" },
         "BoolIfExists": { "ssm:SessionDocumentAccessCheck": "true" }
       }
     },
@@ -368,7 +369,7 @@ aws logs tag-resource --region ap-northeast-1 \
 
 ```bash
 aws ssm describe-instance-information --region ap-northeast-1 \
-  --filters Key=tag:Project,Values=fukuda-nwc-poc \
+  --filters Key=tag:Project,Values=netops-poc \
   --query 'InstanceInformationList[].[InstanceId,PingStatus,AgentVersion]' --output table
 ```
 
@@ -412,7 +413,7 @@ PC の 8080 が使用中なら `localPortNumber` を変え、URL のポートも
 
 ## 片付け
 
-まとめて打つなら `ops/down.sh`（「[毎日の起動と片付けをスクリプトで打つ](deploy.md)」）。以下はその中身。
+まとめて打つなら `ops/down.sh`（「[デプロイの詳しい説明](deploy.md)」）。以下はその中身。
 
 **順番はこのとおりに。**後のルートが前のルートの state を読んでいるので、先に前のルートを消すと、後のルートの destroy が値を読めずに止まる。
 作っていないルートの行は飛ばす（`ls terraform/*/terraform.tfstate` で state があるルートが分かる）。各 destroy は消すリソースの一覧を出して `yes` を待つ。手順 3 で `-var` を足したなら、`terraform/base/core` の destroy にも同じものを付ける。
@@ -423,7 +424,7 @@ LOG_GROUP=$(terraform -chdir=terraform/agent output -raw runtime_log_group_name)
 
 ↑ Runtime のロググループ名（agent を作っているとき）。`terraform/agent` を消すと出力ごと見えなくなるので、先に取っておく。
 
-workflow を作っていれば、最初に消す（手順 w-2 の `-var` を destroy にも付ける）。
+workflow を作っていれば、最初に消す（[WORKFLOW](workflow.md) の手順 w-2 の `-var` を destroy にも付ける）。
 
 ```bash
 terraform -chdir=terraform/workflow destroy -var "worker_image_tag=$IMAGE_TAG"
@@ -474,36 +475,4 @@ aws logs delete-log-group --region ap-northeast-1 --log-group-name "$LOG_GROUP"
 - ECR はイメージごと消える（`force_delete`）。残すなら `terraform/base/ecr` を消さなくてよい（保管料は月数円）。
 - destroy が終わっても **state ファイルは消さない**（空の state が残るだけ。次の apply で使う）。
 - 消し残しは「[名前とタグ](architecture.md)」の `get-resources` で確かめる。
-
-## CloudFormation 版から移るとき
-
-このリポジトリは 2026-09-15 まで CloudFormation だった。**CloudFormation 版のスタックが残っていると、Terraform は同じ名前（バケット・IAM ロール・ECR リポジトリ・ガードレールなど）を作れず `AlreadyExists` で落ちる**（`ops/up.sh` は手順 0 で気づいて止まる）。
-先に CloudFormation 版を全部消す。手順 0 の `$ACCOUNT_ID` が入ったターミナルで、上から順に打つ。作っていないスタックの行は、無いものを消そうとするだけで何も起きずに通る（`wait` もすぐ返る）。
-
-```bash
-# 1. stream / graph（作っていれば）
-aws cloudformation delete-stack --region ap-northeast-1 --stack-name fukuda-nwc-poc-graph
-aws cloudformation delete-stack --region ap-northeast-1 --stack-name fukuda-nwc-poc-stream
-aws cloudformation wait stack-delete-complete --region ap-northeast-1 --stack-name fukuda-nwc-poc-graph
-aws cloudformation wait stack-delete-complete --region ap-northeast-1 --stack-name fukuda-nwc-poc-stream
-# 2. lab（作っていれば）。stream が消え終わってから
-aws cloudformation delete-stack --region ap-northeast-1 --stack-name fukuda-nwc-poc-lab
-aws cloudformation wait stack-delete-complete --region ap-northeast-1 --stack-name fukuda-nwc-poc-lab
-# 3. 本体。先にバケットを空にする（中身が残ると DELETE_FAILED）
-aws s3 rm s3://fukuda-nwc-poc-kb-$ACCOUNT_ID --recursive
-aws cloudformation delete-stack --region ap-northeast-1 --stack-name fukuda-nwc-poc
-aws cloudformation wait stack-delete-complete --region ap-northeast-1 --stack-name fukuda-nwc-poc
-# 4. ECR（イメージごと消える）と build（作っていれば。zip が残ると DELETE_FAILED なので先に空にする）
-aws cloudformation delete-stack --region ap-northeast-1 --stack-name fukuda-nwc-poc-ecr
-aws s3 rm s3://fukuda-nwc-poc-build-$ACCOUNT_ID --recursive
-aws cloudformation delete-stack --region ap-northeast-1 --stack-name fukuda-nwc-poc-build
-aws cloudformation wait stack-delete-complete --region ap-northeast-1 --stack-name fukuda-nwc-poc-ecr
-aws cloudformation wait stack-delete-complete --region ap-northeast-1 --stack-name fukuda-nwc-poc-build
-# 5. スタックの外にある Runtime のロググループ（あれば）
-aws logs describe-log-groups --region ap-northeast-1 --log-group-name-prefix /aws/bedrock-agentcore/runtimes/fukuda_nwc_poc_agent --query 'logGroups[].logGroupName' --output text
-```
-
-5 で名前が出たら、それを `aws logs delete-log-group --region ap-northeast-1 --log-group-name <出た名前>` で消す（残しても Terraform とはぶつからない。保管料だけ）。
-`wait` が `Waiter StackDeleteComplete failed` で返ったら、そのスタックが `DELETE_FAILED` になっている。コンソールのイベントで理由を見て（Runtime の ENI なら 8 時間待つ、バケットの中身なら空にする）、同じ `delete-stack` と `wait` を打ち直す。
-全部消えたら `ops/up.sh`（または手順 1 から）。
 

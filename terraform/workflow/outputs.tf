@@ -19,7 +19,7 @@ output "anomaly_queue_url" {
 }
 
 output "anomaly_rule_name" {
-  description = "EventBridge rule that routes AnomalyOpened (source netops.spark) to the queue"
+  description = "EventBridge rule that routes AnomalyOpened (source <name_prefix>.spark) to the queue"
   value       = aws_cloudwatch_event_rule.anomalies.name
 }
 

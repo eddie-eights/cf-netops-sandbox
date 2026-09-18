@@ -5,7 +5,7 @@ data "aws_ssm_parameter" "al2023" {
 
 resource "aws_iam_role" "web" {
   name        = "${var.name_prefix}-web"
-  description = "fukuda-nwc-poc chat web EC2 - SSM managed node, reads web assets from S3 and the runtime ARN from SSM"
+  description = "${var.name_prefix} chat web EC2 - SSM managed node, reads web assets from S3 and the runtime ARN from SSM"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -24,7 +24,7 @@ resource "aws_iam_role_policy_attachment" "web_ssm" {
   policy_arn = "arn:${local.partition}:iam::aws:policy/AmazonSSMManagedInstanceCore"
 }
 
-# 画面のコード・静的データ・wheel は同じバケットの web/ に置く（README の手順 4）。docs/ は読ませない。
+# 画面のコード・静的データ・wheel は同じバケットの web/ に置く（docs/deploy-manual.md の手順 4）。docs/ は読ませない。
 # Runtime の ARN は terraform/agent が /<name_prefix>/runtime-arn に書き、web/app.py が 60 秒ごとに読む（agent を後から入れ替えても再起動が要らない）。
 # InvokeAgentRuntime の許可は terraform/agent がこのロールに足す
 resource "aws_iam_role_policy" "web_assets" {

@@ -22,6 +22,8 @@ log.setLevel(logging.INFO)
 
 TOOL_NAME_KEY = "bedrockAgentCoreToolName"
 DELIMITER = "___"
+# ツールを持つモジュール（agent/app.py の MODULES と同じ並び）。ツールを増やすときはそちらと両方に足す
+MODULES = (topology, anomalies, evidence, proposals)
 
 
 def tool_name(context) -> str:
@@ -31,15 +33,10 @@ def tool_name(context) -> str:
 
 
 def dispatch(name: str, args: dict) -> dict:
-    if name in topology.TOOLS:
-        topology.reload()
-        return topology.run_tool(name, args)
-    if name in anomalies.TOOLS:
-        return anomalies.run_tool(name, args)
-    if name in evidence.TOOLS:
-        return evidence.run_tool(name, args)
-    if name in proposals.TOOLS:
-        return proposals.run_tool(name, args)
+    """ツール名を持っているモジュールに渡す（topology の reload は topology.run_tool が自分で呼ぶ）"""
+    for m in MODULES:
+        if name in m.TOOLS:
+            return m.run_tool(name, args)
     return {"error": f"unknown tool {name}"}
 
 

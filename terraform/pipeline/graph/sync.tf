@@ -1,4 +1,4 @@
-# ---------------------------------------------------------------- dynamic status: EventBridge (netops.spark) -> Lambda -> Neptune
+# ---------------------------------------------------------------- dynamic status: EventBridge (<name_prefix>.spark) -> Lambda -> Neptune
 # The Spark job of terraform/pipeline/analytics puts AnomalyOpened / AnomalyResolved on the default bus when a link goes down / comes back.
 # This rule sends both to a small Lambda in the VPC (graph/status_handler.py + agent/graph.py) that sets the property "status"
 # (DOWN / UP, ALARM for other traps) on the link edge or the device vertex. The web draws DOWN in red and the chat tools return it.
@@ -18,6 +18,13 @@ data "archive_file" "status" {
   source {
     content  = file("${path.module}/../../../agent/graph.py")
     filename = "graph.py"
+  }
+
+  # graph.py が import する共通部品（リージョン・SSM パラメータ・boto3 クライアント）。入れ忘れると
+  # apply も plan も通るのに、実行時に ModuleNotFoundError で status が一度も書かれない
+  source {
+    content  = file("${path.module}/../../../agent/toolkit.py")
+    filename = "toolkit.py"
   }
 }
 
@@ -130,7 +137,9 @@ resource "aws_cloudwatch_event_rule" "status" {
   description = "AnomalyOpened / AnomalyResolved from the Spark job (terraform/pipeline/analytics) to the status Lambda"
 
   event_pattern = jsonencode({
-    source        = ["netops.spark"]
+    # Source は接頭辞ごとに変わる（terraform/pipeline/analytics の locals.event_source が Spark に --event-source で渡す値）。
+    # ここを netops.spark で固定すると、1 つの AWS アカウントを何人かで使ったとき他の人の異常でこの Lambda が動く
+    source        = ["${var.name_prefix}.spark"]
     "detail-type" = ["AnomalyOpened", "AnomalyResolved"]
   })
 }

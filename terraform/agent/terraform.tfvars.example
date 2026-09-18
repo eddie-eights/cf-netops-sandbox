@@ -1,14 +1,15 @@
-# Copy to terraform.tfvars (gitignored) only when the defaults are not right. Every value has a default in variables.tf.
-# ops/up.sh passes owner / agent_image_tag / create_knowledge_base / kb_admin_principal_arn / opensearch_cacert_file with -var.
+# Copy to terraform.tfvars only when the defaults are not right. Every value has a default in variables.tf.
+# ops/up.sh passes name_prefix / owner / agent_image_tag / create_knowledge_base / kb_admin_principal_arn / opensearch_cacert_file with -var
+# (from NAME_PREFIX / OWNER in deploy.env), so set them there rather than here when you run ops/up.sh.
 # region / name_prefix / owner must be the same values as terraform/base/core.
 #
 # region      = "ap-northeast-1"
-# name_prefix = "fukuda-nwc-poc"
-# owner       = "fukuda"
+# name_prefix = "netops-poc"
+# owner       = "netops"
 #
 # agent_image_tag = "v1"
 # agent_image_uri = ""             # leave empty to use the terraform/base/ecr repository
-# runtime_name    = "fukuda_nwc_poc_agent"
+# runtime_name    = ""             # leave empty to derive it from name_prefix (netops-poc -> netops_poc_agent)
 # model_id        = "jp.amazon.nova-2-lite-v1:0"
 #
 # create_knowledge_base      = false  # true adds OpenSearch Serverless (about 0.33 USD per hour) and the Bedrock knowledge base

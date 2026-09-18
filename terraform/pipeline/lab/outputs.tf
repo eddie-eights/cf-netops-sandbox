@@ -19,12 +19,12 @@ output "start_command" {
 }
 
 output "upload_lab_command" {
-  description = "Run in this repository after downloading the containerlab rpm (README lab-2). Re-run and reboot to change configs. Phase 2 adds the Telegraf rpm (README s-1)."
-  value       = "aws s3 sync lab/ s3://${local.bucket}/lab/ --exclude \"wvs2.clab.yml\" && aws s3 cp containerlab_${var.containerlab_version}_linux_arm64.rpm s3://${local.bucket}/lab/"
+  description = "Run in this repository after downloading the containerlab rpm (docs/pipeline.md lab-2). Re-run and reboot to change configs. The stream root adds the Telegraf rpm (docs/pipeline.md s-1)."
+  value       = "aws s3 sync lab/ s3://${local.bucket}/lab/ --exclude \"wanlab.clab.yml\" && aws s3 cp containerlab_${var.containerlab_version}_linux_arm64.rpm s3://${local.bucket}/lab/"
 }
 
 output "upload_telegraf_command" {
-  description = "Phase 2. Run after downloading https://dl.influxdata.com/telegraf/releases/telegraf-<telegraf_version>-1.aarch64.rpm, then reboot the instance"
+  description = "Run after downloading https://dl.influxdata.com/telegraf/releases/telegraf-<telegraf_version>-1.aarch64.rpm, then reboot the instance"
   value       = "aws s3 cp telegraf-${var.telegraf_version}-1.aarch64.rpm s3://${local.bucket}/lab/"
 }
 

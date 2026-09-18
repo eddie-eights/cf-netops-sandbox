@@ -8,18 +8,20 @@ variable "region" {
 variable "name_prefix" {
   description = "Same value as terraform/base/core (the IAM roles <name_prefix>-runtime / <name_prefix>-web get the proposal table and gateway policy)."
   type        = string
-  default     = "fukuda-nwc-poc"
+  default     = "netops-poc"
 
   validation {
-    condition     = can(regex("^[a-z][a-z0-9-]{1,24}$", var.name_prefix))
-    error_message = "name_prefix must match ^[a-z][a-z0-9-]{1,24}$."
+    # 一番きついのは OpenSearch Serverless の data access policy 名（32 文字まで）で、一番長い接尾辞はこのルートの <name_prefix>-logs-read（10 文字）。だから 22 文字に抑える
+    # ハイフンの連続と末尾のハイフンも弾く（ECR のリポジトリ名が受け付けない）
+    condition     = can(regex("^[a-z][a-z0-9]*(-[a-z0-9]+)*$", var.name_prefix)) && length(var.name_prefix) >= 2 && length(var.name_prefix) <= 22
+    error_message = "name_prefix must be 2-22 lowercase letters, digits and single hyphens, starting with a letter and not ending with one."
   }
 }
 
 variable "owner" {
   description = "Value of the owner tag."
   type        = string
-  default     = "fukuda"
+  default     = "netops"
 
   validation {
     condition     = can(regex("^[A-Za-z0-9._-]{1,64}$", var.owner))
@@ -29,7 +31,7 @@ variable "owner" {
 
 # ---------------------------------------------------------------- images (terraform/base/ecr)
 variable "worker_image_tag" {
-  description = "Tag of the worker image in the <name_prefix>-worker repository (README workflow-1). ops/up.sh passes IMAGE_TAG."
+  description = "Tag of the worker image in the <name_prefix>-worker repository (docs/workflow.md w-1). ops/up.sh passes IMAGE_TAG."
   type        = string
 
   validation {
@@ -39,7 +41,7 @@ variable "worker_image_tag" {
 }
 
 variable "temporal_image_tag" {
-  description = "Tag of the Temporal CLI image mirrored into the <name_prefix>-temporal repository (temporalio/temporal, README workflow-1)."
+  description = "Tag of the Temporal CLI image mirrored into the <name_prefix>-temporal repository (temporalio/temporal, docs/workflow.md w-1)."
   type        = string
   default     = "1.9.1"
 }

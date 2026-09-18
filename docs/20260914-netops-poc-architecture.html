@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>fukuda-nwc-poc 構成図</title>
-<meta name="description" content="閉域の既存 VPC で、EC2 のチャット Web から AgentCore Runtime、Knowledge Base（OpenSearch Serverless のハイブリッド検索）、ガードレール付きの Bedrock へ会話が流れる構成の図解。">
+<title>netops-poc 構成図</title>
+<meta name="description" content="インターネットへの出口が無い VPC で、EC2 のチャット Web から AgentCore Runtime、Knowledge Base（OpenSearch Serverless のハイブリッド検索）、ガードレール付きの Bedrock へ会話が流れる構成の図解。">
 <meta name="mb-tags" content="aws terraform agentcore bedrock knowledge-base opensearch-serverless guardrails architecture">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -20,13 +20,13 @@
 
 <header class="mb-header">
   <div>
-    <h1>fukuda-nwc-poc 構成図</h1>
-    <p class="mb-meta-line">2026-09-14 / docs / <a href="https://github.com/eddie-eights/cf-netops-sandbox" target="_blank" rel="noopener">eddie-eights/cf-netops-sandbox</a></p>
+    <h1>netops-poc 構成図</h1>
+    <p class="mb-meta-line">2026-09-14（2026-09-18 更新） / docs / netops-poc</p>
   </div>
 </header>
 
 <p class="mb-lede">
-閉域の既存 VPC にある EC2 のチャット画面から、Bedrock のモデル（Amazon Nova 2 Lite）と会話する構成です。
+インターネットへの出口が無い VPC（<code>terraform/base/core</code> が作ります）に置いた EC2 のチャット画面から、Bedrock のモデル（Amazon Nova 2 Lite）と会話する構成です。
 質問を受けると、エージェントが手順書を検索し、見つけた資料と一緒にモデルへ渡し、ガードレールを通した回答を返します。
 </p>
 
@@ -40,7 +40,7 @@
     <li><a href="#points">検索とガードレールの決めごと</a></li>
     <li><a href="#cost">費用</a></li>
     <li><a href="#deploy">デプロイから会話まで</a></li>
-    <li><a href="#phase2">フェーズ 2: containerlab → Telegraf → Kafka → Spark → S3 Tables と、トポロジの Neptune</a></li>
+    <li><a href="#pipeline">PIPELINE: containerlab → Telegraf → Kafka → Spark → S3 Tables と、トポロジの Neptune</a></li>
     <li><a href="#limits">確認できていないこと</a></li>
   </ol>
 </nav>
@@ -50,7 +50,7 @@
     <li>PC から EC2 へは SSM のポートフォワーディングで入り、EC2 から先は VPC エンドポイントだけで AWS のサービスに届く</li>
     <li>エージェントは Knowledge Base をハイブリッド検索（ベクトル + キーワード）で候補 20 件を引き、リランクで 5 件に絞って Amazon Nova 2 Lite に渡す</li>
     <li>ガードレールが質問と回答の両方を判定し、止めたときは定型文を返す</li>
-    <li>置いておくだけで 1 時間 ≈ $0.52（約 79 円）。<em>OpenSearch Serverless だけで月 ≈ $240</em> かかるので、使わない期間は <code>terraform/base/core</code> を destroy する</li>
+    <li>置いておくだけで 1 時間 ≈ $0.18（約 27 円）。<em><code>CREATE_KB=1</code> にすると OpenSearch Serverless だけで月 ≈ $240</em> 増えるので、使わない期間は <code>ops/down.sh</code> で消す（AGENT だけ消すなら <code>terraform -chdir=terraform/agent destroy</code>。土台は残せる）</li>
   </ul>
 </div>
 
@@ -72,7 +72,7 @@
 <rect x="2" y="150" width="598" height="666" rx="12" fill="none" stroke="#111110" stroke-width="1.5"/>
 <text x="588" y="172" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="12.5" fill="#111110" font-weight="700" text-anchor="end">東京リージョン ap-northeast-1</text>
 <rect x="12" y="184" width="300" height="344" rx="10" fill="none" stroke="#595959" stroke-width="1.2"/>
-<text x="24" y="204" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="12.5" fill="#111110" font-weight="700">既存 VPC（インターネットへの出口なし）</text>
+<text x="24" y="204" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="12.5" fill="#111110" font-weight="700">VPC（インターネットへの出口なし）</text>
 <text x="348" y="204" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="12.5" fill="#111110" font-weight="700">AWS のサービス</text>
 <rect x="40" y="220" width="244" height="92" rx="8" fill="#FFFFFF" stroke="#111110" stroke-width="1.5"/>
 <text x="52" y="244" font-family="Ubuntu Sans, Noto Sans JP, sans-serif" font-size="14" fill="#111110" font-weight="700">EC2 Web（Gradio）</text>
@@ -160,18 +160,18 @@
 <div class="mb-grid-3">
   <div class="mb-card">
     <div class="mb-card-title">置いておくだけ</div>
-    <p><strong>1 時間 ≈ $0.52</strong>（約 79 円）</p>
-    <p>OpenSearch Serverless の最小 1 OCU 分が $0.33、エンドポイントが約 $0.18 です。</p>
+    <p><strong>1 時間 ≈ $0.18</strong>（約 27 円）</p>
+    <p>エンドポイントの時間課金が約 $0.13、土台（EC2 t4g.small + EBS + ssm 用エンドポイント）が約 $0.05 です。<code>CREATE_KB=1</code> にすると OpenSearch Serverless の最小 1 OCU 分などで +$0.36 になります。</p>
   </div>
   <div class="mb-card">
     <div class="mb-card-title">会話しながら</div>
-    <p><strong>1 時間 ≈ $0.81</strong>（約 121 円）</p>
-    <p>1 人が 1 分に 1 回話す想定です。上にモデルのトークン、リランク（約 $0.06）、ガードレール、Runtime の実行時間が乗ります。</p>
+    <p><strong>1 時間 ≈ $0.36</strong>（約 54 円）</p>
+    <p>1 人が 1 分に 1 回話す想定です。上にモデルのトークン、リランク、ガードレール、Runtime の実行時間が乗ります。</p>
   </div>
   <div class="mb-card">
     <div class="mb-card-title">1 か月置いたまま</div>
-    <p><strong>≈ $383</strong>（約 57,400 円）</p>
-    <p>EC2 を止めてもほとんど減りません。使わない期間は terraform destroy で消します。lab の EC2（t4g.large）は起動中だけ約 13 円/h。使ったら止めます。</p>
+    <p><strong>≈ $131</strong>（約 19,700 円）</p>
+    <p>EC2 を止めてもほとんど減りません（大半がエンドポイントの時間課金）。使わない期間は <code>ops/down.sh</code> で消します。<code>CREATE_KB=1</code> なら ≈ $394（約 59,100 円）、PIPELINE と WORKFLOW も足した全部なら ≈ $1,270（約 190,500 円）です。</p>
   </div>
 </div>
 
@@ -182,68 +182,82 @@
 
 <h2 id="deploy">デプロイから会話まで</h2>
 
+<p>
+打つのは <code>ops/up.sh</code> の 1 本だけです。手順 3 の中身は、何が起きているかを示すために展開しています。
+</p>
+
 <ol>
-  <li><code>terraform/base/ecr</code> を apply して ECR リポジトリを作る</li>
-  <li>arm64 のエージェントイメージ（トポロジのツールと静的データ入り）をビルドして push する</li>
-  <li><code>terraform/base/core</code> を apply する。VPC / サブネット / ルートテーブルを作り、push したタグ <code>agent_image_tag</code> を渡す（OpenSearch の管理者は apply した人の認証情報から自動で取る）。VPC ID・サブネット・SG・バケット名は出力に出し、<code>terraform/pipeline/lab</code> / <code>terraform/pipeline/stream</code> / <code>terraform/pipeline/analytics</code> / <code>terraform/pipeline/graph</code> はローカルの state（<code>terraform_remote_state</code>）から読む</li>
-  <li>Gradio の画面と wheel（arm64 / cp313）を S3 の <code>web/</code> に置いて EC2 を再起動し、<code>kb-docs/</code> の md を S3 に置いて取り込みジョブを流す</li>
-  <li>Runtime のロググループに保持期間とタグを付け、利用者に <code>ssm:StartSession</code> の権限を渡す</li>
-  <li>PC でポートフォワーディングを始め、ブラウザで <code>http://localhost:8080/</code> を開く</li>
-  <li>（任意）lab のイメージを ECR に、設定と containerlab の rpm を S3 に置き、<code>terraform/pipeline/lab</code> を apply する。SSM セッションで入って <code>sudo lab check</code></li>
+  <li>道具を入れて AWS に入る（AWS CLI v2 / Terraform 1.11 以上 / Docker / Session Manager plugin / python3。<code>docs/setup.md</code>）</li>
+  <li>配布の zip を展開し、<code>cp deploy.env.example deploy.env</code> で写して、要る機能（<code>AGENT</code> / <code>PIPELINE</code> / <code>WORKFLOW</code>、既定は <code>AGENT</code> だけ）を <code>1</code> にする</li>
+  <li><code>ops/up.sh</code> を打つ。土台 → 機能の順に、次を自動で進める
+    <ul>
+      <li><code>terraform/base/ecr</code> を apply して ECR リポジトリを作り、arm64 のエージェントイメージ（トポロジのツールと静的データ入り）をビルドして push する</li>
+      <li><code>terraform/base/core</code> を apply する。VPC / サブネット / ルートテーブル / 共用のエンドポイント / S3 / Web の EC2 を作る。VPC ID・サブネット・SG・バケット名は出力に出し、<code>terraform/agent</code> と <code>terraform/pipeline/*</code> / <code>terraform/workflow</code> はローカルの state（<code>terraform_remote_state</code>）から読む</li>
+      <li><code>terraform/agent</code> を apply する。AgentCore Runtime（push したタグを <code>agent_image_tag</code> で渡す）と Gateway（MCP）+ tools Lambda を作り、<code>CREATE_KB=1</code> なら Knowledge Base も作る（OpenSearch の管理者は apply した人の認証情報から自動で取る）。Runtime のロググループには保持期間とタグを付ける</li>
+      <li>Gradio の画面と wheel（arm64 / cp313）を S3 の <code>web/</code> に置いて EC2 に取り込み、<code>CREATE_KB=1</code> なら <code>kb-docs/</code> の md を S3 に置いて取り込みジョブを流す</li>
+      <li><code>PIPELINE=1</code> なら <code>terraform/pipeline/lab</code> → <code>stream</code> → <code>analytics</code> / <code>graph</code> を、<code>WORKFLOW=1</code> なら <code>terraform/workflow</code> を足す</li>
+    </ul>
+  </li>
+  <li>最後に PC からのポートフォワーディングが開くので、ブラウザで <code>http://localhost:8080/</code> を開く（利用者には <code>ssm:StartSession</code> の権限を渡す）</li>
+  <li>使い終わったら <strong>当日中に</strong> <code>ops/down.sh</code> を打つ</li>
 </ol>
 
-<pre><code class="language-bash">aws ssm start-session --region ap-northeast-1 \
-  --target i-0123456789abcdef0 \
+<p>
+ポートフォワーディングを閉じたあとに開き直すときは、インスタンス ID を state から取って打ちます。
+</p>
+
+<pre><code class="language-bash">INSTANCE_ID=$(terraform -chdir=terraform/base/core output -raw web_instance_id)
+aws ssm start-session --region ap-northeast-1 \
+  --target "$INSTANCE_ID" \
   --document-name AWS-StartPortForwardingSession \
   --parameters '{"portNumber":["8080"],"localPortNumber":["8080"]}'</code></pre>
 
 <p>
-各手順のコマンドは、<a href="https://github.com/eddie-eights/cf-netops-sandbox" target="_blank" rel="noopener">リポジトリの README</a> にあります。
+各手順のコマンドは、配布物の <code>docs/</code> にあります（<code>docs/deploy.md</code> と <code>docs/deploy-manual.md</code>）。
 </p>
 
-<h2 id="phase2">フェーズ 2: containerlab → Telegraf → Kafka → Spark → S3 Tables と、トポロジの Neptune</h2>
+<h2 id="pipeline">PIPELINE: containerlab → Telegraf → Kafka → Spark → S3 Tables と、トポロジの Neptune</h2>
 
 <p>
-フェーズ 1 では lab と Web はつながっておらず、トポロジもコンテナに焼いた静的データでした。
-フェーズ 2 は 4 つのルート（<code>terraform/pipeline/lab</code> → <code>terraform/pipeline/stream</code> → <code>terraform/pipeline/analytics</code> と <code>terraform/pipeline/graph</code>）を足して、lab の SNMP を Kafka に流し、Spark で S3 Tables（Iceberg）に溜め、トポロジを Neptune に置きます（2026-09-17 のユーザー決定でフェーズ 2 の範囲をここまでにし、旧 2B を取り込みました。フェーズ 3 は <code>terraform/workflow</code> を足して、Temporal on ECS Fargate のワーカーがエージェントに原因を調査させ、人が Web の「承認」タブで承認すると lab で直します。エージェントのツールは AgentCore Gateway（MCP）経由。2026-09-17 着手。<code>docs/phases.md</code>）。
+土台 + AGENT だけのときは lab と Web はつながっておらず、トポロジもコンテナに焼いた静的データです。
+PIPELINE は 4 つのルート（<code>terraform/pipeline/lab</code> → <code>terraform/pipeline/stream</code> → <code>terraform/pipeline/analytics</code> と <code>terraform/pipeline/graph</code>）を足して、lab の SNMP を Kafka に流し、Spark で S3 Tables（Iceberg）に溜め、トポロジを Neptune に置きます（WORKFLOW は <code>terraform/workflow</code> を足して、Temporal on ECS Fargate のワーカーがエージェントに原因を調査させ、人が Web の「承認」タブで承認すると lab で直します。エージェントのツールは AgentCore Gateway（MCP）経由。<code>docs/phases.md</code>）。
 どれも時間課金なので、<strong>使う日に作って当日中に消す</strong>前提です。
 </p>
 
 <pre><code>lab EC2 の Telegraf ── SNMP ポーリング（10 秒）+ SNMP trap（linkUp / linkDown）
       │ Kafka（IAM 認証）
       ▼
-MSK（2 ブローカー）──┬─▶ detector Lambda ──▶ DynamoDB の異常テーブル ──▶ Web「異常一覧」/ エージェントの list_anomalies（「いま」）
-                     ├─▶ MSK Connect（S3 sink）──▶ S3 の stream/（任意。CREATE_S3_SINK=0 で外す）
-                     └─▶ Spark（EMR Serverless、60 秒トリガー）──▶ S3 Tables（Iceberg）の netops.snmp_metrics（履歴の正本）
+MSK（2 ブローカー）──┬─▶ MSK Connect（S3 sink）──▶ S3 の stream/（任意。CREATE_S3_SINK=0 で外す）
+                     └─▶ Spark（EMR Serverless、60 秒トリガー）──┬─▶ S3 Tables（Iceberg）の netops.snmp_metrics（履歴の正本）
+                                                                 └─▶ DynamoDB の異常テーブル ──▶ Web「異常一覧」/ エージェントの list_anomalies（「いま」）
+                                                                     + EventBridge（AnomalyOpened / AnomalyResolved）
 
 Neptune ── Gremlin ──▶ エージェントのトポロジツール / Web「トポロジ」タブ（図・表・リンクの追加削除）</code></pre>
 
 <ul>
   <li><strong>異常の定義は「インタフェースが down」だけ。</strong>ポーリングで <code>ifOperStatus</code> が 2 になるか、snmpd が送る linkDown trap を受けたら <code>open</code>、up に戻れば <code>resolved</code>。BGP の隣接や経路の変化は見ません。</li>
-  <li><strong>trap とポーリングの両方を持つのは、速さと確実さのため。</strong>trap は 5 秒以内に届きますが取りこぼすことがあり、ポーリングは 10 秒周期ですが必ず追いつきます。detector は同じ機器・同じインタフェースを 1 件にまとめます。</li>
-  <li><strong>Web とエージェントは、同じ 3 つのモジュールでトポロジと異常を読みます。</strong>Neptune と DynamoDB の場所は SSM のパラメータから引き、無ければ静的データに戻る（60 秒キャッシュ）ので、フェーズ 2 を destroy してもフェーズ 1 のまま動きます。</li>
+  <li><strong>trap とポーリングの両方を持つのは、速さと確実さのため。</strong>trap は 5 秒以内に届きますが取りこぼすことがあり、ポーリングは 10 秒周期ですが必ず追いつきます。Spark の検知は同じ機器・同じインタフェースを 1 件にまとめます。</li>
+  <li><strong>Web とエージェントは、同じ 3 つのモジュールでトポロジと異常を読みます。</strong>Neptune と DynamoDB の場所は SSM のパラメータから引き、無ければ静的データに戻る（60 秒キャッシュ）ので、PIPELINE を destroy しても土台 + AGENT だけで動きます。</li>
   <li><strong>Neptune の中身は Web から手で編集します。</strong>「静的データを投入」で 10 台と 10 本を入れ、以後リンクの追加・削除ができます。lab の実配線とは同期しません。</li>
   <li><strong>Spark は EMR Serverless（ARM64、emr-7.13.0 = Spark 3.5.6）で、ジョブが動いている間だけ課金。</strong>Telegraf の JSON をそのまま行（ts / topic / measurement / agent_host / host / tags_json / fields_json / ingested_at）にして追記します。閉域なので S3 Tables の API は <code>s3tables</code> の interface エンドポイント（2 AZ）経由。Kafka / MSK IAM / S3 Tables カタログの jar 6 本は <code>ops/up.sh</code> が Maven Central から取って S3 に置きます。</li>
-  <li><strong>費用はフェーズ 2 の 4 ルートで 1 時間 ≈ $0.69（約 104 円）。</strong>lab の t4g.large が $0.09、MSK kafka.t3.small × 2 が $0.12、MSK Connect 1 MCU が $0.14、lambda / sts のエンドポイントが $0.03、EMR Serverless の 2 vCPU が ≈ $0.15、s3tables のエンドポイント 2 AZ が $0.03、Neptune db.t4g.medium が $0.14。1 か月置くと ≈ $504（約 75,600 円）。東京の税抜単価で、2026-09-15（analytics は 2026-09-17）に AWS Price List API と料金ページで確認。</li>
+  <li><strong>費用は PIPELINE の 4 ルートで 1 時間 ≈ $1.50（約 225 円）。</strong>lab の t4g.large が $0.09、MSK kafka.m5.large × 2 が $0.54、MSK Connect 1 MCU が $0.14、sts のエンドポイントが $0.01、EMR Serverless の 2 vCPU とメモリが ≈ $0.15、s3tables / events のエンドポイント 2 AZ が $0.06、Neptune db.t4g.medium が $0.14、格納先の OpenSearch Serverless が最大 $0.33 と Prometheus のエンドポイントが $0.03。1 か月置くと ≈ $1,095（約 164,000 円）。東京の税抜単価で、2026-09-15（analytics は 2026-09-17、MSK のブローカーは 2026-09-18）に AWS Price List API と料金ページで確認。内訳は <code>docs/cost.md</code>。</li>
 </ul>
 
 <h2 id="limits">確認できていないこと</h2>
 
 <p>
-Terraform の 6 ルートは <code>terraform validate</code> と <code>terraform fmt</code> を通し、エージェントと detector と Neptune の読み書きは boto3 を差し替えた模擬テスト（41 / 23 / 18 項目）、analytics は Terraform と Spark スクリプトの整合の静的テスト（81 項目）を通しました。
-Gradio の画面はフェーズ 1 の版は手元で起動し、フェーズ 2 の 3 タブ版は構文検査までです。AWS 上にはまだデプロイしていません。次の点は実環境で確かめる必要があります。
+Terraform の 8 ルートは <code>terraform validate</code> と <code>terraform fmt</code> を通し、エージェント・Spark の検知・Neptune・analytics・workflow は boto3 と pyspark を差し替えた模擬テストと静的テストを通してあります（<code>ops/check.sh</code> がまとめて打ちます）。
+<strong>8 ルートの通しの apply は 2026-09-18 に AWS 上で 1 回通し、lab の起動から、Telegraf → MSK の IAM 認証、Spark のジョブ、S3 Tables への書き込み、異常の検知、Neptune への Gremlin、承認から修復までを一周させました。</strong>
+確かめたのはその 1 回の一周だけで、項目ごとの確認や、別のアカウント・別の PC からの打ち直しは見ていません。次のようなものが残っています（全部の一覧は <code>docs/development.md</code> の「確認したこと・確認できていないこと」）。
 </p>
 
 <ul>
+  <li>繰り返しの apply / destroy と、別のアカウント・別の PC からの打ち直し</li>
   <li>OpenSearch Serverless のアクセスポリシーの反映待ちで、インデックスの作成が 403 にならないか</li>
-  <li>既定のアナライザで、日本語の質問にキーワード検索がどれだけ効くか</li>
-  <li>Amazon Rerank 1.0 が日本語の手順書で順位をどれだけ良くするか（日本語対応は AWS の文書で確認できていない）。候補 20 件 → 5 件が妥当か</li>
-  <li>閉域の EC2 から、S3 ゲートウェイ経由で <code>dnf install python3.13</code> / <code>docker</code> が通るか。t4g.small で Gradio が安定して動くか</li>
-  <li>containerlab の rpm が AL2023 で入り、lab の 14 コンテナが t4g.large で動くか。t4g.small $0.0216/h・t4g.large $0.0864/h は 2026-09-15 に Price List API で確認</li>
-  <li>VPC モードの Runtime が、イメージの取得に VPC 内の ECR / S3 エンドポイントを使うか</li>
-  <li>（フェーズ 2）Telegraf 1.40.0 の <code>outputs.kafka</code> が、インスタンスロールの資格情報で MSK の IAM 認証を通るか。MSK Connect の <code>KafkaConnectVersion</code> に <code>2.7.1</code> が入るか。Confluent の S3 sink 12.1.11 をプラグインとして登録できるか</li>
-  <li>（フェーズ 2）VPC モードの Runtime から Neptune のクラスター名が引けるか（プライベート DNS）</li>
-  <li>（フェーズ 2）EMR Serverless の emr-7.13.0 に S3 Tables カタログの jar が同梱されているか（同梱なら足した jar と衝突する可能性）。Kafka の jar 6 本の組み合わせで Structured Streaming の Kafka ソースが動くか。閉域から S3 Tables に届くか（interface エンドポイント + S3 ゲートウェイの <code>*--table-s3</code>）。Lake Formation の設定が要るか。組織の SCP / IAM が EMR Serverless / S3 Tables を止めていないか</li>
+  <li>既定のアナライザで、日本語の質問にキーワード検索がどれだけ効くか。Amazon Rerank 1.0 が日本語の手順書で順位をどれだけ良くするか（日本語対応は AWS の文書で確認できていない）</li>
+  <li>格納先の OpenSearch Serverless（ログ）のコレクションが、ナレッジベースのコレクションと OCU を共有するか。共有されなければ +$0.33/h</li>
+  <li>MSK Connect の <code>KafkaConnectVersion</code> に <code>2.7.1</code> が入るか。Confluent の S3 sink 12.1.11 をプラグインとして登録できるか（<code>CREATE_S3_SINK=0</code> で外せる任意の経路）</li>
+  <li>組織の SCP / IAM が、EMR Serverless / S3 Tables / ECS / AgentCore Gateway を止めていないか</li>
 </ul>
 
 </div><!-- /.mb-main -->
@@ -268,7 +282,7 @@ Gradio の画面はフェーズ 1 の版は手元で起動し、フェーズ 2 �
 
 </div><!-- /.mb-wrap -->
 
-<footer class="mb-footer">cf-netops-sandbox / docs</footer>
+<footer class="mb-footer">netops-poc / docs</footer>
 
 </div>
 </body>

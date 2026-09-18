@@ -1,4 +1,4 @@
-# fukuda-nwc-poc - agent root module (feature "agent"). The AgentCore Runtime (VPC mode) that answers the chat, its
+# netops-poc - agent root module (feature "agent"). The AgentCore Runtime (VPC mode) that answers the chat, its
 # execution policy, the guardrail, the interface endpoints the runtime needs (ecr / logs / bedrock-runtime, 2 AZ) and the
 # bedrock-agentcore endpoint the chat web invokes it through. Optionally (create_knowledge_base = true) a Bedrock
 # Knowledge Base on OpenSearch Serverless for RAG - off by default because the collection costs about 0.33 USD per hour.
@@ -60,4 +60,8 @@ locals {
   index_name      = "kb-index"
 
   param_prefix = "/${var.name_prefix}"
+
+  # AgentCore Runtime の名前にはハイフンが使えないので、接頭辞の - を _ にして _agent を付ける（netops-poc -> netops_poc_agent）。
+  # ops/down.sh も同じ規則でロググループ（/aws/bedrock-agentcore/runtimes/<この名前>-*）を探すので、変えるなら両方を合わせる
+  runtime_name = var.runtime_name != "" ? var.runtime_name : "${replace(var.name_prefix, "-", "_")}_agent"
 }

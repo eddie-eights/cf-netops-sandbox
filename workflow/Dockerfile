@@ -1,4 +1,4 @@
-# フェーズ 3 のワーカー（Temporal の worker + 異常を拾う starter）。ECS Fargate の ARM64 で動かすので
+# WORKFLOW のワーカー（Temporal の worker + 異常を拾う starter）。ECS Fargate の ARM64 で動かすので
 # ビルドは必ず --platform linux/arm64（ops/up.sh の手順 2 が打つ）。temporal 本体は同じタスクの別コンテナ（temporalio/temporal を ECR にミラー）。
 FROM public.ecr.aws/docker/library/python:3.13-slim
 

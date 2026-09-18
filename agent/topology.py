@@ -1,7 +1,7 @@
 """トポロジをエージェントのツールとして出す。
 
 元データは 2 通り。Neptune（terraform/pipeline/graph。graph.configured() が真）があればそこから読み、無ければ
-静的データ（data/devices.yaml と data/topology.json。tools Lambda では devices.json）。どちらも中身はローカル lab（lab/wvs2.clab.yml）の
+静的データ（data/devices.yaml と data/topology.json。tools Lambda では devices.json）。どちらも中身はローカル lab（lab/wanlab.clab.yml）の
 10 台そのもので、すべて架空のアドレス。SNMP や lab には触らない。読み取りだけなので、モデルが何度呼んでも副作用は無い。
 Neptune のときは TTL 秒ごとに読み直す（画面で編集した結果が次の質問に効く）。
 
@@ -17,6 +17,7 @@ from collections import deque
 from botocore.exceptions import BotoCoreError, ClientError
 
 import graph
+import toolkit
 
 DATA_DIR = os.environ.get("TOPOLOGY_DATA_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "data"))
 # 段の順（上が上流）。frontend の ROLE_ORDER と同じ
@@ -185,14 +186,5 @@ TOOL_SPECS = [
     }},
 ]
 TOOLS = {"list_devices": list_devices, "neighbors": neighbors, "blast_radius": blast_radius, "topology_graph": topology_graph}
-
-
-def run_tool(name: str, args: dict) -> dict:
-    fn = TOOLS.get(name)
-    if fn is None:
-        return {"error": f"unknown tool {name}"}
-    reload()
-    try:
-        return fn(**{k: v for k, v in (args or {}).items() if k in fn.__code__.co_varnames})
-    except (TypeError, ValueError) as e:
-        return {"error": str(e)}
+# ツールを呼ぶ前に reload()（TTL を過ぎていれば Neptune を読み直す。画面での編集が次の質問に効く）
+run_tool = toolkit.runner(TOOLS, before=reload)

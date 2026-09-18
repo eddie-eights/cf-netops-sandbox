@@ -361,7 +361,7 @@ check("up.sh は前の配置（agent に ecr-api）が残っていたら土台�
       up.index('aws_vpc_endpoint.runtime["ecr-api"]') < up.index("tf_apply base/core "))
 # SINK_* の判定ブロックを up.sh から切り出して、bash で実際に動かす（die と flag_value は up.sh / deploy-env.sh と同じ意味の最小版）
 import subprocess
-_blk = up[up.index('if [ -n "${SINKS:-}" ]; then'):up.index('SINKS_TF="\\"$(printf')]
+_blk = up[up.index('SINK_S3="${SINK_S3:-1}"'):up.index('SINKS_TF="\\"$(printf')]
 _blk += up[up.index('SINKS_TF="\\"$(printf'):].split("\n", 1)[0] + "\n"
 _pre = ('die() { echo "DIE: $*"; exit 1; }\n'
         'flag_value() { local name="$1" v; v="${!name:-}"; case "$v" in 1|true|yes) printf -v "$name" %s 1 ;; ""|0|false|no) printf -v "$name" %s "" ;; *) die "$name は 1 か 0" ;; esac; }\n')
@@ -377,14 +377,8 @@ _rc, _out = _sinks(SINK_S3="0", SINK_OPENSEARCH="0", SINK_PROMETHEUS="0")
 check("SINK_* が全部 0 なら止まる", _rc == 1 and "全部 0" in _out)
 _rc, _out = _sinks(SINK_S3="2")
 check("SINK_S3=2 は止まる", _rc == 1 and "SINK_S3 は 1 か 0" in _out)
-check("古い SINKS=iceberg は SINK_S3 だけ 1 に読み替える", _sinks(SINKS="iceberg") == (0, 'OUT: iceberg | "iceberg"'))
-check("古い SINKS は順番と空白を問わない", _sinks(SINKS="prometheus, iceberg") == (0, 'OUT: iceberg,prometheus | "iceberg","prometheus"'))
-_rc, _out = _sinks(SINKS="iceberg", SINK_S3="1")
-check("SINKS と SINK_* は同時に書けない", _rc == 1 and "同時に書けない" in _out)
-_rc, _out = _sinks(SINKS="iceberg,splunk")
-check("古い SINKS の知らない名前は止まる", _rc == 1 and "カンマ区切り" in _out)
-check("deploy-env.sh は SINK_* と古い SINKS を読めるキーに持つ",
-      all(re.search(rf'(?<![A-Z_]){k}(?![A-Z_])', open(os.path.join(ROOT, "ops", "deploy-env.sh"), encoding="utf-8").read()) for k in ("SINK_S3", "SINK_OPENSEARCH", "SINK_PROMETHEUS", "SINKS")))
+check("deploy-env.sh は SINK_* を読めるキーに持つ",
+      all(re.search(rf'(?<![A-Z_]){k}(?![A-Z_])', open(os.path.join(ROOT, "ops", "deploy-env.sh"), encoding="utf-8").read()) for k in ("SINK_S3", "SINK_OPENSEARCH", "SINK_PROMETHEUS")))
 check("up.sh は analytics を stream の後に apply し、job を STREAMING で起こす（名前は snmp-sinks）",
       up.index("tf_apply pipeline/stream") < up.index("tf_apply pipeline/analytics") < up.index("--name snmp-sinks --mode STREAMING"))
 check("up.sh は s3tables / prometheus のエンドポイントと opensearch の OCU を SINK_* ごとに費用に足し、opensearch は analytics を作るときだけ OCU の注意を出す",
@@ -399,7 +393,7 @@ check("up.sh の WORKFLOW=1 は SKIP_ANALYTICS があれば止まる（Spark の
       re.search(r'if \[ -n "\$WORKFLOW" \]; then\n[\s\S]*?-n "\$SKIP_ANALYTICS"[\s\S]*?die "WORKFLOW は lab と stream と analytics が要る', up) is not None)
 check("up.sh は PIPELINE=0 なら lab / stream / analytics / graph を全部飛ばす",
       re.search(r'else\n\s*SKIP_LAB=1; SKIP_STREAM=1; SKIP_ANALYTICS=1; SKIP_GRAPH=1\n', up) is not None)
-check("deploy.env.example に SINK_S3 / SINK_OPENSEARCH / SINK_PROMETHEUS の行がある（既定 1）。古い SINKS の行は載せない（2026-09-18）",
+check("deploy.env.example に SINK_S3 / SINK_OPENSEARCH / SINK_PROMETHEUS の行がある（既定 1）。カンマ区切りの SINKS は使わない",
       all(re.search(rf'^#{k}=1$', env_example, re.M) is not None for k in ("SINK_S3", "SINK_OPENSEARCH", "SINK_PROMETHEUS"))
       and re.search(r'^#?\s*SINKS=', env_example, re.M) is None)
 # iceberg を外したら S3 Tables も s3tables のエンドポイントも作らない

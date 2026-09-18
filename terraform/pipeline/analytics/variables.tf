@@ -7,17 +7,25 @@ variable "region" {
 variable "name_prefix" {
   description = "Prefix of every resource name. Must match terraform/base/core and terraform/pipeline/stream"
   type        = string
-  default     = "fukuda-nwc-poc"
+  default     = "netops-poc"
 
   validation {
-    condition     = can(regex("^[a-z][a-z0-9-]{1,24}$", var.name_prefix))
-    error_message = "name_prefix は小文字英数字とハイフン、先頭は英字、2〜25 文字（S3 Tables のテーブルバケット名 <prefix>-tables が 63 文字以内に収まるように）。"
+    # 一番きついのは OpenSearch Serverless の data access policy 名（32 文字まで）で、一番長い接尾辞は terraform/workflow の <name_prefix>-logs-read（10 文字）。だから 22 文字に抑える
+    # ハイフンの連続と末尾のハイフンも弾く（ECR のリポジトリ名が受け付けない）
+    condition     = can(regex("^[a-z][a-z0-9]*(-[a-z0-9]+)*$", var.name_prefix)) && length(var.name_prefix) >= 2 && length(var.name_prefix) <= 22
+    error_message = "name_prefix must be 2-22 lowercase letters, digits and single hyphens, starting with a letter and not ending with one."
   }
 }
 
 variable "owner" {
   description = "Value of the owner tag on every resource"
   type        = string
+  default     = "netops"
+
+  validation {
+    condition     = can(regex("^[A-Za-z0-9._-]{1,64}$", var.owner))
+    error_message = "owner must match ^[A-Za-z0-9._-]{1,64}$."
+  }
 }
 
 variable "emr_release_label" {
@@ -96,7 +104,7 @@ variable "sinks" {
 
 # ---------------------------------------------------------------- detection (Spark -> DynamoDB -> EventBridge)
 variable "device_map" {
-  description = "ip=device_id,... used by the detection query when a message has no sysName tag (traps). Matches lab/wvs2.clab.yml.in and agent/data/devices.yaml."
+  description = "ip=device_id,... used by the detection query when a message has no sysName tag (traps). Matches lab/wanlab.clab.yml.in and agent/data/devices.yaml."
   type        = string
   default     = "203.0.113.11=hq-ce-01,203.0.113.12=dc-ce-01,203.0.113.13=br1-ce-01,203.0.113.14=br2-ce-01"
 }

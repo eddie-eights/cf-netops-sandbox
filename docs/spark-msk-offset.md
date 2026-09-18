@@ -1,6 +1,8 @@
 # Spark と MSK — offset は誰が持っているか
 
-検証日 2026-09-18 / Spark 4.2.0（`docs/latest/streaming/*`）
+← [README](../README.md)
+
+検証日 2026-09-18 / Spark 4.2.0（Apache Spark の `docs/latest/streaming/*`）。**この PoC が動かすのは EMR Serverless の emr-7.13.0 = Spark 3.5.6** で、ここに書いた offset と `group.id` の扱いは 3.5 系でも同じ。
 
 ## 結論
 
@@ -113,7 +115,7 @@ def handle(batch_df, batch_id):
 ```
 
 - IAM 認証は `aws-msk-iam-auth` の jar と、`sasl.jaas.config` / コールバックハンドラの指定が要る
-  （**この文書では未検証。AWS のドキュメントで確認する**）
+  （上の断片はその 2 行を省いてある。実際に動かしている全文は `spark/snmp_sinks.py`）
 - Spark は **VPC の中**から MSK に届く必要がある（EMR Serverless / Glue は VPC 設定、セキュリティグループで 9098 を許可）
 
 ---

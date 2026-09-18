@@ -11,9 +11,9 @@
 #                     Web の「承認」タブで人が承認すると Temporal が lab で直す。AGENT と PIPELINE（lab / stream / analytics）が要る
 # 毎日全部消す運用向け。何度打っても同じ状態に収束する（できているものは Terraform が差分なしで飛ばし、ECR にあるタグはビルドしない）。
 # あとから別の機能を 1 にして打ち直せば、その機能だけ足される（土台と他の機能は作り直さない）。
-# Terraform の state はこの PC のリポジトリの中（terraform/<ルート>/terraform.tfstate）に置く。消すのは ops/down.sh。
+# Terraform の state はこの PC の展開したフォルダの中（terraform/<ルート>/terraform.tfstate）に置く。消すのは ops/down.sh。
 #
-# 使い方（リポジトリの直下で。先に AWS CLI の認証を通しておく。IAM ユーザーなら長期キーのまま打つ）:
+# 使い方（展開したフォルダの直下で。先に AWS CLI の認証を通しておく。IAM ユーザーなら長期キーのまま打つ）:
 #   cp deploy.env.example deploy.env  # 初回だけ。どの機能を作るかを deploy.env に書く（無ければ既定の AGENT=1 だけで動く）
 #   ops/up.sh                         # deploy.env のとおりに作る。最後にポートフォワーディングを開いたまま止まる（Ctrl+C で閉じる）
 #   PIPELINE=1 ops/up.sh              # その回だけ変える（環境変数は deploy.env より優先）。初回は PIPELINE で 40〜60 分（MSK の作成が長い）
@@ -23,11 +23,14 @@
 # 機能を 0 にして打っても、前に作ったルートは消さない（消すのは ops/down.sh）。
 #
 # 設定できるキー（deploy.env か環境変数。全部任意。意味は deploy.env.example、読み方は ops/deploy-env.sh）:
+#   NAME_PREFIX             リソース名の接頭辞と Project タグの値。既定 netops-poc。英小文字で始まる 2〜22 文字の英小文字・数字・ハイフン（連続と末尾は不可）
+#                           （AgentCore Runtime の名前はハイフンが使えないので、- を _ にした <接頭辞>_agent になる）。
+#                           **作ったあとで変えると、Terraform は名前の違うリソースを作り直す**（先に ops/down.sh で消す）
+#   OWNER                   owner タグの値。既定 netops。英数字と . _ - だけの 1〜64 文字。NAME_PREFIX と同じく、変えると全リソースのタグが書き換わる
 #   AGENT=1                 agent での分析（既定 1）。terraform/agent を作る
 #   PIPELINE=1              データパイプライン（既定 0）。lab / stream / analytics / graph を作る（SKIP_* で減らせる）
 #   WORKFLOW=1              Temporal での実行（既定 0）。workflow を作る。AGENT と PIPELINE が要り、SKIP_LAB / SKIP_STREAM / SKIP_ANALYTICS は書けない
 #   CREATE_KB=1             AGENT=1 で Knowledge Base（OpenSearch Serverless。+$0.36/h）も作る（既定 0）
-#   PHASE                   古い書き方（1 → AGENT=1、2 → AGENT=1 PIPELINE=1、3 → 全部 1）。読み替えて注意を出す。上の 3 つと同時には書けない
 #   SKIP_LAB=1              PIPELINE=1 で lab を作らない（stream は lab が要るので SKIP_STREAM=1 も要る）
 #   SKIP_STREAM=1           PIPELINE=1 で stream と analytics（stream の Kafka を読む）を作らない
 #   SKIP_ANALYTICS=1        PIPELINE=1 で analytics（Spark → S3 Tables / OpenSearch / Prometheus と異常検知）を作らない。「異常一覧」は使えない
@@ -35,8 +38,6 @@
 #                           analytics の Spark の格納先を 1 つずつ外す（既定は 3 つとも 1。0 にするとリソースごと作らない。1 つ以上は要る）。
 #                           SINK_S3 = 全トピック → S3 Tables（Iceberg。MSK Connect の S3 sink の CREATE_S3_SINK とは別物）、SINK_OPENSEARCH = traps と logs（FRR のログ）→ OpenSearch Serverless、
 #                           SINK_PROMETHEUS = metrics → Amazon Managed Service for Prometheus。terraform/pipeline/analytics の var.sinks（iceberg / opensearch / prometheus）に組んで渡す。
-#                           2026-09-17 ユーザー決定「SINKS に opensearch と prometheus を入れる。KB のコレクションと OCU を共有できなくても入れる」で既定は全部 1）
-#   SINKS                   古い書き方（カンマ区切りの iceberg,opensearch,prometheus）。SINK_* に読み替えて注意を出す。SINK_* と同時には書けない
 #   SKIP_GRAPH=1            PIPELINE=1 で graph（Neptune）を作らない
 #   CREATE_S3_SINK=0        MSK Connect の S3 sink を作らない（Confluent の zip が取れないとき。ops/down.sh は state を見て合わせる）
 #   IMAGE_TAG               エージェント（WORKFLOW=1 ではワーカーも）のイメージのタグ。既定 v1。ECR にそのタグが無いときだけ PC の docker buildx でビルドして push する（タグは上書きできない）
@@ -49,15 +50,13 @@
 #   TF_VERBOSE=1            terraform の出力を全部画面に出す（既定は進みと結果だけ。全文は ops/logs/tf-<ルート>-apply.log）
 #   AWS_PROFILE / AWS_CA_BUNDLE  AWS CLI と terraform がそのまま読む
 # AGENT / PIPELINE / WORKFLOW / CREATE_KB / SKIP_* / SINK_* / NO_PORTFORWARD は 1 / 0 のほか true / false、yes / no でも書ける（CREATE_S3_SINK と ops/down.sh の KEEP_ECR は 1 か 0 だけ）。
-# WITH_LAB は 2026-09-16 に、WITH_STREAM は 2026-09-17 に無くなった（lab も stream も PIPELINE に入り、外すときは SKIP_* で書く）。
-# フェーズ（PHASE）で分ける運用は 2026-09-17 に機能で分ける運用に変えた（docs/phases.md）。
 #
 # 手順 6（利用者への権限）は人に渡す作業なので入れていない。
 set -euo pipefail
 
 REGION=ap-northeast-1
-PREFIX=fukuda-nwc-poc
-OWNER=fukuda
+# リソース名の接頭辞 PREFIX と owner タグの OWNER は deploy.env で変えられるので、確定するのは load_deploy_env のあと
+# （手順 0 の resolve_name_prefix。既定値と形の検査は ops/deploy-env.sh）
 # 下の 5 つは Terraform の変数の既定値に合わせてある（terraform/pipeline/lab の *_image_tag / containerlab_version / telegraf_version、
 # terraform/pipeline/stream の s3_sink_plugin_key）。変えるときは両方を変える
 FRR_TAG=10.2.1
@@ -119,7 +118,7 @@ tf_init() {  # tf_init <ルート>
 }
 tf_apply_only() {  # tf_apply_only <ルート> [-var 名前=値 …]  init 済みのルートを apply する
   local root="$1"; shift
-  tf_logged "$root" apply -input=false -auto-approve -var "owner=$OWNER" "$@" \
+  tf_logged "$root" apply -input=false -auto-approve -var "name_prefix=$PREFIX" -var "owner=$OWNER" "$@" \
     || die "terraform/$root の apply に失敗した（上のエラー。全文は $(tf_log_file "$root" apply)。docs/troubleshooting.md の「うまくいかないとき」。直したらもう一度 ops/up.sh）"
 }
 tf_apply() {  # tf_apply <ルート> [-var 名前=値 …]
@@ -171,7 +170,7 @@ ssm_run() {  # ssm_run <インスタンス ID> <コマンド…>  cloud-init（u
 run_on_instance() {  # run_on_instance <インスタンス ID> <コマンド…>  ssm_run の失敗で止まる版
   ssm_run "$@" || die "インスタンス $1 の上のコマンドが失敗した（上の出力）"
 }
-fetch() {  # fetch <URL> <ファイル名>  リポジトリの直下（gitignore 済み）に無いときだけ取る。翌日からは取り直さない
+fetch() {  # fetch <URL> <ファイル名>  展開したフォルダの直下に無いときだけ取る。翌日からは取り直さない
   if [ -s "$2" ]; then echo "$2: 手元にあるので取らない"; return 0; fi
   curl -fL --retry 3 -o "$2.part" "$1" || { rm -f "$2.part"; return 1; }
   mv "$2.part" "$2"
@@ -193,6 +192,7 @@ trap on_exit EXIT
 # ---- 0. 道具と認証 -------------------------------------------------------------
 log "0. 設定と道具と認証を確かめる"
 load_deploy_env
+resolve_name_prefix  # PREFIX と OWNER。terraform の -var name_prefix / owner にそのまま渡す（下の tf_apply_only）
 IMAGE_TAG="${IMAGE_TAG:-v1}"
 LOCAL_PORT="${LOCAL_PORT:-8080}"
 CREATE_S3_SINK="${CREATE_S3_SINK:-1}"
@@ -200,24 +200,9 @@ case "$CREATE_S3_SINK" in
   0|1) ;;
   *) die "CREATE_S3_SINK は 1（作る。既定）か 0（作らない）（いまは「${CREATE_S3_SINK}」）。まだ何も作っていない" ;;
 esac
-# analytics の Spark の格納先。SINK_S3 / SINK_OPENSEARCH / SINK_PROMETHEUS を 1 / 0 で書く（既定は 3 つとも 1。2026-09-17 ユーザー決定
-# 「s3, open search, prometheus のデプロイをそれぞれ 1 と 0 でオンオフ」）。0 にした格納先は Spark が書かないだけでなく、リソースも作らない。
-# SINKS（カンマ区切り）は古い書き方で、SINK_* に読み替える。terraform/pipeline/analytics の var.sinks（list）にするので ["iceberg","opensearch"] の形に組む
-if [ -n "${SINKS:-}" ]; then
-  if [ -n "${SINK_S3:-}${SINK_OPENSEARCH:-}${SINK_PROMETHEUS:-}" ]; then
-    die "SINKS と SINK_S3 / SINK_OPENSEARCH / SINK_PROMETHEUS は同時に書けない。SINKS の行を消す。まだ何も作っていない"
-  fi
-  SINK_S3=0; SINK_OPENSEARCH=0; SINK_PROMETHEUS=0
-  for s in $(printf '%s' "$SINKS" | tr -d ' ' | tr ',' ' '); do
-    case "$s" in
-      iceberg) SINK_S3=1 ;;
-      opensearch) SINK_OPENSEARCH=1 ;;
-      prometheus) SINK_PROMETHEUS=1 ;;
-      *) die "SINKS は iceberg / opensearch / prometheus のカンマ区切り（いまは「${SINKS}」）。いまは SINK_S3 / SINK_OPENSEARCH / SINK_PROMETHEUS で書く。まだ何も作っていない" ;;
-    esac
-  done
-  printf '\033[1;33m%s\033[0m\n' "SINKS=$SINKS は古い書き方。SINK_S3=$SINK_S3 SINK_OPENSEARCH=$SINK_OPENSEARCH SINK_PROMETHEUS=$SINK_PROMETHEUS と読み替えた。deploy.env をこの形に書き換える（deploy.env.example）"
-fi
+# analytics の Spark の格納先。SINK_S3 / SINK_OPENSEARCH / SINK_PROMETHEUS を 1 / 0 で書く（既定は 3 つとも 1）。
+# 0 にした格納先は Spark が書かないだけでなく、リソースも作らない。
+# terraform/pipeline/analytics の var.sinks（list）に渡すので、["iceberg","opensearch"] の形に組む（SINKS_TF）
 SINK_S3="${SINK_S3:-1}"; SINK_OPENSEARCH="${SINK_OPENSEARCH:-1}"; SINK_PROMETHEUS="${SINK_PROMETHEUS:-1}"
 flag_value SINK_S3; flag_value SINK_OPENSEARCH; flag_value SINK_PROMETHEUS
 SINKS=""
@@ -226,29 +211,8 @@ if [ -n "$SINK_OPENSEARCH" ]; then SINKS="$SINKS${SINKS:+,}opensearch"; fi
 if [ -n "$SINK_PROMETHEUS" ]; then SINKS="$SINKS${SINKS:+,}prometheus"; fi
 [ -n "$SINKS" ] || die "SINK_S3 / SINK_OPENSEARCH / SINK_PROMETHEUS が全部 0。Spark のジョブは格納先が 1 つ以上要る。analytics ごと要らないなら SKIP_ANALYTICS=1。まだ何も作っていない"
 SINKS_TF="\"$(printf '%s' "$SINKS" | sed 's/,/","/g')\""
-if [ -n "${WITH_LAB:-}" ]; then
-  die "WITH_LAB は無くなった（lab は PIPELINE に入った）。lab だけ作るなら PIPELINE=1 と SKIP_STREAM=1 と SKIP_GRAPH=1。まだ何も作っていない"
-fi
-if [ -n "${WITH_STREAM:-}" ]; then
-  die "WITH_STREAM は無くなった（2026-09-17。stream は PIPELINE に入った）。PIPELINE=1 で作り、要らないときは SKIP_STREAM=1 を書く。まだ何も作っていない"
-fi
 flag_value SKIP_LAB; flag_value SKIP_STREAM; flag_value SKIP_ANALYTICS; flag_value SKIP_GRAPH; flag_value NO_PORTFORWARD
-# どの機能を作るか。PHASE は古い書き方で、機能に読み替える（2026-09-17 まで。docs/phases.md）
-if [ -n "${PHASE:-}" ]; then
-  if [ -n "${PIPELINE:-}${AGENT:-}${WORKFLOW:-}" ]; then
-    die "PHASE と PIPELINE / AGENT / WORKFLOW は同時に書けない。PHASE の行を消す（1 → AGENT=1、2 → AGENT=1 PIPELINE=1、3 → 全部 1）。まだ何も作っていない"
-  fi
-  case "$PHASE" in
-    1) AGENT=1; PIPELINE=0; WORKFLOW=0 ;;
-    2) AGENT=1; PIPELINE=1; WORKFLOW=0 ;;
-    3) AGENT=1; PIPELINE=1; WORKFLOW=1 ;;
-    2B|2b) die "フェーズ 2B は 2026-09-17 にフェーズ 2 に入った（Spark → S3 Tables は PIPELINE の analytics）。PIPELINE=1 にする" ;;
-    5A|5a|5B|5b) die "フェーズ $PHASE は 2026-09-17 にフェーズ 3 にまとまった（docs/phases.md）。WORKFLOW=1 にする" ;;
-    4) die "フェーズ 4 は無い（agent に取り込み済み。docs/phases.md）。AGENT=1（既定）にする" ;;
-    *) die "PHASE は 1 か 2 か 3（いまは「${PHASE}」）。いまは PIPELINE / AGENT / WORKFLOW で書く" ;;
-  esac
-  printf '\033[1;33m%s\033[0m\n' "PHASE=$PHASE は古い書き方。AGENT=$AGENT PIPELINE=$PIPELINE WORKFLOW=$WORKFLOW と読み替えた。deploy.env をこの形に書き換える（deploy.env.example）"
-fi
+# どの機能を作るか（既定は土台 + AGENT）
 AGENT="${AGENT:-1}"
 flag_value AGENT; flag_value PIPELINE; flag_value WORKFLOW; flag_value CREATE_KB
 if [ -n "$WORKFLOW" ]; then
@@ -312,13 +276,6 @@ case "$CALLER_ARN" in
      fi ;;
 esac
 tf_use_cli_credentials
-# CloudFormation 版（2026-09-15 まで）のスタックが残っていると、同じ名前のリソースを作れずに apply が途中で落ちる
-OLD_STACKS=$(aws cloudformation list-stacks --region "$REGION" \
-  --query "StackSummaries[?starts_with(StackName, '$PREFIX') && StackStatus != 'DELETE_COMPLETE'].StackName" \
-  --output text 2>/dev/null || true)
-if [ -n "$OLD_STACKS" ] && [ "$OLD_STACKS" != None ]; then
-  die "CloudFormation 版のスタックが残っている: $OLD_STACKS 。名前がぶつかるので先に消す（docs/deploy-manual.md「CloudFormation 版から移るとき」）"
-fi
 CACERT="${OPENSEARCH_CACERT_FILE:-${AWS_CA_BUNDLE:-}}"
 # 共用のエンドポイント（ecr.api / ecr.dkr / logs）は Runtime・lab の EC2（docker pull）・Spark（ドライバーのログ）・workflow の Fargate が使う。
 # 2026-09-17 までは terraform/agent にあり、AGENT=0 PIPELINE=1 だと lab がイメージを取れず Spark のジョブも落ちた。使う機能が 1 つも無いときだけ作らない
@@ -341,12 +298,12 @@ echo "作るルート: $ROOTS"
 #   + 共用のエンドポイント 8（ecr.api / ecr.dkr / logs の 3 本 × 2 AZ。AGENT か lab か analytics を作るときだけ。2026-09-18 に agent から土台へ移した）、
 # agent = 5（bedrock-runtime × 2 AZ + bedrock-agentcore 1 本）
 #   + CREATE_KB なら 36（OpenSearch Serverless の OCU 33 + bedrock-agent-runtime のエンドポイント 3）、
-# lab = 9、graph = 14、stream = 29（S3 sink 無しなら 15）、
+# lab = 9、graph = 14、stream = 71（MSK Connect の S3 sink 無しなら 57）、
 # analytics = 17（ストリーミングのジョブが動いている間の EMR Serverless の 2 vCPU + 異常検知の events エンドポイント 2 本。単価は 2026-09-17 に確認）
 #   + SINK_S3 なら 3（s3tables のエンドポイント 2 本。テーブルは無料）
 #   + SINK_PROMETHEUS なら 3（aps-workspaces のエンドポイント 2 本。取り込みのサンプル課金は別）
 #   + SINK_OPENSEARCH なら 33（logs コレクションの OCU。KB のコレクションと共有されるか確認できていないので最大値で数える。
-#     2026-09-17 ユーザー決定で既定に入れた。共有されれば 0 に近づく）、
+#     共有されれば 0 に近づく）、
 # workflow = 6（Fargate ARM 1 vCPU / 2 GB のタスク 1 つ + sqs エンドポイント 1 本。Gateway と Lambda と DynamoDB と SQS は使った分だけ。単価は 2026-09-17 に確認）。
 # docs/cost.md の試算を変えたらここも変える
 COST_CENTS=5
@@ -500,7 +457,7 @@ fi
 log "4-2. Web の部品を s3://$KB_BUCKET/web/ に置く"
 aws s3 cp --only-show-errors web/app.py "s3://$KB_BUCKET/web/app.py"
 aws s3 cp --only-show-errors web/requirements.txt "s3://$KB_BUCKET/web/requirements.txt"
-for f in topology anomalies graph proposals; do aws s3 cp --only-show-errors "agent/$f.py" "s3://$KB_BUCKET/web/$f.py"; done
+for f in toolkit topology anomalies graph proposals; do aws s3 cp --only-show-errors "agent/$f.py" "s3://$KB_BUCKET/web/$f.py"; done
 aws s3 cp --only-show-errors agent/data/ "s3://$KB_BUCKET/web/data/" --recursive
 aws s3 sync --only-show-errors wheels/ "s3://$KB_BUCKET/web/wheels/"
 
@@ -551,7 +508,7 @@ if [ -z "$SKIP_LAB" ]; then
   log "5-1. lab の材料（containerlab の rpm とトポロジ。stream を作るなら Telegraf の rpm も）を s3://$KB_BUCKET/lab/ に置く（docs/pipeline.md の lab-2 と s-1）"
   fetch "https://github.com/srl-labs/containerlab/releases/download/v$CONTAINERLAB_VERSION/$CONTAINERLAB_RPM" "$CONTAINERLAB_RPM" \
     || die "containerlab の rpm が取れない（docs/pipeline.md の lab-2。社内 PC なら「社内 PC で使うとき」の証明書）"
-  aws s3 sync --only-show-errors lab/ "s3://$KB_BUCKET/lab/" --exclude "wvs2.clab.yml" --exclude "snmpd/certs/*"
+  aws s3 sync --only-show-errors lab/ "s3://$KB_BUCKET/lab/" --exclude "wanlab.clab.yml" --exclude "snmpd/certs/*"
   aws s3 cp --only-show-errors "$CONTAINERLAB_RPM" "s3://$KB_BUCKET/lab/"
   if [ -z "$SKIP_STREAM" ]; then
     fetch "https://dl.influxdata.com/telegraf/releases/$TELEGRAF_RPM" "$TELEGRAF_RPM" || die "Telegraf の rpm が取れない（docs/pipeline.md の s-1）"
@@ -567,7 +524,7 @@ if [ -z "$SKIP_STREAM" ]; then
     log "5-2. S3 sink のプラグイン（Confluent の zip）を s3://$KB_BUCKET/stream/ に置く（docs/pipeline.md の s-1）"
     if ! fetch "$S3_SINK_URL" "$S3_SINK_ZIP" || ! is_zip "$S3_SINK_ZIP"; then
       rm -f "$S3_SINK_ZIP"
-      die "Confluent の zip が取れない（利用条件への同意が要るとページが返る）。ブラウザで $S3_SINK_URL を開いて取り、リポジトリの直下に $S3_SINK_ZIP の名前で置いて打ち直す。S3 sink が要らなければ deploy.env に CREATE_S3_SINK=0 を書いて打ち直す"
+      die "Confluent の zip が取れない（利用条件への同意が要るとページが返る）。ブラウザで $S3_SINK_URL を開いて取り、展開したフォルダの直下に $S3_SINK_ZIP の名前で置いて打ち直す。S3 sink が要らなければ deploy.env に CREATE_S3_SINK=0 を書いて打ち直す"
     fi
     aws s3 cp --only-show-errors "$S3_SINK_ZIP" "s3://$KB_BUCKET/stream/$S3_SINK_ZIP"
   fi
@@ -585,7 +542,7 @@ fi
 
 # ---- 6. lab ---------------------------------------------------------------------
 LAB_INSTANCE_ID=""; LAB_WARN=""
-LAB_NODES=$(grep -c '^ *kind: linux' lab/wvs2.clab.yml.in)   # containerlab のノードの数（14）
+LAB_NODES=$(grep -c '^ *kind: linux' lab/wanlab.clab.yml.in)   # containerlab のノードの数（14）
 if [ -z "$SKIP_LAB" ]; then
   log "6. lab（terraform/pipeline/lab。EC2 の中でトポロジが上がるまで 5 分ほど）"
   tf_apply pipeline/lab
@@ -656,10 +613,10 @@ if [ -n "$GRAPH_PID" ]; then
   fi
   tail -n 3 "$GRAPH_LOG"
   log "8-2. Neptune が空なら lab の定義からトポロジを入れる（初期ロード。入っていれば何もしない。入れ直すのは ops/sync-graph.sh --replace）"
-  # lab/lab_topology.py が lab/wvs2.clab.yml.in と lab/frr/*.conf から機器と回線を作り（手元で打つ）、ops/seed_graph.py を Web の EC2 の上で
+  # lab/lab_topology.py が lab/wanlab.clab.yml.in と lab/frr/*.conf から機器と回線を作り（手元で打つ）、ops/seed_graph.py を Web の EC2 の上で
   # Web と同じ環境変数と依存で動かして Neptune に入れる。コマンドに記号を入れないよう、スクリプトもトポロジも base64 で渡す
   LAB_TOPOLOGY_B64=$("${PY[@]}" lab/lab_topology.py lab | base64 | tr -d '\n') || die "lab/lab_topology.py が lab の定義を読めなかった"
-  run_on_instance "$INSTANCE_ID" "echo $(base64 < ops/seed_graph.py | tr -d '\n') | base64 -d | LAB_TOPOLOGY_B64=$LAB_TOPOLOGY_B64 /usr/bin/python3.13 -"
+  run_on_instance "$INSTANCE_ID" "echo $(base64 < ops/seed_graph.py | tr -d '\n') | base64 -d | NAME_PREFIX=$PREFIX LAB_TOPOLOGY_B64=$LAB_TOPOLOGY_B64 /usr/bin/python3.13 -"
 fi
 if [ -z "$SKIP_STREAM" ] || [ -z "$SKIP_GRAPH" ]; then
   log "8-3. Web を再起動する（起動時に SSM の異常テーブルと Neptune を読むため）"

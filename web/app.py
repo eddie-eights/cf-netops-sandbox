@@ -30,7 +30,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 
 
 def load_env_file() -> str:
-    """手元で動かすときの .env（リポジトリ直下。ENV_FILE=<パス> で変えられる。並びは .env.example）。
+    """手元で動かすときの .env（展開したフォルダ直下。ENV_FILE=<パス> で変えられる。並びは .env.example）。
     EC2 では systemd の EnvironmentFile が渡すので無くてよい。既にある環境変数は上書きしない。同じ名前は後の行が勝つ。
     読めたらそのパスを返す"""
     path = os.environ.get("ENV_FILE") or os.path.join(HERE, "..", ".env")
@@ -57,21 +57,16 @@ ENV_FILE = load_env_file()
 if not os.environ.get("AWS_REGION"):
     sys.exit("environment variable AWS_REGION is not set. "
              "EC2: /etc/<name_prefix>-web.env is written by the user_data of terraform/base/core (compare with .env.example). "
-             "local: cp .env.example .env and fill it in (README)")
+             "local: cp .env.example .env and fill it in (docs/development.md)")
 REGION = os.environ["AWS_REGION"]
-# Runtime の ARN。環境変数 RUNTIME_ARN があればそれ、無ければ SSM の <PARAM_PREFIX>/runtime-arn（terraform/agent が書く）を 60 秒ごとに読む。
-# どちらも無ければ agent が配備されていない（チャットだけ使えない。トポロジ・異常・承認のタブは動く）
-PARAM_PREFIX = os.environ.get("PARAM_PREFIX", "")
-ARN_TTL = 60
-_arn_cache = {"arn": "", "checked": 0.0}
 PORT = int(os.environ.get("PORT", "8080"))
 DATA_DIR = os.environ.get("DATA_DIR") or os.path.join(HERE, "data")
-if not os.path.isabs(DATA_DIR):  # 相対パスはリポジトリ直下から（.env.example の DATA_DIR=agent/data）
+if not os.path.isabs(DATA_DIR):  # 相対パスは展開したフォルダ直下から（.env.example の DATA_DIR=agent/data）
     DATA_DIR = os.path.normpath(os.path.join(HERE, "..", DATA_DIR))
-TITLE = os.environ.get("TITLE", "NWC PoC")
+TITLE = os.environ.get("TITLE", "NetOps PoC")
 MAX_PROMPT = 4000
 
-# エージェントと同じモジュール。EC2 では同じディレクトリに置く（upload_web_command）。手元ではリポジトリの agent/ から読む。
+# エージェントと同じモジュール。EC2 では同じディレクトリに置く（upload_web_command）。手元では agent/ から読む。
 # 静的データの場所だけ DATA_DIR に合わせる
 if not os.path.isfile(os.path.join(HERE, "topology.py")):
     sys.path.append(os.path.join(HERE, "..", "agent"))
@@ -79,28 +74,18 @@ os.environ["TOPOLOGY_DATA_DIR"] = DATA_DIR
 import anomalies  # noqa: E402
 import proposals  # noqa: E402
 import graph  # noqa: E402
+import toolkit  # noqa: E402
 import topology  # noqa: E402
+
+# Runtime の ARN。環境変数 RUNTIME_ARN があればそれ、無ければ SSM の <PARAM_PREFIX>/runtime-arn（terraform/agent が書く）を 60 秒ごとに読む。
+# どちらも無ければ agent が配備されていない（チャットだけ使えない。トポロジ・異常・承認のタブは動く）
+RUNTIME_ARN = toolkit.Param("RUNTIME_ARN", "runtime-arn")
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 log = logging.getLogger("web")
 # 読み取りのタイムアウトは Runtime の応答（ツール往復を含む）より長くする
 agentcore = boto3.client("bedrock-agentcore", region_name=REGION,
                          config=boto3.session.Config(read_timeout=150, connect_timeout=10, retries={"max_attempts": 1}))
-
-
-def runtime_arn() -> str:
-    env = os.environ.get("RUNTIME_ARN", "")
-    if env:
-        return env
-    if _arn_cache["arn"] or time.time() - _arn_cache["checked"] < ARN_TTL or not PARAM_PREFIX:
-        return _arn_cache["arn"]
-    _arn_cache["checked"] = time.time()
-    try:
-        _arn_cache["arn"] = boto3.client("ssm", region_name=REGION).get_parameter(
-            Name=f"{PARAM_PREFIX}/runtime-arn")["Parameter"]["Value"]
-    except (ClientError, BotoCoreError):
-        _arn_cache["arn"] = ""
-    return _arn_cache["arn"]
 
 
 # ---------------------------------------------------------------- data
@@ -246,7 +231,7 @@ def remove_link(sel, a, b):
 ANOMALY_COLS = ["機器", "種別", "対象", "状態", "発生", "最終確認", "解消", "経路"]
 
 
-# ---------------------------------------------------------------- proposals (phase 3)
+# ---------------------------------------------------------------- proposals (WORKFLOW)
 PROPOSAL_COLS = ["proposal_id", "状態", "機器", "種別", "対象", "原因", "処置", "コマンド", "理由", "作成", "更新", "決めた人", "結果"]
 
 
@@ -303,7 +288,7 @@ def anomaly_table(status: str = "open"):
 
 # ---------------------------------------------------------------- chat
 def invoke(prompt: str, session_id: str) -> str:
-    arn = runtime_arn()
+    arn = RUNTIME_ARN.value()
     if not arn:
         raise gr.Error("エージェントが配備されていません（terraform/agent を apply する。deploy.env の AGENT=1）")
     try:

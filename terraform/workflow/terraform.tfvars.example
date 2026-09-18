@@ -1,11 +1,11 @@
-# Copy to terraform.tfvars (gitignored) only when the defaults are not right. Every value except worker_image_tag has a default in variables.tf.
+# Copy to terraform.tfvars only when the defaults are not right. Every value except worker_image_tag has a default in variables.tf.
 # terraform/base/core, terraform/pipeline/lab and terraform/pipeline/stream must be applied first (this root reads their state files), and
 # terraform/base/ecr must have the worker / temporal repositories (create_workflow_repositories = true, the default).
 # ops/up.sh passes worker_image_tag = IMAGE_TAG on the command line.
 #
 # region      = "ap-northeast-1"
-# name_prefix = "fukuda-nwc-poc"
-# owner       = "fukuda"
+# name_prefix = "netops-poc"
+# owner       = "netops"
 #
 # worker_image_tag   = "v1"
 # temporal_image_tag = "1.9.1"

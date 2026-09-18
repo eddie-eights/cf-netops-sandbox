@@ -1,6 +1,6 @@
 # ---------------------------------------------------------------- knowledge base (S3 -> Titan Embeddings v2 -> OpenSearch Serverless)
 # create_knowledge_base = true のときだけ作る（count）。バケットは terraform/base/core のもの（web/ lab/ stream/ と共用）。
-# 取り込み元の md は利用者の PC から aws s3 cp で docs/ に置き、start-ingestion-job で取り込む（README の手順 4）
+# 取り込み元の md は利用者の PC から aws s3 cp で docs/ に置き、start-ingestion-job で取り込む（docs/deploy-manual.md の手順 4）
 resource "aws_opensearchserverless_security_policy" "kb_encryption" {
   count = local.kb ? 1 : 0
 
@@ -65,7 +65,7 @@ resource "aws_opensearchserverless_collection" "kb" {
 
   name        = local.collection_name
   type        = "VECTORSEARCH"
-  description = "fukuda-nwc-poc knowledge base"
+  description = "${var.name_prefix} knowledge base"
   # スタンバイを切ると最小 OCU が半分になる（検証用。可用性は下がる）
   standby_replicas = "DISABLED"
 
@@ -135,7 +135,7 @@ resource "aws_iam_role" "kb" {
   count = local.kb ? 1 : 0
 
   name        = "${var.name_prefix}-kb"
-  description = "Service role for the fukuda-nwc-poc Bedrock knowledge base"
+  description = "Service role for the ${var.name_prefix} Bedrock knowledge base"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -231,7 +231,7 @@ resource "aws_bedrockagent_knowledge_base" "kb" {
   count = local.kb ? 1 : 0
 
   name        = "${var.name_prefix}-kb"
-  description = "fukuda-nwc-poc runbooks (markdown)"
+  description = "${var.name_prefix} runbooks (markdown)"
   role_arn    = aws_iam_role.kb[0].arn
 
   knowledge_base_configuration {
@@ -282,7 +282,7 @@ resource "aws_bedrockagent_data_source" "docs" {
 # Standard 階層はクロスリージョン推論が必須で、判定は APAC の他リージョンで行われることがある
 resource "aws_bedrock_guardrail" "this" {
   name                      = "${var.name_prefix}-guardrail"
-  description               = "fukuda-nwc-poc content filters and prompt attack filter"
+  description               = "${var.name_prefix} content filters and prompt attack filter"
   blocked_input_messaging   = "この質問にはお答えできません。業務に関する内容で聞き直してください。"
   blocked_outputs_messaging = "回答にガードレールで止める内容が含まれたため、表示しません。聞き方を変えてください。"
 
@@ -333,5 +333,5 @@ resource "aws_bedrock_guardrail" "this" {
 # 版は作成時点のガードレールを固定する。ガードレールを変えたら description の r1 を r2 に上げて、版を作り直させる
 resource "aws_bedrock_guardrail_version" "r1" {
   guardrail_arn = aws_bedrock_guardrail.this.guardrail_arn
-  description   = "fukuda-nwc-poc r1"
+  description   = "${var.name_prefix} r1"
 }

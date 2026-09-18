@@ -1,7 +1,7 @@
 """Neptune（terraform/pipeline/graph）に置いたトポロジの読み書き。boto3 の neptunedata で Gremlin を送る（IAM 認証の署名は boto3 が付ける）。
 
 エンドポイントは環境変数 NEPTUNE_ENDPOINT（host:port）、無ければ SSM の <PARAM_PREFIX>/neptune-endpoint（terraform/pipeline/graph が書く）。
-どちらも無ければ configured() が False で、topology.py は data/ の静的データを使う（フェーズ 1 のまま動く）。
+どちらも無ければ configured() が False で、topology.py は data/ の静的データを使う（graph を作っていなくても動く）。
 
 グラフの形は data/topology.json と同じ:
   頂点 label=device, id=device_id。property: hostname, site, role, asn, mgmt_ip, enabled, status
@@ -11,39 +11,27 @@ status（UP / DOWN / ALARM）は動的な状態で、Spark の検知（AnomalyOp
 set_status() で書く。無ければ UP。seed() で入れ直すと消える（静的な構成だけを入れる）。
 """
 
-import os
-import time
-
 import boto3
 from botocore.config import Config
-from botocore.exceptions import BotoCoreError, ClientError
 
-PARAM_PREFIX = os.environ.get("PARAM_PREFIX", "")
-REGION = os.environ.get("AWS_REGION") or os.environ.get("BEDROCK_REGION") or None
-TTL = 60
-_cache = {"endpoint": "", "checked": 0.0, "client": None}
+import toolkit
+
+REGION = toolkit.REGION
+ENDPOINT = toolkit.Param("NEPTUNE_ENDPOINT", "neptune-endpoint")  # 接続先（環境変数か SSM）
+_cache = {"client": None}
 
 
 def endpoint() -> str:
-    env = os.environ.get("NEPTUNE_ENDPOINT", "")
-    if env:
-        return env
-    if _cache["endpoint"] or time.time() - _cache["checked"] < TTL or not PARAM_PREFIX:
-        return _cache["endpoint"]
-    _cache["checked"] = time.time()
-    try:
-        _cache["endpoint"] = boto3.client("ssm", region_name=REGION).get_parameter(
-            Name=f"{PARAM_PREFIX}/neptune-endpoint")["Parameter"]["Value"]
-    except (ClientError, BotoCoreError):
-        _cache["endpoint"] = ""
-    return _cache["endpoint"]
+    return ENDPOINT.value()
 
 
 def configured() -> bool:
+    """Neptune を配備してあるか（無ければ topology.py は data/ の静的データに戻る）"""
     return bool(endpoint())
 
 
 def _client():
+    """neptunedata のクライアント。接続先が変わらないかぎり作り直さない"""
     ep = endpoint()
     if _cache["client"] is None or _cache["client"][0] != ep:
         # 既定（接続 60 秒 × 再試行）だと SG で落とされたときに 1 回の呼び出しが数分かかり、

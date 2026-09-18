@@ -2,13 +2,13 @@
 # lab EC2（terraform/pipeline/lab）の上で containerlab を動かす。user_data が /usr/local/bin/lab に置くので、SSM セッションから `sudo lab check` で使う。
 #   lab.sh render | pull | up | down | status | check | snmp <node> | logs [node] | fail-main | heal-main | failover | clab <args...>
 #   lab.sh telegraf-render | telegraf-status     （stream: Telegraf → MSK。deploy.env の WITH_STREAM=1 で terraform/pipeline/stream を作ってから）
-# 元はローカル PoC の app/wvs2-lab/lab.sh。違いは 3 つ: containerlab を直接呼ぶ（root）、イメージは ECR から取る（pull）、
-# wvs2.clab.yml はテンプレート（.in）からイメージ URI を埋めて作る（render）。
+# 手元の containerlab と違うのは 3 つ: containerlab を直接呼ぶ（root）、イメージは ECR から取る（pull）、
+# wanlab.clab.yml はテンプレート（.in）からイメージ URI を埋めて作る（render）。
 set -euo pipefail
 cd "$(dirname "$0")"
 SELF="$PWD/$(basename "$0")"
-LAB=wvs2
-TOPO=wvs2.clab.yml
+LAB=wanlab
+TOPO=wanlab.clab.yml
 # FRR のログの置き場（機器ごとに 1 ディレクトリ。コンテナの /var/log/frr に bind する）。telegraf.conf.in の inputs.tail と同じパス。
 # src/ の下に置かないのは、user_data の aws s3 sync --delete が起動のたびに消すから
 LOG_DIR=/var/log/netops-lab

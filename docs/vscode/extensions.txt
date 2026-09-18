@@ -1,9 +1,6 @@
-# VS Code の拡張の一覧。ops/vscode-setup.sh が読む。
+# このリポジトリを触るのに要る VS Code の拡張の一覧。ops/vscode-setup.sh が読む。
 # 行の書き方: 拡張 ID（publisher.name）。# から後ろはコメント。空行は無視。
-# [repo] = このリポジトリを触るのに要るもの（既定でこれだけ入る）
-# [extra] = 手元の PC に入れている残り。ALL=1 のときだけ入る
 
-[repo]
 hashicorp.terraform              # terraform/*.tf の色分け・補完・fmt
 ms-python.python                 # agent / web / tests の Python
 ms-python.vscode-pylance         # 上と一緒に使う言語サーバー
@@ -16,78 +13,3 @@ davidanson.vscode-markdownlint   # README
 eamodio.gitlens                  # 行ごとの履歴
 ms-ceintl.vscode-language-pack-ja  # 日本語表示
 pkief.material-icon-theme        # アイコン
-
-[extra]
-# ここから下はこのリポジトリには要らない。手元の PC に入っているものをそのまま並べてある
-# （PHP / Laravel / Tailwind / Azure など、別の仕事で使うもの）。社用 PC に全部入れる必要はない。
-absszero.vscode-laravel-goto
-alefragnani.bookmarks
-anthropic.claude-code
-austenc.tailwind-docs
-biomejs.biome
-bmewburn.vscode-intelephense-client
-bpruitt-goddard.mermaid-markdown-syntax-highlighting
-bradlc.vscode-tailwindcss
-charliermarsh.ruff
-chris-noring.node-snippets
-christian-kohler.npm-intellisense
-christian-kohler.path-intellisense
-chrmarti.regex
-codingyu.laravel-goto-view
-cweijan.vscode-office
-donjayamanne.githistory
-dsznajder.es7-react-js-snippets
-ecmel.vscode-html-css
-editorconfig.editorconfig
-emilast.logfilehighlighter
-esbenp.prettier-vscode
-formulahendry.auto-close-tag
-formulahendry.auto-rename-tag
-github.vscode-github-actions
-github.vscode-pull-request-github
-glenn2223.live-sass
-humao.rest-client
-ibm.output-colorizer
-llvm-vs-code-extensions.lldb-dap
-mhutchie.git-graph
-ms-azure-load-testing.microsoft-testing
-ms-azuretools.azure-dev
-ms-azuretools.vscode-azure-github-copilot
-ms-azuretools.vscode-azure-mcp-server
-ms-azuretools.vscode-azureappservice
-ms-azuretools.vscode-azurecontainerapps
-ms-azuretools.vscode-azurefunctions
-ms-azuretools.vscode-azureresourcegroups
-ms-azuretools.vscode-azurestaticwebapps
-ms-azuretools.vscode-azurestorage
-ms-azuretools.vscode-azurevirtualmachines
-ms-azuretools.vscode-cosmosdb
-ms-azuretools.vscode-docker
-ms-python.vscode-python-envs
-ms-toolsai.jupyter
-ms-toolsai.jupyter-keymap
-ms-toolsai.jupyter-renderers
-ms-toolsai.vscode-jupyter-cell-tags
-ms-toolsai.vscode-jupyter-slideshow
-ms-vscode-remote.remote-containers
-ms-vscode-remote.remote-ssh
-ms-vscode-remote.remote-ssh-edit
-ms-vscode.makefile-tools
-ms-vscode.remote-explorer
-ms-vscode.vscode-chat-customizations-evaluations
-ms-vscode.vscode-node-azure-pack
-ms-windows-ai-studio.windows-ai-studio
-naumovs.color-highlight
-onecentlin.laravel-blade
-openai.chatgpt
-prisma.prisma
-ritwickdey.liveserver
-rvben.rumdl
-ryu1kn.partial-diff
-samuelcolvin.jinjahtml
-shufo.vscode-blade-formatter
-syler.sass-indented
-vdanchenkov.tailwind-class-sorter
-wayou.vscode-todo-highlight
-willasm.obsidian-md-vsc
-xdebug.php-debug

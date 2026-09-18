@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# lab の定義（lab/wvs2.clab.yml.in + lab/frr/*.conf）から作ったトポロジを Neptune に入れる。ops/up.sh の 8-2 と同じ処理を単独で打つ版。
+# lab の定義（lab/wanlab.clab.yml.in + lab/frr/*.conf）から作ったトポロジを Neptune に入れる。ops/up.sh の 8-2 と同じ処理を単独で打つ版。
 # 設計の「静的なトポロジ構成の同期（初期 & 定期ロード）」の、定期ロードのほう。lab を変えたら打つ（cron で回してもよい）。
 #
-# 使い方（リポジトリの直下で。ops/up.sh と同じ deploy.env と AWS の認証情報）:
+# 使い方（展開したフォルダの直下で。ops/up.sh と同じ deploy.env と AWS の認証情報）:
 #   ops/sync-graph.sh            # Neptune が空のときだけ入れる（初期ロード。入っていれば何もしない）
 #   ops/sync-graph.sh --replace  # 入っていても入れ直す（Web で編集した内容と、Spark の検知で付いた status は消えて lab の定義に戻る）
 #   ops/sync-graph.sh --dry-run  # Neptune には触らず、lab から作ったトポロジ（JSON）を出すだけ
@@ -24,6 +24,7 @@ die() { echo "NG: $*" >&2; exit 1; }
 # shellcheck source=ops/deploy-env.sh
 . ops/deploy-env.sh
 load_deploy_env
+resolve_name_prefix  # PREFIX。Web の EC2 の中での置き場（/opt/<接頭辞>-web）を ops/seed_graph.py に教える
 REGION=ap-northeast-1
 if command -v python3 >/dev/null; then PY=(python3)
 elif command -v uv >/dev/null; then PY=(uv run --python 3.13 python)
@@ -37,7 +38,7 @@ INSTANCE_ID=$(terraform -chdir=terraform/base/core output -raw web_instance_id 2
 [ -n "$INSTANCE_ID" ] || die "terraform/base/core の出力 web_instance_id が空"
 
 # ops/up.sh の ssm_run と同じ。コマンドは JSON の文字列に埋めるので、ダブルクォートとバックスラッシュを含めない
-CMD="echo $(base64 < ops/seed_graph.py | tr -d '\n') | base64 -d | LAB_TOPOLOGY_B64=$(printf '%s' "$TOPO_JSON" | base64 | tr -d '\n') GRAPH_REPLACE=${REPLACE:-0} /usr/bin/python3.13 -"
+CMD="echo $(base64 < ops/seed_graph.py | tr -d '\n') | base64 -d | NAME_PREFIX=$PREFIX LAB_TOPOLOGY_B64=$(printf '%s' "$TOPO_JSON" | base64 | tr -d '\n') GRAPH_REPLACE=${REPLACE:-0} /usr/bin/python3.13 -"
 CMD_ID=$(aws ssm send-command --region "$REGION" --instance-ids "$INSTANCE_ID" \
   --document-name AWS-RunShellScript --timeout-seconds 900 \
   --parameters "{\"commands\":[\"$CMD\"]}" --query Command.CommandId --output text) || die "SSM Run Command を送れなかった"

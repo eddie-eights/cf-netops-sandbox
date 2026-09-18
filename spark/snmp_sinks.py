@@ -4,7 +4,7 @@ EMR Serverless の上で動く（terraform/pipeline/analytics）。起動は ops
 output job_driver_json が組み立てる（--bootstrap / --checkpoint / --sinks と、格納先ごとの --iceberg-table などの値）。
 Kafka と S3 Tables の jar、カタログの設定は spark-submit の --conf で渡す。
 
-格納先は 3 つ（--sinks にカンマ区切り。2026-09-17 ユーザー決定「Kafka から 4 つに分ける」のうち Splunk 以外。Splunk は Kafka の sink（MSK Connect）で後回し）:
+格納先は 3 つ（--sinks にカンマ区切り。4 つ目の Splunk は Kafka の sink（MSK Connect）にする予定で後回し）:
   iceberg     全トピック → S3 Tables（Iceberg）のテーブルに append（履歴の正本）
   opensearch  ログのトピックだけ → OpenSearch Serverless（TIMESERIES 型のコレクション）の _bulk に SigV4 で POST
   prometheus  メトリクスのトピックだけ → Amazon Managed Service for Prometheus の remote write に SigV4 で POST（数値の field だけ）
@@ -17,10 +17,10 @@ Telegraf の JSON 出力（outputs.kafka の data_format = "json"、json_timesta
 の形。列に分けるのは timestamp / name / agent_host / host だけで、tags と fields は JSON 文字列のまま入れる
 （機器やメトリクスが増えてもテーブルの列を変えないため。terraform/pipeline/analytics/tables.tf の列と同じ）。
 
-異常の検知（detect）は格納先とは別に常に動く 4 本目のクエリ（2026-09-17 ユーザー決定「Spark が異常を検知したら EventBridge にイベント発行」）:
+異常の検知（detect）は格納先とは別に常に動く 4 本目のクエリ（検知したら EventBridge にイベントを出す）:
   metrics の interface で ifOperStatus が down のインタフェース（ポーリング）と、traps の linkDown（即時）を DynamoDB の異常テーブル
   （terraform/pipeline/stream の anomalies。キーは <機器>#<種別>#<インタフェース>）に open で書き、up に戻ったポーリングと linkUp で resolved にする。
-  新しく open になったときだけ EventBridge の既定のバスに Source netops.spark / DetailType AnomalyOpened を put_events する
+  新しく open になったときだけ EventBridge の既定のバスに Source <接頭辞>.spark（--event-source）/ DetailType AnomalyOpened を put_events する
   （terraform/workflow の events.tf がルールで SQS に流し、Temporal の worker が調査ワークフローを起こす）。
   機器名は sysName タグ > --device-map（IP=機器名,...）の順で引く。以前 terraform/pipeline/stream の detector Lambda がしていたことをここに寄せた。
 
@@ -67,6 +67,9 @@ def parse_args(argv):
     p.add_argument("--anomaly-table", default="", help="detect: 異常を書く DynamoDB のテーブル名（terraform/pipeline/stream の anomalies。空なら検知しない）")
     p.add_argument("--device-map", default="", help="detect: agent_host の IP から機器名を引く表（IP=機器名,... 。sysName タグがあればそちら）")
     p.add_argument("--event-bus", default="default", help="detect: 新しい異常を put_events する EventBridge のバス名")
+    # バスは既定の 1 本を共有するので、Source を接頭辞ごとに変えないと、1 つの AWS アカウントを何人かで使ったとき
+    # 他の人の異常が自分のルール（terraform/workflow と terraform/pipeline/graph）に当たる。terraform が <接頭辞>.spark を渡す
+    p.add_argument("--event-source", default=EVENT_SOURCE, help="detect: put_events の Source（既定 netops.spark。terraform は <接頭辞>.spark を渡す）")
     args = p.parse_args(argv)
     args.sinks = [s.strip() for s in args.sinks.split(",") if s.strip()]
     bad = [s for s in args.sinks if s not in SINKS]
@@ -390,7 +393,7 @@ def make_prometheus_sender(url, region):
 
 # ---------------------------------------------------------------- detect（異常 → DynamoDB + EventBridge）
 LINK_DOWN, LINK_UP = ".1.3.6.1.6.3.1.1.5.3", ".1.3.6.1.6.3.1.1.5.4"   # IF-MIB linkDown / linkUp の trap OID
-EVENT_SOURCE = "netops.spark"
+EVENT_SOURCE = "netops.spark"          # --event-source の既定。terraform は name_prefix に合わせて <接頭辞>.spark を渡す
 EVENT_DETAIL_TYPE = "AnomalyOpened"
 EVENT_RESOLVED_TYPE = "AnomalyResolved"   # open → resolved にした瞬間に出す（terraform/pipeline/graph の status Lambda が回線を UP に戻す）
 
@@ -447,7 +450,7 @@ def anomaly_detail(kind, ifn, src):
     return f"{ifn} is down ({src})" if kind == "link_down" else f"trap {ifn}"
 
 
-def make_detect_sender(table_name, devmap, region, event_bus, dynamodb=None, events_client=None):
+def make_detect_sender(table_name, devmap, region, event_bus, event_source=EVENT_SOURCE, dynamodb=None, events_client=None):
     """records（row_to_record の辞書）から異常を出し、DynamoDB に open / resolved を書き、新しく open になったものを AnomalyOpened、
     open から resolved になったものを AnomalyResolved として EventBridge に出す。戻り値は新しく open になったものだけ。
 
@@ -507,8 +510,8 @@ def make_detect_sender(table_name, devmap, region, event_bus, dynamodb=None, eve
                 except dynamodb.exceptions.ConditionalCheckFailedException:
                     continue  # 開いていない異常の up は何もしない（正常時のポーリングは毎回ここ）
                 resolved_now.append({"anomaly_id": key, "device_id": dev, "kind": kind, "target": ifn, "resolved_at": now, "source": src})
-        entries = ([{"Source": EVENT_SOURCE, "DetailType": EVENT_DETAIL_TYPE, "EventBusName": event_bus, "Detail": json.dumps(o)} for o in opened_now]
-                   + [{"Source": EVENT_SOURCE, "DetailType": EVENT_RESOLVED_TYPE, "EventBusName": event_bus, "Detail": json.dumps(o)} for o in resolved_now])
+        entries = ([{"Source": event_source, "DetailType": EVENT_DETAIL_TYPE, "EventBusName": event_bus, "Detail": json.dumps(o)} for o in opened_now]
+                   + [{"Source": event_source, "DetailType": EVENT_RESOLVED_TYPE, "EventBusName": event_bus, "Detail": json.dumps(o)} for o in resolved_now])
         for i in range(0, len(entries), 10):   # PutEvents は 1 回 10 件まで
             r = events_client.put_events(Entries=entries[i:i + 10])
             if r.get("FailedEntryCount"):
@@ -567,7 +570,7 @@ def build(spark, args):
             queries.append(http_query(rows, s, args.checkpoint, make_prometheus_sender(args.prometheus_url, args.region)))
     if args.anomaly_table:
         rows = read_rows(spark, args.bootstrap, sink_topics("detect", args.metric_topics, args.log_topics))
-        queries.append(http_query(rows, "detect", args.checkpoint, make_detect_sender(args.anomaly_table, args.device_map, args.region, args.event_bus)))
+        queries.append(http_query(rows, "detect", args.checkpoint, make_detect_sender(args.anomaly_table, args.device_map, args.region, args.event_bus, args.event_source)))
     return queries
 
 
@@ -578,7 +581,7 @@ def main(argv):
     spark = SparkSession.builder.appName("snmp_sinks").getOrCreate()
     queries = build(spark, args)
     log("格納先: " + ", ".join(f"{s}({sink_topics(s, args.metric_topics, args.log_topics)})" for s in args.sinks)
-        + (f"; 検知: DynamoDB {args.anomaly_table} → EventBridge {args.event_bus}" if args.anomaly_table else "; 検知: なし（--anomaly-table が空）"))
+        + (f"; 検知: DynamoDB {args.anomaly_table} → EventBridge {args.event_bus}（Source {args.event_source}）" if args.anomaly_table else "; 検知: なし（--anomaly-table が空）"))
     # 1 つのクエリが落ちても他は続ける。全部止まったら 1 で終わる（EMR Serverless の STREAMING モードがジョブごと起こし直す）
     # ジョブは RUNNING のままなので、落ちた格納先は外から見えない。どれが落ちたかを名前つきの ERROR で出し、
     # 残りが動いているあいだ REMIND 秒ごとに言い直す（CloudWatch Logs で "ERROR sink" を引けば分かる）

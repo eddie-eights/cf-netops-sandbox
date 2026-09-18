@@ -1,61 +1,26 @@
 """異常一覧（DynamoDB。terraform/pipeline/analytics の Spark ジョブ（spark/snmp_sinks.py の detect）が書く。2026-09-17 までは stream の detector Lambda）をエージェントのツールと画面に出す。
 
 テーブル名は環境変数 ANOMALY_TABLE、無ければ SSM の <PARAM_PREFIX>/anomaly-table（terraform/pipeline/stream が書く）。
-どちらも無ければ「まだ配備されていない」を返して、フェーズ 1 のままの構成でも落ちない。
+どちらも無ければ「まだ配備されていない」を返して、PIPELINE を作っていない構成でも落ちない。
 項目: anomaly_id（<機器>#<種別>#<対象>）, device_id, kind（link_down / trap）, target, status（open / resolved）,
 first_seen / last_seen / resolved_at（epoch 秒）, source（poll / trap）, detail。
+DynamoDB の読み方（クライアントの使い回し・表名・整形）は agent/toolkit.py に置いてある（proposals.py と共通）。
 """
 
-import os
-import time
-from datetime import datetime, timezone, timedelta
-
-import boto3
 from botocore.exceptions import BotoCoreError, ClientError
 
-PARAM_PREFIX = os.environ.get("PARAM_PREFIX", "")
-REGION = os.environ.get("AWS_REGION") or os.environ.get("BEDROCK_REGION") or None
-INDEX = "status-last_seen-index"
-TTL = 60  # SSM を引き直す間隔（秒）。無いときに毎回叩かないため
-JST = timezone(timedelta(hours=9))
-_cache = {"table": "", "checked": 0.0}
+import toolkit
+
+INDEX = "status-last_seen-index"  # GSI。パーティションキーが status、ソートキーが last_seen
+STATUSES = ("open", "resolved")
+QUERYABLE = STATUSES + ("all",)  # ツールと画面が指定できる値（all は両方）
+TABLE = toolkit.Param("ANOMALY_TABLE", "anomaly-table")  # 表の名前（環境変数か SSM）
 
 
-def table_name() -> str:
-    env = os.environ.get("ANOMALY_TABLE", "")
-    if env:
-        return env
-    if _cache["table"] or time.time() - _cache["checked"] < TTL or not PARAM_PREFIX:
-        return _cache["table"]
-    _cache["checked"] = time.time()
-    try:
-        _cache["table"] = boto3.client("ssm", region_name=REGION).get_parameter(
-            Name=f"{PARAM_PREFIX}/anomaly-table")["Parameter"]["Value"]
-    except (ClientError, BotoCoreError):
-        _cache["table"] = ""
-    return _cache["table"]
-
-
-def _plain(item: dict) -> dict:
-    """DynamoDB の型付き項目（{"S": ..} / {"N": ..}）を素の値に"""
-    out = {}
-    for k, v in item.items():
-        if "S" in v:
-            out[k] = v["S"]
-        elif "N" in v:
-            out[k] = int(v["N"]) if v["N"].lstrip("-").isdigit() else float(v["N"])
-        elif "BOOL" in v:
-            out[k] = v["BOOL"]
-    return out
-
-
-def _iso(epoch) -> str:
-    return datetime.fromtimestamp(int(epoch), JST).strftime("%Y-%m-%d %H:%M:%S") if epoch else ""
-
-
-def _query(client, status: str, limit: int) -> list:
+def _query(client, table: str, status: str, limit: int) -> list:
+    """GSI をその status だけ、新しい順（ScanIndexForward=False）に limit 件まで"""
     res = client.query(
-        TableName=table_name(), IndexName=INDEX, KeyConditionExpression="#s = :s",
+        TableName=table, IndexName=INDEX, KeyConditionExpression="#s = :s",
         ExpressionAttributeNames={"#s": "status"}, ExpressionAttributeValues={":s": {"S": status}},
         ScanIndexForward=False, Limit=limit)
     return res.get("Items", [])
@@ -64,35 +29,33 @@ def _query(client, status: str, limit: int) -> list:
 def list_anomalies(status: str = "open", limit: int = 20, device_id: str = "") -> dict:
     """status（open / resolved / all）の異常を新しい順に。Spark が最後に見た時刻（last_seen）で並ぶ。
 
-    all は「これまでの異常は」に答えるためのもの（2026-09-18）。GSI は status ごとなので open と resolved を
-    別々に引いて last_seen で並べ直す。機器で絞るときは多めに読んでから絞る（この PoC の表は数十件）。
+    all は「これまでの異常は」に答えるためのもの（2026-09-18）。GSI のパーティションキーが status なので
+    1 回の Query では両方取れない。open と resolved を別々に引いて last_seen で並べ直す（読むのは最大 2×read 件）。
+    Limit は機器の絞り込みより先に効くので、device_id があるときは多めに読んでから絞る。
     """
-    table = table_name()
+    table = TABLE.value()
     if not table:
         return {"error": "異常一覧はまだ配備されていない（terraform/pipeline/stream を apply すると使える）", "anomalies": []}
-    status = status if status in ("open", "resolved", "all") else "open"
+    status = status if status in QUERYABLE else "open"
     limit = max(1, min(int(limit), 100))
-    read = 100 if device_id else limit
-    client = boto3.client("dynamodb", region_name=REGION)
+    read = toolkit.read_count(device_id, limit)
+    client = toolkit.client("dynamodb")
     try:
         if status == "all":
-            items = _query(client, "open", read) + _query(client, "resolved", read)
+            items = _query(client, table, "open", read) + _query(client, table, "resolved", read)
             items.sort(key=lambda i: int(i.get("last_seen", {}).get("N", "0")), reverse=True)
         else:
-            items = _query(client, status, read)
+            items = _query(client, table, status, read)
     except (ClientError, BotoCoreError) as e:
         return {"error": f"異常一覧を読めなかった: {str(e)[:200]}", "anomalies": []}
     rows = []
-    for it in items:
-        r = _plain(it)
-        r["first_seen_jst"] = _iso(r.get("first_seen"))
-        r["last_seen_jst"] = _iso(r.get("last_seen"))
+    for it in toolkit.narrow(items, device_id, limit):  # 返す行だけを整形する
+        r = toolkit.plain(it)
+        r["first_seen_jst"] = toolkit.jst(r.get("first_seen"))
+        r["last_seen_jst"] = toolkit.jst(r.get("last_seen"))
         if r.get("resolved_at"):
-            r["resolved_at_jst"] = _iso(r["resolved_at"])
+            r["resolved_at_jst"] = toolkit.jst(r["resolved_at"])
         rows.append(r)
-    if device_id:
-        rows = [r for r in rows if r.get("device_id") == device_id]
-    rows = rows[:limit]
     return {"status": status, "count": len(rows), "anomalies": rows}
 
 
@@ -110,13 +73,4 @@ TOOL_SPECS = [
     }},
 ]
 TOOLS = {"list_anomalies": list_anomalies}
-
-
-def run_tool(name: str, args: dict) -> dict:
-    fn = TOOLS.get(name)
-    if fn is None:
-        return {"error": f"unknown tool {name}"}
-    try:
-        return fn(**{k: v for k, v in (args or {}).items() if k in fn.__code__.co_varnames})
-    except (TypeError, ValueError) as e:
-        return {"error": str(e)}
+run_tool = toolkit.runner(TOOLS)

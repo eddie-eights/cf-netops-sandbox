@@ -1,5 +1,5 @@
 """Neptune へのトポロジ同期の模擬テスト（AWS に触れない）。
-lab/lab_topology.py が lab の定義（wvs2.clab.yml.in + frr/*.conf）から作る機器と回線が agent/data の静的データと同じであること
+lab/lab_topology.py が lab の定義（wanlab.clab.yml.in + frr/*.conf）から作る機器と回線が agent/data の静的データと同じであること
 （PyYAML があるときと無いときの両方）、graph/status_handler.py が AnomalyOpened / AnomalyResolved を graph.set_status に正しく写すこと、
 terraform/pipeline/graph の sync.tf がその配線を持つこと。実行は uv run --group dev python tests/test_sync.py"""
 import builtins, importlib.util, json, os, re, sys, types
@@ -84,7 +84,7 @@ fake_graph = types.ModuleType("graph")
 fake_graph.set_status = lambda dev, ifn="", status="DOWN": (calls.append((dev, ifn, status)) or {"updated": 1})
 sys.modules["graph"] = fake_graph
 h = load("graph/status_handler.py", "status_handler")
-ev = lambda t, **d: {"detail-type": t, "source": "netops.spark", "detail": d}
+ev = lambda t, **d: {"detail-type": t, "source": "demo-poc.spark", "detail": d}
 h.handler(ev("AnomalyOpened", anomaly_id="hq-ce-01#link_down#eth1", device_id="hq-ce-01", kind="link_down", target="eth1"))
 check("AnomalyOpened の link_down は機器の IF の回線を DOWN", calls[-1] == ("hq-ce-01", "eth1", "DOWN"))
 h.handler(ev("AnomalyResolved", anomaly_id="hq-ce-01#link_down#eth1", device_id="hq-ce-01", kind="link_down", target="eth1"))
@@ -104,7 +104,13 @@ check("detail が JSON 文字列でも読む", h.handler({"detail-type": "Anomal
 # ---- terraform/pipeline/graph の配線
 tf = read("terraform", "pipeline", "graph", "sync.tf")
 check("sync.tf は status_handler.py を index.py、agent/graph.py を graph.py で zip にする", 'graph/status_handler.py")' in tf and 'filename = "index.py"' in tf and 'agent/graph.py")' in tf and 'filename = "graph.py"' in tf)
-check("EventBridge のルールは netops.spark の AnomalyOpened と AnomalyResolved", re.search(r'source\s*=\s*\["netops.spark"\]', tf) and '"detail-type" = ["AnomalyOpened", "AnomalyResolved"]' in tf)
+# zip に入れ忘れても apply も plan も通り、実行時に ModuleNotFoundError で初めて分かる。だから「含まれている」ではなく「足りていない
+# ものが無い」を見る: graph.py が import する agent/ のモジュール（いまは toolkit）が全部 source に並んでいるか
+zipped = set(re.findall(r'filename = "(\w+)\.py"', tf))
+needed = {m for m in re.findall(r"^import (\w+)$", read("agent", "graph.py"), re.M) if os.path.exists(os.path.join(ROOT, "agent", m + ".py"))}
+check(f"status.zip は graph.py が import する agent/ のモジュールを全部入れる（足りない: {sorted(needed - zipped)}）", needed and not (needed - zipped))
+check("EventBridge のルールは <接頭辞>.spark の AnomalyOpened と AnomalyResolved（Source を接頭辞ごとに変えて他の人の異常を拾わない）",
+      re.search(r'source\s*=\s*\["\$\{var\.name_prefix\}\.spark"\]', tf) and '"detail-type" = ["AnomalyOpened", "AnomalyResolved"]' in tf)
 check("Lambda は VPC の中で NEPTUNE_ENDPOINT を環境変数で持ち、ロググループは retention 付き",
       "vpc_config" in tf and "NEPTUNE_ENDPOINT = " in tf and "retention_in_days = var.log_retention_days" in tf)
 check("Lambda の SG は Neptune の 8182 へ出て、Neptune の SG がそこからの 8182 を受ける", 'resource "aws_vpc_security_group_egress_rule" "status_to_neptune"' in tf and 'resource "aws_vpc_security_group_ingress_rule" "neptune_from_status"' in tf)

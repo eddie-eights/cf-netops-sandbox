@@ -1,7 +1,7 @@
-"""フェーズ 3 のワーカー（Temporal on ECS Fargate。EKS は後回し、2026-09-17 ユーザー決定）。
+"""WORKFLOW のワーカー（Temporal on ECS Fargate）。
 Spark が検知した異常（EventBridge → SQS）を受けてエージェントに原因を調べさせ、修復案を出し、人が承認したら lab EC2 で直し、異常が消えるまで確かめる。
 
-2026-09-17 ユーザー決定の流れ: Spark が異常を検知 → EventBridge にイベント（AnomalyOpened）→ SQS → ここ（agent = Temporal のワークフロー）が
+流れ: Spark が異常を検知 → EventBridge にイベント（AnomalyOpened）→ SQS → ここ（agent = Temporal のワークフロー）が
 Neptune / S3 / OpenSearch / Prometheus を見て原因分析 → 修復の提案 → 人間の承認 → Temporal で実行。
 同じタスクの中の temporal コンテナ（temporal server start-dev、SQLite）に localhost:7233 でつなぐ。
 1 プロセスで 2 つを動かす:

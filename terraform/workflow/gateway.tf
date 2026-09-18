@@ -7,6 +7,20 @@
 
 locals {
   tools = jsondecode(file("${path.module}/../../tools/tools.json"))
+
+  # Lambda の zip に入れるファイル（プロジェクトの中の場所 = zip の中の名前）。
+  # handler.py だけ名前が変わる（Lambda のハンドラが index.handler）。proposals.py は読むだけで、承認・却下はツールに出していない。
+  # agent/ のモジュールを増やしたらここにも足す（同じ一覧が agent/Dockerfile と terraform/base/core の upload_web_command にもある）
+  tools_files = {
+    "../../tools/handler.py"         = "index.py"
+    "../../agent/toolkit.py"         = "toolkit.py"
+    "../../agent/topology.py"        = "topology.py"
+    "../../agent/anomalies.py"       = "anomalies.py"
+    "../../agent/graph.py"           = "graph.py"
+    "../../agent/evidence.py"        = "evidence.py"
+    "../../agent/proposals.py"       = "proposals.py"
+    "../../agent/data/topology.json" = "data/topology.json"
+  }
 }
 
 data "archive_file" "tools" {
@@ -15,40 +29,13 @@ data "archive_file" "tools" {
   type        = "zip"
   output_path = "${path.module}/.build/tools.zip"
 
-  source {
-    content  = file("${path.module}/../../tools/handler.py")
-    filename = "index.py"
-  }
+  dynamic "source" {
+    for_each = local.tools_files
 
-  source {
-    content  = file("${path.module}/../../agent/topology.py")
-    filename = "topology.py"
-  }
-
-  source {
-    content  = file("${path.module}/../../agent/anomalies.py")
-    filename = "anomalies.py"
-  }
-
-  source {
-    content  = file("${path.module}/../../agent/graph.py")
-    filename = "graph.py"
-  }
-
-  source {
-    content  = file("${path.module}/../../agent/evidence.py")
-    filename = "evidence.py"
-  }
-
-  # 修復案の履歴（list_proposals）。読むだけで、承認・却下（decide）はツールに出していない
-  source {
-    content  = file("${path.module}/../../agent/proposals.py")
-    filename = "proposals.py"
-  }
-
-  source {
-    content  = file("${path.module}/../../agent/data/topology.json")
-    filename = "data/topology.json"
+    content {
+      content  = file("${path.module}/${source.key}")
+      filename = source.value
+    }
   }
 
   # Lambda には PyYAML が無いので devices.yaml を JSON にして入れる（topology.load_static は devices.json を先に見る）
@@ -90,11 +77,11 @@ data "aws_iam_policy_document" "tools" {
     resources = [local.anomaly_table_arn, "${local.anomaly_table_arn}/index/*"]
   }
 
-  # 修復案は読むだけ。UpdateItem は付けない（承認・却下は web ロールだけが書ける。proposals.tf の reader_access）
+  # 修復案は読むだけ。UpdateItem は付けない（承認・却下は web ロールだけが書ける。proposals.tf の decide_access）
   statement {
     sid       = "ProposalsRead"
     actions   = ["dynamodb:Query", "dynamodb:GetItem", "dynamodb:Scan"]
-    resources = [aws_dynamodb_table.proposals.arn, "${aws_dynamodb_table.proposals.arn}/index/*"]
+    resources = local.proposal_table_arns
   }
 
   # VPC の中で動くので ENI を作る（AWSLambdaVPCAccessExecutionRole と同じ中身。マネージドポリシーは付けない）
@@ -319,7 +306,7 @@ resource "aws_bedrockagentcore_gateway" "tools" {
   count = var.create_gateway ? 1 : 0
 
   name            = "${var.name_prefix}-tools"
-  description     = "fukuda-nwc-poc agent tools (MCP)"
+  description     = "${var.name_prefix} agent tools (MCP)"
   role_arn        = aws_iam_role.gateway[0].arn
   authorizer_type = "AWS_IAM"
   protocol_type   = "MCP"

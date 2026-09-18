@@ -1,14 +1,14 @@
-"""調査の証拠を取るツール（フェーズ 3。エージェントが原因分析のために OpenSearch / Prometheus / S3 Tables を見に行く）。
+"""調査の証拠を取るツール（WORKFLOW。エージェントが原因分析のために OpenSearch / Prometheus / S3 Tables を見に行く）。
 
-2026-09-17 ユーザー決定「Spark が異常を検知したら EventBridge にイベント発行して、それを検知した agent が Neptune や S3、OpenSearch、
-Prometheus を見に行って原因分析」。Neptune は graph.py / topology.py（neighbors / blast_radius）、ここは残りの 3 つ:
+Spark が検知した異常を受けて、エージェントが Neptune / S3 Tables / OpenSearch / Prometheus を見に行って原因を分析する。
+Neptune は graph.py / topology.py（neighbors / blast_radius）、ここは残りの 3 つ:
   search_logs    OpenSearch Serverless の logs コレクション（terraform/pipeline/analytics の sinks=opensearch。Spark が traps を書く）を機器名で検索
   query_metrics  Amazon Managed Service for Prometheus（sinks=prometheus。Spark が metrics を remote write）に PromQL を投げる
   query_history  S3 Tables（Iceberg）の履歴。Athena のワークグループとカタログの接続をまだ配備していないので、案内だけ返す（未実装）
 
 エンドポイントは環境変数 OPENSEARCH_ENDPOINT（https://...aoss.amazonaws.com）/ OPENSEARCH_INDEX（既定 snmp-logs）/
 PROMETHEUS_QUERY_URL（https://aps-workspaces.<region>.amazonaws.com/workspaces/<id>/api/v1/query）。
-どれも無ければ「まだ配備されていない」を返して、フェーズ 1 / 2 の構成でも落ちない。
+どれも無ければ「まだ配備されていない」を返して、PIPELINE の analytics を作っていない構成でも落ちない。
 署名は botocore の SigV4（サービス名 aoss / aps）。requests は使わず urllib で送る（tools Lambda は素の python3.13、依存を増やさない）。
 tools Lambda（terraform/workflow）と chat runtime（agent/app.py）の両方から同じものが呼ばれる。
 """
@@ -20,10 +20,11 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-import boto3
 from botocore.auth import SigV4Auth
 from botocore.awsrequest import AWSRequest
 from botocore.exceptions import BotoCoreError
+
+import toolkit
 
 OPENSEARCH_ENDPOINT = os.environ.get("OPENSEARCH_ENDPOINT", "").rstrip("/")
 OPENSEARCH_INDEX = os.environ.get("OPENSEARCH_INDEX", "snmp-logs")
@@ -37,7 +38,8 @@ def _signed(method: str, url: str, service: str, body: bytes | None = None, head
     headers = dict(headers or {})
     req = AWSRequest(method=method, url=url, data=body, headers=headers)
     try:
-        SigV4Auth(boto3.Session().get_credentials(), service, REGION).add_auth(req)
+        # セッションは使い回す（認証情報を取り直さないため）。署名のリージョンはここで指定する
+        SigV4Auth(toolkit.session().get_credentials(), service, REGION).add_auth(req)
     except (BotoCoreError, AttributeError, TypeError) as e:  # NoCredentialsError は BotoCoreError の子
         return {"error": f"署名できない（認証情報が無い）: {e}"}
     try:
@@ -126,13 +128,4 @@ TOOL_SPECS = [
     }},
 ]
 TOOLS = {"search_logs": search_logs, "query_metrics": query_metrics, "query_history": query_history}
-
-
-def run_tool(name: str, args: dict) -> dict:
-    fn = TOOLS.get(name)
-    if fn is None:
-        return {"error": f"unknown tool {name}"}
-    try:
-        return fn(**{k: v for k, v in (args or {}).items() if k in fn.__code__.co_varnames})
-    except (TypeError, ValueError) as e:
-        return {"error": str(e)}
+run_tool = toolkit.runner(TOOLS)

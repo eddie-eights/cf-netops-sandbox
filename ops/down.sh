@@ -2,12 +2,14 @@
 # docs/deploy-manual.md の「片付け」をまとめて打つ。Terraform のルートを依存の逆順に destroy し、消え終わるまで待つ。
 # state（terraform/<ルート>/terraform.tfstate）にリソースが載っているルートだけを消す。作っていないルートは飛ばす。
 #
-# 使い方（リポジトリの直下で。先に AWS CLI の認証を通しておく。IAM ユーザーなら長期キーのまま打つ）:
+# 使い方（展開したフォルダの直下で。先に AWS CLI の認証を通しておく。IAM ユーザーなら長期キーのまま打つ）:
 #   ops/down.sh              # 全部消す（workflow → analytics → graph → stream → lab → agent → main → ecr → Runtime のロググループ）。KEEP_ECR=0 と同じ
 #   KEEP_ECR=1 ops/down.sh   # ECR（イメージ）だけ残す。翌日の ops/up.sh でビルドを飛ばせる（保管料は月数円）
 #
 # ops/up.sh と同じ deploy.env（DEPLOY_ENV_FILE=<パス> で別のファイル）を読む。環境変数はファイルより優先。
 # ここで使うキー（任意）:
+#   NAME_PREFIX / OWNER  リソース名の接頭辞と owner タグ。既定は netops-poc / netops。**作ったときの ops/up.sh と同じ値にする**
+#              （deploy.env を書き換えずに打てば自動で揃う）。違う値だと Terraform が消す相手を取り違える
 #   KEEP_ECR   ECR を残すか。1 = 残す、0 = 消す（既定）。それ以外の値は何も消さずに止まる
 #   AWS_PROFILE / AWS_CA_BUNDLE / OPENSEARCH_CACERT_FILE  ops/up.sh と同じ
 #
@@ -19,8 +21,7 @@
 set -uo pipefail
 
 REGION=ap-northeast-1
-PREFIX=fukuda-nwc-poc
-OWNER=fukuda
+# PREFIX と OWNER は deploy.env で変えられるので、確定するのは load_deploy_env のあと（手順 0 の resolve_name_prefix）
 . "$(dirname "$0")/deploy-env.sh"
 resolve_deploy_env_file  # DEPLOY_ENV_FILE の相対パスは、下の cd の前の場所から見る
 cd "$(dirname "$0")/.."
@@ -56,13 +57,58 @@ has_resources() {  # has_resources <ルート>  state があり、リソース�
   tf "$1" init -input=false >/dev/null || die "terraform/$1 の init に失敗した（provider の取得。社内 PC は docs/setup.md「社内 PC で使うとき」）"
   [ -n "$(tf "$1" state list 2>/dev/null)" ]
 }
-destroy_root() {  # destroy_root <ルート> [-var 名前=値 …]
+# SG が消えないときの DependencyViolation は「まだ何かが掴んでいる」としか言わないので、掴んでいるものを名指しで出す。
+# 掴んでいるのは 2 種類ある:
+#   1. ENI — サービスが持つもの（RequesterManaged=true。MSK のブローカー、MSK Connect のワーカー、VPC エンドポイント、
+#      AgentCore Runtime）は自分では消せないので、AWS 側が片付けるのを待つしかない。それ以外で status=available のものは
+#      誰も使っていない残骸なので、ここで消す
+#   2. 他の SG のルート — その SG をこの SG から参照していると、参照している側が消えるまでこの SG は消せない
+show_and_reap_sg() {  # show_and_reap_sg <SG ID>
+  local sg="$1" eni st managed desc
+  echo "  SG $sg を掴んでいる ENI:"
+  aws ec2 describe-network-interfaces --region "$REGION" --filters "Name=group-id,Values=$sg" \
+    --query 'NetworkInterfaces[].[NetworkInterfaceId,Status,RequesterManaged,Description]' --output text 2>/dev/null \
+    | while IFS=$'\t' read -r eni st managed desc; do
+        echo "    $eni $st RequesterManaged=$managed $desc"
+        if [ "$st" = available ] && [ "$managed" = False ]; then
+          aws ec2 delete-network-interface --region "$REGION" --network-interface-id "$eni" >/dev/null 2>&1 \
+            && echo "      → 誰も使っていないので消した"
+        fi
+      done
+  echo "  SG $sg を参照しているルールを持つ他の SG:"
+  aws ec2 describe-security-groups --region "$REGION" --filters "Name=ip-permission.group-id,Values=$sg" \
+    --query "SecurityGroups[?GroupId!='$sg'].[GroupId,GroupName]" --output text 2>/dev/null | sed 's/^/    ingress /'
+  aws ec2 describe-security-groups --region "$REGION" --filters "Name=egress.ip-permission.group-id,Values=$sg" \
+    --query "SecurityGroups[?GroupId!='$sg'].[GroupId,GroupName]" --output text 2>/dev/null | sed 's/^/    egress  /'
+}
+FAILED_ROOTS=""  # 消えなかったルート（最後にまとめて出して、終了コードを 1 にする）
+destroy_root() {  # destroy_root <ルート> [-var 名前=値 …]  消えたら 0、消えなかったら 1（呼ぶ側は止まらない）
   local root="$1"; shift
   if ! has_resources "$root"; then echo "terraform/$root: 無い（state が無いか空）"; return 0; fi
   echo "terraform/$root: 消す"
-  tf_logged "$root" destroy -input=false -auto-approve -var "owner=$OWNER" "$@" \
-    || die "terraform/$root が消えなかった（上のエラー。全文は $(tf_log_file "$root" destroy)。Runtime の ENI でサブネットや SG が消えないときは最大 8 時間待って ops/down.sh を打ち直す）"
-  echo "terraform/$root: 消えた"
+  local logf try sg
+  logf=$(tf_log_file "$root" destroy)
+  # DependencyViolation は、消したサービスの ENI を AWS 側が片付けるまでの数分だけ出ることが多い。
+  # 掴んでいるものを名指しで出しながら 3 回まで打ち直す（誰も使っていない ENI はその場で消える）
+  for try in 1 2 3; do
+    if tf_logged "$root" destroy -input=false -auto-approve -var "name_prefix=$PREFIX" -var "owner=$OWNER" "$@"; then
+      echo "terraform/$root: 消えた"
+      return 0
+    fi
+    # DependencyViolation 以外の失敗（変数の不足・権限・state の食い違い）は待っても変わらないので打ち直さない
+    grep -q DependencyViolation "$logf" 2>/dev/null || break
+    for sg in $(grep DependencyViolation "$logf" | grep -Eo 'sg-[0-9a-f]+' | sort -u); do
+      show_and_reap_sg "$sg"
+    done
+    [ "$try" -lt 3 ] || break
+    echo "terraform/$root: DependencyViolation だった。2 分待って $((try + 1)) 回目を打つ"
+    sleep 120
+  done
+  # ここで止めない。1 つのルートで抜けると後ろのルート（lab / agent / 土台）が消えず、EC2 が動いたまま課金が続く。
+  # 覚えておいて残りを消しにいき、最後にまとめて出す（AWS 側の ENI 待ちなら、待ってから打ち直せば消える）
+  FAILED_ROOTS="$FAILED_ROOTS $root"
+  echo "NG: terraform/$root が消えなかった（上のエラー。全文は $logf）。先へ進んで、残りのルートを消す"
+  return 1
 }
 # VPC の中の Lambda は、関数を消しても ENI が available のまま 20〜40 分残り、SG とサブネットの削除を DependencyViolation で待たせる
 # （2026-09-18 に graph の destroy が 20 分以上止まった）。destroy の間、その関数の available な ENI だけを裏で消し続ける。
@@ -89,6 +135,7 @@ destroy_lambda_root() {  # destroy_lambda_root <ルート> <VPC の中の Lambda
 
 log "0. 設定と道具と認証"
 load_deploy_env
+resolve_name_prefix  # PREFIX と OWNER。作ったときの ops/up.sh と同じ値でないと、Terraform が別のリソースを消しにいく（deploy.env を変えずに打つ）
 KEEP_ECR="${KEEP_ECR:-0}"
 case "$KEEP_ECR" in
   0) echo "KEEP_ECR=0: ECR もイメージごと消す（残すなら KEEP_ECR=1）" ;;
@@ -187,8 +234,10 @@ if has_resources base/core; then
       esac
     done < <(tf base/core state list 2>/dev/null)
     if [ "${#MAIN_TARGETS[@]}" -gt 0 ]; then
-      tf_logged base/core destroy -input=false -auto-approve -var "owner=$OWNER" "${MAIN_TARGETS[@]}" \
-        || die "terraform/base/core の ENI に関わらない部分が消えなかった（上のエラー）"
+      tf_logged base/core destroy -input=false -auto-approve -var "name_prefix=$PREFIX" -var "owner=$OWNER" "${MAIN_TARGETS[@]}" || {
+        FAILED_ROOTS="$FAILED_ROOTS base/core"
+        echo "NG: terraform/base/core の ENI に関わらない部分が消えなかった（上のエラー）。先へ進んで、残りを消す"
+      }
     else
       echo "terraform/base/core: 残っているのは VPC・サブネット・Runtime の SG だけ"
     fi
@@ -223,13 +272,14 @@ log "6. 残っていないか（Project=$PREFIX のタグ）"
 aws resourcegroupstaggingapi get-resources --region "$REGION" --tag-filters "Key=Project,Values=$PREFIX" \
   --query 'ResourceTagMappingList[].ResourceARN' --output text | tr '\t' '\n' | sed '/^$/d' || true
 echo "（何も出なければ全部消えている。ecr を残したときはリポジトリが出る。消した直後の数分は消えたものが出ることがある）"
-OLD_STACKS=$(aws cloudformation list-stacks --region "$REGION" \
-  --query "StackSummaries[?starts_with(StackName, '$PREFIX') && StackStatus != 'DELETE_COMPLETE'].StackName" \
-  --output text 2>/dev/null || true)
 if [ "$MAIN_LEFT" = 1 ]; then
   echo "terraform/base/core の VPC・サブネット・Runtime の SG は残した（Runtime の ENI 待ち。時間課金は無い）。"
   echo "すぐ使うなら ops/up.sh がそのまま使い回す。消し切るなら数時間おいて ops/down.sh を打ち直す"
 fi
-if [ -n "$OLD_STACKS" ] && [ "$OLD_STACKS" != None ]; then
-  echo "CloudFormation 版のスタックも残っている: $OLD_STACKS （docs/deploy-manual.md「CloudFormation 版から移るとき」）"
+if [ -n "$FAILED_ROOTS" ]; then
+  echo
+  echo "NG: 消えなかったルート:$FAILED_ROOTS（全文は ops/logs/tf-*-destroy.log）"
+  echo "これ以外は消してあるので、時間課金が残っているのは上のルートだけ。上に出た RequesterManaged=True の ENI が残っているなら"
+  echo "AWS 側が片付けるのを待つしかない（MSK / MSK Connect は数分〜十数分、AgentCore Runtime は最大 8 時間）。待って ops/down.sh を打ち直す"
+  exit 1
 fi

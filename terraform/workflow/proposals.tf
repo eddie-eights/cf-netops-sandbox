@@ -53,10 +53,7 @@ data "aws_iam_policy_document" "reader_access" {
       "dynamodb:GetItem",
       "dynamodb:Scan",
     ]
-    resources = [
-      aws_dynamodb_table.proposals.arn,
-      "${aws_dynamodb_table.proposals.arn}/index/*",
-    ]
+    resources = local.proposal_table_arns
   }
 
   statement {
@@ -94,6 +91,6 @@ data "aws_iam_policy_document" "decide_access" {
 
 resource "aws_iam_role_policy" "decide_access" {
   name   = "${var.name_prefix}-workflow-decide"
-  role   = data.terraform_remote_state.main.outputs.web_role_name
+  role   = local.web_role_name
   policy = data.aws_iam_policy_document.decide_access.json
 }
