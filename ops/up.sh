@@ -358,8 +358,8 @@ fi
 if [ -z "$SKIP_LAB" ]; then COST_CENTS=$((COST_CENTS + 9)); fi
 if [ -z "$SKIP_GRAPH" ]; then COST_CENTS=$((COST_CENTS + 14)); fi
 if [ -z "$SKIP_STREAM" ]; then
-  # MSK は kafka.m7g.large × 2 で 0.527（Kafka 4 は t3.small を受け付けない。2026-09-18）。MSK Connect 1 MCU で +0.14
-  if [ "$CREATE_S3_SINK" = 1 ]; then COST_CENTS=$((COST_CENTS + 70)); else COST_CENTS=$((COST_CENTS + 56)); fi
+  # MSK は kafka.m5.large × 2 で 0.542（Kafka 4 は t3.small を受け付けない。2026-09-18）。MSK Connect 1 MCU で +0.14
+  if [ "$CREATE_S3_SINK" = 1 ]; then COST_CENTS=$((COST_CENTS + 71)); else COST_CENTS=$((COST_CENTS + 57)); fi
 fi
 if [ -z "$SKIP_ANALYTICS" ]; then
   COST_CENTS=$((COST_CENTS + 17))

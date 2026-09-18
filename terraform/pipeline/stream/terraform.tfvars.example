@@ -10,7 +10,7 @@
 # create_dynamodb_endpoint = true
 #
 # kafka_version        = "4.1.x.kraft"
-# broker_instance_type = "kafka.m7g.large"  # Kafka 4.x は kafka.t3.small を受け付けない
+# broker_instance_type = "kafka.m5.large"  # Kafka 4.x は kafka.t3.small を受け付けない
 # log_retention_days   = 7
 #
 # create_s3_sink        = true

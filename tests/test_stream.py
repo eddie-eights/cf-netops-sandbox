@@ -31,7 +31,7 @@ check("detector_logs の output は無い", "detector_logs" not in tf)
 check("MSK は Kafka 4 以上の KRaft（kafka_version の既定が N.N.x.kraft で、検査が .kraft を強いる）",
       re.search(r'variable "kafka_version" \{[^}]*default\s*=\s*"[4-9]\.\d+\.x\.kraft"', tf) is not None and "x\\\\.kraft$" in tf)
 check("ブローカーは Kafka 4 が受け付ける m5 / m7g（t3.small は Unsupported InstanceType。2026-09-18）",
-      re.search(r'variable "broker_instance_type" \{[^}]*default\s*=\s*"kafka\.m7g\.large"', tf) is not None
+      re.search(r'variable "broker_instance_type" \{[^}]*default\s*=\s*"kafka\.m5\.large"', tf) is not None
       and '"kafka.t3.small"' not in tf)
 
 # ---- spark/snmp_sinks.py を pyspark 無しで読む
