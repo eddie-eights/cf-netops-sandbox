@@ -407,7 +407,7 @@ ECR のレイヤー置き場（Runtime のイメージ取得）、AL2023 の dnf
 中身は下の手順のコマンドそのもので、**できているものは飛ばす**（Terraform は差分だけ作る、ECR に同じタグのイメージがあればビルドしない、`wheels/`・rpm・zip が手元にあれば取り直さない、Neptune に機器が入っていれば投入しない）ので、途中で落ちても同じコマンドを打ち直せばよい。
 手順 0 の環境変数は要らない（スクリプトが認証情報と Terraform の出力から取る）。**aws-vault の人は 0-1 の `--no-session` のサブシェルの中で打つ**（一時セッションで入っていると、その旨を出して止まる）。社内 PC は「社内 PC で使うとき」の設定を入れたターミナルで打つ。
 
-**待機の時間課金は、土台 0.05 + 共用のエンドポイント 0.08（AGENT / lab / analytics のどれかを作るとき）+ AGENT 0.05（`CREATE_KB=1` なら +0.36）+ PIPELINE の lab（t4g.large）0.09 + stream（MSK / MSK Connect）0.28 + analytics（EMR Serverless / S3 Tables / エンドポイント）0.20 + OpenSearch Serverless の logs コレクション最大 0.33 + Prometheus 0.03 + graph（Neptune）0.14 + WORKFLOW 0.06 で、全部作ると約 $1.32/h**（「1 時間起動したときの試算」。`ops/up.sh` も手順 0 で目安を出す）。**使い終わったら当日中に `ops/down.sh` を打つ。**
+**待機の時間課金は、土台 0.05 + 共用のエンドポイント 0.08（AGENT / lab / analytics のどれかを作るとき）+ AGENT 0.05（`CREATE_KB=1` なら +0.36）+ PIPELINE の lab（t4g.large）0.09 + stream（MSK kafka.m7g.large × 2 / MSK Connect）0.70 + analytics（EMR Serverless / S3 Tables / エンドポイント）0.20 + OpenSearch Serverless の logs コレクション最大 0.33 + Prometheus 0.03 + graph（Neptune）0.14 + WORKFLOW 0.06 で、全部作ると約 $1.74/h**（「1 時間起動したときの試算」。`ops/up.sh` も手順 0 で目安を出す）。**使い終わったら当日中に `ops/down.sh` を打つ。**
 
 初回だけ、設定のファイルを写す（`deploy.env` は gitignore 済み）:
 
@@ -1630,18 +1630,18 @@ PIPELINE（`PIPELINE=1`）は上に含めていない。単価は東京リージ
 
 lab は止めれば EBS の月 $1.5 だけ。lab だけを 1 か月起動したままだと約 $65（約 9,700 円）。`SKIP_LAB=1` なら約 $0.14/h、`SKIP_GRAPH=1` なら約 $0.09/h。
 
-**stream は約 $0.28/h（約 42 円）、1 か月置くと約 $204（約 30,600 円）。**
+**stream は約 $0.70/h（約 105 円）、1 か月置くと約 $508（約 76,000 円）。**Kafka 4.x（KRaft）が受け付ける最小の Standard ブローカーが kafka.m7g.large で、kafka.t3.small は `CreateCluster` が `Unsupported InstanceType` で拒否する（2026-09-18 実機。3.x 用）。
 
 | stream の項目 | 単価 | 1 時間 |
 |---|---|---|
-| MSK kafka.t3.small × 2 | $0.0596/h/ブローカー | $0.119 |
+| MSK kafka.m7g.large × 2 | $0.2635/h/ブローカー | $0.527 |
 | MSK ストレージ 10 GB × 2 | $0.114/GB 月 | $0.003 |
 | MSK Connect 1 MCU | $0.142/MCU 時間 | $0.142 |
 | インターフェイスエンドポイント sts × 1 AZ（MSK Connect 用。2026-09-17 に lambda を外した） | $0.014/h/AZ | $0.014 |
 | DynamoDB（オンデマンド）/ SSM / S3 | 数百万リクエストまでほぼ無料枠 | 約 $0 |
-| **合計** | | **約 $0.28（約 42 円）** |
+| **合計** | | **約 $0.70（約 105 円）** |
 
-MSK Connect を作らなければ（`CREATE_S3_SINK=0`）stream は約 $0.14/h（約 21 円）、1 か月で約 $100（約 15,000 円）。
+MSK Connect を作らなければ（`CREATE_S3_SINK=0`）stream は約 $0.56/h（約 84 円）、1 か月で約 $405（約 61,000 円）。
 
 **analytics は約 $0.20/h（約 30 円）、1 か月置くと約 $146（約 21,900 円）。**ジョブが動いている間だけ EMR Serverless に課金され、アプリケーション（器）と S3 Tables のテーブルは置いておくだけならほぼ 0。
 
@@ -1835,7 +1835,7 @@ uv run python web/app.py
 - `temporalio/temporal` 1.9.1 のイメージが arm64 を含むこと（マニフェスト、2026-09-17）。
 - EMR Serverless の `emr-7.13.0` が Spark 3.5.6 であること、S3 Tables のカタログが `emr-7.5.0` 以上で使えること、jar 6 本が Maven Central にあること（HTTP 200）、S3 Tables のデータが `<uuid>--table-s3` という名前のバケットに置かれること、EMR Serverless が 0.0.0.0/0 の受信を持つ SG を拒否すること、`start-job-run` に `--mode STREAMING` があること（2026-09-17、AWS の文書）。
 - Telegraf の `inputs.snmp` は数値 OID とフィールド名を明示すれば MIB 無しで動き、`inputs.snmp_trap` は v2c を MIB 無しで受ける（varbind の名前は数値 OID）。`agent_host` タグは `source` に替わっている。net-snmp の `monitor` には `iquerySecName` と内部ユーザーが要る。
-- MSK は Kafka 4.1.x の KRaft モードで作る（`kafka_version = "4.1.x.kraft"`。Kafka 4 に ZooKeeper モードは無く、版の末尾の `.kraft` が KRaft の指定。Standard ブローカーで選べる最新が 4.1.x で、4.2.x は Express ブローカー専用。AWS の「推奨」の印は 3.9.x に付いたまま。`aws kafka list-kafka-versions` と MSK の supported versions のページで 2026-09-18 に確認。KRaft のコントローラーに追加料金は無い）。クライアントは Kafka 2.1 以降のプロトコルが要る（KIP-896）。MSK Connect 2.7.1、Spark の kafka-clients 3.x、Telegraf（sarama）はどれも満たすが、4.1.x.kraft + kafka.t3.small の実機確認はまだ。
+- MSK は Kafka 4.1.x の KRaft モードで作る（`kafka_version = "4.1.x.kraft"`。Kafka 4 に ZooKeeper モードは無く、版の末尾の `.kraft` が KRaft の指定。Standard ブローカーで選べる最新が 4.1.x で、4.2.x は Express ブローカー専用。AWS の「推奨」の印は 3.9.x に付いたまま。`aws kafka list-kafka-versions` と MSK の supported versions のページで 2026-09-18 に確認。KRaft のコントローラーに追加料金は無い）。クライアントは Kafka 2.1 以降のプロトコルが要る（KIP-896）。MSK Connect 2.7.1、Spark の kafka-clients 3.x、Telegraf（sarama）はどれも満たすが、4.1.x.kraft では kafka.t3.small を `CreateCluster` が `Unsupported InstanceType specified. Valid values: [express.m7g.*, kafka.m5.*, kafka.m7g.*]` で拒否した（2026-09-18 実機）ので、ブローカーは kafka.m7g.large にした。
 - Neptune の最新が 1.4.8.0、Neptune の IAM アクションが `neptune-db:*DataViaQuery`、`aws_msk_configuration` の版を `latest_revision` で渡すこと、Lambda の MSK イベントソースが NAT 無しの VPC では lambda と sts のエンドポイントを要ること、MSK Connect の信頼先が `kafkaconnect.amazonaws.com` であること。
 - `agent/app.py` と `agent/topology.py` を、boto3 と SDK を差し替えた模擬テスト（`tests/test_app.py`）で確かめた。46 項目（2026-09-17 に Web の編集画面の選択肢 `interfaces` / `link_choices` の 5 項目を足した）: ハイブリッド検索の指定、リランクの有無で `rerankingConfiguration` を付け外しする、質問だけを `guardContent` に入れる、ガードレールで止めた往復を履歴に残さない、参照元の付け方、検索とモデルの失敗、履歴の長さ、ツールの仕様が `toolConfig` に載ること、`toolUse` → `toolResult` の往復、往復の上限（5 回）、無い機器の扱い、トポロジ関数の結果、ツールが 8 つ（トポロジ 4 + 異常一覧 + 証拠 3）、`list_anomalies` が未配備で error を返す、振り分け。
 - `web/app.py` を手元（Python 3.14、gradio 5.50.0）で起動し、画面が出ることと、Runtime の呼び出しが `AccessDenied` のときにエラー表示になることを確かめた。

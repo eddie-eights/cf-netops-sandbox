@@ -53,13 +53,13 @@ variable "kafka_version" {
 }
 
 variable "broker_instance_type" {
-  description = "kafka.t3.small is the smallest provisioned broker (2 brokers, about 0.09 USD per hour together in Tokyo - verify in the pricing page)."
+  description = "Smallest Standard broker that Kafka 4.x (KRaft) accepts. kafka.t3.small is rejected by CreateCluster with 4.1.x.kraft (Unsupported InstanceType, seen 2026-09-18); it is only for 3.x. kafka.m7g.large is 0.2635 USD per hour per broker in Tokyo, so 0.527 for the 2 brokers (Price List API, 2026-09-18)."
   type        = string
-  default     = "kafka.t3.small"
+  default     = "kafka.m7g.large"
 
   validation {
-    condition     = contains(["kafka.t3.small", "kafka.m7g.large"], var.broker_instance_type)
-    error_message = "broker_instance_type must be kafka.t3.small or kafka.m7g.large."
+    condition     = contains(["kafka.m7g.large", "kafka.m5.large"], var.broker_instance_type)
+    error_message = "broker_instance_type must be kafka.m7g.large or kafka.m5.large (Kafka 4.x does not accept kafka.t3.small)."
   }
 }
 

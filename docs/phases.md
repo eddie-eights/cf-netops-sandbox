@@ -121,7 +121,7 @@ graph（Neptune のトポロジ。Web の「トポロジ」タブから編集）
 | analytics のジョブ | Structured Streaming、`--mode STREAMING`、60 秒トリガー、driver 1 + executor 1 の 2 vCPU。Kafka / MSK IAM / S3 Tables カタログの jar 6 本は `ops/up.sh` が Maven Central から取って `s3://<バケット>/analytics/jars/` に置く。起動は `ops/up.sh` の start-job-run（動いていれば起こさない） |
 | analytics のネットワーク | NAT が無いので S3 Tables の API は **interface エンドポイント `s3tables`（2 AZ）**、データ本体は main の S3 ゲートウェイエンドポイント。EMR の SG は inbound を自分自身からだけにする（0.0.0.0/0 の inbound があると EMR Serverless が拒否する） |
 | graph | Neptune は Gremlin を boto3 の `neptunedata` から IAM 認証で呼ぶ。`ops/up.sh` は最後に静的トポロジを投入して Web を再起動する |
-| 費用 | 約 $0.69/h（約 104 円）: lab 0.09（t4g.large + gp3）、stream 0.29（MSK 2 ブローカー + MSK Connect。sink 無しで 0.15）、analytics 0.17（2 vCPU / 8 GB のジョブ ≒ 0.15 + s3tables EP 2 AZ 0.028）、graph 0.14（db.t4g.medium）。1 か月置くと約 $504（約 75,600 円） |
+| 費用 | 約 $1.10/h（約 165 円）: lab 0.09（t4g.large + gp3）、stream 0.70（MSK kafka.m7g.large × 2 + MSK Connect。sink 無しで 0.56。Kafka 4 は t3.small を受け付けないので 2026-09-18 に上げた）、analytics 0.17（2 vCPU / 8 GB のジョブ ≒ 0.15 + s3tables EP 2 AZ 0.028）、graph 0.14（db.t4g.medium）。1 か月置くと約 $803（約 120,000 円） |
 | 権限 | 組織の SCP / IAM で t4g.large・MSK・Neptune・EMR Serverless・S3 Tables の作成が止められていることがある（README の「前提」→「AWS 側」） |
 
 ### 決まっていないこと（着手前・初回の apply で確かめる）
