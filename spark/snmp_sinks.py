@@ -424,10 +424,13 @@ def events(m, devmap):
     if name == "snmp_trap":
         oid = t.get("oid", "")
         if oid in (LINK_DOWN, LINK_UP):
-            # MIB が無いと varbind の名前は数値 OID（末尾に ifIndex が付く）。ifDescr を優先し、無ければ ifIndex
+            # MIB が無いと varbind の名前は数値 OID（末尾に ifIndex が付く）。ifDescr を優先し、無ければ ifIndex。
+            # lab の Telegraf 1.40 は数値 OID を "iso.3.6.1.2.1.2.2.1.2.38" と書く（先頭が ".1." でなく "iso."。2026-09-18 実機）ので
+            # 先頭を揃えてから見る。揃えないと target が "?" になり、ポーリングの eth1 と別の異常として二重に開いていた
+            fields = {(".1." + k[4:] if k.startswith("iso.") else k): v for k, v in f.items()}
             ifn = "?"
             for pre in ("ifDescr", ".1.3.6.1.2.1.2.2.1.2", "ifIndex", ".1.3.6.1.2.1.2.2.1.1"):
-                v = [v for k, v in f.items() if k == pre or k.startswith(pre + ".")]
+                v = [v for k, v in fields.items() if k == pre or k.startswith(pre + ".")]
                 if v:
                     ifn = str(v[0])
                     break
@@ -478,9 +481,18 @@ def make_detect_sender(table_name, devmap, region, event_bus, dynamodb=None, eve
                     ReturnValues="ALL_OLD",
                 )
                 before = (r.get("Attributes") or {}).get("status", {}).get("S")
+                if before == "resolved":
+                    # 開き直しは新しい異常として扱う: first_seen を今にし、前の resolved_at を消す。
+                    # workflow/worker.py は anomaly_id + first_seen で修復案の有無を見るので、first_seen が前のままだと
+                    # 直したあとにもう一度落ちても調査ワークフローが起きない（2026-09-18 に lab の failover の 2 回目で気づいた）
+                    dynamodb.update_item(
+                        TableName=table_name,
+                        Key={"anomaly_id": {"S": key}},
+                        UpdateExpression="SET first_seen=:n REMOVE resolved_at",
+                        ExpressionAttributeValues={":n": {"N": str(now)}},
+                    )
                 if before != "open":   # 無かった、または resolved から開き直した
-                    first_seen = int(((r.get("Attributes") or {}).get("first_seen") or {}).get("N") or now)
-                    opened_now.append({"anomaly_id": key, "device_id": dev, "kind": kind, "target": ifn, "first_seen": now if before is None else first_seen,
+                    opened_now.append({"anomaly_id": key, "device_id": dev, "kind": kind, "target": ifn, "first_seen": now,
                                        "detail": anomaly_detail(kind, ifn, src), "source": src})
             else:
                 try:

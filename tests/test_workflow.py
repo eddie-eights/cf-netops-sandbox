@@ -339,4 +339,12 @@ check("up.sh は main の後に agent を apply し、CREATE_KB のときだけ�
       up.index("tf_apply base/core") < up.index('tf_apply agent "${AGENT_VARS[@]}"') < up.index("start-ingestion-job")
       and re.search(r'if \[ -n "\$CREATE_KB" \]; then\nlog "4-3\. 手順書を置いて取り込む', up) is not None and 'AGENT_VARS+=(-var create_knowledge_base=true)' in up)
 
+# ---- 2026-09-18 実機: wait_condition の timeout は asyncio.TimeoutError で、握らないとワークフロー自体が失敗して承認が拾えない
+wsrc = read("workflow", "worker.py")
+check("承認待ちの wait_condition は TimeoutError を握って表を見直す（漏らすとワークフロー失敗）",
+      "except asyncio.TimeoutError" in wsrc and wsrc.index("wait_condition(") < wsrc.index("except asyncio.TimeoutError"))
+web = read("web", "app.py")
+check("承認タブの注記はワークフローが Temporal であることを言い、表は折り返し、id は表から選べる",
+      "Temporal" in web and "wrap=True" in web and "pr_id = gr.Dropdown(" in web and "proposal_detail" in web)
+
 print(f"通過 {passed} / 失敗 0")

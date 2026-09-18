@@ -52,9 +52,11 @@ data "aws_iam_policy_document" "status" {
     resources = ["*"]
   }
 
+  # status を書き換える property('status', ...) は既存の値の削除を伴うので、Neptune は DeleteDataViaQuery も要る
+  # （無いと ExecuteGremlinQuery が AccessDeniedException になり、検知がトポロジに反映されない。2026-09-18 実機）
   statement {
     sid       = "Gremlin"
-    actions   = ["neptune-db:ReadDataViaQuery", "neptune-db:WriteDataViaQuery", "neptune-db:GetQueryStatus"]
+    actions   = ["neptune-db:ReadDataViaQuery", "neptune-db:WriteDataViaQuery", "neptune-db:DeleteDataViaQuery", "neptune-db:GetQueryStatus"]
     resources = ["arn:${local.partition}:neptune-db:${var.region}:${local.account_id}:${aws_neptune_cluster.graph.cluster_resource_id}/*"]
   }
 }

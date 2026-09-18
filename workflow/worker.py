@@ -97,7 +97,8 @@ def dedupe_key(anomaly: dict) -> tuple[str, int]:
 
 def should_start(anomaly: dict, existing: dict | None) -> bool:
     """同じ異常（anomaly_id + first_seen）の修復案が既にあれば起こさない。無ければ起こす。
-    Spark（spark/snmp_sinks.py の detect）は resolved から開き直すと first_seen を残すので、同じ異常が一度 resolved → 再 open になると起こし直さない（既知の制限）"""
+    Spark（spark/snmp_sinks.py の detect）は resolved から開き直すと first_seen を今にするので、同じ異常が resolved → 再 open になれば起こし直す
+    （2026-09-18 まで first_seen が残っていて起こし直せなかった）"""
     if not anomaly.get("anomaly_id"):
         return False
     if not existing:
@@ -305,11 +306,19 @@ class InvestigateAnomaly:
             investigate, anomaly, start_to_close_timeout=timedelta(minutes=3), retry_policy=RETRY)
         pid = await workflow.execute_activity(put_proposal, args=[anomaly, finding, workflow.info().workflow_id], **opts)
 
+        workflow.logger.info("proposal %s: pending (action=%s)", pid, finding["action"])
+
         # 人の判断を待つ（テーブルの status か、シグナル decide）
         deadline = workflow.now() + timedelta(minutes=APPROVAL_TIMEOUT_MINUTES)
         decision = ""
         while workflow.now() < deadline:
-            await workflow.wait_condition(lambda: bool(self._decision), timeout=timedelta(seconds=DECISION_POLL))
+            # wait_condition は timeout に達すると asyncio.TimeoutError を投げ、それをそのまま漏らすと
+            # ワークフロー自体が失敗する（temporalio は TimeoutError をタスク失敗でなくワークフロー失敗にする。
+            # 2026-09-18 に承認しても applied に進まない原因だった）。時間切れは「まだ決まっていない」なので握って表を見る
+            try:
+                await workflow.wait_condition(lambda: bool(self._decision), timeout=timedelta(seconds=DECISION_POLL))
+            except asyncio.TimeoutError:
+                pass
             if self._decision:
                 decision = self._decision
                 break
@@ -318,8 +327,10 @@ class InvestigateAnomaly:
                 decision = status
                 break
         if not decision:
+            workflow.logger.info("proposal %s: expired", pid)
             await workflow.execute_activity(set_status, args=[pid, "expired", {"verify_note": "承認待ちのまま時間切れ"}], **opts)
             return "expired"
+        workflow.logger.info("proposal %s: %s", pid, decision)
         if decision == "rejected":
             return "rejected"
 
@@ -328,6 +339,7 @@ class InvestigateAnomaly:
             result = await workflow.execute_activity(
                 apply_on_lab, finding["command"], start_to_close_timeout=timedelta(minutes=4), retry_policy=RetryPolicy(maximum_attempts=1))
             ok = result["status"] in ("Success", "Skipped")
+            workflow.logger.info("proposal %s: apply %s -> %s", pid, finding["command"], result["status"])
             await workflow.execute_activity(
                 set_status, args=[pid, "applied" if ok else "failed", {"apply_output": f"{result['status']}: {result['output']}"[:4000]}], **opts)
             if not ok:
@@ -338,9 +350,11 @@ class InvestigateAnomaly:
         for i in range(VERIFY_ATTEMPTS):
             await asyncio.sleep(VERIFY_INTERVAL)
             if await workflow.execute_activity(anomaly_resolved, anomaly_id, **opts):
+                workflow.logger.info("proposal %s: verified (%d)", pid, i + 1)
                 await workflow.execute_activity(
                     set_status, args=[pid, "verified", {"verify_note": f"{i + 1} 回目の確認で resolved"}], **opts)
                 return "verified"
+        workflow.logger.info("proposal %s: still open after %d checks", pid, VERIFY_ATTEMPTS)
         await workflow.execute_activity(
             set_status, args=[pid, "failed", {"verify_note": f"{VERIFY_ATTEMPTS} 回確かめても open のまま"}], **opts)
         return "failed"

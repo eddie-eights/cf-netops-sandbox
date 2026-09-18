@@ -108,7 +108,9 @@ check("EventBridge のルールは netops.spark の AnomalyOpened と AnomalyRes
 check("Lambda は VPC の中で NEPTUNE_ENDPOINT を環境変数で持ち、ロググループは retention 付き",
       "vpc_config" in tf and "NEPTUNE_ENDPOINT = " in tf and "retention_in_days = var.log_retention_days" in tf)
 check("Lambda の SG は Neptune の 8182 へ出て、Neptune の SG がそこからの 8182 を受ける", 'resource "aws_vpc_security_group_egress_rule" "status_to_neptune"' in tf and 'resource "aws_vpc_security_group_ingress_rule" "neptune_from_status"' in tf)
-check("Lambda のロールは neptune-db の Read / Write だけ", '"neptune-db:WriteDataViaQuery"' in tf and "DeleteDataViaQuery" not in tf)
+# property('status', ...) は既存値の削除を伴うので Delete も要る（無いと AccessDenied で検知がトポロジに映らない。2026-09-18 実機）
+check("Lambda のロールは neptune-db の Read / Write / Delete（Gremlin だけ、他のサービスは持たない）",
+      all(f'"neptune-db:{a}DataViaQuery"' in tf for a in ("Read", "Write", "Delete")) and "neptune-db:*" not in tf)
 check("EventBridge から Lambda を呼ぶ permission", 'principal     = "events.amazonaws.com"' in tf and "source_arn    = aws_cloudwatch_event_rule.status.arn" in tf)
 check("variables.tf に log_retention_days", 'variable "log_retention_days"' in read("terraform", "pipeline", "graph", "variables.tf"))
 print(f"通過 {passed} / 失敗 0")

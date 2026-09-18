@@ -195,6 +195,12 @@ def refresh_topology(a="", b=""):
     return topology_svg(), device_table(), *_choices(a, b)
 
 
+def redraw_topology():
+    """自動更新用。図と表だけ描き直し、編集フォームの選択には触らない"""
+    topology.reload(force=True)
+    return topology_svg(), device_table()
+
+
 def interface_choices(device):
     """機器を選んだら、その機器でいま使われているインタフェース名を選択肢に出す（新しい名前は打てる）"""
     return gr.update(choices=topology.interfaces(device) if device else [], value=None)
@@ -244,7 +250,12 @@ ANOMALY_COLS = ["機器", "種別", "対象", "状態", "発生", "最終確認"
 PROPOSAL_COLS = ["proposal_id", "状態", "機器", "種別", "対象", "原因", "処置", "コマンド", "理由", "作成", "更新", "決めた人", "結果"]
 
 
+# 表は列が多く、原因・理由は長い文なので折り返す。幅は %（Gradio 5 の column_widths）。表で切れる分は下の「詳細」に全文を出す
+PROPOSAL_WIDTHS = ["14%", "6%", "7%", "7%", "5%", "16%", "6%", "9%", "16%", "7%", "7%", "5%", "12%"]
+
+
 def proposal_table(status: str = "pending"):
+    """表と、proposal_id の選択肢（表の 1 列目と同じ）"""
     r = proposals.list_proposals(status=status, limit=100)
     rows = [{"proposal_id": p.get("proposal_id", ""), "状態": p.get("status", ""), "機器": p.get("device_id", ""),
              "種別": p.get("kind", ""), "対象": p.get("target", ""), "原因": p.get("cause", ""), "処置": p.get("action", ""),
@@ -252,14 +263,33 @@ def proposal_table(status: str = "pending"):
              "更新": p.get("updated_at_jst", ""), "決めた人": p.get("decided_by", ""),
              "結果": (p.get("verify_note") or p.get("apply_output") or "")[:200]} for p in r.get("proposals", [])]
     msg = r["error"] if r.get("error") else f"{r.get('count', 0)} 件（{status}）"
-    return msg, pd.DataFrame(rows, columns=PROPOSAL_COLS)
+    ids = [row["proposal_id"] for row in rows]
+    return msg, pd.DataFrame(rows, columns=PROPOSAL_COLS), gr.update(choices=ids, value=ids[0] if ids else None)
+
+
+def proposal_detail(proposal_id: str) -> str:
+    """選んだ修復案の全文（表では切れる原因・理由・結果）"""
+    proposal_id = (proposal_id or "").strip()
+    if not proposal_id:
+        return ""
+    p = proposals.get_proposal(proposal_id)
+    if not p:
+        return f"`{proposal_id}` は無い（更新を押す）"
+    lines = [f"**{html.escape(proposal_id)}** — {p.get('status', '')}（{p.get('device_id', '')} / {p.get('kind', '')} / {p.get('target', '')}）", ""]
+    for label, key in (("原因", "cause"), ("処置", "action"), ("コマンド", "command"), ("理由", "reason"),
+                       ("実行結果", "apply_output"), ("確認結果", "verify_note"), ("決めた人", "decided_by"),
+                       ("作成", "created_at_jst"), ("更新", "updated_at_jst")):
+        v = str(p.get(key) or "").strip()
+        if v:
+            lines.append(f"- **{label}**: {html.escape(v)}")
+    return "\n".join(lines)
 
 
 def decide_proposal(proposal_id: str, decision: str, status: str):
     r = proposals.decide((proposal_id or "").strip(), decision, decided_by="web")
-    msg = r["error"] if r.get("error") else f"{r['proposal_id']} を {decision} にした（ワーカーが次の段に進める）"
-    _, table = proposal_table(status)
-    return msg, table
+    msg = r["error"] if r.get("error") else f"{r['proposal_id']} を {decision} にした（ワーカーが次の段に進める。状態を approved / applied / verified にして更新で追える）"
+    _, table, ids = proposal_table(status)
+    return msg, table, ids
 
 
 def anomaly_table(status: str = "open"):
@@ -370,7 +400,7 @@ with gr.Blocks(title=f"{TITLE} チャット") as demo:
             an_status = gr.Radio(["open", "resolved"], value="open", label="状態（open = 未解消）", scale=3)
             an_refresh = gr.Button("更新", scale=1)
         an_msg = gr.Markdown()
-        an_table = gr.Dataframe(pd.DataFrame(columns=ANOMALY_COLS), interactive=False, label="異常（Spark が DynamoDB に書いたもの）")
+        an_table = gr.Dataframe(pd.DataFrame(columns=ANOMALY_COLS), interactive=False, wrap=True, label="異常（Spark が DynamoDB に書いたもの）")
         an_refresh.click(anomaly_table, [an_status], [an_msg, an_table])
         an_status.change(anomaly_table, [an_status], [an_msg, an_table])
         demo.load(anomaly_table, [an_status], [an_msg, an_table])
@@ -381,18 +411,31 @@ with gr.Blocks(title=f"{TITLE} チャット") as demo:
                                  value="pending", label="状態（pending = 承認待ち）", scale=4)
             pr_refresh = gr.Button("更新", scale=1)
         pr_msg = gr.Markdown()
-        pr_table = gr.Dataframe(pd.DataFrame(columns=PROPOSAL_COLS), interactive=False, label="修復案（ワーカーが DynamoDB に書いたもの）")
+        pr_table = gr.Dataframe(pd.DataFrame(columns=PROPOSAL_COLS), interactive=False, wrap=True, column_widths=PROPOSAL_WIDTHS,
+                                label="修復案（ワーカーが DynamoDB に書いたもの。長い列は折り返し。全文は下の「詳細」）")
         with gr.Row():
-            pr_id = gr.Textbox(label="proposal_id（表の 1 列目をそのまま）", scale=4)
+            pr_id = gr.Dropdown([], value=None, allow_custom_value=True, scale=4,
+                                label="proposal_id（表の 1 列目。選ぶと下に全文が出る）")
             pr_approve = gr.Button("承認して直す", variant="primary", scale=1)
             pr_reject = gr.Button("却下", scale=1)
-        pr_refresh.click(proposal_table, [pr_status], [pr_msg, pr_table])
-        pr_status.change(proposal_table, [pr_status], [pr_msg, pr_table])
-        demo.load(proposal_table, [pr_status], [pr_msg, pr_table])
-        pr_approve.click(lambda i, s: decide_proposal(i, "approved", s), [pr_id, pr_status], [pr_msg, pr_table])
-        pr_reject.click(lambda i, s: decide_proposal(i, "rejected", s), [pr_id, pr_status], [pr_msg, pr_table])
-        gr.Markdown("承認すると、ワーカーが lab EC2 で `sudo lab <コマンド>` を打ち（SSM Run Command）、異常が resolved になるまで数回確かめます。"
-                    "却下は何もしません。承認待ちのまま 2 時間（approval_timeout_minutes）で expired になります。")
+        pr_detail = gr.Markdown(label="詳細")
+        pr_out = [pr_msg, pr_table, pr_id]
+        pr_refresh.click(proposal_table, [pr_status], pr_out)
+        pr_status.change(proposal_table, [pr_status], pr_out)
+        demo.load(proposal_table, [pr_status], pr_out)
+        pr_id.change(proposal_detail, [pr_id], [pr_detail])
+        # 30 秒ごとに描き直す（Spark の検知が 1 分、ワーカーの確認が 30 秒おきなので、ボタンを押さなくても追える。
+        # 読むのは Neptune 1 回と DynamoDB のクエリ 2 回で、開いているブラウザの数だけ）。proposal_id の選択はそのまま残す
+        ticker = gr.Timer(30)
+        ticker.tick(redraw_topology, None, [topo_html, topo_table])
+        ticker.tick(anomaly_table, [an_status], [an_msg, an_table])
+        ticker.tick(lambda st: proposal_table(st)[:2], [pr_status], [pr_msg, pr_table])
+        pr_approve.click(lambda i, s: decide_proposal(i, "approved", s), [pr_id, pr_status], pr_out)
+        pr_reject.click(lambda i, s: decide_proposal(i, "rejected", s), [pr_id, pr_status], pr_out)
+        gr.Markdown("修復案は Temporal のワークフロー（terraform/workflow の ECS Fargate のワーカー）が出し、承認を待っています。"
+                    "承認すると同じワークフローが lab EC2 で `sudo lab <コマンド>` を打ち（EC2 への入口は SSM Run Command。SSH は開けていない）、"
+                    "異常が resolved になるまで 30 秒おきに数回確かめて verified にします。却下は何もしません。"
+                    "承認待ちのまま 2 時間（approval_timeout_minutes）で expired になります。")
 
 if __name__ == "__main__":
     demo.queue(default_concurrency_limit=4).launch(

@@ -76,7 +76,12 @@ class FakeDynamo:
             if old is None or old.get(attr) != values[m.group(2)]:
                 raise ConditionalCheckFailedException("condition")
         item = dict(old or {})
-        for lhs, rhs in re.findall(r"([#\w]+)=(if_not_exists\([^)]*\)|:\w+)", kw["UpdateExpression"]):
+        expr = kw["UpdateExpression"]
+        if " REMOVE " in expr:
+            expr, removed = expr.split(" REMOVE ", 1)
+            for attr in removed.split(","):
+                item.pop(names.get(attr.strip(), attr.strip()), None)
+        for lhs, rhs in re.findall(r"([#\w]+)=(if_not_exists\([^)]*\)|:\w+)", expr):
             attr = names.get(lhs, lhs)
             m = re.fullmatch(r"if_not_exists\((\w+),(:\w+)\)", rhs)
             if m:
@@ -172,9 +177,10 @@ check("open → resolved で AnomalyResolved を 1 件出す（Detail に anomal
 check("resolved のあとの up は何もしない（ConditionExpression。AnomalyResolved も出さない）",
       send([iface("203.0.113.11", "eth1", 1)]) == [] and ddb.plain(key)["status"] == "resolved" and len(ev.calls) == 2)
 reopened = send([iface("203.0.113.11", "eth1", 2)])
-check("resolved → 再 open はイベントをもう一度出し、first_seen は前のまま",
-      len(reopened) == 1 and reopened[0]["first_seen"] == first - 100 and ddb.plain(key)["status"] == "open"
-      and ddb.plain(key)["first_seen"] == first - 100 and len(ev.calls) == 3 and ev.calls[-1][0]["DetailType"] == "AnomalyOpened")
+check("resolved → 再 open はイベントをもう一度出し、first_seen を今にして resolved_at を消す（worker が起こし直せるように。2026-09-18）",
+      len(reopened) == 1 and reopened[0]["first_seen"] >= first and ddb.plain(key)["status"] == "open"
+      and ddb.plain(key)["first_seen"] == reopened[0]["first_seen"] and "resolved_at" not in ddb.plain(key)
+      and len(ev.calls) == 3 and ev.calls[-1][0]["DetailType"] == "AnomalyOpened")
 
 send, ddb, ev = make()
 check("ifDescr が無ければ ifIndex", send([iface("203.0.113.12", None, 2, ifindex="3")]) and "dc-ce-01#link_down#3" in ddb.items)
@@ -195,6 +201,10 @@ check("linkDown trap（MIB 無しの数値 OID）は ifDescr の varbind から 
       [o["anomaly_id"] for o in opened] == [key] and ddb.plain(key)["source"] == "trap" and ddb.plain(key)["detail"] == "eth3 is down (trap)")
 check("linkUp trap で resolved", send([trap("203.0.113.11", mod.LINK_UP, {".1.3.6.1.2.1.2.2.1.2.3": "eth3"})]) == [] and ddb.plain(key)["status"] == "resolved")
 send, ddb, ev = make()
+send([{"measurement": "snmp_trap", "tags": {"source": "203.0.113.11", "oid": mod.LINK_DOWN, "name": "iso.3.6.1.6.3.1.1.5.3", "mib": ""},
+       "fields": {"iso.3.6.1.2.1.2.2.1.2.38": "eth1", "iso.3.6.1.2.1.2.2.1.1.38": 38, "iso.3.6.1.2.1.1.3.0": 882671}}])
+check("Telegraf 1.40 の \"iso.\" 始まりの数値 OID でも ifDescr を取る（source タグでも機器名が出る。2026-09-18 実機）",
+      "hq-ce-01#link_down#eth1" in ddb.items and ddb.plain("hq-ce-01#link_down#eth1")["target"] == "eth1")
 send([trap("203.0.113.11", mod.LINK_DOWN, {"ifDescr": "eth4", "ifIndex": 4})])
 check("MIB がある varbind 名（ifDescr）でも取れる", "hq-ce-01#link_down#eth4" in ddb.items)
 send, ddb, ev = make()
