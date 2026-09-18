@@ -8,7 +8,7 @@
 
 **待機の時間課金は、土台 0.05 + 共用のエンドポイント 0.08（AGENT / lab / analytics のどれかを作るとき）+ AGENT 0.05（`CREATE_KB=1` なら +0.36）+ PIPELINE の lab（t4g.large）0.09 + stream（MSK kafka.m5.large × 2 / MSK Connect）0.71 + analytics（EMR Serverless / S3 Tables / エンドポイント）0.20 + OpenSearch Serverless の logs コレクション最大 0.33 + Prometheus 0.03 + graph（Neptune）0.14 + WORKFLOW 0.06 で、全部作ると約 $1.74/h**（「[1 時間起動したときの試算](cost.md)」。`ops/up.sh` も手順 0 で目安を出す）。**使い終わったら当日中に `ops/down.sh` を打つ。**
 
-初回だけ、設定のファイルを写す（`deploy.env` は配布物には入っていない）。写したら **`OWNER`（デプロイする人の名前。必須）の行の `#` を外して自分の名前に書き換える**:
+初回だけ、設定のファイルを写す（`deploy.env` は配布物には入っていない）。写したら **空の `OWNER=` に自分の名前（デプロイする人の名前。必須）を書く**:
 
 ```bash
 cp deploy.env.example deploy.env

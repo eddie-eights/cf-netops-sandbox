@@ -62,7 +62,7 @@ terraform/
 1. 道具を入れる。AWS CLI v2 / Terraform 1.11 以上 / Docker（arm64 のビルドができる buildx）/ Session Manager plugin / python3 か uv（「[前提](docs/setup.md)」）。
 2. AWS に入る。`aws login --profile <プロファイル>` か `aws configure sso`、または IAM ユーザーの長期キー（`aws configure`）。スクリプトは `credential_process` で Terraform に渡すので、環境変数に鍵を出さなくてよい。**IAM ユーザーの一時セッション（`sts get-session-token`）では IAM の API が呼べず apply が落ちる**ので、`ops/up.sh` が見つけて先頭で止まる。
 3. 配布された zip を **Linux 側のホーム**に展開する（WSL2 は `/mnt/c` ではなく `~`。`/mnt/c` だと Docker のビルドと `wheels/` の展開が遅くなる）。展開したフォルダに入ってから以降を打つ。
-4. `cp deploy.env.example deploy.env` で写し、**`OWNER` の行の `#` を外して自分の名前を書き**（必須。リソース名と `Project` タグの接頭辞が `<owner>-nwc-poc` になり、自分の名前で AWS のリソースを探せる）、要る機能を `1` にする。
+4. `cp deploy.env.example deploy.env` で写し、**空の `OWNER=` に自分の名前を書き**（必須。リソース名と `Project` タグの接頭辞が `<owner>-nwc-poc` になり、自分の名前で AWS のリソースを探せる）、要る機能を `1` にする。
 5. `ops/up.sh` を打つ。手順 0 で作るルートと 1 時間あたりの目安を出し、土台 → 機能の順に apply する。終わると Web への SSM ポートフォワーディングが開く（`http://localhost:8080`）。
 6. 使い終わったら **当日中に** `ops/down.sh`。
 
