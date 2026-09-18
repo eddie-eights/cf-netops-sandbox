@@ -1,8 +1,9 @@
 # ---------------------------------------------------------------- AgentCore Gateway (MCP) + tools Lambda
 # The chat runtime (agent/app.py) lists the tools through the gateway URL (SSM <name_prefix>/gateway-url) and calls them over MCP
-# instead of its built-in functions. The Lambda runs the same agent/topology.py, agent/anomalies.py and agent/evidence.py inside
-# the VPC (subnet a), so it reads Neptune (terraform/pipeline/graph), the logs collection and the metrics workspace (terraform/pipeline/analytics)
-# and the anomaly table (terraform/pipeline/stream). Without graph / analytics the topology comes from data/ and the evidence tools say so.
+# instead of its built-in functions. The Lambda runs the same agent/topology.py, agent/anomalies.py, agent/evidence.py and
+# agent/proposals.py inside the VPC (subnet a), so it reads Neptune (terraform/pipeline/graph), the logs collection and the metrics
+# workspace (terraform/pipeline/analytics), the anomaly table (terraform/pipeline/stream) and the proposal table (proposals.tf).
+# Without graph / analytics the topology comes from data/ and the evidence tools say so.
 
 locals {
   tools = jsondecode(file("${path.module}/../../tools/tools.json"))
@@ -39,6 +40,12 @@ data "archive_file" "tools" {
     filename = "evidence.py"
   }
 
+  # 修復案の履歴（list_proposals）。読むだけで、承認・却下（decide）はツールに出していない
+  source {
+    content  = file("${path.module}/../../agent/proposals.py")
+    filename = "proposals.py"
+  }
+
   source {
     content  = file("${path.module}/../../agent/data/topology.json")
     filename = "data/topology.json"
@@ -66,7 +73,7 @@ resource "aws_iam_role" "tools" {
   count = var.create_gateway ? 1 : 0
 
   name               = "${var.name_prefix}-tools"
-  description        = "Tools Lambda behind the MCP gateway - reads the anomaly table, Neptune, the logs collection and the metrics workspace"
+  description        = "Tools Lambda behind the MCP gateway - reads the anomaly and proposal tables, Neptune, the logs collection and the metrics workspace"
   assume_role_policy = data.aws_iam_policy_document.lambda_trust.json
 }
 
@@ -81,6 +88,13 @@ data "aws_iam_policy_document" "tools" {
     sid       = "Anomalies"
     actions   = ["dynamodb:Query", "dynamodb:GetItem", "dynamodb:Scan"]
     resources = [local.anomaly_table_arn, "${local.anomaly_table_arn}/index/*"]
+  }
+
+  # 修復案は読むだけ。UpdateItem は付けない（承認・却下は web ロールだけが書ける。proposals.tf の reader_access）
+  statement {
+    sid       = "ProposalsRead"
+    actions   = ["dynamodb:Query", "dynamodb:GetItem", "dynamodb:Scan"]
+    resources = [aws_dynamodb_table.proposals.arn, "${aws_dynamodb_table.proposals.arn}/index/*"]
   }
 
   # VPC の中で動くので ENI を作る（AWSLambdaVPCAccessExecutionRole と同じ中身。マネージドポリシーは付けない）
@@ -243,6 +257,7 @@ resource "aws_lambda_function" "tools" {
     variables = {
       PARAM_PREFIX         = local.param_prefix # graph.py が <prefix>/neptune-endpoint を引く（無ければ data/ の静的トポロジ）
       ANOMALY_TABLE        = local.anomaly_table
+      PROPOSAL_TABLE       = aws_dynamodb_table.proposals.name
       OPENSEARCH_ENDPOINT  = local.opensearch_endpoint
       OPENSEARCH_INDEX     = local.opensearch_index
       PROMETHEUS_QUERY_URL = local.prometheus_query_url
@@ -322,7 +337,7 @@ resource "aws_bedrockagentcore_gateway_target" "tools" {
   count = var.create_gateway ? 1 : 0
 
   name               = "tools"
-  description        = "Read only tools backed by the tools Lambda (topology, anomalies, logs, metrics)"
+  description        = "Read only tools backed by the tools Lambda (topology, anomalies, proposals, logs, metrics)"
   gateway_identifier = aws_bedrockagentcore_gateway.tools[0].gateway_id
 
   credential_provider_configuration {

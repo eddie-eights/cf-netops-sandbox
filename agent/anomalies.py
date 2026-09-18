@@ -53,39 +53,59 @@ def _iso(epoch) -> str:
     return datetime.fromtimestamp(int(epoch), JST).strftime("%Y-%m-%d %H:%M:%S") if epoch else ""
 
 
-def list_anomalies(status: str = "open", limit: int = 20) -> dict:
-    """status（open / resolved）の異常を新しい順に。Spark が最後に見た時刻（last_seen）で並ぶ"""
+def _query(client, status: str, limit: int) -> list:
+    res = client.query(
+        TableName=table_name(), IndexName=INDEX, KeyConditionExpression="#s = :s",
+        ExpressionAttributeNames={"#s": "status"}, ExpressionAttributeValues={":s": {"S": status}},
+        ScanIndexForward=False, Limit=limit)
+    return res.get("Items", [])
+
+
+def list_anomalies(status: str = "open", limit: int = 20, device_id: str = "") -> dict:
+    """status（open / resolved / all）の異常を新しい順に。Spark が最後に見た時刻（last_seen）で並ぶ。
+
+    all は「これまでの異常は」に答えるためのもの（2026-09-18）。GSI は status ごとなので open と resolved を
+    別々に引いて last_seen で並べ直す。機器で絞るときは多めに読んでから絞る（この PoC の表は数十件）。
+    """
     table = table_name()
     if not table:
         return {"error": "異常一覧はまだ配備されていない（terraform/pipeline/stream を apply すると使える）", "anomalies": []}
-    status = status if status in ("open", "resolved") else "open"
+    status = status if status in ("open", "resolved", "all") else "open"
     limit = max(1, min(int(limit), 100))
+    read = 100 if device_id else limit
+    client = boto3.client("dynamodb", region_name=REGION)
     try:
-        res = boto3.client("dynamodb", region_name=REGION).query(
-            TableName=table, IndexName=INDEX, KeyConditionExpression="#s = :s",
-            ExpressionAttributeNames={"#s": "status"}, ExpressionAttributeValues={":s": {"S": status}},
-            ScanIndexForward=False, Limit=limit)
+        if status == "all":
+            items = _query(client, "open", read) + _query(client, "resolved", read)
+            items.sort(key=lambda i: int(i.get("last_seen", {}).get("N", "0")), reverse=True)
+        else:
+            items = _query(client, status, read)
     except (ClientError, BotoCoreError) as e:
         return {"error": f"異常一覧を読めなかった: {str(e)[:200]}", "anomalies": []}
     rows = []
-    for it in res.get("Items", []):
+    for it in items:
         r = _plain(it)
         r["first_seen_jst"] = _iso(r.get("first_seen"))
         r["last_seen_jst"] = _iso(r.get("last_seen"))
         if r.get("resolved_at"):
             r["resolved_at_jst"] = _iso(r["resolved_at"])
         rows.append(r)
+    if device_id:
+        rows = [r for r in rows if r.get("device_id") == device_id]
+    rows = rows[:limit]
     return {"status": status, "count": len(rows), "anomalies": rows}
 
 
 TOOL_SPECS = [
     {"toolSpec": {
         "name": "list_anomalies",
-        "description": "監視で見つかった異常の一覧（機器、種別 link_down / trap、対象インタフェース、発生時刻、最後に確認した時刻、poll か trap か）。"
-                       "「今の異常は」「どこが落ちている」と聞かれたら status=open で呼ぶ。過去の分は status=resolved。",
+        "description": "監視で見つかった異常の一覧（機器、種別 link_down / trap、対象インタフェース、発生時刻、最後に確認した時刻、解消時刻、poll か trap か）。"
+                       "「今の異常は」「どこが落ちている」と聞かれたら status=open で呼ぶ。"
+                       "「これまでの異常は」「過去に何があった」「履歴」と聞かれたら status=all（解消済みも含む）で呼ぶ。解消済みだけなら status=resolved。",
         "inputSchema": {"json": {"type": "object", "properties": {
-            "status": {"type": "string", "description": "open（未解消、既定）か resolved（解消済み）"},
+            "status": {"type": "string", "description": "open（未解消、既定）／ resolved（解消済み）／ all（両方を新しい順に）"},
             "limit": {"type": "integer", "description": "件数の上限（既定 20、最大 100）"},
+            "device_id": {"type": "string", "description": "機器名（例 hq-ce-01）で絞る。空なら全機器"},
         }}},
     }},
 ]

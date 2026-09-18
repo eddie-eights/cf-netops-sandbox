@@ -43,6 +43,8 @@ resource "aws_ssm_parameter" "proposal_table" {
 }
 
 # ---------------------------------------------------------------- access for the chat runtime and the web EC2 (terraform/base/core roles)
+# Both read (the chat tool list_proposals and the approval tab), but only the web EC2 writes: approving and rejecting is what a
+# person does in the approval tab, so the chat runtime gets no UpdateItem. The HITL line is drawn in IAM, not only in the code.
 data "aws_iam_policy_document" "reader_access" {
   statement {
     sid = "Proposals"
@@ -50,7 +52,6 @@ data "aws_iam_policy_document" "reader_access" {
       "dynamodb:Query",
       "dynamodb:GetItem",
       "dynamodb:Scan",
-      "dynamodb:UpdateItem",
     ]
     resources = [
       aws_dynamodb_table.proposals.arn,
@@ -80,4 +81,19 @@ resource "aws_iam_role_policy" "reader_access" {
   name   = "${var.name_prefix}-workflow-access"
   role   = each.value
   policy = data.aws_iam_policy_document.reader_access.json
+}
+
+# 承認・却下を書けるのは web EC2 だけ（agent/proposals.py の decide。pending のときだけ通る ConditionExpression 付き）
+data "aws_iam_policy_document" "decide_access" {
+  statement {
+    sid       = "Decide"
+    actions   = ["dynamodb:UpdateItem"]
+    resources = [aws_dynamodb_table.proposals.arn]
+  }
+}
+
+resource "aws_iam_role_policy" "decide_access" {
+  name   = "${var.name_prefix}-workflow-decide"
+  role   = data.terraform_remote_state.main.outputs.web_role_name
+  policy = data.aws_iam_policy_document.decide_access.json
 }

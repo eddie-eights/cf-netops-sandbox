@@ -165,6 +165,18 @@ proposals._cache["table"] = ""
 check("テーブルが無ければ案内だけ返す", "error" in proposals.list_proposals() and "error" in proposals.decide("p1", "approved"))
 os.environ["PROPOSAL_TABLE"] = "prop"
 
+# エージェントのツール（読むだけ。cf-netops-sandbox#1 の B。2026-09-18）
+calls.clear()
+fake["scan"] = {"Items": [
+    {"proposal_id": {"S": "p1"}, "device_id": {"S": "hq-ce-01"}, "status": {"S": "verified"}, "updated_at": {"N": "1700000000"}},
+    {"proposal_id": {"S": "p2"}, "device_id": {"S": "br1-ce-01"}, "status": {"S": "rejected"}, "updated_at": {"N": "1700000900"}}]}
+r = proposals.run_tool("list_proposals", {})
+check("ツールの既定は all（履歴）で、新しい順に返す",
+      calls[-1][1] == "scan" and [p["proposal_id"] for p in r["proposals"]] == ["p2", "p1"])
+check("device_id で機器を絞れる", [p["proposal_id"] for p in proposals.run_tool("list_proposals", {"device_id": "hq-ce-01"})["proposals"]] == ["p1"])
+check("承認・却下はツールに出さない（人が画面の承認タブで決める）",
+      set(proposals.TOOLS) == {"list_proposals"} and "承認や却下はこのツールではできない" in proposals.TOOL_SPECS[0]["toolSpec"]["description"])
+
 # ---- mcp_client.py
 check("JSON の応答はそのまま", mcp_client.parse_response("application/json", '{"result": {"tools": []}}') == {"result": {"tools": []}})
 sse = 'event: message\ndata: {"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"tools___list_devices"}]}}\n\n'
@@ -180,10 +192,11 @@ check("Gateway に無いツールの call はエラーの辞書", "error" in mcp
 
 # ---- tools.json と Python の TOOL_SPECS
 tools = json.loads(read("tools", "tools.json"))
-py_specs = {s["toolSpec"]["name"]: s["toolSpec"] for s in topology.TOOL_SPECS + anomalies.TOOL_SPECS + evidence.TOOL_SPECS}
-check("tools.json の 8 つは topology / anomalies / evidence の TOOL_SPECS と同じ名前", {t["name"] for t in tools} == set(py_specs) and len(tools) == 8)
+py_specs = {s["toolSpec"]["name"]: s["toolSpec"] for s in topology.TOOL_SPECS + anomalies.TOOL_SPECS + evidence.TOOL_SPECS + proposals.TOOL_SPECS}
+check("tools.json の 9 つは topology / anomalies / evidence / proposals の TOOL_SPECS と同じ名前", {t["name"] for t in tools} == set(py_specs) and len(tools) == 9)
 check("evidence のツールは search_logs / query_metrics / query_history", {s["toolSpec"]["name"] for s in evidence.TOOL_SPECS} == {"search_logs", "query_metrics", "query_history"})
-check("handler は evidence のツールも呼ぶ", "evidence.run_tool" in read("tools", "handler.py"))
+check("handler は evidence と proposals のツールも呼ぶ",
+      all(s in read("tools", "handler.py") for s in ("evidence.run_tool", "proposals.run_tool")))
 for t in tools:
     js = py_specs[t["name"]]["inputSchema"]["json"]
     check(f"{t['name']} の引数と必須が Python と同じ",
@@ -233,14 +246,23 @@ check("タスクロールは Runtime の InvokeAgentRuntime と lab への ssm:S
 check("修復案テーブルは status-updated_at-index を持ち、SSM の proposal-table に名前を書く",
       'name            = "status-updated_at-index"' in tf and '"${local.param_prefix}/proposal-table"' in tf)
 check("Runtime と Web のロールに修復案と Gateway の権限を足す", 'for_each = local.reader_role_names' in tf and '"bedrock-agentcore:InvokeGateway"' in tf)
+# 承認・却下を書けるのは web だけ（チャットは読むだけ。HITL の線をコードだけでなく IAM でも引く。2026-09-18）
+reader_doc = re.search(r'data "aws_iam_policy_document" "reader_access" \{[\s\S]*?\n\}\n', tf)
+check("UpdateItem は web のロールにだけ付き、reader_access（Runtime も入る）には入れない",
+      reader_doc is not None and '"dynamodb:UpdateItem"' not in reader_doc.group(0)
+      and re.search(r'data "aws_iam_policy_document" "decide_access"[\s\S]*?"dynamodb:UpdateItem"', tf) is not None
+      and 'role   = data.terraform_remote_state.main.outputs.web_role_name' in tf)
 check("Gateway は AWS_IAM 認可の MCP で、2025-06-18 を話す", 'authorizer_type = "AWS_IAM"' in tf and 'protocol_type   = "MCP"' in tf and '"2025-06-18"' in tf)
 check("Gateway のターゲットは tools.json から inline schema を作る", 'jsondecode(file("${path.module}/../../tools/tools.json"))' in tf and 'dynamic "inline_payload"' in tf)
-check("tools Lambda は python3.13 arm64 で、handler.py / topology / anomalies / graph / data を zip にする",
+check("tools Lambda は python3.13 arm64 で、handler.py / topology / anomalies / proposals / graph / data を zip にする",
       'runtime          = "python3.13"' in tf and 'architectures    = ["arm64"]' in tf
-      and all(f"../../{p}" in tf for p in ("tools/handler.py", "agent/topology.py", "agent/anomalies.py", "agent/evidence.py", "agent/graph.py", "agent/data/topology.json", "agent/data/devices.yaml")))
-check("tools Lambda は VPC の中（Neptune / OpenSearch / Prometheus に届く）で、OPENSEARCH_ENDPOINT / PROMETHEUS_QUERY_URL / ANOMALY_TABLE を渡す",
+      and all(f"../../{p}" in tf for p in ("tools/handler.py", "agent/topology.py", "agent/anomalies.py", "agent/evidence.py", "agent/proposals.py", "agent/graph.py", "agent/data/topology.json", "agent/data/devices.yaml")))
+check("tools Lambda は VPC の中（Neptune / OpenSearch / Prometheus に届く）で、OPENSEARCH_ENDPOINT / PROMETHEUS_QUERY_URL / ANOMALY_TABLE / PROPOSAL_TABLE を渡す",
       re.search(r'resource "aws_lambda_function" "tools"[\s\S]*?vpc_config \{', tf) is not None
-      and all(v in tf for v in ("OPENSEARCH_ENDPOINT", "OPENSEARCH_INDEX", "PROMETHEUS_QUERY_URL", "ANOMALY_TABLE")))
+      and all(v in tf for v in ("OPENSEARCH_ENDPOINT", "OPENSEARCH_INDEX", "PROMETHEUS_QUERY_URL", "ANOMALY_TABLE", "PROPOSAL_TABLE")))
+# 修復案は読むだけ（UpdateItem は web ロールだけ。承認は画面の承認タブで人が決める）
+check("tools Lambda のロールの修復案は Query / GetItem / Scan だけ（UpdateItem は付けない）",
+      re.search(r'sid       = "ProposalsRead"\s*\n\s*actions   = \["dynamodb:Query", "dynamodb:GetItem", "dynamodb:Scan"\]', tf) is not None)
 check("tools Lambda のロールに aoss:APIAccessAll と aps:QueryMetrics、コレクションの data access policy",
       '"aoss:APIAccessAll"' in tf and '"aps:QueryMetrics"' in tf and 'resource "aws_opensearchserverless_access_policy" "tools"' in tf)
 check("EventBridge のルールは netops.spark / AnomalyOpened を SQS（anomalies）へ、DLQ は 5 回で",

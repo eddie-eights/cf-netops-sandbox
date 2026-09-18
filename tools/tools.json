@@ -62,17 +62,21 @@
   },
   {
     "name": "list_anomalies",
-    "description": "監視で見つかった異常の一覧（機器、種別 link_down / trap、対象インタフェース、発生時刻、最後に確認した時刻、poll か trap か）。「今の異常は」「どこが落ちている」と聞かれたら status=open で呼ぶ。過去の分は status=resolved。",
+    "description": "監視で見つかった異常の一覧（機器、種別 link_down / trap、対象インタフェース、発生時刻、最後に確認した時刻、解消時刻、poll か trap か）。「今の異常は」「どこが落ちている」と聞かれたら status=open で呼ぶ。「これまでの異常は」「過去に何があった」「履歴」と聞かれたら status=all（解消済みも含む）で呼ぶ。解消済みだけなら status=resolved。",
     "inputSchema": {
       "type": "object",
       "properties": {
         "status": {
           "type": "string",
-          "description": "open（未解消、既定）か resolved（解消済み）"
+          "description": "open（未解消、既定）／ resolved（解消済み）／ all（両方を新しい順に）"
         },
         "limit": {
           "type": "integer",
           "description": "件数の上限（既定 20、最大 100）"
+        },
+        "device_id": {
+          "type": "string",
+          "description": "機器名（例 hq-ce-01）で絞る。空なら全機器"
         }
       }
     }
@@ -131,6 +135,27 @@
         "hours": {
           "type": "integer",
           "description": "何時間前まで見るか（既定 24）"
+        }
+      }
+    }
+  },
+  {
+    "name": "list_proposals",
+    "description": "AI が出した修復案と、その後の履歴（状態、原因、打ったコマンド、決めた人、実行結果、確認結果）。「修復履歴は」「何を直した」「承認待ちは」と聞かれたらこれを呼ぶ。状態は pending（承認待ち）→ approved / rejected（人が決めた）→ applied（実行した）→ verified（直ったのを確かめた）/ failed、expired（時間切れ）。承認や却下はこのツールではできない（人が画面の承認タブで決める）。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string",
+          "description": "all（全部、既定）か pending / approved / rejected / applied / verified / failed / expired のどれか"
+        },
+        "limit": {
+          "type": "integer",
+          "description": "件数の上限（既定 20、最大 100）"
+        },
+        "device_id": {
+          "type": "string",
+          "description": "機器名（例 hq-ce-01）で絞る。空なら全機器"
         }
       }
     }

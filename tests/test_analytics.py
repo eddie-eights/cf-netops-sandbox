@@ -129,7 +129,7 @@ check("runtime role に aoss:APIAccessAll と aps:RemoteWrite（格納先を選�
 check("remote write の URL は prometheus_endpoint + api/v1/remote_write",
       re.search(r'prometheus_remote_write_url\s*=\s*local\.sink_prometheus \? "\$\{aws_prometheus_workspace\.metrics\[0\]\.prometheus_endpoint\}api/v1/remote_write" : ""', tf) is not None)
 
-# ---- output（ops/up.sh と README a-3 がそのまま使う）
+# ---- output（ops/up.sh と docs/pipeline.md の a-3 がそのまま使う）
 for out in ("application_id", "runtime_role_arn", "table_identifier", "job_driver_json", "configuration_overrides_json", "list_job_runs_command", "list_tables_command",
             "sinks", "opensearch_collection_endpoint", "prometheus_workspace_id", "prometheus_remote_write_url", "prometheus_query_url",
             "anomaly_table_name", "opensearch_collection_name", "opensearch_collection_arn", "opensearch_index", "prometheus_workspace_arn", "events_endpoint_id"):

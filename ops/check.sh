@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# fukuda-nwc-poc - AWS に触らずに打てる検査をまとめて打つ。README の「手元で確かめる」と同じ内容。
+# fukuda-nwc-poc - AWS に触らずに打てる検査をまとめて打つ。docs/development.md の「手元で確かめる」と同じ内容。
 #   1. terraform fmt -check -recursive
 #   2. 7 つのルートで init -backend=false + validate（provider を取るだけで state には触らない）
 #   3. ops スクリプトの構文（bash -n と、EC2 の上で打つ ops/seed_graph.py、EMR Serverless で打つ spark/snmp_sinks.py、
@@ -18,7 +18,7 @@ die() {
   exit 1
 }
 
-command -v terraform >/dev/null || die "terraform が無い（README の「Terraform を打つ PC 側」）"
+command -v terraform >/dev/null || die "terraform が無い（docs/setup.md の「Terraform を打つ PC 側」）"
 
 log "1. terraform fmt -check -recursive terraform"
 terraform fmt -check -recursive terraform || die "整形されていないファイルがある。terraform fmt -recursive terraform で直す"
@@ -45,7 +45,7 @@ if command -v uv >/dev/null; then
     uv run --group dev python "$t" || die "$t が失敗した"
   done
 else
-  echo "uv が無いので飛ばす（README の「手元で確かめる」の通り uv sync --group dev を入れてから打つ）"
+  echo "uv が無いので飛ばす（docs/development.md の「手元で確かめる」の通り uv sync --group dev を入れてから打つ）"
 fi
 
 printf '\nすべて通過\n'

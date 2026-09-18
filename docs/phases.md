@@ -1,7 +1,7 @@
 # フェーズごとの概要（2026-09-17 時点）
 
 いま決まっている範囲だけを書く。**決まっていないことは「未定」と書いてある。**
-手順とコマンドの正本は [`../README.md`](../README.md)、構成図は [`20260914-fukuda-nwc-poc-architecture.html`](20260914-fukuda-nwc-poc-architecture.html)。
+手順とコマンドの正本は [`../README.md`](../README.md) と [`deploy-manual.md`](deploy-manual.md)、構成図は [`20260914-fukuda-nwc-poc-architecture.html`](20260914-fukuda-nwc-poc-architecture.html)。
 ここはその手前の「どこまで作ってあって、次に何が残っているか」だけを見るための頁。
 
 **2026-09-17 ユーザー決定: フェーズの番号で積み上げる形をやめ、機能ごとに独立して作る形にした。**目的は費用を抑えること（「フェーズ 1 の上に 2 が乗るのではなく、機能ごとにデプロイできれば嬉しい」）。土台（`terraform/base/ecr` + `terraform/base/core`）を必ず作り、その上に 3 つの機能を要るものだけ載せる。`deploy.env` のキーは `AGENT` / `PIPELINE` / `WORKFLOW`。
@@ -33,8 +33,8 @@
 | PIPELINE（`PIPELINE=1`。旧 2） | データパイプライン。EC2 の中の疑似ネットワーク（containerlab）の SNMP を Telegraf が Kafka に流し、Spark が S3 Tables（Iceberg）/ OpenSearch Serverless / Prometheus に書き続け、異常を検知して DynamoDB の一覧に出す（EventBridge にも出す）。トポロジは Neptune で持って Web から編集する | 土台に `terraform/pipeline/lab` → `terraform/pipeline/stream` → `terraform/pipeline/analytics`、並行して `terraform/pipeline/graph` | 約 $1.08/h（約 162 円。lab 0.09 + stream 0.28 + analytics 0.20 + OpenSearch 最大 0.33 + Prometheus 0.03 + graph 0.14） | 作ってある（使う日だけ作る。**AWS 上の apply は未確認**） |
 | WORKFLOW（`WORKFLOW=1`。旧 3。AGENT と PIPELINE が要る） | Spark の検知が EventBridge → SQS で届き、エージェントが Neptune / OpenSearch / Prometheus を見て原因調査 → 修復案を Temporal のワークフローで回し、**人が Web の「承認」タブで承認**してから Temporal が lab で直して確かめる。エージェントのツールは AgentCore Gateway（MCP）経由 | AGENT + PIPELINE に `terraform/workflow` | 約 $0.06/h（約 9 円。Temporal のサーバーとワーカーを ECS on Fargate の 1 タスク（ARM、1 vCPU / 2 GB）+ sqs エンドポイント 1 本） | 作ってある（2026-09-17。使う日だけ作る。**AWS 上の apply は未確認**） |
 
-費用は 1 時間立てたときの目安。内訳と前提は README の「1 時間起動したときの試算」にある（単価は土台と AGENT が 2026-09-14、lab・graph・stream が 2026-09-15、analytics が 2026-09-17 に AWS Price List API と料金ページで確認した値）。
-何を作るかは `deploy.env` の `AGENT` / `PIPELINE` / `WORKFLOW`（と `CREATE_KB`）で選ぶ（README の「毎日の起動と片付けをスクリプトで打つ」）。機能は互いに独立で、あとから別の機能を `1` にして打ち直せばその機能だけ足される。PIPELINE の一部だけ要らないときは `SKIP_LAB` / `SKIP_STREAM` / `SKIP_ANALYTICS` / `SKIP_GRAPH`。
+費用は 1 時間立てたときの目安。内訳と前提は [`cost.md`](cost.md) の「1 時間起動したときの試算」にある（単価は土台と AGENT が 2026-09-14、lab・graph・stream が 2026-09-15、analytics が 2026-09-17 に AWS Price List API と料金ページで確認した値）。
+何を作るかは `deploy.env` の `AGENT` / `PIPELINE` / `WORKFLOW`（と `CREATE_KB`）で選ぶ（[`deploy.md`](deploy.md)）。機能は互いに独立で、あとから別の機能を `1` にして打ち直せばその機能だけ足される。PIPELINE の一部だけ要らないときは `SKIP_LAB` / `SKIP_STREAM` / `SKIP_ANALYTICS` / `SKIP_GRAPH`。
 
 **時間課金のものは使う日に作って当日中に消す。**土台 + AGENT を 1 か月置くと約 $131（約 19,700 円。`CREATE_KB=1` なら +$263 で、その大半は OpenSearch Serverless の最小 OCU）、PIPELINE の 4 ルートは約 $789（約 118,000 円）。**EC2 を止めてもほとんど減らない。**
 
@@ -122,12 +122,12 @@ graph（Neptune のトポロジ。Web の「トポロジ」タブから編集）
 | analytics のネットワーク | NAT が無いので S3 Tables の API は **interface エンドポイント `s3tables`（2 AZ）**、データ本体は main の S3 ゲートウェイエンドポイント。EMR の SG は inbound を自分自身からだけにする（0.0.0.0/0 の inbound があると EMR Serverless が拒否する） |
 | graph | Neptune は Gremlin を boto3 の `neptunedata` から IAM 認証で呼ぶ。`ops/up.sh` は最後に静的トポロジを投入して Web を再起動する |
 | 費用 | 約 $1.11/h（約 167 円）: lab 0.09（t4g.large + gp3）、stream 0.71（MSK kafka.m5.large × 2 + MSK Connect。sink 無しで 0.57。Kafka 4 は t3.small を受け付けないので 2026-09-18 に上げた）、analytics 0.17（2 vCPU / 8 GB のジョブ ≒ 0.15 + s3tables EP 2 AZ 0.028）、graph 0.14（db.t4g.medium）。1 か月置くと約 $810（約 122,000 円） |
-| 権限 | 組織の SCP / IAM で t4g.large・MSK・Neptune・EMR Serverless・S3 Tables の作成が止められていることがある（README の「前提」→「AWS 側」） |
+| 権限 | 組織の SCP / IAM で t4g.large・MSK・Neptune・EMR Serverless・S3 Tables の作成が止められていることがある（[`setup.md`](setup.md) の「AWS 側」） |
 
 ### 決まっていないこと（着手前・初回の apply で確かめる）
 
 - **AWS 上の apply は未確認**（4 ルートとも。手元の validate と模擬テストまで）。
-- analytics は特に未検証が多い（README「未確認のもの」にも同じ一覧）:
+- analytics は特に未検証が多い（[`development.md`](development.md) の「確認したこと・確認できていないこと」にも同じ一覧）:
   - EMR Serverless 7.13.0 に S3 Tables カタログの jar が同梱されているか（同梱なら `s3-tables-catalog-for-iceberg-runtime` を足すと衝突する可能性）。
   - Kafka の jar 6 本の組み合わせで Structured Streaming の Kafka ソースが動くか。
   - 閉域から S3 Tables に届くか（interface エンドポイント + S3 ゲートウェイエンドポイントの `*--table-s3` の許可）。Lake Formation の設定が要るか。
@@ -149,7 +149,7 @@ graph（Neptune のトポロジ。Web の「トポロジ」タブから編集）
 
 ## フェーズ 3（いまの WORKFLOW）— Temporal でエージェントが調査し、人が承認して直す
 
-**2026-09-17 に着手した**（ユーザー決定「ECSで着手して」「agent gateway の MCP も一緒に」）。`terraform/workflow`（ECS on Fargate のタスク + DynamoDB の修復案テーブル + AgentCore Gateway（MCP）と tools Lambda）、`workflow/`（ワーカー）、`tools/`（Gateway のツール）、`agent/mcp_client.py` / `agent/proposals.py`、Web の「承認」タブ、`WORKFLOW=1 ops/up.sh`、`tests/test_workflow.py`。手順は README の「workflow（WORKFLOW）」。**AWS 上の apply は未確認。**
+**2026-09-17 に着手した**（ユーザー決定「ECSで着手して」「agent gateway の MCP も一緒に」）。`terraform/workflow`（ECS on Fargate のタスク + DynamoDB の修復案テーブル + AgentCore Gateway（MCP）と tools Lambda）、`workflow/`（ワーカー）、`tools/`（Gateway のツール）、`agent/mcp_client.py` / `agent/proposals.py`、Web の「承認」タブ、`WORKFLOW=1 ops/up.sh`、`tests/test_workflow.py`。手順は [`workflow.md`](workflow.md)。**AWS 上の apply は未確認。**
 **2026-09-17 夕方のユーザー決定**「Spark が異常を検知したら EventBridge にイベント発行して、それを検知した agent が Neptune や S3、OpenSearch、Prometheus を見に行って原因分析 → 修復の提案 → 人間の承認 → Temporal で実行」
 「Step Functions じゃなくて Temporal（EKS）だった。ただいまの段階では EKS ではなく ECS で OK」で、入口を DynamoDB の polling から **EventBridge → SQS** に変え（`terraform/workflow/events.tf`）、
 エージェントに OpenSearch / Prometheus / S3 Tables を見るツール（`agent/evidence.py`）を足した。stream の detector Lambda は消し、検知は Spark（`spark/snmp_sinks.py` の detect）に寄せた。
@@ -213,7 +213,7 @@ graph（Neptune のトポロジ。Web の「トポロジ」タブから編集）
 
 ### 決まっていないこと
 
-- **AWS 上の apply は未確認。**Gateway（MCP）に VPC モードの Runtime と Fargate のタスクから届くか、`start-dev` が Fargate で上がるか、`temporalio` 1.33.0 の SDK と Temporal 1.9.1 の組み合わせ、Nova 2 Lite が求めた JSON で答えるか、組織の SCP / IAM が ECS / Gateway / Lambda を止めていないか（README の「確認できていないこと」）。
+- **AWS 上の apply は未確認。**Gateway（MCP）に VPC モードの Runtime と Fargate のタスクから届くか、`start-dev` が Fargate で上がるか、`temporalio` 1.33.0 の SDK と Temporal 1.9.1 の組み合わせ、Nova 2 Lite が求めた JSON で答えるか、組織の SCP / IAM が ECS / Gateway / Lambda を止めていないか（[`development.md`](development.md)）。
 - Gateway のツールは静的トポロジしか見ない（Neptune は Runtime の中のツールだけ）。Gateway があるときのチャットのトポロジを Neptune に戻すか。
 - 調査に S3 Tables の `snmp_metrics`（履歴）を読ませるか。
 - 実機に対して何をどこまで打たせるか。**lab 以外に打つ話は何も決まっていない。**
@@ -223,6 +223,6 @@ graph（Neptune のトポロジ。Web の「トポロジ」タブから編集）
 
 ## 更新するとき
 
-- 費用の数字は README の「1 時間起動したときの試算」が正本。こちらは要約なので、直すときは両方直す。
+- 費用の数字は [`cost.md`](cost.md) の「1 時間起動したときの試算」が正本。こちらは要約なので、直すときは両方直す。
 - **単価を書くときは確認した日を併記する。**3 か月以上前のものは引き直す。
 - 実アカウント ID・ARN・CIDR・ホスト名・顧客名はここにも書かない。

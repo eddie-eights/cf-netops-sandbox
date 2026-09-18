@@ -4,7 +4,7 @@
 #   bash ops/vscode-setup.sh          … docs/vscode/extensions.txt の [repo]（このリポジトリに要るものだけ）
 #   ALL=1 bash ops/vscode-setup.sh    … [repo] + [extra]（手元の PC と同じ全部）
 #
-# 設定そのもの（ユーザー設定・キー割り当て）は貼り付けで入れる。README「VS Code の設定」を見る。
+# 設定そのもの（ユーザー設定・キー割り当て）は貼り付けで入れる。docs/development.md「VS Code の設定」を見る。
 set -euo pipefail
 cd "$(dirname "$0")/.."
 

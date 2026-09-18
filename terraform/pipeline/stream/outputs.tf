@@ -19,7 +19,7 @@ output "msk_security_group_id" {
 }
 
 output "upload_plugin_command" {
-  description = "Upload command of the Confluent S3 sink zip (README s-1). The zip must be there before the first apply when create_s3_sink is true."
+  description = "Upload command of the Confluent S3 sink zip (docs/pipeline.md の s-1). The zip must be there before the first apply when create_s3_sink is true."
   value       = "aws s3 cp ${basename(var.s3_sink_plugin_key)} s3://${local.bucket}/${var.s3_sink_plugin_key}"
 }
 

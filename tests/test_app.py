@@ -1,7 +1,7 @@
 """agent/app.py の模擬テスト。boto3 と bedrock_agentcore を差し替えて、AWS に触れずに流れを確かめる。"""
 import importlib.util, os, sys, types
 
-# 引数が無ければリポジトリの agent/app.py を読む。実行は uv run python tests/test_app.py（README「手元で確かめる」）
+# 引数が無ければリポジトリの agent/app.py を読む。実行は uv run python tests/test_app.py（docs/development.md「手元で確かめる」）
 APP_PATH = sys.argv[1] if len(sys.argv) > 1 else os.path.join(os.path.dirname(__file__), "..", "agent", "app.py")
 # app.py は同じディレクトリの topology.py を import する（PyYAML が要る: uv sync --group dev）
 sys.path.insert(0, os.path.dirname(os.path.abspath(APP_PATH)))
@@ -94,7 +94,7 @@ r = app.invoke({"prompt": "%BGP-5-ADJCHANGE が出た"})
 rk = state["calls"][0][1]; ck = state["calls"][1][1]
 check("RERANK_MODEL_ARN が無ければリランクなしで HYBRID と件数だけ渡す", rk["retrievalConfiguration"]["vectorSearchConfiguration"] == {"numberOfResults": 3, "overrideSearchType": "HYBRID"} and rk["knowledgeBaseId"] == "KB12345678")
 check("Converse に guardrailConfig", ck["guardrailConfig"] == {"guardrailIdentifier": "gr123", "guardrailVersion": "1"})
-check("Converse にトポロジの 4 ツール + 異常一覧 + 証拠の 3 ツール", [t["toolSpec"]["name"] for t in ck["toolConfig"]["tools"]] == ["list_devices", "neighbors", "blast_radius", "topology_graph", "list_anomalies", "search_logs", "query_metrics", "query_history"])
+check("Converse にトポロジの 4 ツール + 異常一覧 + 証拠の 3 ツール + 修復案の履歴", [t["toolSpec"]["name"] for t in ck["toolConfig"]["tools"]] == ["list_devices", "neighbors", "blast_radius", "topology_graph", "list_anomalies", "search_logs", "query_metrics", "query_history", "list_proposals"])
 last = ck["messages"][-1]
 check("質問は guardContent、資料は text", last["content"][1] == {"guardContent": {"text": {"text": "%BGP-5-ADJCHANGE が出た"}}} and "<documents>" in last["content"][0]["text"] and 'source="interface-errors.md"' in last["content"][0]["text"])
 check("初回は messages 1 件", len(ck["messages"]) == 1)
@@ -176,6 +176,11 @@ a = app.anomalies
 check("異常一覧はテーブル未設定なら error と空リスト", a.list_anomalies()["anomalies"] == [] and "terraform/pipeline/stream" in a.list_anomalies()["error"])
 check("app.run_tool は list_anomalies を anomalies に振る", "error" in app.run_tool("list_anomalies", {"status": "open"}) and app.run_tool("list_devices", {})["count"] == 10)
 check("anomalies.run_tool の未知ツール", "unknown" in a.run_tool("nope", {})["error"])
+check("app.run_tool は list_proposals を proposals に振る（テーブル未設定なので案内）", "terraform/workflow" in app.run_tool("list_proposals", {})["error"])
+# 過去の異常・修復履歴・状態に答えられるようにした（cf-netops-sandbox#1 の A / B / C。2026-09-18）
+check("list_anomalies は status=all と device_id を受ける", {"status", "limit", "device_id"} == set(a.TOOL_SPECS[0]["toolSpec"]["inputSchema"]["json"]["properties"]) and "all" in a.TOOL_SPECS[0]["toolSpec"]["description"])
+check("system prompt は過去 → status=all、履歴 → list_proposals、承認はしない、と言う",
+      "status=all" in app.SYSTEM_PROMPT and "list_proposals" in app.SYSTEM_PROMPT and "承認や却下はあなたにはできません" in app.SYSTEM_PROMPT)
 
 # ---- ツールの往復
 app.history.clear()

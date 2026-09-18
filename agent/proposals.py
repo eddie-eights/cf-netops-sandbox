@@ -64,27 +64,31 @@ def _decorate(p: dict) -> dict:
     return p
 
 
-def list_proposals(status: str = "pending", limit: int = 50) -> dict:
-    """status の修復案を新しい順に（updated_at）。status が all なら全件（Scan）"""
+def list_proposals(status: str = "pending", limit: int = 50, device_id: str = "") -> dict:
+    """status の修復案を新しい順に（updated_at）。status が all なら全件（Scan）。device_id があればその機器だけ"""
     table = table_name()
     if not table:
         return {"error": "修復案はまだ配備されていない（terraform/workflow を apply すると使える）", "proposals": []}
     limit = max(1, min(int(limit), 100))
+    read = 100 if device_id else limit  # 機器で絞るときは多めに読んでから絞る（この PoC の表は数十件）
     client = boto3.client("dynamodb", region_name=REGION)
     try:
         if status == "all":
-            res = client.scan(TableName=table, Limit=limit)
+            res = client.scan(TableName=table, Limit=read)
             items = sorted(res.get("Items", []), key=lambda i: int(i.get("updated_at", {}).get("N", "0")), reverse=True)
         else:
             status = status if status in STATUSES else "pending"
             res = client.query(
                 TableName=table, IndexName=INDEX, KeyConditionExpression="#s = :s",
                 ExpressionAttributeNames={"#s": "status"}, ExpressionAttributeValues={":s": {"S": status}},
-                ScanIndexForward=False, Limit=limit)
+                ScanIndexForward=False, Limit=read)
             items = res.get("Items", [])
     except (ClientError, BotoCoreError) as e:
         return {"error": f"修復案を読めない: {str(e)[:200]}", "proposals": []}
     proposals = [_decorate(_plain(i)) for i in items]
+    if device_id:
+        proposals = [p for p in proposals if p.get("device_id") == device_id]
+    proposals = proposals[:limit]
     return {"status": status, "count": len(proposals), "proposals": proposals}
 
 
@@ -123,3 +127,38 @@ def decide(proposal_id: str, decision: str, decided_by: str = "web") -> dict:
     except BotoCoreError as e:
         return {"error": f"更新できない: {str(e)[:200]}"}
     return {"proposal_id": proposal_id, "status": decision, "decided_by": decided_by, "decided_at": now}
+
+
+# ---------------------------------------------------------------- エージェントのツール（読むだけ）
+# 承認・却下（decide）はツールにしない。人が画面の承認タブで決めるのが HITL の線で、チャットからは決めさせない（2026-09-18）
+def _tool_list_proposals(status: str = "all", limit: int = 20, device_id: str = "") -> dict:
+    """画面は pending が既定だが、チャットで聞かれるのはたいてい履歴なので all を既定にする"""
+    return list_proposals(status=status if status in STATUSES or status == "all" else "all",
+                          limit=limit, device_id=device_id)
+
+
+TOOL_SPECS = [
+    {"toolSpec": {
+        "name": "list_proposals",
+        "description": "AI が出した修復案と、その後の履歴（状態、原因、打ったコマンド、決めた人、実行結果、確認結果）。"
+                       "「修復履歴は」「何を直した」「承認待ちは」と聞かれたらこれを呼ぶ。"
+                       "状態は pending（承認待ち）→ approved / rejected（人が決めた）→ applied（実行した）→ verified（直ったのを確かめた）/ failed、expired（時間切れ）。"
+                       "承認や却下はこのツールではできない（人が画面の承認タブで決める）。",
+        "inputSchema": {"json": {"type": "object", "properties": {
+            "status": {"type": "string", "description": "all（全部、既定）か pending / approved / rejected / applied / verified / failed / expired のどれか"},
+            "limit": {"type": "integer", "description": "件数の上限（既定 20、最大 100）"},
+            "device_id": {"type": "string", "description": "機器名（例 hq-ce-01）で絞る。空なら全機器"},
+        }}},
+    }},
+]
+TOOLS = {"list_proposals": _tool_list_proposals}
+
+
+def run_tool(name: str, args: dict) -> dict:
+    fn = TOOLS.get(name)
+    if fn is None:
+        return {"error": f"unknown tool {name}"}
+    try:
+        return fn(**{k: v for k, v in (args or {}).items() if k in fn.__code__.co_varnames})
+    except (TypeError, ValueError) as e:
+        return {"error": str(e)}

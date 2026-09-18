@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# README の「片付け」をまとめて打つ。Terraform のルートを依存の逆順に destroy し、消え終わるまで待つ。
+# docs/deploy-manual.md の「片付け」をまとめて打つ。Terraform のルートを依存の逆順に destroy し、消え終わるまで待つ。
 # state（terraform/<ルート>/terraform.tfstate）にリソースが載っているルートだけを消す。作っていないルートは飛ばす。
 #
-# 使い方（リポジトリの直下で。aws-vault なら `aws-vault exec <プロファイル> --no-session` のサブシェルの中で）:
+# 使い方（リポジトリの直下で。先に AWS CLI の認証を通しておく。IAM ユーザーなら長期キーのまま打つ）:
 #   ops/down.sh              # 全部消す（workflow → analytics → graph → stream → lab → agent → main → ecr → Runtime のロググループ）。KEEP_ECR=0 と同じ
 #   KEEP_ECR=1 ops/down.sh   # ECR（イメージ）だけ残す。翌日の ops/up.sh でビルドを飛ばせる（保管料は月数円）
 #
@@ -34,7 +34,7 @@ die()  { printf '\033[1;31mNG: %s\033[0m\n' "$*" >&2; exit 1; }
 TF_AWS_CONFIG=""
 TF_AWS_ENV=()
 tf_use_cli_credentials() {
-  if [ -n "${AWS_ACCESS_KEY_ID:-}" ]; then  # aws-vault など、鍵が環境変数にあるときはそのまま渡す
+  if [ -n "${AWS_ACCESS_KEY_ID:-}" ]; then  # 鍵が環境変数にあるときはそのまま渡す
     echo "terraform の認証情報: 環境変数の鍵"
     return 0
   fi
@@ -53,7 +53,7 @@ tf() {  # tf <ルート> <terraform のサブコマンドと引数…>
 }
 has_resources() {  # has_resources <ルート>  state があり、リソースが 1 つ以上載っている（init もここで済ませる）
   [ -f "terraform/$1/terraform.tfstate" ] || return 1
-  tf "$1" init -input=false >/dev/null || die "terraform/$1 の init に失敗した（provider の取得。社内 PC は README「社内 PC で使うとき」）"
+  tf "$1" init -input=false >/dev/null || die "terraform/$1 の init に失敗した（provider の取得。社内 PC は docs/setup.md「社内 PC で使うとき」）"
   [ -n "$(tf "$1" state list 2>/dev/null)" ]
 }
 destroy_root() {  # destroy_root <ルート> [-var 名前=値 …]
@@ -97,7 +97,7 @@ case "$KEEP_ECR" in
 esac
 command -v aws >/dev/null || die "aws CLI が無い"
 command -v terraform >/dev/null || die "terraform が無い"
-ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text) || die "認証が通っていない（aws-vault なら --no-session のサブシェルの中で打つ。aws login なら打ち直す）"
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text) || die "認証が通っていない（aws configure か aws login で入り直す）"
 echo "ACCOUNT_ID=$ACCOUNT_ID"
 tf_use_cli_credentials
 CACERT="${OPENSEARCH_CACERT_FILE:-${AWS_CA_BUNDLE:-}}"
@@ -231,5 +231,5 @@ if [ "$MAIN_LEFT" = 1 ]; then
   echo "すぐ使うなら ops/up.sh がそのまま使い回す。消し切るなら数時間おいて ops/down.sh を打ち直す"
 fi
 if [ -n "$OLD_STACKS" ] && [ "$OLD_STACKS" != None ]; then
-  echo "CloudFormation 版のスタックも残っている: $OLD_STACKS （README「CloudFormation 版から移るとき」）"
+  echo "CloudFormation 版のスタックも残っている: $OLD_STACKS （docs/deploy-manual.md「CloudFormation 版から移るとき」）"
 fi
