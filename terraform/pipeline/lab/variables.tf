@@ -52,6 +52,24 @@ variable "auto_start_lab" {
   default     = true
 }
 
+# ---------------------------------------------------------------- Telegraf EC2 (telegraf.tf)
+variable "create_telegraf" {
+  description = "Create the Telegraf EC2 that sends SNMP polls, traps and FRR logs of the lab to MSK (terraform/pipeline/stream). ops/up.sh sets true when it makes the stream root. terraform/pipeline/stream needs it."
+  type        = bool
+  default     = false
+}
+
+variable "telegraf_instance_type" {
+  description = "Telegraf only (no containers). t4g.micro (1 GB) is enough for 4 SNMP agents, traps and the FRR logs."
+  type        = string
+  default     = "t4g.micro"
+
+  validation {
+    condition     = contains(["t4g.nano", "t4g.micro", "t4g.small", "t4g.medium"], var.telegraf_instance_type)
+    error_message = "telegraf_instance_type must be t4g.nano, t4g.micro, t4g.small or t4g.medium (arm64)."
+  }
+}
+
 # ---------------------------------------------------------------- assets
 variable "containerlab_version" {
   description = "containerlab_<version>_linux_arm64.rpm must be uploaded to s3://<kb_bucket_name of terraform/base/core>/lab/"
@@ -65,7 +83,7 @@ variable "containerlab_version" {
 }
 
 variable "telegraf_version" {
-  description = "telegraf-<version>-1.aarch64.rpm in s3://<kb_bucket_name of terraform/base/core>/lab/ is installed when present (step 5 of ops/up.sh). Nothing happens without it."
+  description = "telegraf-<version>-1.aarch64.rpm must be uploaded to s3://<kb_bucket_name of terraform/base/core>/telegraf/ with telegraf/ of this repository (step 5 of ops/up.sh). The Telegraf EC2 does nothing without it."
   type        = string
   default     = "1.40.0"
 

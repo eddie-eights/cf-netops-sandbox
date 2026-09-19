@@ -1,7 +1,7 @@
 """異常検知（spark/snmp_sinks.py の detect）の模擬テスト。boto3 のクライアントを差し替えて DynamoDB と EventBridge への書き込みを確かめ、
 terraform/pipeline/stream から detector Lambda が消えて anomalies テーブルだけが残っていることも確かめる。
 実行は python3 tests/test_stream.py（pyspark も boto3 も要らない。snmp_sinks.py は pyspark を関数の中で import する）。"""
-import importlib.util, json, os, re, sys
+import importlib.util, ipaddress, json, os, re, sys
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 SRC = os.path.join(ROOT, "spark", "snmp_sinks.py")
@@ -223,7 +223,7 @@ send, ddb, ev = make()
 opened = send([iface("203.0.113.11", f"eth{i}", 2) for i in range(23)])
 check("新しい異常が 10 件を超えたら put_events を分ける", len(opened) == 23 and [len(c) for c in ev.calls] == [10, 10, 3])
 
-# ---- ログの経路: FRR の log file → EC2 の /var/log/netops-lab/<機器名> → Telegraf の tail → Kafka の logs → Spark（2026-09-18）
+# ---- ログの経路: FRR の log file → lab の EC2 の /var/log/netops-lab/<機器名> → rsyslog → Telegraf の EC2 の socket_listener → Kafka の logs → Spark（2026-09-19）
 def _read(*parts):
     with open(os.path.join(ROOT, *parts), encoding="utf-8") as f:
         return f.read()
@@ -234,22 +234,60 @@ check("FRR の 6 台とも log file と bgp log-neighbor-changes を持つ", len
 clab = _read("lab", "wanlab.clab.yml.in")
 check("containerlab は FRR の 6 台のログの置き場を bind する", all(f"- __LOG_DIR__/{n}:/var/log/frr" in clab for n in frr_nodes))
 labsh = _read("lab", "lab.sh")
-tele = _read("lab", "telegraf.conf.in")
+tele = _read("telegraf", "telegraf.conf.in")
+tgsh = _read("telegraf", "telegraf.sh")
+rsys = _read("lab", "rsyslog-frr.conf.in")
+lab_locals = _read("terraform", "pipeline", "lab", "locals.tf")
 log_dir = re.search(r"^LOG_DIR=(\S+)$", labsh, re.M).group(1)
 check("lab.sh は render で __LOG_DIR__ を埋めて置き場を作り、logs で読める",
       '-e "s#__LOG_DIR__#$LOG_DIR#"' in labsh and 'install -d -m 1777 "$LOG_DIR/$n"' in labsh and re.search(r"^\s*logs\)", labsh, re.M) is not None)
 check("置き場は src/ の外（user_data の s3 sync --delete に消されない）", log_dir.startswith("/var/log/"))
-check("Telegraf は lab.sh と同じ置き場を tail し、frr_log として logs トピックに出す",
-      f'files = ["{log_dir}/*/frr.log"]' in tele and 'name_override = "frr_log"' in tele
+check("rsyslog は lab.sh と同じ置き場を読み、パスから機器名を取って Telegraf へ送る",
+      'File="__LOG_DIR__/*/frr.log"' in rsys and 're_extract($!metadata!filename, "__LOG_DIR__/([^/]+)/frr[.]log"' in rsys
+      and 'addMetadata="on"' in rsys and 'target="__TELEGRAF__" port="__LOG_PORT__" protocol="tcp"' in rsys
+      and 'string="%$.dev% %msg%\\n"' in rsys)
+check("lab.sh forward は rsyslog の設定の __*__ を全部埋める",
+      all(k in labsh for k in ('"s#__LOG_DIR__#$LOG_DIR#g"', '"s#__TELEGRAF__#$t#"', '"s#__LOG_PORT__#$LOG_PORT#"', "rsyslog-frr.conf.in"))
+      and set(re.findall(r"__[A-Z_]+__", rsys)) == {"__LOG_DIR__", "__TELEGRAF__", "__LOG_PORT__"})
+# ログのポートは 4 か所で同じ（lab.sh / telegraf.sh / telegraf.conf.in / lab の SG）
+log_port = re.search(r"^LOG_PORT=(\d+)$", labsh, re.M).group(1)
+check("FRR のログのポートが lab.sh・telegraf.sh・telegraf.conf.in・lab の locals で同じ",
+      re.search(rf"^LOG_PORT={log_port}$", tgsh, re.M) is not None and f'service_address = "tcp://:{log_port}"' in tele
+      and re.search(rf"^\s*log_port\s*=\s*{log_port}$", lab_locals, re.M) is not None)
+# 管理ネットワークは 3 か所で同じ（containerlab の mgmt / lab.sh / lab の locals の VPC ルート）
+mgmt = re.search(r"^MGMT=(\S+)$", labsh, re.M).group(1)
+check("管理ネットワークが containerlab・lab.sh・lab の locals で同じ",
+      re.search(rf"^\s*ipv4-subnet: {re.escape(mgmt)}$", clab, re.M) is not None
+      and re.search(rf'^\s*mgmt_cidr\s*=\s*"{re.escape(mgmt)}"$', lab_locals, re.M) is not None)
+_agents = re.findall(r"udp://([\d.]+):161", re.search(r"^\s*agents = \[(.*)\]$", tele, re.M).group(1))
+check("Telegraf のポーリング先は全部管理ネットワークの中（VPC のルートで lab の EC2 へ行く）",
+      len(_agents) == 4 and all(ipaddress.ip_address(a) in ipaddress.ip_network(mgmt) for a in _agents))
+mgmt_gw = re.search(r"^MGMT_GW=(\S+)$", labsh, re.M).group(1)
+_snmpd = [n for n in os.listdir(os.path.join(ROOT, "lab", "snmpd")) if n.endswith(".conf")]
+check("snmpd の trap の宛先は lab.sh の MGMT_GW:162（forward が Telegraf へ DNAT する）",
+      len(_snmpd) == 4 and all(re.search(rf"^trap2sink {re.escape(mgmt_gw)} \S+ 162$", _read("lab", "snmpd", n), re.M) for n in _snmpd))
+check("lab.sh up は毎回 forward を呼び、forward / forward-status がある",
+      '"$SELF" forward' in labsh and re.search(r"^\s*forward\)", labsh, re.M) is not None and re.search(r"^\s*forward-status\)", labsh, re.M) is not None)
+check("forward の iptables の規則は全部目印付き（unforward で消せる）",
+      all("${c[@]}" in l for l in labsh.splitlines() if re.match(r"\s*iptables .*-I ", l)))
+check("Telegraf は FRR のログを socket_listener で受け、frr_log として logs トピックに出す",
+      'name_override = "frr_log"' in tele and "[[inputs.tail]]" not in tele
       and re.search(r'topic = "logs"[\s\S]*?namepass = \["frr_log"\]|namepass = \["frr_log"\][\s\S]*?topic = "logs"', tele) is not None)
 check("metrics / traps の出力に frr_log が混ざらない（namepass / namedrop）",
       all(re.search(r"name(pass|drop)", blk) for blk in tele.split("[[outputs.kafka]]")[1:]))
-check("パスから sysName を作る（detect と同じ機器名のタグ）", 'result_key = "sysName"' in tele and log_dir + "/([^/]+)/" in tele)
-# grok と同じ形を Python の正規表現で確かめる（FRR の log file の 1 行）
-_line = "2026/09/18 01:02:03 BGP: [M59KS-A3ZXZ] bgp_update_receive: rcvd End-of-RIB for IPv4 Unicast from 203.0.113.2 in vrf default"
-_m = re.match(r"^(?P<log_time>\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}) (?P<daemon>\w+): (?P<message>.*)$", _line)
-check("grok の形（日時 デーモン: 本文）が FRR の行に合う", _m is not None and _m.group("daemon") == "BGP" and "%{FRR_TS:log_time} %{WORD:daemon:tag}: %{GREEDYDATA:message}" in tele)
+check("行の先頭の機器名を sysName のタグにする（detect と同じ機器名のタグ）", "%{NOTSPACE:sysName:tag} " in tele)
+# grok と同じ形を Python の正規表現で確かめる（rsyslog が機器名を付けた FRR の log file の 1 行）
+_line = "hq-ce-01 2026/09/18 01:02:03 BGP: [M59KS-A3ZXZ] bgp_update_receive: rcvd End-of-RIB for IPv4 Unicast from 203.0.113.2 in vrf default"
+_m = re.match(r"^(?P<sysName>\S+) (?P<log_time>\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}) (?P<daemon>\w+): (?P<message>.*)$", _line)
+check("grok の形（機器名 日時 デーモン: 本文）が rsyslog の送る行に合う",
+      _m is not None and _m.group("sysName") == "hq-ce-01" and _m.group("daemon") == "BGP"
+      and "%{NOTSPACE:sysName:tag} %{FRR_TS:log_time} %{WORD:daemon:tag}: %{GREEDYDATA:message}" in tele)
 check("detect は frr_log を異常にしない", mod.events({"name": "frr_log", "tags": {"sysName": "hq-ce-01"}, "fields": {"message": "x"}}, {}) == [])
+_access = _read("terraform", "pipeline", "stream", "access.tf")
+_lab_tg = _read("terraform", "pipeline", "lab", "telegraf.tf")
+check("stream の stream_produce は Telegraf が lab の state に無くても role が空にならない（down.sh の destroy が検証で止まらない。2026-09-19）",
+      'role = coalesce(local.telegraf_role_name, "${local.name_prefix}-telegraf")' in _access
+      and re.search(r'resource "aws_iam_role" "telegraf" \{[\s\S]*?name\s+= "\$\{local\.name_prefix\}-telegraf"', _lab_tg) is not None)
 sink_tf = _read("terraform", "pipeline", "stream", "sink.tf")
 check("S3 sink と Spark の既定は logs も読む", '"metrics,traps,logs"' in sink_tf and mod.LOG_TOPICS == "traps,logs"
       and mod.sink_topics("opensearch", mod.METRIC_TOPICS, mod.LOG_TOPICS) == "traps,logs")

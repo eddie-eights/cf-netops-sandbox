@@ -20,6 +20,8 @@ LAB=/opt/${name_prefix}-lab
 REGISTRY=${account_id}.dkr.ecr.${region}.amazonaws.com
 # Docker は AL2023 のリポジトリから（S3 ゲートウェイエンドポイント経由）。containerlab は S3 に置いた rpm から
 command -v docker >/dev/null || dnf install -y docker
+# rsyslog は FRR のログを Telegraf の EC2 へ送るのに使う（lab.sh forward が設定を書く）。入らなくてもトポロジは上げる
+command -v rsyslogd >/dev/null || dnf install -y rsyslog || echo "rsyslog could not be installed. FRR logs will not reach Telegraf." >&2
 systemctl enable --now docker
 install -d -m 0755 $LAB
 aws s3 sync --delete --region ${region} s3://${bucket}/lab/ $LAB/src/
@@ -30,12 +32,7 @@ fi
 command -v containerlab >/dev/null || dnf install -y $LAB/src/containerlab_${containerlab_version}_linux_arm64.rpm
 chmod 0755 $LAB/src/lab.sh
 ln -sfn $LAB/src/lab.sh /usr/local/bin/lab
-# Telegraf の rpm が lab/ にあれば入れる（無ければ何もしない。terraform/pipeline/stream が無くてもここは通る）
-TELEGRAF_RPM=$LAB/src/telegraf-${telegraf_version}-1.aarch64.rpm
-if [ -f $TELEGRAF_RPM ] && ! rpm -q telegraf-${telegraf_version} >/dev/null 2>&1; then
-  dnf install -y $TELEGRAF_RPM
-  systemctl disable --now telegraf.service 2>/dev/null || true
-fi
+# 前の版は Telegraf をこの EC2 で動かしていた。rpm ごと S3 の lab/ に残っていても、ここでは入れない（Telegraf は別の EC2。telegraf.tf）
 
 cat > /etc/${name_prefix}-lab.env <<__ENV__
 AWS_REGION=${region}
@@ -63,29 +60,6 @@ TimeoutStartSec=600
 WantedBy=multi-user.target
 __UNIT__
 
-# Telegraf。ExecStartPre で SSM の /<name_prefix>/msk-bootstrap を読んで設定を作る。terraform/pipeline/stream が無い間は
-# 失敗して 60 秒ごとに試し直す（トポロジには影響しない）。162/udp で trap を受けるので root で動かす
-if [ -f $TELEGRAF_RPM ]; then
-  cat > /etc/systemd/system/${name_prefix}-telegraf.service <<__UNIT__
-[Unit]
-Description=${name_prefix} Telegraf - SNMP poll + trap from the lab to MSK
-After=docker.service network-online.target ${name_prefix}-lab.service
-Wants=${name_prefix}-lab.service
-
-[Service]
-EnvironmentFile=/etc/${name_prefix}-lab.env
-Environment=AWS_CONFIG_FILE=/etc/telegraf/aws_config
-WorkingDirectory=$LAB/src
-ExecStartPre=$LAB/src/lab.sh telegraf-render
-ExecStart=/usr/bin/telegraf --config /etc/telegraf/telegraf.conf
-Restart=on-failure
-RestartSec=60
-
-[Install]
-WantedBy=multi-user.target
-__UNIT__
-fi
-
 systemctl daemon-reload
 $LAB/src/lab.sh render
 $LAB/src/lab.sh pull
@@ -94,9 +68,5 @@ if [ "${auto_start_lab}" = "true" ]; then
   systemctl restart ${name_prefix}-lab.service
 else
   systemctl disable ${name_prefix}-lab.service || true
-fi
-if [ -f $TELEGRAF_RPM ]; then
-  systemctl enable ${name_prefix}-telegraf.service
-  systemctl restart ${name_prefix}-telegraf.service || true
 fi
 --==BOUNDARY==--

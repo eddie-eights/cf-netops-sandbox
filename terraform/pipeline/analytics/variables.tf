@@ -115,7 +115,7 @@ variable "metric_topics" {
 }
 
 variable "log_topics" {
-  description = "Kafka topics that carry logs (traps = Telegraf inputs.snmp_trap, logs = the FRR log files Telegraf tails on the lab EC2). Read by the iceberg and opensearch sinks"
+  description = "Kafka topics that carry logs (traps = Telegraf inputs.snmp_trap, logs = the FRR log files that rsyslog on the lab EC2 sends to the Telegraf EC2). Read by the iceberg and opensearch sinks"
   type        = list(string)
   default     = ["traps", "logs"]
 

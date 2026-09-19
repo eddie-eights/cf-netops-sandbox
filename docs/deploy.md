@@ -16,7 +16,7 @@
 | `WORKFLOW` | Temporal での調査と修復。`AGENT=1` と `PIPELINE=1` が要り、`SKIP_LAB` / `SKIP_STREAM` / `SKIP_ANALYTICS` とは一緒に書けない |
 | `CREATE_KB` | ナレッジベース（+$0.36/h）。`AGENT=1` のとき |
 | `SKIP_LAB` | lab を作らない（-$0.09/h）。`SKIP_STREAM=1` も要る |
-| `SKIP_STREAM` | stream を作らない（-$1.27/h）。analytics も外れる |
+| `SKIP_STREAM` | stream と Telegraf の EC2 を作らない（-$1.28/h）。analytics も外れる |
 | `SKIP_ANALYTICS` | analytics を作らない（-$0.56/h）。異常一覧は使えない |
 | `SKIP_GRAPH` | Neptune を作らない（-$0.14/h）。トポロジは静的データになる |
 | `SINK_S3` / `SINK_OPENSEARCH` / `SINK_PROMETHEUS` | Spark の格納先。既定は 3 つとも `1`。`0` にするとリソースごと作らない。3 つとも `0` は止まる |

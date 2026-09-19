@@ -72,10 +72,10 @@ resource "aws_msk_cluster" "stream" {
   ]
 }
 
-# ブローカーのアドレスはクラスタ作成後にしか分からない。Telegraf（lab EC2）が起動時にここから読む
+# ブローカーのアドレスはクラスタ作成後にしか分からない。Telegraf の EC2（terraform/pipeline/lab）が起動時にここから読む
 resource "aws_ssm_parameter" "bootstrap" {
   name        = "/${local.name_prefix}/msk-bootstrap"
   type        = "String"
   value       = aws_msk_cluster.stream.bootstrap_brokers_sasl_iam
-  description = "MSK bootstrap brokers (SASL/IAM, 9098). Read by Telegraf on the lab EC2 at start."
+  description = "MSK bootstrap brokers (SASL/IAM, 9098). Read by the Telegraf EC2 (terraform/pipeline/lab) at start."
 }

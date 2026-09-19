@@ -13,6 +13,9 @@
 # volume_size       = 16
 # auto_start_lab    = true
 #
+# create_telegraf        = false        # ops/up.sh passes true when it makes terraform/pipeline/stream
+# telegraf_instance_type = "t4g.micro"
+#
 # containerlab_version = "0.79.0"
 # telegraf_version     = "1.40.0"
 # frr_image_tag        = "10.2.1"

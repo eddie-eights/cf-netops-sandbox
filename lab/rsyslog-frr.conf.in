@@ -1,0 +1,17 @@
+# FRR のログ（$LOG_DIR/<機器名>/frr.log）を Telegraf の EC2 へ送る rsyslog の設定。lab.sh forward が __*__ を埋めて
+# /etc/rsyslog.d/netops-lab-frr.conf に書く（Telegraf が無いときは消す）。
+# 1 行を「機器名 FRR の行」にして TCP で送る。機器名はファイルのパス（ディレクトリ名）から取る。
+# 受ける側は telegraf/telegraf.conf.in の inputs.socket_listener（grok で機器名・時刻・デーモン・本文に分ける）
+module(load="imfile")
+
+template(name="netops_frr" type="string" string="%$.dev% %msg%\n")
+
+ruleset(name="netops_frr") {
+  set $.dev = re_extract($!metadata!filename, "__LOG_DIR__/([^/]+)/frr[.]log", 0, 1, "unknown");
+  # Telegraf が止まっている間は溜めておき、戻ったら送る（上限を超えた分は捨てる）
+  action(type="omfwd" target="__TELEGRAF__" port="__LOG_PORT__" protocol="tcp" template="netops_frr"
+         queue.type="LinkedList" queue.size="10000" action.resumeRetryCount="-1")
+}
+
+# freshStartTail: 初めて読むファイルは末尾から（deploy し直すたびに過去の行を送り直さない）
+input(type="imfile" File="__LOG_DIR__/*/frr.log" Tag="frr" ruleset="netops_frr" addMetadata="on" freshStartTail="on")

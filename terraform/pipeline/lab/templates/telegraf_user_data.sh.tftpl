@@ -1,0 +1,61 @@
+Content-Type: multipart/mixed; boundary="==BOUNDARY=="
+MIME-Version: 1.0
+
+--==BOUNDARY==
+Content-Type: text/cloud-config; charset="us-ascii"
+MIME-Version: 1.0
+
+#cloud-config
+cloud_final_modules:
+- [scripts-user, always]
+
+--==BOUNDARY==
+Content-Type: text/x-shellscript; charset="utf-8"
+MIME-Version: 1.0
+Content-Transfer-Encoding: 8bit
+
+#!/bin/bash
+set -euo pipefail
+DIR=/opt/${name_prefix}-telegraf
+install -d -m 0755 $DIR
+aws s3 sync --delete --region ${region} s3://${bucket}/telegraf/ $DIR/src/
+TELEGRAF_RPM=$DIR/src/telegraf-${telegraf_version}-1.aarch64.rpm
+if [ ! -f $DIR/src/telegraf.sh ] || [ ! -f $TELEGRAF_RPM ]; then
+  echo "telegraf/ or the Telegraf rpm is not in s3://${bucket}/telegraf/ yet. Upload (output upload_telegraf_command) and reboot." >&2
+  exit 0
+fi
+# rpm が入れる telegraf.service（telegraf ユーザー）は使わない。162/udp で trap を受けるので下の unit を root で動かす
+rpm -q telegraf-${telegraf_version} >/dev/null 2>&1 || dnf install -y $TELEGRAF_RPM
+systemctl disable --now telegraf.service 2>/dev/null || true
+chmod 0755 $DIR/src/telegraf.sh
+ln -sfn $DIR/src/telegraf.sh /usr/local/bin/tg
+
+cat > /etc/${name_prefix}-telegraf.env <<__ENV__
+AWS_REGION=${region}
+PARAM_PREFIX=/${name_prefix}
+__ENV__
+
+# ExecStartPre で SSM の /<name_prefix>/msk-bootstrap を読んで設定を作る。terraform/pipeline/stream が無い間は失敗して 60 秒ごとに試し直す
+cat > /etc/systemd/system/${name_prefix}-telegraf.service <<__UNIT__
+[Unit]
+Description=${name_prefix} Telegraf - SNMP poll, traps and FRR logs from the lab to MSK
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+EnvironmentFile=/etc/${name_prefix}-telegraf.env
+Environment=AWS_CONFIG_FILE=/etc/telegraf/aws_config
+WorkingDirectory=$DIR/src
+ExecStartPre=$DIR/src/telegraf.sh render
+ExecStart=/usr/bin/telegraf --config /etc/telegraf/telegraf.conf
+Restart=on-failure
+RestartSec=60
+
+[Install]
+WantedBy=multi-user.target
+__UNIT__
+
+systemctl daemon-reload
+systemctl enable ${name_prefix}-telegraf.service
+systemctl restart ${name_prefix}-telegraf.service || true
+--==BOUNDARY==--

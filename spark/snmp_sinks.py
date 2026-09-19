@@ -9,7 +9,7 @@ Kafka と S3 Tables の jar、カタログの設定は spark-submit の --conf �
   opensearch  ログのトピックだけ → OpenSearch Serverless（TIMESERIES 型のコレクション）の _bulk に SigV4 で POST
   prometheus  メトリクスのトピックだけ → Amazon Managed Service for Prometheus の remote write に SigV4 で POST（数値の field だけ）
 どのトピックがメトリクスでどれがログかは --metric-topics / --log-topics（既定は Telegraf の metrics と traps,logs。
-logs は lab の Telegraf が tail する FRR のログ）。格納先ごとに別のストリーミングクエリ（別の Kafka の購読と checkpoint）に
+logs は FRR のログ。lab の EC2 の rsyslog が Telegraf の EC2 へ送る）。格納先ごとに別のストリーミングクエリ（別の Kafka の購読と checkpoint）に
 するので、1 つが落ちても他は進む。
 
 Telegraf の JSON 出力（outputs.kafka の data_format = "json"、json_timestamp_units = "1s"）は
@@ -39,8 +39,8 @@ import time
 import urllib.error
 import urllib.request
 
-METRIC_TOPICS = "metrics"   # Telegraf の inputs.snmp（terraform/pipeline/lab の telegraf.conf）
-LOG_TOPICS = "traps,logs"   # traps = Telegraf の inputs.snmp_trap、logs = inputs.tail（FRR のログ。measurement は frr_log）
+METRIC_TOPICS = "metrics"   # Telegraf の inputs.snmp（telegraf/telegraf.conf.in。Telegraf の EC2 で動く）
+LOG_TOPICS = "traps,logs"   # traps = Telegraf の inputs.snmp_trap、logs = inputs.socket_listener（FRR のログ。measurement は frr_log）
 SINKS = ("iceberg", "opensearch", "prometheus")
 TRIGGER = "60 seconds"
 REMIND = 300  # 落ちた格納先を ERROR で言い直す間隔（秒）

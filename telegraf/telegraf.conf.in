@@ -1,10 +1,16 @@
-# Telegraf の設定テンプレート（PIPELINE の stream があるときだけ動く）。lab.sh telegraf-render が __KAFKA_BROKERS__ / __AWS_REGION__ を埋めて
-# /etc/telegraf/telegraf.conf に書く。ブローカーは SSM パラメータ /<接頭辞>/msk-bootstrap（terraform/pipeline/stream が書く）から取る。
+# Telegraf の設定テンプレート。Telegraf の EC2（terraform/pipeline/lab の create_telegraf。telegraf.tf）の上で telegraf.sh render が
+# __KAFKA_BROKERS__ / __AWS_REGION__ を埋めて /etc/telegraf/telegraf.conf に書く。ブローカーは SSM パラメータ /<接頭辞>/msk-bootstrap
+# （terraform/pipeline/stream が書く）から取る。
 #
-# 流れ: CE の snmpd を 10 秒ごとにポーリング（ifTable）+ snmpd からの trap を udp 162 で受ける → MSK（IAM 認証、TLS）
+# 流れ: CE の snmpd を 10 秒ごとにポーリング（ifTable）+ snmpd からの trap を udp 162 で受ける + FRR のログを tcp 5140 で受ける
+#       → MSK（IAM 認証、TLS）
 #   metrics トピック: interface（ifDescr / ifOperStatus / ifInErrors ...）と system（sysName / sysUpTime）
 #   traps   トピック: snmp_trap（linkDown / linkUp）
-#   logs    トピック: frr_log（FRR のログ。BGP の隣接の up / down など。機器ごとのファイルを tail する）
+#   logs    トピック: frr_log（FRR のログ。BGP の隣接の up / down など）
+# 機器は lab の EC2 の中の docker network（203.0.113.0/24）にいる。この EC2 からは次の経路で届く（lab の EC2 で sudo lab forward-status）:
+#   ポーリング  VPC のルートで lab の EC2 へ行き、lab の EC2 が管理ネットワークへ転送する
+#   trap        snmpd は lab の EC2（203.0.113.1:162）へ送り、lab の EC2 がここへ DNAT する。送り元は機器の管理 IP のまま
+#   FRR のログ  lab の EC2 の rsyslog がファイルを読み、「機器名 行」にしてここの 5140/tcp へ送る（lab/rsyslog-frr.conf.in）
 # MIB は入れないので OID は数値で書き、名前を明示する（translator が無くても動く）。trap の varbind 名は数値 OID のまま
 # Kafka に載る（detector 側で ifDescr の OID を引く）。
 
@@ -17,7 +23,7 @@
   omit_hostname = true
   snmp_translator = "gosmi"
 
-# ---- ポーリング。agents は CE の管理 IP（snmpd は CE の netns に相乗り）
+# ---- ポーリング。agents は CE の管理 IP（snmpd は CE の netns に相乗り）。lab の EC2 を経由する（上の注記）
 [[inputs.snmp]]
   agents = ["udp://203.0.113.11:161", "udp://203.0.113.12:161", "udp://203.0.113.13:161", "udp://203.0.113.14:161"]
   version = 2
@@ -60,37 +66,29 @@
       name = "ifOutErrors"
       oid = ".1.3.6.1.2.1.2.2.1.20"
 
-# ---- trap 受信。162 は特権ポートなので unit は root で動かす（setcap でもよい）
+# ---- trap 受信。162 は特権ポートなので unit は root で動かす（setcap でもよい）。source タグは機器の管理 IP（lab の EC2 が送り元を変えない）
 [[inputs.snmp_trap]]
   service_address = "udp://:162"
   version = "2c"
   timeout = "5s"
 
-# ---- 機器のログ。FRR のコンテナに syslogd は無いので、frr.conf の log file を EC2 のディレクトリに bind して（wanlab.clab.yml.in）ここで tail する。
-# 1 行は「2026/09/18 10:00:00 BGP: [XXXXX-XXXXX] %ADJCHANGE: neighbor 172.16.1.1 ... Down ...」の形。時刻は読んだ時刻を使う
-# （コンテナの TZ に tzdata が効いているか確かめていないので、行の中の時刻は文字列のまま log_time に入れる）。形に合わない行（折り返しの続き）は捨てる
-[[inputs.tail]]
-  files = ["/var/log/netops-lab/*/frr.log"]
-  # from_beginning は Telegraf 1.40 で消えていて、書くと設定の読み込みで落ちる（2026-09-18 に実機で確認）。既定は末尾から読む
+# ---- 機器のログ。FRR のコンテナに syslogd は無いので、frr.conf の log file を lab の EC2 のディレクトリに bind し（wanlab.clab.yml.in）、
+# lab の EC2 の rsyslog が 1 行ずつ「機器名 FRR の行」にして送ってくる（lab/rsyslog-frr.conf.in）。ポートは lab.sh の LOG_PORT と
+# terraform/pipeline/lab の local.log_port と同じ。
+# 1 行は「hq-ce-01 2026/09/18 10:00:00 BGP: [XXXXX-XXXXX] %ADJCHANGE: neighbor 172.16.1.1 ... Down ...」の形。時刻は受けた時刻を使う
+# （コンテナの TZ に tzdata が効いているか確かめていないので、行の中の時刻は文字列のまま log_time に入れる）。形に合わない行（折り返しの続き）は捨てる。
+# 機器名は metrics / traps と同じタグ名（sysName）にして、OpenSearch で機器ごとに引けるようにする
+[[inputs.socket_listener]]
+  service_address = "tcp://:5140"
   name_override = "frr_log"
-  path_tag = "path"
   data_format = "grok"
   grok_custom_patterns = "FRR_TS %{YEAR}/%{MONTHNUM}/%{MONTHDAY} %{TIME}"
-  grok_patterns = ["%{FRR_TS:log_time} %{WORD:daemon:tag}: %{GREEDYDATA:message}"]
-
-# 機器名（sysName）はファイルのパスから取る。metrics / traps と同じタグ名にして、OpenSearch で機器ごとに引けるようにする
-[[processors.regex]]
-  namepass = ["frr_log"]
-  [[processors.regex.tags]]
-    key = "path"
-    pattern = "^/var/log/netops-lab/([^/]+)/.*$"
-    replacement = "${1}"
-    result_key = "sysName"
+  grok_patterns = ["%{NOTSPACE:sysName:tag} %{FRR_TS:log_time} %{WORD:daemon:tag}: %{GREEDYDATA:message}"]
 
 # ---- MSK へ。トピックは metric 名で分ける（snmp_trap → traps、frr_log → logs、それ以外 → metrics）
 # sasl_aws_msk_iam_profile: Telegraf 1.40.0 は profile か role + session のどちらかを書かないと
 # 「both role and session must be set」で落ち、インスタンスプロファイルだけでは起動しない（2026-09-18 に実機で確認。plugins/common/kafka/sasl_aws_iam_msk.go）。
-# lab.sh telegraf-render が region だけの [default] を /etc/telegraf/aws_config に書き、鍵が無いので SDK が IMDS（EC2 のロール）に落ちる
+# telegraf.sh render が region だけの [default] を /etc/telegraf/aws_config に書き、鍵が無いので SDK が IMDS（EC2 のロール）に落ちる
 [[outputs.kafka]]
   brokers = [__KAFKA_BROKERS__]
   topic = "metrics"

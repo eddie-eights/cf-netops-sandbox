@@ -1,4 +1,4 @@
-# netops-poc - PIPELINE stream root module. MSK (2 brokers, IAM auth) receives SNMP polls and traps from Telegraf on the lab EC2 (terraform/pipeline/lab),
+# netops-poc - PIPELINE stream root module. MSK (2 brokers, IAM auth) receives SNMP polls, traps and FRR logs from the Telegraf EC2 (terraform/pipeline/lab, create_telegraf),
 # the Spark job of terraform/pipeline/analytics writes link_down / trap anomalies to the DynamoDB table made here, and MSK Connect keeps the raw
 # messages in the asset bucket (S3 sink). The chat runtime, the web and the workflow tools read the anomaly table. Costs about 0.13 USD per hour while it exists - destroy it the same day.
 
@@ -39,9 +39,9 @@ locals {
   bucket            = data.terraform_remote_state.main.outputs.kb_bucket_name
   reader_role_names = toset([data.terraform_remote_state.main.outputs.runtime_role_name, data.terraform_remote_state.main.outputs.web_role_name])
 
-  # lab が無いと Telegraf の送信元が無い。下の precondition で「lab を先に」と出す
-  lab_sg_id     = try(data.terraform_remote_state.lab.outputs.lab_security_group_id, "")
-  lab_role_name = try(data.terraform_remote_state.lab.outputs.lab_role_name, "")
+  # Telegraf の EC2（terraform/pipeline/lab の create_telegraf）が無いと送信元が無い。network.tf の precondition で「lab を先に」と出す
+  telegraf_sg_id     = try(data.terraform_remote_state.lab.outputs.telegraf_security_group_id, "")
+  telegraf_role_name = try(data.terraform_remote_state.lab.outputs.telegraf_role_name, "")
 
   # ブローカー 2 台 = サブネット 2 つ（terraform/base/core の Runtime サブネット）
   broker_subnet_ids = slice(local.subnet_ids, 0, 2)

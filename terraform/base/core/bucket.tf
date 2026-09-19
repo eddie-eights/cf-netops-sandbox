@@ -1,7 +1,7 @@
 # ---------------------------------------------------------------- shared S3 bucket
-# web/（画面のコードと wheel）、docs/（KB の取り込み元。terraform/agent の create_knowledge_base = true のとき）、lab/ stream/ analytics/ を置く。
+# web/（画面のコードと wheel）、docs/（KB の取り込み元。terraform/agent の create_knowledge_base = true のとき）、lab/ telegraf/ stream/ analytics/ を置く。
 # 名前は kb のまま（ナレッジベースを作らなくても使う）。
-# force_destroy = true なので、docs/ web/ lab/ stream/ が残っていても terraform destroy で消える
+# force_destroy = true なので、docs/ web/ lab/ telegraf/ stream/ が残っていても terraform destroy で消える
 resource "aws_s3_bucket" "kb" {
   bucket        = "${local.name_prefix}-kb-${local.account_id}"
   force_destroy = true

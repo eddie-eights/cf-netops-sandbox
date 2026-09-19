@@ -1,5 +1,7 @@
-# 受信ルールは置かない。操作は SSM Session Manager（SSM Agent が内側から ssmmessages へつなぎに行く）。
-# lab のアドレス（203.0.113.0/24 / 172.16.0.0/16 / 10.x.0.0/24）は EC2 の中の docker network と veth に閉じていて VPC には出ない
+# 操作は SSM Session Manager（SSM Agent が内側から ssmmessages へつなぎに行く）なので、受信ルールは Telegraf の EC2 からの SNMP だけ（telegraf.tf）。
+# lab のアドレス（203.0.113.0/24 / 172.16.0.0/16 / 10.x.0.0/24）は EC2 の中の docker network と veth に閉じていて VPC には出ない。
+# create_telegraf のときだけ、管理ネットワーク 203.0.113.0/24 を VPC のルートでこの EC2 に向ける（telegraf.tf）
+# description は変えると SG が作り直しになり、ほかのルートの SG ルールが参照している間は消せないので、Telegraf の穴を足した今も元の文のまま
 resource "aws_security_group" "lab" {
   name        = "${local.name_prefix}-lab"
   description = "Lab EC2 - no inbound, outbound HTTPS only (SSM, ECR, S3 gateway)"
@@ -14,15 +16,6 @@ resource "aws_vpc_security_group_egress_rule" "lab_https" {
   ip_protocol       = "tcp"
   from_port         = 443
   to_port           = 443
-  cidr_ipv4         = "0.0.0.0/0"
-}
-
-resource "aws_vpc_security_group_egress_rule" "lab_kafka" {
-  security_group_id = aws_security_group.lab.id
-  description       = "Kafka with IAM auth to the MSK brokers of terraform/pipeline/stream (private IPs in this VPC, no NAT)"
-  ip_protocol       = "tcp"
-  from_port         = 9098
-  to_port           = 9098
   cidr_ipv4         = "0.0.0.0/0"
 }
 

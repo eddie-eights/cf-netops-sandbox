@@ -2,7 +2,7 @@
 #
 # これはテンプレート。__FRR_IMAGE__ などは lab.sh render が ECR の URI に置き換えて wanlab.clab.yml を作る。
 # EC2 は閉域で quay.io / ghcr.io に届かないため、イメージは ECR から取る（terraform/base/ecr）。
-# __LOG_DIR__/<機器名> は FRR のログ（frr.conf の log file）の置き場。lab.sh render が EC2 の上に作り、Telegraf が tail して Kafka の logs に送る。
+# __LOG_DIR__/<機器名> は FRR のログ（frr.conf の log file）の置き場。lab.sh render が EC2 の上に作り、rsyslog が Telegraf の EC2 へ送る（lab.sh forward）。
 #
 #   hq-ce-01 ─ 主回線 ─ carrier-pe-01 ┐
 #          └─ 副回線 ─ carrier-pe-02 ┤  AS 65000（キャリア網の代役）
@@ -15,7 +15,8 @@
 name: wanlab
 
 mgmt:
-  # 名前と subnet を固定する（EC2 の中だけの docker network。VPC には出ない）
+  # 名前と subnet を固定する（EC2 の中だけの docker network）。VPC からは Telegraf の EC2 だけが、VPC のルートで lab の EC2 を経由して届く
+  # （terraform/pipeline/lab の telegraf.tf の local.mgmt_cidr と lab.sh の MGMT が同じ subnet）
   network: netops-lab
   ipv4-subnet: 203.0.113.0/24
 

@@ -24,7 +24,7 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-  LAB["lab の EC2<br/>containerlab + FRR"] -->|"Telegraf: SNMP ポーリング 10 秒 / trap / FRR のログ"| MSK["MSK<br/>metrics / traps / logs"]
+  LAB["lab の EC2<br/>containerlab + FRR"] -->|"SNMP ポーリング 10 秒 / trap / FRR のログ"| TG["Telegraf の EC2"] --> MSK["MSK<br/>metrics / traps / logs"]
   MSK --> SPARK["Spark（EMR Serverless）"]
   MSK -.->|"任意"| S3SINK["MSK Connect の S3 sink"]
   SPARK -->|"全トピック（正本）"| ICE["S3 Tables<br/>snmp_metrics"]
@@ -58,7 +58,8 @@ WORKFLOW の流れは [workflow.md](workflow.md)。
 | `workflow/` | Temporal のワークフローとワーカー |
 | `tools/` | Gateway（MCP）の tools Lambda |
 | `spark/` | Spark のジョブ（`snmp_sinks.py`） |
-| `lab/` | containerlab の構成、FRR、snmpd、Telegraf |
+| `lab/` | containerlab の構成、FRR、snmpd、Telegraf の EC2 への転送（`lab forward`） |
+| `telegraf/` | Telegraf の設定と `tg`（Telegraf の EC2 で動く） |
 | `graph/` | Neptune の `status` を書く Lambda |
 | `kb-docs/` | ナレッジベースに入れる手順書 |
 | `ops/` | `up.sh` / `down.sh` / `check.sh` など |
@@ -71,7 +72,7 @@ terraform/
 │   └── core/        VPC / SG / エンドポイント / バケット / ロール / Web の EC2
 ├── agent/         AGENT=1     Runtime / ガードレール / KB
 ├── pipeline/      PIPELINE=1
-│   ├── lab/         containerlab の EC2
+│   ├── lab/         containerlab の EC2 と Telegraf の EC2（stream を作るとき）
 │   ├── stream/      MSK / MSK Connect / 異常テーブル
 │   ├── analytics/   EMR Serverless / S3 Tables / OpenSearch / Prometheus
 │   └── graph/       Neptune

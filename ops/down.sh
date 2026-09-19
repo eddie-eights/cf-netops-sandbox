@@ -107,7 +107,7 @@ destroy_root() {  # destroy_root <ルート> [-var 名前=値 …]  消えたら
   # ここで止めない。1 つのルートで抜けると後ろのルート（lab / agent / 土台）が消えず、EC2 が動いたまま課金が続く。
   # 覚えておいて残りを消しにいき、最後にまとめて出す（AWS 側の ENI 待ちなら、待ってから打ち直せば消える）
   FAILED_ROOTS="$FAILED_ROOTS $root"
-  echo "NG: terraform/$root が消えなかった（上のエラー。全文は $logf）。先へ進んで、残りのルートを消す"
+  echo "NG: terraform/$root が消えなかった（上のエラー。全文は ${logf}）。先へ進んで、残りのルートを消す"
   return 1
 }
 # VPC の中の Lambda は、関数を消しても ENI が available のまま 20〜40 分残り、SG とサブネットの削除を DependencyViolation で待たせる
@@ -278,7 +278,7 @@ if [ "$MAIN_LEFT" = 1 ]; then
 fi
 if [ -n "$FAILED_ROOTS" ]; then
   echo
-  echo "NG: 消えなかったルート:$FAILED_ROOTS（全文は ops/logs/tf-*-destroy.log）"
+  echo "NG: 消えなかったルート:${FAILED_ROOTS}（全文は ops/logs/tf-*-destroy.log）"
   echo "これ以外は消してあるので、時間課金が残っているのは上のルートだけ。上に出た RequesterManaged=True の ENI が残っているなら"
   echo "AWS 側が片付けるのを待つしかない（MSK / MSK Connect は数分〜十数分、AgentCore Runtime は最大 8 時間）。待って ops/down.sh を打ち直す"
   exit 1

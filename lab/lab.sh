@@ -1,18 +1,28 @@
 #!/usr/bin/env bash
 # lab EC2（terraform/pipeline/lab）の上で containerlab を動かす。user_data が /usr/local/bin/lab に置くので、SSM セッションから `sudo lab check` で使う。
 #   lab.sh render | pull | up | down | status | check | snmp <node> | logs [node] | fail-main | heal-main | failover | clab <args...>
-#   lab.sh telegraf-render | telegraf-status     （stream: Telegraf → MSK。deploy.env の WITH_STREAM=1 で terraform/pipeline/stream を作ってから）
+#   lab.sh forward | forward-status     （stream: 別の EC2 の Telegraf へ SNMP / trap / FRR のログを通す。up が毎回呼ぶ。Telegraf 自体は telegraf/telegraf.sh）
 # 手元の containerlab と違うのは 3 つ: containerlab を直接呼ぶ（root）、イメージは ECR から取る（pull）、
 # wanlab.clab.yml はテンプレート（.in）からイメージ URI を埋めて作る（render）。
 set -euo pipefail
-cd "$(dirname "$0")"
-SELF="$PWD/$(basename "$0")"
+# /usr/local/bin/lab（シンボリックリンク）から呼ばれても、テンプレートのある src/ で動く
+SELF=$(readlink -f "$0")
+cd "$(dirname "$SELF")"
 LAB=wanlab
 TOPO=wanlab.clab.yml
-# FRR のログの置き場（機器ごとに 1 ディレクトリ。コンテナの /var/log/frr に bind する）。telegraf.conf.in の inputs.tail と同じパス。
+# FRR のログの置き場（機器ごとに 1 ディレクトリ。コンテナの /var/log/frr に bind する）。forward が書く rsyslog の設定（rsyslog-frr.conf.in）がここを読む。
 # src/ の下に置かないのは、user_data の aws s3 sync --delete が起動のたびに消すから
 LOG_DIR=/var/log/netops-lab
-# terraform/pipeline/lab の user_data が書く。REGISTRY / FRR_IMAGE / SNMPD_IMAGE / MULTITOOL_IMAGE / AWS_REGION
+# containerlab の管理ネットワーク（wanlab.clab.yml.in の mgmt）と、その上のこの EC2 のアドレス（snmpd の trap の宛先）。
+# Telegraf の EC2 は VPC のルートでここへ来る（terraform/pipeline/lab の telegraf.tf の local.mgmt_cidr）
+MGMT=203.0.113.0/24
+MGMT_GW=203.0.113.1
+# FRR のログを Telegraf へ送る TCP のポート（telegraf/telegraf.conf.in の socket_listener と terraform/pipeline/lab の local.log_port と同じ）
+LOG_PORT=5140
+RSYSLOG_CONF=/etc/rsyslog.d/netops-lab-frr.conf
+# forward が入れる iptables の規則の目印（入れ直す前にこれの付いた規則を全部消す）
+FW_TAG=netops-lab-telegraf
+# terraform/pipeline/lab の user_data が書く。REGISTRY / FRR_IMAGE / SNMPD_IMAGE / MULTITOOL_IMAGE / AWS_REGION / PARAM_PREFIX
 ENV_FILE=$(ls /etc/*-lab.env 2>/dev/null | head -1 || true)
 [ -n "$ENV_FILE" ] && set -a && . "$ENV_FILE" && set +a
 
@@ -29,6 +39,14 @@ snmp_if() {
   | sed 's/^\.1\.3\.6\.1\.2\.1\.2\.2\.1\.2\.//; s/\.1\.3\.6\.1\.2\.1\.2\.2\.1\.8\.[0-9]* //' \
   | awk -F'\t' '{split($1,a," "); printf "  ifIndex %-4s %-10s oper=%s\n", a[1], a[2], $2}' \
   | grep -vE '(tunl0|gre0|gretap0|erspan0|ip_vti0|ip6_vti0|sit0|ip6tnl0|ip6gre0)'
+}
+unforward() {  # forward が入れた規則（目印 ${FW_TAG}）を全部消す
+  local t rules r
+  for t in raw filter nat; do
+    rules=$(iptables -t "$t" -S 2>/dev/null | grep -- "--comment $FW_TAG" || true)
+    [ -n "$rules" ] || continue
+    while read -ra r; do iptables -t "$t" -D "${r[@]:1}"; done <<<"$rules"
+  done
 }
 
 case "${1:-}" in
@@ -53,6 +71,9 @@ case "${1:-}" in
     [ -f "$TOPO" ] || "$SELF" render
     docker image inspect "$FRR_IMAGE" >/dev/null 2>&1 || "$SELF" pull
     clab deploy -t "$TOPO" --reconfigure
+    # Docker は管理ネットワークを作るたびに自分の MASQUERADE を nat の先頭に入れるので、deploy のあとに毎回入れ直す。
+    # 失敗してもトポロジは上がっている（Telegraf に届かないだけ。sudo lab forward-status で見る）
+    "$SELF" forward || echo "forward に失敗した（トポロジは動いている）。sudo lab forward-status で見る" >&2
     ;;
   down)   clab destroy -t "$TOPO" --cleanup ;;
   status) clab inspect -t "$TOPO" ;;
@@ -105,28 +126,51 @@ case "${1:-}" in
       sleep 1
     done
     echo "$w"
-    if systemctl is-active -q "*-telegraf.service" 2>/dev/null; then
-      echo "== Telegraf（stream）=="
+    if iptables -t nat -S PREROUTING 2>/dev/null | grep -q -- "--comment $FW_TAG"; then
+      echo "== Telegraf（stream。別の EC2）=="
       echo "  ポーリング（10 秒周期）と snmpd の linkDown トラップ（5 秒周期の monitor）が MSK に流れ、analytics の Spark が異常を DynamoDB に書く（EventBridge にも出す）。"
       echo "  GUI の「異常一覧」か、エージェントに「今の異常は？」と聞くと hq-ce-01 eth1 の link_down が出る。戻すのは 'lab heal-main'"
     fi
     ;;
-  telegraf-render)
-    # terraform/pipeline/stream が SSM に書いたブローカーを埋めて /etc/telegraf/telegraf.conf を作る。
-    # terraform/pipeline/stream が無いときは失敗して終わる（unit は Restart=on-failure で 60 秒ごとに試し直す）
+  forward)
+    # 別の EC2 の Telegraf（terraform/pipeline/lab の create_telegraf）へ 3 つを通す。アドレスは SSM の $PARAM_PREFIX/telegraf-address。
+    # 無ければ（Telegraf を作っていない）何もしない。何度打っても同じ規則になる（目印の付いた規則を消してから入れる）
     : "${AWS_REGION:?}" "${PARAM_PREFIX:?}"
-    b=$(aws ssm get-parameter --region "$AWS_REGION" --name "$PARAM_PREFIX/msk-bootstrap" --query Parameter.Value --output text) || {
-      echo "SSM $PARAM_PREFIX/msk-bootstrap が読めない。terraform/pipeline/stream はまだ？" >&2; exit 1; }
-    q=$(printf '"%s"' "${b//,/\",\"}")
-    install -d -m 0755 /etc/telegraf
-    # Telegraf の MSK IAM 認証は profile の指定が要る（telegraf.conf.in の注記）。鍵を書かない [default] なので EC2 のロールが使われる
-    printf '[default]\nregion = %s\n' "$AWS_REGION" > /etc/telegraf/aws_config
-    sed -e "s#__KAFKA_BROKERS__#$q#" -e "s#__AWS_REGION__#$AWS_REGION#" telegraf.conf.in > /etc/telegraf/telegraf.conf
-    echo "/etc/telegraf/telegraf.conf を作った（brokers: $b）"
+    t=$(aws ssm get-parameter --region "$AWS_REGION" --name "$PARAM_PREFIX/telegraf-address" --query Parameter.Value --output text 2>/dev/null) || t=""
+    unforward
+    if [ -z "$t" ]; then
+      rm -f "$RSYSLOG_CONF"
+      echo "SSM $PARAM_PREFIX/telegraf-address が無い（Telegraf の EC2 を作っていない）ので、Telegraf への転送は張らない"
+      exit 0
+    fi
+    c=(-m comment --comment "$FW_TAG")
+    # ポーリング: Telegraf → CE の snmpd（161/udp）。VPC のルートでこの EC2 に来る。Docker は外から管理ネットワークへの転送を落とすので DOCKER-USER で先に通す
+    iptables -I DOCKER-USER 1 -s "$t" -d "$MGMT" -p udp --dport 161 "${c[@]}" -j ACCEPT
+    # Docker 28 以降は raw の PREROUTING でブリッジ以外から来たコンテナ宛てを落とす。その前で抜ける（古い Docker では何もしない規則になる）
+    iptables -t raw -I PREROUTING 1 -s "$t" -d "$MGMT" -p udp --dport 161 "${c[@]}" -j ACCEPT
+    # trap: snmpd の宛先（この EC2 の $MGMT_GW:162）を Telegraf へ向け直す
+    iptables -t nat -I PREROUTING 1 -s "$MGMT" -d "$MGMT_GW" -p udp --dport 162 "${c[@]}" -j DNAT --to-destination "$t:162"
+    iptables -I DOCKER-USER 1 -s "$MGMT" -d "$t" -p udp --dport 162 "${c[@]}" -j ACCEPT
+    # 送り元（機器の管理 IP）を残す。Docker の MASQUERADE（-s $MGMT ! -o <bridge>）より前で抜ける。Spark とエージェントは送り元の IP で機器を引く
+    iptables -t nat -I POSTROUTING 1 -s "$MGMT" -d "$t" "${c[@]}" -j RETURN
+    # FRR のログ: rsyslog が $LOG_DIR/<機器名>/frr.log を読み、「機器名 行」にして Telegraf の $LOG_PORT/tcp へ送る
+    if command -v rsyslogd >/dev/null; then
+      sed -e "s#__LOG_DIR__#$LOG_DIR#g" -e "s#__TELEGRAF__#$t#" -e "s#__LOG_PORT__#$LOG_PORT#" rsyslog-frr.conf.in > "$RSYSLOG_CONF"
+      systemctl enable -q rsyslog
+      systemctl restart rsyslog
+    else
+      echo "rsyslog が入っていないので、FRR のログは Telegraf に届かない（dnf install -y rsyslog のあと sudo lab forward）" >&2
+    fi
+    echo "Telegraf（${t}）へ通した: SNMP 161/udp の転送、trap 162/udp の DNAT、FRR のログ $LOG_PORT/tcp"
     ;;
-  telegraf-status)
-    systemctl --no-pager status "*-telegraf.service" || true
-    echo "== 直近のログ =="; journalctl -u "*-telegraf.service" -n 20 --no-pager
+  forward-status)
+    echo "== iptables（目印 ${FW_TAG}）=="
+    for tb in raw filter nat; do iptables -t "$tb" -S 2>/dev/null | grep -- "--comment $FW_TAG" || true; done
+    echo "== nat POSTROUTING（$FW_TAG の RETURN が Docker の MASQUERADE より上にあること）=="
+    iptables -t nat -S POSTROUTING
+    echo "== rsyslog（FRR のログ → Telegraf）=="
+    systemctl is-active rsyslog || true
+    if [ -f "$RSYSLOG_CONF" ]; then grep -o 'target="[^"]*" port="[^"]*"' "$RSYSLOG_CONF"; else echo "  $RSYSLOG_CONF が無い"; fi
     ;;
   *) sed -n '2,4p' "$SELF"; exit 1 ;;
 esac

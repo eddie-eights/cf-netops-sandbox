@@ -10,7 +10,7 @@ flowchart LR
   WEB -->|"invoke_agent_runtime"| RT["AgentCore Runtime<br/>Nova 2 Lite + ガードレール"]
   RT --> KB["ナレッジベース<br/>CREATE_KB=1"]
   RT --> TOOLS["ツール<br/>Neptune / DynamoDB / OpenSearch / Prometheus"]
-  LAB["lab の EC2<br/>containerlab + Telegraf"] --> MSK["MSK"] --> SPARK["Spark<br/>EMR Serverless"]
+  LAB["lab の EC2<br/>containerlab"] --> TG["Telegraf の EC2"] --> MSK["MSK"] --> SPARK["Spark<br/>EMR Serverless"]
   SPARK --> STORE["S3 Tables / OpenSearch / Prometheus"]
   SPARK -->|"異常"| DDB["DynamoDB<br/>異常一覧"]
   SPARK -->|"AnomalyOpened"| WF["Temporal<br/>ECS Fargate"]
@@ -26,10 +26,10 @@ flowchart LR
 |---|---|---|
 | 土台（必ず） | VPC、Web の EC2、S3、ECR | 約 $0.05/h |
 | `AGENT=1`（既定） | チャット（Runtime + ガードレール）。`CREATE_KB=1` で手順書の検索も | 約 $0.13/h（KB は +$0.36/h） |
-| `PIPELINE=1` | lab → MSK → Spark → S3 Tables / OpenSearch / Prometheus、異常検知、Neptune のトポロジ | 約 $1.50/h |
+| `PIPELINE=1` | lab → MSK → Spark → S3 Tables / OpenSearch / Prometheus、異常検知、Neptune のトポロジ | 約 $1.51/h |
 | `WORKFLOW=1` | Temporal で調査 → 承認 → 修復。AGENT と PIPELINE が要る | 約 $0.06/h |
 
-全部で約 $1.74/h。**1 か月置くと約 $1,270（約 19 万円）になるので、使い終わったら当日中に消す。**
+全部で約 $1.75/h。**1 か月置くと約 $1,280（約 19 万円）になるので、使い終わったら当日中に消す。**
 
 ## 手順
 

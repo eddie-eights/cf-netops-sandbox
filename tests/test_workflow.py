@@ -422,4 +422,13 @@ check("承認待ちの wait_condition は TimeoutError を握って表を見直�
 check("承認タブの注記はワークフローが Temporal であることを言い、表は折り返し、id は表から選べる",
       "Temporal" in web and "wrap=True" in web and "pr_id = gr.Dropdown(" in web and "proposal_detail" in web)
 
+# ---- ops/up.sh が Web を立てる手順（2026-09-19 実機: app.py だけ置いて chat が無く、起動のたびに落ちていたのに「Web が動いている」と出た）
+up = read("ops", "up.sh")
+web_imports = {m for m in re.findall(r"^(?:import|from) (\w+)", read("web", "app.py"), re.M) if os.path.exists(os.path.join(ROOT, "web", m + ".py"))}
+check(f"up.sh 4-2 は web/*.py を全部置く（app.py が import する {sorted(web_imports)} を含む）",
+      web_imports and 'for f in web/*.py; do aws s3 cp --only-show-errors "$f" "s3://$KB_BUCKET/web/${f#web/}"; done' in up)
+check("Web の起動確認は is-active（落ちて再起動するまでの数秒も active）ではなく 8080 を聞いているかで見る",
+      "ss -ltn 'sport = :8080' | grep -q LISTEN" in up and "systemctl is-active --quiet $PREFIX-web.service" not in up)
+check("lab の状態の照合は 1 つの空白で区切った lab=active containers=N をそのまま探す（空白を 2 つ要る形だと合わない）",
+      '*" lab=active containers=$LAB_NODES "*)' in up)
 print(f"通過 {passed} / 失敗 0")

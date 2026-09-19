@@ -7,8 +7,9 @@
 ```mermaid
 flowchart LR
   subgraph LABEC2["lab の EC2（terraform/pipeline/lab）"]
-    CLAB["containerlab<br/>CE / PE / snmpd / ホスト 14 コンテナ"] --> TG["Telegraf<br/>SNMP ポーリング 10 秒 / trap / FRR のログ"]
+    CLAB["containerlab<br/>CE / PE / snmpd / ホスト 14 コンテナ"]
   end
+  CLAB -->|"SNMP ポーリング 10 秒 / trap / FRR のログ（rsyslog）"| TG["Telegraf の EC2<br/>（terraform/pipeline/lab）"]
   TG --> MSK["MSK（stream）<br/>metrics / traps / logs"]
   MSK -.->|"CREATE_S3_SINK"| RAW["S3 の stream/<br/>生データ（JSON）"]
   MSK --> SPARK["Spark（analytics）<br/>EMR Serverless"]
@@ -21,6 +22,8 @@ flowchart LR
 ```
 
 - lab は Web やエージェントとはつながっていない。使うのは SNMP とログの発生源としてだけ。
+- Telegraf は lab とは別の EC2 で動く（stream を作るときだけ。`terraform/pipeline/lab` の `create_telegraf`）。Telegraf だけを止める・作り直す・ログを見ることができる。
+- 機器は lab の EC2 の中の docker network（`203.0.113.0/24`）にいる。Telegraf の EC2 からのポーリングは VPC のルートで lab の EC2 を通り、trap は lab の EC2 が Telegraf へ DNAT し、FRR のログは lab の EC2 の rsyslog が Telegraf の `5140/tcp` へ送る。この 3 つは lab の EC2 で `sudo lab forward` が張る（`lab up` が毎回呼ぶ）。
 - 履歴の正本は S3 Tables。Web の「異常一覧」とエージェントの `list_anomalies` は DynamoDB を読む。
 - Neptune が無いとき（`SKIP_GRAPH=1`）は、トポロジは `agent/data/` の静的データになる。
 
@@ -43,17 +46,34 @@ aws ssm start-session --region ap-northeast-1 --target "$LAB_INSTANCE_ID"
 | `sudo lab heal-main` / `sudo lab fail-main` | 主回線を戻す / 落とすだけ |
 | `sudo lab snmp hq-snmp-01` | 1 台の ifDescr と ifOperStatus |
 | `sudo lab logs` | FRR のログの末尾。1 台だけなら `sudo lab logs hq-ce-01`、行数は `LINES=50` を前に付ける |
-| `sudo lab telegraf-status` | Telegraf の状態と直近のログ |
+| `sudo lab forward-status` | Telegraf の EC2 への転送（iptables の規則と rsyslog）。張り直すのは `sudo lab forward` |
 | `sudo lab clab inspect --all` | containerlab をそのまま呼ぶ |
 
 - 機器の CLI: `sudo docker exec -it clab-wanlab-hq-ce-01 vtysh`（1 行だけなら `-c 'show bgp summary'`）
 - `sudo lab failover` を打つと、trap が 5 秒以内、ポーリングの `link_down` が 10 秒以内に出る。`sudo lab heal-main` で resolved に戻る。
-- FRR のログは EC2 の `/var/log/netops-lab/<機器名>/frr.log`。Telegraf が tail してトピック `logs` に出す（measurement は `frr_log`）。
+- FRR のログは lab の EC2 の `/var/log/netops-lab/<機器名>/frr.log`。rsyslog が 1 行ずつ機器名を付けて Telegraf へ送り、Telegraf がトピック `logs` に出す（measurement は `frr_log`）。
+
+## Telegraf に入る
+
+```bash
+TELEGRAF_INSTANCE_ID=$(terraform -chdir=terraform/pipeline/lab output -raw telegraf_instance_id); echo "$TELEGRAF_INSTANCE_ID"
+aws ssm start-session --region ap-northeast-1 --target "$TELEGRAF_INSTANCE_ID"
+```
+
+| コマンド | 何をする |
+|---|---|
+| `sudo tg status` | unit の状態、trap（`162/udp`）と FRR のログ（`5140/tcp`）を受けているか、lab の EC2 から rsyslog がつながっているか、直近のログ |
+| `sudo tg test` | SNMP のポーリングを 1 回だけまわして画面に出す（MSK には送らない） |
+| `sudo tg logs` | unit のログ。行数は `LINES=200` を前に付ける |
+| `sudo tg restart` | Telegraf だけを再起動する（`ExecStartPre` の `tg render` で MSK のブローカーを読み直す） |
+
+- 設定のテンプレートは `telegraf/telegraf.conf.in`。変えたときは下の「変えたとき」。
+- `sudo tg test` で機器に届かない、trap が来ない、ログが来ないときは、lab の EC2 で `sudo lab forward-status` を見る（規則が無ければ `sudo lab forward`）。
 
 ### 動かないとき
 
 ```bash
-systemctl is-active <prefix>-lab <prefix>-telegraf
+systemctl is-active <prefix>-lab rsyslog
 sudo journalctl -u <prefix>-lab -n 50 --no-pager
 sudo tail -n 50 /var/log/cloud-init-output.log
 sudo systemctl restart <prefix>-lab
@@ -121,6 +141,7 @@ ops/sync-graph.sh --dry-run    # 作った JSON を出すだけ
 | 変えたもの | やること |
 |---|---|
 | `lab/` の設定（`lab/frr/` など） | `ops/up.sh` を打つ（手順 5 で S3 に置き直す）→ lab に入って `sudo systemctl restart <prefix>-lab` |
+| `telegraf/telegraf.conf.in` | `ops/up.sh` を打つ（手順 5 で `s3://<バケット>/telegraf/` に置き直す）→ `aws ec2 reboot-instances --region ap-northeast-1 --instance-ids "$TELEGRAF_INSTANCE_ID"`（起動のたびに S3 から取り直す）。lab の EC2 はそのまま |
 | `spark/snmp_sinks.py` | 動いているジョブを止めてから `ops/up.sh` を打つ（手順 7-4 で新しいジョブが起きる）。止めるコマンドは下 |
 | lab の機器や回線 | 上のあと `ops/sync-graph.sh --replace` |
 

@@ -53,6 +53,13 @@ resource "aws_iam_role_policy" "lab_assets" {
           StringLike = { "s3:prefix" = "lab/*" }
         }
       },
+      {
+        # lab.sh forward が Telegraf の EC2 のアドレスを読む（telegraf.tf。無ければ何もしない）
+        Sid      = "TelegrafAddress"
+        Effect   = "Allow"
+        Action   = "ssm:GetParameter"
+        Resource = "arn:${local.partition}:ssm:${var.region}:${local.account_id}:parameter/${local.name_prefix}/telegraf-address"
+      },
     ]
   })
 }
