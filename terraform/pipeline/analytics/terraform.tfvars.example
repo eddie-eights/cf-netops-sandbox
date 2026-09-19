@@ -4,7 +4,7 @@
 # リソース名と Project タグは <owner>-nwc-poc になる（英小文字・数字・ハイフンの 14 文字まで）
 # owner = "efukuda"
 
-# 変えないのが既定。変えるときは docs/pipeline.md「stream / analytics / graph」を読む
+# 変えないのが既定。変えるときは docs/pipeline.md を読む
 # emr_release_label = "emr-7.13.0"
 # namespace         = "netops"
 # table_name        = "snmp_metrics"

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # deploy.env の PIPELINE / AGENT / WORKFLOW で選んだ機能を 1 本で起こす。機能は互いに独立で、要るものだけ作る（費用を抑えるため）。
-#   土台（必ず作る）  base/ecr + base/core（VPC / Web の EC2 / バケット / ロール。docs/deploy-manual.md の手順 1〜3・5・7）。約 $0.05/h。
+#   土台（必ず作る）  base/ecr + base/core（VPC / Web の EC2 / バケット / ロール）。約 $0.05/h。
 #                     AGENT か lab か analytics を作るなら、共用のエンドポイント（ecr.api / ecr.dkr / logs）も土台に作る（+ 約 $0.08/h）
 #   AGENT（既定 1）   agent での分析。terraform/agent（AgentCore Runtime + ガードレール + bedrock のエンドポイント。CREATE_KB=1 なら Knowledge Base も）。
 #                     Web の「チャット」タブが使える
@@ -19,7 +19,7 @@
 #   PIPELINE=1 ops/up.sh              # その回だけ変える（環境変数は deploy.env より優先）。初回は PIPELINE で 40〜60 分（MSK の作成が長い）
 #   DEPLOY_ENV_FILE=<パス> ops/up.sh  # 別の設定ファイルを読む
 #
-# どの機能も時間課金（試算は docs/cost.md「1 時間起動したときの試算」）。使い終わったら当日中に ops/down.sh を打つ。
+# どの機能も時間課金（目安は README の「作るもの」）。使い終わったら当日中に ops/down.sh を打つ。
 # 機能を 0 にして打っても、前に作ったルートは消さない（消すのは ops/down.sh）。
 #
 # 設定できるキー（deploy.env か環境変数。**OWNER だけ必須**で、ほかは任意。意味は deploy.env.example、読み方は ops/deploy-env.sh）:
@@ -115,7 +115,7 @@ tf() {  # tf <ルート> <terraform のサブコマンドと引数…>
 }
 tf_init() {  # tf_init <ルート>
   tf "$1" init -input=false >/dev/null \
-    || die "terraform/$1 の init に失敗した（provider の取得。社内 PC は docs/setup.md「社内 PC で使うとき」）"
+    || die "terraform/$1 の init に失敗した（provider の取得。社内 PC は docs/setup.md「社内 PC の CA」）"
 }
 tf_apply_only() {  # tf_apply_only <ルート> [-var 名前=値 …]  init 済みのルートを apply する
   local root="$1"; shift
@@ -142,7 +142,7 @@ wait_ssm_online() {  # wait_ssm_online <インスタンス ID>
     fi
     sleep 10
   done
-  die "$1 が 10 分たっても Session Manager に Online にならない（docs/troubleshooting.md の「うまくいかないとき」）"
+  die "$1 が 10 分たっても Session Manager に Online にならない（docs/troubleshooting.md の「画面に入れない」）"
 }
 ssm_run() {  # ssm_run <インスタンス ID> <コマンド…>  cloud-init（user_data）が終わるのを待ってから打ち、標準出力を出す。失敗なら 1
   # コマンドは JSON の文字列に埋めるので、ダブルクォートとバックスラッシュを含めない
@@ -249,21 +249,21 @@ fi
 if [ -z "$AGENT$PIPELINE$WORKFLOW" ]; then
   echo "機能が全部 0 なので土台（base/ecr + base/core）だけ作る（Web は「チャット」で「配備されていない」と返す）"
 fi
-command -v aws >/dev/null || die "aws CLI が無い（docs/setup.md「WSL2 の準備」）"
-command -v terraform >/dev/null || die "terraform が無い（docs/setup.md「WSL2 の準備」。1.11 以上）"
+command -v aws >/dev/null || die "aws CLI が無い（docs/setup.md「Terraform を打つ PC 側」）"
+command -v terraform >/dev/null || die "terraform が無い（docs/setup.md「Terraform を打つ PC 側」。1.11 以上）"
 if command -v python3 >/dev/null; then PY=(python3)
 elif command -v uv >/dev/null; then PY=(uv run --python 3.13 python)
-else die "python3 も uv も無い（docs/setup.md「WSL2 の準備」）"; fi
+else die "python3 も uv も無い（docs/setup.md「Terraform を打つ PC 側」）"; fi
 if [ -z "$SKIP_LAB" ] || [ -z "$SKIP_ANALYTICS" ]; then command -v curl >/dev/null || die "curl が無い（lab の rpm と analytics の jar を取るのに使う。sudo apt install curl）"; fi
 # docker はイメージ（agent / lab の 3 つ / worker / temporal）を ECR に置くときだけ要る。土台だけなら要らない
 NEED_DOCKER="$AGENT$WORKFLOW"; if [ -z "$SKIP_LAB" ]; then NEED_DOCKER=1; fi
 if [ -n "$NEED_DOCKER" ]; then
-  command -v docker >/dev/null || die "docker が無い（イメージのビルドに使う。docs/setup.md「WSL2 の準備」）"
-  docker buildx version >/dev/null 2>&1 || die "docker buildx が無い（Ubuntu の docker.io には入っていない。docs/setup.md「WSL2 の準備」）"
+  command -v docker >/dev/null || die "docker が無い（イメージのビルドに使う。docs/setup.md「Terraform を打つ PC 側」）"
+  docker buildx version >/dev/null 2>&1 || die "docker buildx が無い（Ubuntu の docker.io には入っていない。docs/setup.md「Terraform を打つ PC 側」）"
 fi
 # 最後のポートフォワーディング（手順 10）で要る。40〜60 分かけた後で落ちないよう、ここで見る
 if [ -z "$NO_PORTFORWARD" ]; then
-  command -v session-manager-plugin >/dev/null || die "Session Manager plugin が無い（手順 10 のポートフォワーディングに使う。docs/setup.md「WSL2 の準備」か「Mac で打つとき」。開かないなら NO_PORTFORWARD=1）"
+  command -v session-manager-plugin >/dev/null || die "Session Manager plugin が無い（手順 10 のポートフォワーディングに使う。docs/setup.md「Terraform を打つ PC 側」。開かないなら NO_PORTFORWARD=1）"
 fi
 CALLER_ARN=$(aws sts get-caller-identity --query Arn --output text) || die "認証が通っていない（aws configure か aws login で入り直す）"
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
@@ -295,7 +295,7 @@ echo "CALLER_ARN=$CALLER_ARN"
 echo "IMAGE_TAG=$IMAGE_TAG"
 echo "AGENT=${AGENT:-0} PIPELINE=${PIPELINE:-0} WORKFLOW=${WORKFLOW:-0} CREATE_KB=${CREATE_KB:-0}"
 echo "作るルート: $ROOTS"
-# 待機時の 1 時間あたりの目安（セント。東京リージョンの税抜。単価は 2026-09-14〜15 に Price List API で確認。内訳は docs/cost.md「1 時間起動したときの試算」）。
+# 待機時の 1 時間あたりの目安（セント。東京リージョンの税抜。単価は 2026-09-14〜15 に Price List API で確認。README の「作るもの」と docs/deploy.md の金額はここから出している）。
 # 土台 = 5（ssm / ssmmessages のエンドポイント 2 本 + Web の EC2）
 #   + 共用のエンドポイント 8（ecr.api / ecr.dkr / logs の 3 本 × 2 AZ。AGENT か lab か analytics を作るときだけ。2026-09-18 に agent から土台へ移した）、
 # agent = 5（bedrock-runtime × 2 AZ + bedrock-agentcore 1 本）
@@ -307,7 +307,7 @@ echo "作るルート: $ROOTS"
 #   + SINK_OPENSEARCH なら 33（logs コレクションの OCU。KB のコレクションと共有されるか確認できていないので最大値で数える。
 #     共有されれば 0 に近づく）、
 # workflow = 6（Fargate ARM 1 vCPU / 2 GB のタスク 1 つ + sqs エンドポイント 1 本。Gateway と Lambda と DynamoDB と SQS は使った分だけ。単価は 2026-09-17 に確認）。
-# docs/cost.md の試算を変えたらここも変える
+# ここを変えたら README の「作るもの」と docs/deploy.md の金額も変える
 COST_CENTS=5
 if [ -n "$SHARED_ENDPOINTS" ]; then COST_CENTS=$((COST_CENTS + 8)); fi
 if [ -n "$AGENT" ]; then
@@ -331,7 +331,7 @@ COST_NOTE=$(printf '待機だけで約 $%d.%02d/h（約 %d 円/h。チャット�
   $((COST_CENTS / 100)) $((COST_CENTS % 100)) $(((COST_CENTS * 150 + 50) / 100)))
 printf '\033[1;33m%s\033[0m\n' "$COST_NOTE"
 case ",$SINKS," in
-  *,opensearch,*) if [ -z "$SKIP_ANALYTICS" ]; then printf '\033[1;33m%s\033[0m\n' "SINK_OPENSEARCH=1（既定）: OpenSearch Serverless の logs コレクションを作る。OCU が KB のコレクションと共有されなければ最大 \$0.33/h で、上の目安はそれを含んでいる（docs/cost.md「1 時間起動したときの試算」）"; fi ;;
+  *,opensearch,*) if [ -z "$SKIP_ANALYTICS" ]; then printf '\033[1;33m%s\033[0m\n' "SINK_OPENSEARCH=1（既定）: OpenSearch Serverless の logs コレクションを作る。OCU が KB のコレクションと共有されなければ最大 \$0.33/h で、上の目安はそれを含んでいる"; fi ;;
 esac
 
 # ---- 1. ECR --------------------------------------------------------------------
@@ -360,10 +360,10 @@ NEED_LAB="$NEED_FRR$NEED_MULTITOOL$NEED_SNMPD"
 if [ -z "$NEED_AGENT$NEED_LAB$NEED_WORKER$NEED_TEMPORAL" ]; then
   echo "作るイメージは無い"
 else
-  docker info >/dev/null 2>&1 || die "dockerd に接続できない（WSL なら sudo service docker start。docs/setup.md「WSL2 の準備」）"
+  docker info >/dev/null 2>&1 || die "dockerd に接続できない（WSL なら sudo service docker start。docs/setup.md「Terraform を打つ PC 側」）"
   # agent と snmpd は RUN があるので、x86_64 の PC では QEMU（binfmt）が要る
   if [ -n "$NEED_AGENT$NEED_SNMPD$NEED_WORKER" ] && ! docker buildx ls | grep -q 'linux/arm64'; then
-    die "docker buildx ls の Platforms に linux/arm64 が無い（docs/setup.md「WSL2 の準備」の docker の行）"
+    die "docker buildx ls の Platforms に linux/arm64 が無い（docs/setup.md「WSL2（Ubuntu）」の binfmt の行）"
   fi
   aws ecr get-login-password --region "$REGION" | docker login --username AWS --password-stdin "$REG"
   if [ -n "$NEED_AGENT" ]; then
@@ -507,13 +507,13 @@ echo "Web が動いている"
 # ---- 5. lab と stream の材料 --------------------------------------------------------
 # lab の EC2 は起動のたびに s3://<バケット>/lab/ を読む。apply より前に置けば、Telegraf まで最初の起動で入る（再起動が要らない）
 if [ -z "$SKIP_LAB" ]; then
-  log "5-1. lab の材料（containerlab の rpm とトポロジ。stream を作るなら Telegraf の rpm も）を s3://$KB_BUCKET/lab/ に置く（docs/pipeline.md の lab-2 と s-1）"
+  log "5-1. lab の材料（containerlab の rpm とトポロジ。stream を作るなら Telegraf の rpm も）を s3://$KB_BUCKET/lab/ に置く"
   fetch "https://github.com/srl-labs/containerlab/releases/download/v$CONTAINERLAB_VERSION/$CONTAINERLAB_RPM" "$CONTAINERLAB_RPM" \
-    || die "containerlab の rpm が取れない（docs/pipeline.md の lab-2。社内 PC なら「社内 PC で使うとき」の証明書）"
+    || die "containerlab の rpm が取れない（社内 PC なら docs/setup.md「社内 PC の CA」）"
   aws s3 sync --only-show-errors lab/ "s3://$KB_BUCKET/lab/" --exclude "wanlab.clab.yml" --exclude "snmpd/certs/*"
   aws s3 cp --only-show-errors "$CONTAINERLAB_RPM" "s3://$KB_BUCKET/lab/"
   if [ -z "$SKIP_STREAM" ]; then
-    fetch "https://dl.influxdata.com/telegraf/releases/$TELEGRAF_RPM" "$TELEGRAF_RPM" || die "Telegraf の rpm が取れない（docs/pipeline.md の s-1）"
+    fetch "https://dl.influxdata.com/telegraf/releases/$TELEGRAF_RPM" "$TELEGRAF_RPM" || die "Telegraf の rpm が取れない（社内 PC なら docs/setup.md「社内 PC の CA」）"
     aws s3 cp --only-show-errors "$TELEGRAF_RPM" "s3://$KB_BUCKET/lab/"
   fi
 fi
@@ -523,7 +523,7 @@ if [ -z "$SKIP_STREAM" ]; then
     echo "CREATE_S3_SINK=0 なので S3 sink は作らない"
     STREAM_VARS+=(-var create_s3_sink=false)
   else
-    log "5-2. S3 sink のプラグイン（Confluent の zip）を s3://$KB_BUCKET/stream/ に置く（docs/pipeline.md の s-1）"
+    log "5-2. S3 sink のプラグイン（Confluent の zip）を s3://$KB_BUCKET/stream/ に置く"
     if ! fetch "$S3_SINK_URL" "$S3_SINK_ZIP" || ! is_zip "$S3_SINK_ZIP"; then
       rm -f "$S3_SINK_ZIP"
       die "Confluent の zip が取れない（利用条件への同意が要るとページが返る）。ブラウザで $S3_SINK_URL を開いて取り、展開したフォルダの直下に $S3_SINK_ZIP の名前で置いて打ち直す。S3 sink が要らなければ deploy.env に CREATE_S3_SINK=0 を書いて打ち直す"
@@ -532,10 +532,10 @@ if [ -z "$SKIP_STREAM" ]; then
   fi
 fi
 if [ -z "$SKIP_ANALYTICS" ]; then
-  log "5-3. Spark のスクリプトと jar（Kafka / MSK IAM / S3 Tables カタログ）を s3://$KB_BUCKET/analytics/ に置く（docs/pipeline.md の a-1）"
+  log "5-3. Spark のスクリプトと jar（Kafka / MSK IAM / S3 Tables カタログ）を s3://$KB_BUCKET/analytics/ に置く"
   mkdir -p "$JARS_DIR"
   for url in "${JAR_URLS[@]}"; do
-    fetch "$url" "$JARS_DIR/${url##*/}" || die "jar が取れない: $url （docs/pipeline.md の a-1。社内 PC なら「社内 PC で使うとき」の証明書）"
+    fetch "$url" "$JARS_DIR/${url##*/}" || die "jar が取れない: $url （社内 PC なら docs/setup.md「社内 PC の CA」）"
   done
   "${PY[@]}" -c 'import ast, sys; ast.parse(open(sys.argv[1]).read(), sys.argv[1])' "$SPARK_SCRIPT" || die "$SPARK_SCRIPT が Python として読めない"
   aws s3 cp --only-show-errors "$SPARK_SCRIPT" "s3://$KB_BUCKET/analytics/"
@@ -567,7 +567,7 @@ if [ -n "$LAB_INSTANCE_ID" ]; then
   case " $LAB_STATE " in
     *" lab=active "*" containers=$LAB_NODES "*) echo "トポロジは $LAB_NODES コンテナとも動いている" ;;
     *)
-      LAB_WARN="lab のトポロジが上がっていない（${LAB_STATE:-状態を読めなかった}。$LAB_NODES コンテナが動いて lab=active になるはず）。SSM セッションで入り、sudo tail -n 50 /var/log/cloud-init-output.log と sudo journalctl -u $PREFIX-lab -n 50 --no-pager を見る（docs/pipeline.md の lab-4）"
+      LAB_WARN="lab のトポロジが上がっていない（${LAB_STATE:-状態を読めなかった}。$LAB_NODES コンテナが動いて lab=active になるはず）。SSM セッションで入り、sudo tail -n 50 /var/log/cloud-init-output.log と sudo journalctl -u $PREFIX-lab -n 50 --no-pager を見る（docs/pipeline.md の「動かないとき」）"
       printf '\033[1;33m%s\033[0m\n' "$LAB_WARN" ;;
   esac
   if [ -z "$SKIP_STREAM" ]; then
@@ -588,7 +588,7 @@ if [ -z "$SKIP_ANALYTICS" ]; then
   ANALYTICS_VARS=(-var "sinks=[$SINKS_TF]")
   tf_apply pipeline/analytics "${ANALYTICS_VARS[@]}"
   APP_ID=$(tf pipeline/analytics output -raw application_id); echo "APP_ID=$APP_ID"
-  log "7-4. Spark のストリーミングジョブ（Kafka → ${SINKS}）を起こす（docs/pipeline.md の a-3。動いていれば何もしない）"
+  log "7-4. Spark のストリーミングジョブ（Kafka → ${SINKS}）を起こす（動いていれば何もしない）"
   RUNNING=$(aws emr-serverless list-job-runs --region "$REGION" --application-id "$APP_ID" \
     --states SUBMITTED PENDING SCHEDULED RUNNING --query 'jobRuns[].id' --output text)
   if [ -n "$RUNNING" ] && [ "$RUNNING" != None ]; then

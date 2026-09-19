@@ -24,7 +24,7 @@ resource "aws_iam_role_policy_attachment" "web_ssm" {
   policy_arn = "arn:${local.partition}:iam::aws:policy/AmazonSSMManagedInstanceCore"
 }
 
-# 画面のコード・静的データ・wheel は同じバケットの web/ に置く（docs/deploy-manual.md の手順 4）。docs/ は読ませない。
+# 画面のコード・静的データ・wheel は同じバケットの web/ に置く（ops/up.sh の手順 4）。docs/ は読ませない。
 # Runtime の ARN は terraform/agent が /<接頭辞>/runtime-arn に書き、web/app.py が 60 秒ごとに読む（agent を後から入れ替えても再起動が要らない）。
 # InvokeAgentRuntime の許可は terraform/agent がこのロールに足す
 resource "aws_iam_role_policy" "web_assets" {

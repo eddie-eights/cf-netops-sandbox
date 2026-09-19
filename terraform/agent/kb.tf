@@ -1,6 +1,6 @@
 # ---------------------------------------------------------------- knowledge base (S3 -> Titan Embeddings v2 -> OpenSearch Serverless)
 # create_knowledge_base = true のときだけ作る（count）。バケットは terraform/base/core のもの（web/ lab/ stream/ と共用）。
-# 取り込み元の md は利用者の PC から aws s3 cp で docs/ に置き、start-ingestion-job で取り込む（docs/deploy-manual.md の手順 4）
+# 取り込み元の md は利用者の PC から aws s3 cp で docs/ に置き、start-ingestion-job で取り込む（ops/up.sh の手順 4）
 resource "aws_opensearchserverless_security_policy" "kb_encryption" {
   count = local.kb ? 1 : 0
 

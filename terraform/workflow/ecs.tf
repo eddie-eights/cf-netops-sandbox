@@ -64,7 +64,7 @@ resource "aws_ecs_task_definition" "workflow" {
       command = ["server", "start-dev", "--ip", "0.0.0.0", "--db-filename", "/tmp/temporal.db", "--log-level", "warn"]
       portMappings = [
         { containerPort = 7233, protocol = "tcp" }, # gRPC（ワーカー）
-        { containerPort = 8233, protocol = "tcp" }, # Web UI（docs/workflow.md w-3 のポートフォワード）
+        { containerPort = 8233, protocol = "tcp" }, # Web UI（docs/workflow.md「Temporal UI を開く」）
       ]
       logConfiguration = {
         logDriver = "awslogs"
@@ -123,7 +123,7 @@ resource "aws_ecs_service" "workflow" {
   desired_count   = var.desired_count
   launch_type     = "FARGATE"
 
-  # aws ecs execute-command でタスクの中に入れる（docs/workflow.md w-3）
+  # aws ecs execute-command でタスクの中に入れる
   enable_execute_command = true
 
   # 2 つ同時に立てない（SQLite はタスクの中）

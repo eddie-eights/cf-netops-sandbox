@@ -2,7 +2,7 @@
 # iceberg    = 全トピック → tables.tf の S3 Tables（常に作る。テーブルは無料）
 # opensearch = ログのトピック → ここで作る OpenSearch Serverless の TIMESERIES コレクション（VPC エンドポイント経由だけ）
 # prometheus = メトリクスのトピック → ここで作る Amazon Managed Service for Prometheus のワークスペース（aps-workspaces のエンドポイント経由）
-# 4 本目の Splunk は Spark を通さず Kafka の sink（MSK Connect の Splunk Connect for Kafka）にする予定で、まだ作らない（docs/phases.md）
+# 4 本目の Splunk は Spark を通さず Kafka の sink（MSK Connect の Splunk Connect for Kafka）にする予定で、まだ作らない
 
 # ---------------------------------------------------------------- opensearch
 resource "aws_opensearchserverless_security_policy" "logs_encryption" {
@@ -93,7 +93,7 @@ resource "aws_opensearchserverless_collection" "logs" {
 }
 
 # ---------------------------------------------------------------- prometheus
-# ワークスペースは無料。取り込んだサンプル数と保存量で課金（Price List、2026-09-17 確認は取れていない。docs/cost.md の試算は 未検証 の印付き）
+# ワークスペースは無料。取り込んだサンプル数と保存量で課金（Price List、2026-09-17 確認は取れていない）
 resource "aws_prometheus_workspace" "metrics" {
   count = local.sink_prometheus ? 1 : 0
 

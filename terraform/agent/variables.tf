@@ -19,7 +19,7 @@ variable "owner" {
 
 # ---------------------------------------------------------------- agent
 variable "agent_image_tag" {
-  description = "Tag pushed to the agent repository of terraform/base/ecr (docs/deploy-manual.md step 2). The repository URL is read from terraform/base/ecr/terraform.tfstate."
+  description = "Tag pushed to the agent repository of terraform/base/ecr (step 2 of ops/up.sh). The repository URL is read from terraform/base/ecr/terraform.tfstate."
   type        = string
   default     = "v1"
 
@@ -30,7 +30,7 @@ variable "agent_image_tag" {
 }
 
 variable "agent_image_uri" {
-  description = "Optional. Leave empty to use <terraform/base/ecr repository>:<agent_image_tag>. Set only to run an image from another repository, with tag, built for linux/arm64 (e.g. 123456789012.dkr.ecr.ap-northeast-1.amazonaws.com/netops-nwc-poc-agent:v1)."
+  description = "Optional. Leave empty to use <terraform/base/ecr repository>:<agent_image_tag>. Set only to run an image from another repository, with tag, built for linux/arm64 (e.g. 123456789012.dkr.ecr.ap-northeast-1.amazonaws.com/<owner>-nwc-poc-agent:v1)."
   type        = string
   default     = ""
 }

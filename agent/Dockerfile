@@ -1,5 +1,5 @@
 # AgentCore Runtime は linux/arm64 のイメージしか動かさない。
-# ビルドは必ず --platform linux/arm64 で行う（docs/deploy-manual.md の手順 2）。
+# ビルドは必ず --platform linux/arm64 で行う（ops/up.sh の手順 2）。
 FROM public.ecr.aws/docker/library/python:3.13-slim
 
 ENV PYTHONUNBUFFERED=1 \

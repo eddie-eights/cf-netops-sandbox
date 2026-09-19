@@ -33,7 +33,7 @@ output "jars_s3_prefix" {
   value       = "s3://${local.bucket}/${local.jars_prefix}/"
 }
 
-# start-job-run の引数。ops/up.sh はこの出力をそのまま --job-driver に渡す。手で打つときは docs/pipeline.md の a-3
+# start-job-run の引数。ops/up.sh はこの出力をそのまま --job-driver に渡す（手順 7-4）
 output "job_driver_json" {
   description = "jobDriver for start-job-run (script, sinks and their endpoints, jars, catalog)"
   value = jsonencode({

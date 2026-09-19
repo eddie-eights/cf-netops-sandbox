@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# docs/deploy-manual.md の「片付け」をまとめて打つ。Terraform のルートを依存の逆順に destroy し、消え終わるまで待つ。
+# 作ったものをまとめて消す（docs/deploy.md の「ops/down.sh がすること」）。Terraform のルートを依存の逆順に destroy し、消え終わるまで待つ。
 # state（terraform/<ルート>/terraform.tfstate）にリソースが載っているルートだけを消す。作っていないルートは飛ばす。
 #
 # 使い方（展開したフォルダの直下で。先に AWS CLI の認証を通しておく。IAM ユーザーなら長期キーのまま打つ）:
@@ -54,7 +54,7 @@ tf() {  # tf <ルート> <terraform のサブコマンドと引数…>
 }
 has_resources() {  # has_resources <ルート>  state があり、リソースが 1 つ以上載っている（init もここで済ませる）
   [ -f "terraform/$1/terraform.tfstate" ] || return 1
-  tf "$1" init -input=false >/dev/null || die "terraform/$1 の init に失敗した（provider の取得。社内 PC は docs/setup.md「社内 PC で使うとき」）"
+  tf "$1" init -input=false >/dev/null || die "terraform/$1 の init に失敗した（provider の取得。社内 PC は docs/setup.md「社内 PC の CA」）"
   [ -n "$(tf "$1" state list 2>/dev/null)" ]
 }
 # SG が消えないときの DependencyViolation は「まだ何かが掴んでいる」としか言わないので、掴んでいるものを名指しで出す。

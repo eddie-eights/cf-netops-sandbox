@@ -18,6 +18,6 @@ provider "opensearch" {
   healthcheck           = false
   sign_aws_requests     = true
   aws_signature_service = "aoss"
-  # 社内の SSL 検査で証明書チェーンが社内 CA に置き換わる PC では、その CA の PEM を渡す（docs/setup.md「社内 PC で使うとき」）
+  # 社内の SSL 検査で証明書チェーンが社内 CA に置き換わる PC では、その CA の PEM を渡す（docs/setup.md「社内 PC の CA」）
   cacert_file = var.opensearch_cacert_file != "" ? var.opensearch_cacert_file : null
 }

@@ -1,5 +1,5 @@
 FROM alpine:3.20
-# 社内の証明書で apk が落ちるときは certs/ に社内のルート証明書（.crt / .pem）を置く（docs/pipeline.md の lab-1。イメージには残らない）
+# 社内の証明書で apk が落ちるときは certs/ に社内のルート証明書（.crt / .pem）を置く（docs/pipeline.md の「動かないとき」。イメージには残らない）
 RUN --mount=type=bind,source=certs,target=/certs \
     set -eu; \
     cp /etc/ssl/certs/ca-certificates.crt /tmp/ca.orig; \

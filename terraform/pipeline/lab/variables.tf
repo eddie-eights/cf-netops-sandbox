@@ -65,7 +65,7 @@ variable "containerlab_version" {
 }
 
 variable "telegraf_version" {
-  description = "telegraf-<version>-1.aarch64.rpm in s3://<kb_bucket_name of terraform/base/core>/lab/ is installed when present (docs/pipeline.md s-1). Nothing happens without it."
+  description = "telegraf-<version>-1.aarch64.rpm in s3://<kb_bucket_name of terraform/base/core>/lab/ is installed when present (step 5 of ops/up.sh). Nothing happens without it."
   type        = string
   default     = "1.40.0"
 

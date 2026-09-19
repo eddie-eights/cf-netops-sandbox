@@ -3,7 +3,7 @@
 #
 #   bash ops/vscode-setup.sh
 #
-# 設定そのもの（ユーザー設定・キー割り当て）は貼り付けで入れる。docs/development.md「VS Code の設定」を見る。
+# 設定そのもの（ユーザー設定・キー割り当て）は貼り付けで入れる。docs/development.md「VS Code（任意）」を見る。
 set -euo pipefail
 cd "$(dirname "$0")/.."
 

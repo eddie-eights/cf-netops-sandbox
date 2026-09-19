@@ -19,7 +19,7 @@ output "start_command" {
 }
 
 output "upload_lab_command" {
-  description = "Run in this repository after downloading the containerlab rpm (docs/pipeline.md lab-2). Re-run and reboot to change configs. The stream root adds the Telegraf rpm (docs/pipeline.md s-1)."
+  description = "Run in this repository after downloading the containerlab rpm (step 5 of ops/up.sh). Re-run and reboot to change configs. The stream root adds the Telegraf rpm."
   value       = "aws s3 sync lab/ s3://${local.bucket}/lab/ --exclude \"wanlab.clab.yml\" && aws s3 cp containerlab_${var.containerlab_version}_linux_arm64.rpm s3://${local.bucket}/lab/"
 }
 

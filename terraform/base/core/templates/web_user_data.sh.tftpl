@@ -20,7 +20,7 @@ APP=/opt/${name_prefix}-web
 # /usr/bin/python3 は 3.9 のまま（AL2023 の仕様）。3.13 と pip を別に入れる。取得経路は S3 ゲートウェイエンドポイント
 command -v python3.13 >/dev/null || dnf install -y python3.13 python3.13-pip
 install -d -m 0755 $APP
-# 画面のコード（app.py）・静的データ（data/）・依存の wheel（wheels/）を S3 から取る（docs/deploy-manual.md の手順 4）
+# 画面のコード（app.py）・静的データ（data/）・依存の wheel（wheels/）を S3 から取る（ops/up.sh の手順 4）
 aws s3 sync --delete --region ${region} s3://${bucket}/web/ $APP/src/
 # バケットは terraform/base/core が作るので、初回の apply の時点では web/ が空。置いてから reboot-instances すれば、この user_data がもう一度走る
 if [ ! -f $APP/src/requirements.txt ]; then

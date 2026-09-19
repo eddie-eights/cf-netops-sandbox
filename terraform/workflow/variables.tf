@@ -19,7 +19,7 @@ variable "owner" {
 
 # ---------------------------------------------------------------- images (terraform/base/ecr)
 variable "worker_image_tag" {
-  description = "Tag of the worker image in the <prefix>-worker repository (docs/workflow.md w-1). ops/up.sh passes IMAGE_TAG."
+  description = "Tag of the worker image in the <prefix>-worker repository. ops/up.sh passes IMAGE_TAG."
   type        = string
 
   validation {
@@ -29,7 +29,7 @@ variable "worker_image_tag" {
 }
 
 variable "temporal_image_tag" {
-  description = "Tag of the Temporal CLI image mirrored into the <prefix>-temporal repository (temporalio/temporal, docs/workflow.md w-1)."
+  description = "Tag of the Temporal CLI image mirrored into the <prefix>-temporal repository (temporalio/temporal)."
   type        = string
   default     = "1.9.1"
 }

@@ -3,7 +3,7 @@
 # (log topics) and Amazon Managed Service for Prometheus (metric topics) - see var.sinks. The same job detects link_down / trap anomalies,
 # writes them to the DynamoDB table of terraform/pipeline/stream and puts an AnomalyOpened event on the default EventBridge bus (terraform/workflow listens).
 # The table bucket is the long-term record of the pipeline; DynamoDB (terraform/pipeline/stream) keeps only the current anomalies.
-# Costs about 0.17 USD per hour while the streaming job runs (docs/cost.md) - ops/down.sh cancels the job and destroys this root.
+# Costs about 0.17 USD per hour while the streaming job runs - ops/down.sh cancels the job and destroys this root.
 
 # リソース名の接頭辞であり Project タグの値。デプロイする人の名前（var.owner）から作るので、
 # 1 つの AWS アカウントを何人かで使っても、自分の名前で自分のリソースを探せる
@@ -53,7 +53,7 @@ locals {
   topic_arns = "${replace(local.msk_cluster_arn, ":cluster/", ":topic/")}/*"
   group_arns = "${replace(local.msk_cluster_arn, ":cluster/", ":group/")}/*"
 
-  # ops/up.sh が置く場所（docs/pipeline.md の a-1）。スクリプトと jar は読むだけ、checkpoint と logs は書く
+  # ops/up.sh が置く場所（ops/up.sh の手順 5）。スクリプトと jar は読むだけ、checkpoint と logs は書く
   s3_prefix     = "analytics"
   script_key    = "${local.s3_prefix}/snmp_sinks.py"
   jars_prefix   = "${local.s3_prefix}/jars"

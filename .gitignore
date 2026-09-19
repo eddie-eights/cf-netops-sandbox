@@ -7,14 +7,14 @@ __pycache__/
 !.env.example
 # ops/up.sh・ops/down.sh の設定（deploy.env.example をコピーして書く）
 deploy.env
-# pip download の置き場（docs/deploy-manual.md の手順 4）
+# pip download の置き場（ops/up.sh の手順 4）
 wheels/
 lab/wanlab.clab.yml
 *.rpm
 # uv の仮想環境
 .venv/
 
-# 社内の証明書（docs/pipeline.md の lab-1）
+# 社内の証明書（docs/pipeline.md の「動かないとき」）
 lab/snmpd/certs/*.crt
 lab/snmpd/certs/*.pem
 

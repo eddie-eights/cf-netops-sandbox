@@ -67,7 +67,7 @@ locals {
 
   param_prefix = "/${local.name_prefix}"
 
-  # AgentCore Runtime の名前にはハイフンが使えないので、接頭辞の - を _ にして _agent を付ける（netops-nwc-poc -> netops_nwc_poc_agent）。
+  # AgentCore Runtime の名前にはハイフンが使えないので、接頭辞の - を _ にして _agent を付ける（<owner>-nwc-poc -> <owner>_nwc_poc_agent）。
   # ops/down.sh も同じ規則でロググループ（/aws/bedrock-agentcore/runtimes/<この名前>-*）を探すので、変えるなら両方を合わせる
   runtime_name = var.runtime_name != "" ? var.runtime_name : "${replace(local.name_prefix, "-", "_")}_agent"
 }

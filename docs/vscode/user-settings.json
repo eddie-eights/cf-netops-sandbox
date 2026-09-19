@@ -2,7 +2,7 @@
 // 入れ方: VS Code で Ctrl+Shift+P →「基本設定: ユーザー設定を開く (JSON)」→ この中身を貼る。
 // 既に設定があるなら、丸ごと上書きせず要るところだけ足す。
 //
-// あえて入れていない設定（要るなら自分で足す。理由は docs/development.md「VS Code の設定」）:
+// あえて入れていない設定（要るなら自分で足す。理由は docs/development.md「VS Code（任意）」）:
 //   claudeCode.allowDangerouslySkipPermissions / security.workspace.trust.untrustedFiles
 //   security.promptForLocalFileProtocolHandling / claudeCode.claudeProcessWrapper
 {

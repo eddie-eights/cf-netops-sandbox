@@ -92,7 +92,7 @@ resource "aws_mskconnect_custom_plugin" "s3_sink" {
   lifecycle {
     precondition {
       condition     = contains(data.aws_s3_objects.plugin[0].keys, var.s3_sink_plugin_key)
-      error_message = "s3://<kb_bucket_name of terraform/base/core>/<s3_sink_plugin_key> に Confluent S3 sink の zip が無い。docs/pipeline.md の s-1 で置いてから apply する（シンク無しで立てるなら -var create_s3_sink=false）。"
+      error_message = "s3://<kb_bucket_name of terraform/base/core>/<s3_sink_plugin_key> に Confluent S3 sink の zip が無い。ops/up.sh の手順 5 で置いてから apply する（シンク無しで立てるなら -var create_s3_sink=false）。"
     }
   }
 }

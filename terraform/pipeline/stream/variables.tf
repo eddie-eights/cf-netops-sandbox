@@ -66,7 +66,7 @@ variable "log_retention_days" {
 
 # ---------------------------------------------------------------- MSK Connect S3 sink
 variable "create_s3_sink" {
-  description = "MSK Connect S3 sink (1 MCU, about 0.11 USD per hour). Needs the plugin zip at s3_sink_plugin_key before apply (docs/pipeline.md s-1). Set false to run without the sink."
+  description = "MSK Connect S3 sink (1 MCU, about 0.11 USD per hour). Needs the plugin zip at s3_sink_plugin_key before apply (step 5 of ops/up.sh). Set false to run without the sink."
   type        = bool
   default     = true
 }
@@ -78,7 +78,7 @@ variable "kafka_connect_version" {
 }
 
 variable "s3_sink_plugin_key" {
-  description = "Key of the Confluent S3 sink connector zip in the asset bucket of terraform/base/core (download from Confluent Hub and upload before apply, docs/pipeline.md s-1)."
+  description = "Key of the Confluent S3 sink connector zip in the asset bucket of terraform/base/core (download from Confluent Hub and upload before apply; step 5 of ops/up.sh does this)."
   type        = string
   default     = "stream/confluentinc-kafka-connect-s3-12.1.11.zip"
 

@@ -1,5 +1,5 @@
-# ECR repositories of netops-poc. The agent image (docs/deploy-manual.md step 2), the three lab images (docs/pipeline.md lab-1)
-# and the two workflow images (worker / temporal, docs/workflow.md w-1) go here.
+# ECR repositories of netops-poc. The agent image, the three lab images
+# and the two workflow images (worker / temporal) go here. ops/up.sh pushes them in step 2.
 # force_delete = true so that `terraform destroy` removes the repositories together with their images (daily ops/down.sh).
 
 # リソース名の接頭辞であり Project タグの値。デプロイする人の名前（var.owner）から作るので、

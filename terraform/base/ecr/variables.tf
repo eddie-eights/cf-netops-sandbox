@@ -17,7 +17,7 @@ variable "owner" {
 }
 
 variable "create_lab_repositories" {
-  description = "Also create the three repositories of the lab images (frr / snmpd / multitool, docs/pipeline.md lab-1). false keeps only the agent repository."
+  description = "Also create the three repositories of the lab images (frr / snmpd / multitool). false keeps only the agent repository."
   type        = bool
   default     = true
 }
