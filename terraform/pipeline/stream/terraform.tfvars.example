@@ -9,8 +9,7 @@
 # region      = "ap-northeast-1"
 # owner       = "efukuda"
 #
-# create_sts_endpoint      = true
-# create_dynamodb_endpoint = true
+# create_sts_endpoint = true
 #
 # kafka_version        = "4.1.x.kraft"
 # broker_instance_type = "kafka.m5.large"  # Kafka 4.x は kafka.t3.small を受け付けない

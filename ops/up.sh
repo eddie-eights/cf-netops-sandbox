@@ -5,10 +5,10 @@
 #   AGENT（既定 1）   agent での分析。terraform/agent（AgentCore Runtime + ガードレール + bedrock のエンドポイント。CREATE_KB=1 なら Knowledge Base も）。
 #                     Web の「チャット」タブが使える
 #   PIPELINE          データパイプライン。lab（containerlab。stream を作るなら Telegraf の EC2 も）→ stream（MSK）→ analytics（Spark on EMR Serverless → S3 Tables / OpenSearch / Prometheus、
-#                     異常検知 → DynamoDB + EventBridge）と graph（Neptune のトポロジと投入）。Web の「トポロジ」「異常一覧」タブが動く
+#                     異常検知 → Neptune + S3 Tables の証跡 + EventBridge）と graph（Neptune のトポロジと投入）。Web の「トポロジ」「異常一覧」タブが動く
 #   WORKFLOW          Temporal での実行。workflow（Temporal on ECS Fargate のワーカー + AgentCore Gateway（MCP）+ EventBridge → SQS）。
 #                     Spark の検知が EventBridge → SQS で届き、エージェントが Neptune / OpenSearch / Prometheus を見て原因を調べて修復案を出し、
-#                     Web の「承認」タブで人が承認すると Temporal が lab で直す。AGENT と PIPELINE（lab / stream / analytics）が要る
+#                     Web の「承認」タブで人が承認すると Temporal が lab で直す。AGENT と PIPELINE（lab / stream / analytics / graph）が要る
 # 毎日全部消す運用向け。何度打っても同じ状態に収束する（できているものは Terraform が差分なしで飛ばし、ECR にあるタグはビルドしない）。
 # あとから別の機能を 1 にして打ち直せば、その機能だけ足される（土台と他の機能は作り直さない）。
 # Terraform の state はこの PC の展開したフォルダの中（terraform/<ルート>/terraform.tfstate）に置く。消すのは ops/down.sh。
@@ -30,7 +30,7 @@
 #                           **作ったあとで変えると、Terraform は名前の違うリソースを作り直す**（先に ops/down.sh で消す）
 #   AGENT=1                 agent での分析（既定 1）。terraform/agent を作る
 #   PIPELINE=1              データパイプライン（既定 0）。lab / stream / analytics / graph を作る（SKIP_* で減らせる）
-#   WORKFLOW=1              Temporal での実行（既定 0）。workflow を作る。AGENT と PIPELINE が要り、SKIP_LAB / SKIP_STREAM / SKIP_ANALYTICS は書けない
+#   WORKFLOW=1              Temporal での実行（既定 0）。workflow を作る。AGENT と PIPELINE が要り、SKIP_LAB / SKIP_STREAM / SKIP_ANALYTICS / SKIP_GRAPH は書けない
 #   CREATE_KB=1             AGENT=1 で Knowledge Base（OpenSearch Serverless。+$0.36/h）も作る（既定 0）
 #   SKIP_LAB=1              PIPELINE=1 で lab を作らない（stream は lab が要るので SKIP_STREAM=1 も要る）
 #   SKIP_STREAM=1           PIPELINE=1 で stream と analytics（stream の Kafka を読む）を作らない
@@ -39,7 +39,7 @@
 #                           analytics の Spark の格納先を 1 つずつ外す（既定は 3 つとも 1。0 にするとリソースごと作らない。1 つ以上は要る）。
 #                           SINK_S3 = 全トピック → S3 Tables（Iceberg。MSK Connect の S3 sink の CREATE_S3_SINK とは別物）、SINK_OPENSEARCH = traps と logs（FRR のログ）→ OpenSearch Serverless、
 #                           SINK_PROMETHEUS = metrics → Amazon Managed Service for Prometheus。terraform/pipeline/analytics の var.sinks（iceberg / opensearch / prometheus）に組んで渡す。
-#   SKIP_GRAPH=1            PIPELINE=1 で graph（Neptune）を作らない
+#   SKIP_GRAPH=1            PIPELINE=1 で graph（Neptune）を作らない。analytics の検知が異常を Neptune に書くので、SKIP_ANALYTICS=1（か SKIP_STREAM=1）も要る
 #   CREATE_S3_SINK=0        MSK Connect の S3 sink を作らない（Confluent の zip が取れないとき。ops/down.sh は state を見て合わせる）
 #   IMAGE_TAG               エージェント（WORKFLOW=1 ではワーカーも）のイメージのタグ。既定 v1。ECR にそのタグが無いときだけ PC の docker buildx でビルドして push する（タグは上書きできない）
 #   ADMIN_ARN               terraform/agent の kb_admin_principal_arn（CREATE_KB=1 のとき）。既定は空（Terraform が今の認証情報から決める）
@@ -222,10 +222,10 @@ if [ -n "$WORKFLOW" ]; then
     die "WORKFLOW は AGENT が要る（ワーカーがエージェントの Runtime を呼ぶ。terraform/workflow は terraform/agent の state から ARN を読む）。AGENT=1 にする。まだ何も作っていない"
   fi
   if [ -z "$PIPELINE" ]; then
-    die "WORKFLOW は PIPELINE が要る（analytics の Spark が異常を検知して EventBridge に出し、ワーカーが stream の異常テーブルを読み、lab の EC2 で直す）。PIPELINE=1 にする。まだ何も作っていない"
+    die "WORKFLOW は PIPELINE が要る（analytics の Spark が異常を検知して EventBridge に出し、ワーカーが Neptune の異常と修復案を読み書きし、lab の EC2 で直す）。PIPELINE=1 にする。まだ何も作っていない"
   fi
-  if [ -n "$SKIP_LAB" ] || [ -n "$SKIP_STREAM" ] || [ -n "$SKIP_ANALYTICS" ]; then
-    die "WORKFLOW は lab と stream と analytics が要る。SKIP_LAB / SKIP_STREAM / SKIP_ANALYTICS を外す。まだ何も作っていない"
+  if [ -n "$SKIP_LAB" ] || [ -n "$SKIP_STREAM" ] || [ -n "$SKIP_ANALYTICS" ] || [ -n "$SKIP_GRAPH" ]; then
+    die "WORKFLOW は lab と stream と analytics と graph が要る。SKIP_LAB / SKIP_STREAM / SKIP_ANALYTICS / SKIP_GRAPH を外す。まだ何も作っていない"
   fi
 fi
 if [ -n "$PIPELINE" ]; then
@@ -235,6 +235,9 @@ if [ -n "$PIPELINE" ]; then
   if [ -n "$SKIP_STREAM" ] && [ -z "$SKIP_ANALYTICS" ]; then
     echo "SKIP_STREAM=1 なので analytics も作らない（読む Kafka が無い）"
     SKIP_ANALYTICS=1
+  fi
+  if [ -n "$SKIP_GRAPH" ] && [ -z "$SKIP_ANALYTICS" ]; then
+    die "analytics は graph が要る（検知が異常の「いま」を Neptune に書く。2026-09-24 から）。SKIP_GRAPH を外すか SKIP_ANALYTICS=1 も書く。まだ何も作っていない"
   fi
   if [ -n "$SKIP_LAB" ] && [ -n "$SKIP_GRAPH" ]; then
     echo "SKIP_LAB と SKIP_STREAM と SKIP_GRAPH があるので、PIPELINE=1 でも土台だけになる"
@@ -302,12 +305,12 @@ echo "作るルート: $ROOTS"
 #   + CREATE_KB なら 36（OpenSearch Serverless の OCU 33 + bedrock-agent-runtime のエンドポイント 3）、
 # lab = 9、graph = 14、stream = 71（MSK Connect の S3 sink 無しなら 57）+ Telegraf の EC2 1（terraform/pipeline/lab が作る t4g.micro。
 #   公表単価 $0.0108/h からで、Price List API では確かめていない）、
-# analytics = 17（ストリーミングのジョブが動いている間の EMR Serverless の 2 vCPU + 異常検知の events エンドポイント 2 本。単価は 2026-09-17 に確認）
-#   + SINK_S3 なら 3（s3tables のエンドポイント 2 本。テーブルは無料）
+# analytics = 20（ストリーミングのジョブが動いている間の EMR Serverless の 2 vCPU + 異常検知の events エンドポイント 2 本 17。単価は 2026-09-17 に確認。
+#   + s3tables のエンドポイント 2 本 3。証跡の anomaly_events / proposal_events があるので SINK_S3=0 でも作る。2026-09-24。テーブルは無料）
 #   + SINK_PROMETHEUS なら 3（aps-workspaces のエンドポイント 2 本。取り込みのサンプル課金は別）
 #   + SINK_OPENSEARCH なら 33（logs コレクションの OCU。KB のコレクションと共有されるか確認できていないので最大値で数える。
 #     共有されれば 0 に近づく）、
-# workflow = 6（Fargate ARM 1 vCPU / 2 GB のタスク 1 つ + sqs エンドポイント 1 本。Gateway と Lambda と DynamoDB と SQS は使った分だけ。単価は 2026-09-17 に確認）。
+# workflow = 6（Fargate ARM 1 vCPU / 2 GB のタスク 1 つ + sqs エンドポイント 1 本。Gateway と Lambda と SQS と S3 Tables への追記は使った分だけ。単価は 2026-09-17 に確認）。
 # ここを変えたら README の「作るもの」と docs/deploy.md の金額も変える
 COST_CENTS=5
 if [ -n "$SHARED_ENDPOINTS" ]; then COST_CENTS=$((COST_CENTS + 8)); fi
@@ -323,8 +326,7 @@ if [ -z "$SKIP_STREAM" ]; then
   COST_CENTS=$((COST_CENTS + 1))   # Telegraf の EC2
 fi
 if [ -z "$SKIP_ANALYTICS" ]; then
-  COST_CENTS=$((COST_CENTS + 17))
-  if [ -n "$SINK_S3" ]; then COST_CENTS=$((COST_CENTS + 3)); fi
+  COST_CENTS=$((COST_CENTS + 20))
   if [ -n "$SINK_PROMETHEUS" ]; then COST_CENTS=$((COST_CENTS + 3)); fi
   if [ -n "$SINK_OPENSEARCH" ]; then COST_CENTS=$((COST_CENTS + 33)); fi
 fi
@@ -688,7 +690,7 @@ fi
 
 # ---- 8-3. Web ---------------------------------------------------------------------
 if [ -z "$SKIP_STREAM" ] || [ -z "$SKIP_GRAPH" ]; then
-  log "8-3. Web を再起動する（起動時に SSM の異常テーブルと Neptune を読むため）"
+  log "8-3. Web を再起動する（起動時に SSM から Neptune のエンドポイントを読むため）"
   run_on_instance "$INSTANCE_ID" "systemctl restart $PREFIX-web.service; $WEB_ACTIVE"
   echo "Web が動いている"
 fi
@@ -707,7 +709,7 @@ if [ -n "$WORKFLOW" ]; then
   echo "ワーカーのログ: $(tf workflow output -raw worker_logs_command)"
   echo "Temporal の UI（Web の EC2 経由でタスクの 8233 へ。PC の http://localhost:8233/ ）:"
   echo "  aws ssm start-session --region $REGION --target $INSTANCE_ID --document-name AWS-StartPortForwardingSessionToRemoteHost --parameters '{\"host\":[\"$WF_TASK_IP\"],\"portNumber\":[\"8233\"],\"localPortNumber\":[\"8233\"]}'"
-  log "8-6. Web を再起動する（起動時に SSM の修復案テーブルを読むため。エージェントは Gateway を 5 分以内に拾う）"
+  log "8-6. Web を再起動する（Neptune の接続先を SSM から読み直すため。エージェントは Gateway を 5 分以内に拾う）"
   run_on_instance "$INSTANCE_ID" "systemctl restart $PREFIX-web.service; $WEB_ACTIVE"
   echo "Web が動いている"
 fi

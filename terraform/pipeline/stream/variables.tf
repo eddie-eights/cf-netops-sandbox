@@ -24,12 +24,6 @@ variable "create_sts_endpoint" {
   default     = true
 }
 
-variable "create_dynamodb_endpoint" {
-  description = "DynamoDB gateway endpoint (free) so the chat web EC2 reads the anomaly table without NAT. Set false if the VPC already has one."
-  type        = bool
-  default     = true
-}
-
 # ---------------------------------------------------------------- MSK
 variable "kafka_version" {
   description = "MSK provisioned Kafka version, KRaft mode only (the .kraft suffix selects KRaft; Kafka 4 has no ZooKeeper mode). 4.1.x is the newest for Standard brokers, 4.2.x is Express brokers only (list-kafka-versions and the MSK supported versions page, checked 2026-09-18)."

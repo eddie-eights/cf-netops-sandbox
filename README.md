@@ -9,10 +9,12 @@ flowchart LR
   PC["利用者の PC<br/>localhost:8080"] -->|"SSM ポートフォワーディング"| WEB["Web の EC2<br/>Gradio"]
   WEB -->|"invoke_agent_runtime"| RT["AgentCore Runtime<br/>Nova 2 Lite + ガードレール"]
   RT --> KB["ナレッジベース<br/>CREATE_KB=1"]
-  RT --> TOOLS["ツール<br/>Neptune / DynamoDB / OpenSearch / Prometheus"]
+  RT --> TOOLS["ツール<br/>Neptune / OpenSearch / Prometheus"]
   LAB["lab の EC2<br/>containerlab"] --> TG["Telegraf の EC2"] --> MSK["MSK"] --> SPARK["Spark<br/>EMR Serverless"]
   SPARK --> STORE["S3 Tables / OpenSearch / Prometheus"]
-  SPARK -->|"異常"| DDB["DynamoDB<br/>異常一覧"]
+  SPARK -->|"異常のいま"| NEP["Neptune<br/>トポロジ・異常・修復案"]
+  SPARK -->|"異常の履歴"| AUDIT["S3 Tables<br/>anomaly_events"]
+  WF -->|"修復案の証跡"| PAUDIT["S3 Tables<br/>proposal_events"]
   SPARK -->|"AnomalyOpened"| WF["Temporal<br/>ECS Fargate"]
   WF -->|"調査"| RT
   WF -->|"承認後に修復"| LAB
@@ -94,4 +96,4 @@ ops/down.sh
 | [workflow.md](docs/workflow.md) | 承認の流れと Temporal UI |
 | [troubleshooting.md](docs/troubleshooting.md) | うまくいかないとき |
 | [development.md](docs/development.md) | 手元のテスト、変更するときの決まり、Web を手元で動かす |
-| [data-stores.md](docs/data-stores.md) | 勉強会メモ: データの置き場（S3 Tables / DynamoDB / Neptune）と、Neptune に寄せるかの論点 |
+| [data-stores.md](docs/data-stores.md) | 勉強会メモ: データの置き場（Neptune に「いま」、S3 Tables に履歴と証跡）と、DynamoDB をやめた理由 |

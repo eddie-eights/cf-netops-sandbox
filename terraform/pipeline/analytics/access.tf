@@ -1,7 +1,7 @@
 # ---------------------------------------------------------------- runtime role of the Spark job
 resource "aws_iam_role" "emr" {
   name        = "${local.name_prefix}-emr-runtime"
-  description = "EMR Serverless job runtime - reads MSK, writes the sinks (S3 Tables, OpenSearch Serverless, Prometheus), reads the script and jars from the asset bucket"
+  description = "EMR Serverless job runtime - reads MSK, writes the sinks (S3 Tables, OpenSearch Serverless, Prometheus) and the anomalies (Neptune, S3 Tables), reads the script and jars from the asset bucket"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -69,31 +69,15 @@ resource "aws_iam_role_policy" "emr" {
         Resource = "*"
       },
       {
-        # 検知（spark/snmp_sinks.py の detect）: 異常テーブルに open / resolved を書く
-        Sid      = "AnomalyTable"
+        # 検知（spark/snmp_sinks.py の detect）: 異常の「いま」を Neptune の anomaly の頂点に読み書きする（Gremlin の HTTP、IAM 認証）
+        Sid      = "NeptuneAnomalies"
         Effect   = "Allow"
-        Action   = "dynamodb:UpdateItem"
-        Resource = local.anomaly_table_arn
+        Action   = ["neptune-db:ReadDataViaQuery", "neptune-db:WriteDataViaQuery", "neptune-db:DeleteDataViaQuery"]
+        Resource = "arn:${local.partition}:neptune-db:${var.region}:${local.account_id}:${local.neptune_resource_id}/*"
       },
       {
-        # 検知: link 以外の trap の open を GSI で探し、TRAP_TTL を過ぎたものを resolved にする（spark/snmp_sinks.py の sweep_traps）
-        Sid      = "AnomalyIndex"
-        Effect   = "Allow"
-        Action   = "dynamodb:Query"
-        Resource = "${local.anomaly_table_arn}/index/status-last_seen-index"
-      },
-      {
-        # 新しい異常を EventBridge の既定のバスに出す（terraform/workflow の events.tf が受ける）
-        Sid      = "AnomalyEvents"
-        Effect   = "Allow"
-        Action   = "events:PutEvents"
-        Resource = local.event_bus_arn
-      },
-      ],
-      # ---- 格納先ごと（sinks.tf。選んだものだけ）
-      # 「cond ? [..] : []」は両辺の型が揃わず validate が落ちるので for … if で絞る
-      [for s in [{
-        # Iceberg のカタログ操作（S3 Tables の API）。テーブルは Terraform が作るが、Spark はメタデータの場所を読み書きする
+        # Iceberg のカタログ操作（S3 Tables の API）。テーブルは Terraform が作るが、Spark はメタデータの場所を読み書きする。
+        # 証跡の anomaly_events があるので iceberg を選ばなくても要る
         Sid    = "S3TablesCatalog"
         Effect = "Allow"
         Action = [
@@ -107,11 +91,21 @@ resource "aws_iam_role_policy" "emr" {
           "s3tables:GetTableData",
           "s3tables:PutTableData",
         ]
-        Resource = local.sink_iceberg ? [
-          aws_s3tables_table_bucket.tables[0].arn,
-          "${aws_s3tables_table_bucket.tables[0].arn}/table/*",
-        ] : []
-      }] : s if local.sink_iceberg],
+        Resource = [
+          aws_s3tables_table_bucket.tables.arn,
+          "${aws_s3tables_table_bucket.tables.arn}/table/*",
+        ]
+      },
+      {
+        # 新しい異常を EventBridge の既定のバスに出す（terraform/workflow の events.tf が受ける）
+        Sid      = "AnomalyEvents"
+        Effect   = "Allow"
+        Action   = "events:PutEvents"
+        Resource = local.event_bus_arn
+      },
+      ],
+      # ---- 格納先ごと（sinks.tf。選んだものだけ）
+      # 「cond ? [..] : []」は両辺の型が揃わず validate が落ちるので for … if で絞る
       [for s in [{
         # コレクションの API（中身の権限はデータアクセスポリシー aws_opensearchserverless_access_policy.logs）
         Sid      = "OpenSearchCollection"

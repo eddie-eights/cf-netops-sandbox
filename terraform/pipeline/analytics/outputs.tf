@@ -9,7 +9,7 @@ output "runtime_role_arn" {
 }
 
 output "table_bucket_arn" {
-  description = "S3 Tables table bucket (the Iceberg warehouse of the Spark catalog). Empty unless sinks has iceberg"
+  description = "S3 Tables table bucket (the Iceberg warehouse of the Spark catalog; terraform/workflow appends proposal_events here)"
   value       = local.table_bucket_arn
 }
 
@@ -45,20 +45,19 @@ output "job_driver_json" {
           "--metric-topics", local.metric_topics, "--log-topics", local.log_topics,
           # Source を接頭辞ごとに変える。既定のバスは 1 つの AWS アカウントで共有なので、ここを固定にすると
           # 他の人の異常が自分の workflow / graph のルールに当たる（ルール名は接頭辞付きでも event_pattern は別）
-        "--anomaly-table", local.anomaly_table, "--device-map", var.device_map, "--event-bus", var.event_bus, "--event-source", local.event_source],
+          "--neptune-endpoint", local.neptune_endpoint, "--anomaly-events-table", local.anomaly_events_table,
+        "--device-map", var.device_map, "--event-bus", var.event_bus, "--event-source", local.event_source],
         [for a in ["--iceberg-table", local.iceberg_table] : a if local.sink_iceberg],
         [for a in ["--opensearch-endpoint", local.opensearch_endpoint, "--opensearch-index", local.opensearch_index] : a if local.sink_opensearch],
         [for a in ["--prometheus-url", local.prometheus_remote_write_url] : a if local.sink_prometheus],
       )
-      # Iceberg のカタログの設定は iceberg があるときだけ（warehouse のテーブルバケットが無いとカタログを開けない）
+      # Iceberg のカタログはいつも開く（検知が証跡の anomaly_events に書く。2026-09-24）
       sparkSubmitParameters = join(" ", concat(
-        ["--conf spark.jars=s3://${local.bucket}/${local.jars_prefix}/*.jar"],
-        [for c in [
+        ["--conf spark.jars=s3://${local.bucket}/${local.jars_prefix}/*.jar",
           "--conf spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions",
           "--conf spark.sql.catalog.${local.catalog_name}=org.apache.iceberg.spark.SparkCatalog",
           "--conf spark.sql.catalog.${local.catalog_name}.catalog-impl=software.amazon.s3tables.iceberg.S3TablesCatalog",
-          "--conf spark.sql.catalog.${local.catalog_name}.warehouse=${local.table_bucket_arn}",
-        ] : c if local.sink_iceberg],
+        "--conf spark.sql.catalog.${local.catalog_name}.warehouse=${local.table_bucket_arn}"],
         ["--conf spark.driver.cores=1",
           "--conf spark.driver.memory=2g",
           "--conf spark.executor.cores=1",
@@ -93,8 +92,8 @@ output "list_job_runs_command" {
 }
 
 output "list_tables_command" {
-  description = "See the table (and its metadata location) in S3 Tables. Empty unless sinks has iceberg"
-  value       = local.sink_iceberg ? "aws s3tables list-tables --region ${var.region} --table-bucket-arn ${local.table_bucket_arn} --namespace ${var.namespace}" : ""
+  description = "See the tables (snmp_metrics, anomaly_events, proposal_events) in S3 Tables"
+  value       = "aws s3tables list-tables --region ${var.region} --table-bucket-arn ${local.table_bucket_arn} --namespace ${var.namespace}"
 }
 
 output "log_group_name" {
@@ -122,9 +121,29 @@ output "prometheus_remote_write_url" {
   value       = local.prometheus_remote_write_url
 }
 
-output "anomaly_table_name" {
-  description = "DynamoDB table the detection query writes (from terraform/pipeline/stream)"
-  value       = local.anomaly_table
+output "table_namespace" {
+  description = "S3 Tables namespace of the tables (terraform/workflow appends proposal_events in it)"
+  value       = aws_s3tables_namespace.netops.namespace
+}
+
+output "anomaly_events_table" {
+  description = "Audit trail of anomaly open / resolve (catalog.namespace.table), written by the detection query"
+  value       = local.anomaly_events_table
+}
+
+output "proposal_events_table_name" {
+  description = "Audit trail of proposals (created / approved / rejected / applied / verified ...), written by the terraform/workflow worker"
+  value       = aws_s3tables_table.proposal_events.name
+}
+
+output "proposal_events_table_arn" {
+  description = "ARN of proposal_events (terraform/workflow lets the worker append to it)"
+  value       = aws_s3tables_table.proposal_events.arn
+}
+
+output "neptune_endpoint" {
+  description = "Neptune host:port the detection query writes the anomaly vertices to (from terraform/pipeline/graph)"
+  value       = local.neptune_endpoint
 }
 
 output "opensearch_collection_name" {
@@ -148,7 +167,7 @@ output "prometheus_workspace_arn" {
 }
 
 output "events_endpoint_id" {
-  description = "events interface endpoint the driver puts AnomalyOpened through"
+  description = "events interface endpoint the driver puts AnomalyOpened / AnomalyResolved through"
   value       = aws_vpc_endpoint.events.id
 }
 

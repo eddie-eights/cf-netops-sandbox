@@ -49,11 +49,18 @@ for out in ("vpc_id", "runtime_subnet_ids", "endpoint_security_group_id", "kb_bu
 for out in ("msk_cluster_arn", "msk_security_group_id", "bootstrap_brokers"):
     check(f"stream の output {out} を try で読む（無ければ precondition で止める）",
           re.search(r'try\(data\.terraform_remote_state\.stream\.outputs\.' + out + r',\s*""\)', tf) is not None)
+check("graph の state をローカルから読み、Neptune の endpoint / SG / resource id を try で読む（検知が Neptune に書く。2026-09-24）",
+      re.search(r'data "terraform_remote_state" "graph"[\s\S]*?backend\s*=\s*"local"', tf, re.S) is not None
+      and '"${path.module}/../graph/terraform.tfstate"' in tf
+      and all(re.search(r'try\(data\.terraform_remote_state\.graph\.outputs\.' + o + r',\s*""\)', tf) for o in ("cluster_endpoint", "neptune_security_group_id", "cluster_resource_id")))
+check("graph が無いときは「terraform/pipeline/graph を先に apply する」と出る",
+      re.search(r'precondition\s*\{[\s\S]*?neptune_host\s*!=\s*""[\s\S]*?terraform/pipeline/graph を先に apply する', tf, re.S) is not None)
 check("stream が無いときは「terraform/pipeline/stream を先に apply する」と出る",
       re.search(r'precondition\s*\{[\s\S]*?msk_cluster_arn\s*!=\s*""[\s\S]*?terraform/pipeline/stream を先に apply する', tf, re.S) is not None)
 # main / stream の outputs.tf に本当にその output があるか
 for root, outs in (("base/core", ("vpc_id", "runtime_subnet_ids", "endpoint_security_group_id", "kb_bucket_name")),
-                   ("pipeline/stream", ("msk_cluster_arn", "msk_security_group_id", "bootstrap_brokers"))):
+                   ("pipeline/stream", ("msk_cluster_arn", "msk_security_group_id", "bootstrap_brokers")),
+                   ("pipeline/graph", ("cluster_endpoint", "neptune_security_group_id", "cluster_resource_id"))):
     with open(os.path.join(ROOT, "terraform", root, "outputs.tf"), encoding="utf-8") as f:
         other = f.read()
     for out in outs:
@@ -132,14 +139,15 @@ check("remote write の URL は prometheus_endpoint + api/v1/remote_write",
 # ---- output（ops/up.sh がそのまま使う）
 for out in ("application_id", "runtime_role_arn", "table_identifier", "job_driver_json", "configuration_overrides_json", "list_job_runs_command", "list_tables_command",
             "sinks", "opensearch_collection_endpoint", "prometheus_workspace_id", "prometheus_remote_write_url", "prometheus_query_url",
-            "anomaly_table_name", "opensearch_collection_name", "opensearch_collection_arn", "opensearch_index", "prometheus_workspace_arn", "events_endpoint_id"):
+            "table_bucket_arn", "table_namespace", "anomaly_events_table", "proposal_events_table_name", "proposal_events_table_arn", "neptune_endpoint",
+            "opensearch_collection_name", "opensearch_collection_arn", "opensearch_index", "prometheus_workspace_arn", "events_endpoint_id"):
     check(f"output {out} がある", re.search(r'^output "' + out + r'"', tf, re.M) is not None)
 check("job_driver は S3 Tables のカタログを spark-submit の --conf で渡す",
       "software.amazon.s3tables.iceberg.S3TablesCatalog" in tf and "org.apache.iceberg.spark.SparkCatalog" in tf
       and "IcebergSparkSessionExtensions" in tf)
 args_block = re.search(r'entryPointArguments\s*=\s*concat\((.*?)\n\s*\)\n', tf, re.S)
 check("job_driver の引数は concat（共通 + 格納先ごとの for-if）", args_block is not None)
-for a in ("--bootstrap", "--checkpoint", "--sinks", "--region", "--metric-topics", "--log-topics", "--anomaly-table", "--device-map", "--event-bus"):
+for a in ("--bootstrap", "--checkpoint", "--sinks", "--region", "--metric-topics", "--log-topics", "--neptune-endpoint", "--anomaly-events-table", "--device-map", "--event-bus"):
     check(f"job_driver の共通の引数に {a}", f'"{a}"' in args_block.group(1))
 check("job_driver の格納先の引数は選んだときだけ（for a in [...] : a if local.sink_*）",
       re.search(r'\["--iceberg-table",\s*local\.iceberg_table\] : a if local\.sink_iceberg', args_block.group(1)) is not None
@@ -164,14 +172,26 @@ funcs = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
 check("parse_args / sink_topics / read_rows / build / main がある", {"parse_args", "sink_topics", "read_rows", "build", "main"} <= set(funcs))
 check("検知の関数（parse_device_map / device / events / anomaly_key / make_detect_sender）がある",
       {"parse_device_map", "device", "events", "anomaly_key", "anomaly_detail", "make_detect_sender"} <= set(funcs))
-check("job_driver は --anomaly-table に stream の anomalies テーブル、--device-map と --event-bus に変数を渡す",
-      re.search(r'"--anomaly-table",\s*local\.anomaly_table,\s*"--device-map",\s*var\.device_map,\s*"--event-bus",\s*var\.event_bus', tf) is not None)
-check("precondition は stream の anomaly_table_name も見る", 'local.anomaly_table != ""' in tf and "anomaly_table_name が読めない" in tf)
-check("runtime role は anomalies テーブルに dynamodb:UpdateItem、既定のバスに events:PutEvents",
-      re.search(r'"dynamodb:UpdateItem"[\s\S]*?Resource = local\.anomaly_table_arn', tf) is not None
+check("job_driver は --neptune-endpoint に graph の host:8182、--anomaly-events-table に証跡のテーブル、--device-map と --event-bus に変数を渡す",
+      re.search(r'"--neptune-endpoint",\s*local\.neptune_endpoint,\s*"--anomaly-events-table",\s*local\.anomaly_events_table,\s*"--device-map",\s*var\.device_map,\s*"--event-bus",\s*var\.event_bus', tf) is not None
+      and 'neptune_endpoint    = "${local.neptune_host}:8182"' in tf
+      and 'anomaly_events_table = "${local.catalog_name}.${var.namespace}.${aws_s3tables_table.anomaly_events.name}"' in tf)
+check("DynamoDB を使わない（異常の「いま」は Neptune、履歴は S3 Tables。2026-09-24）", "dynamodb" not in tf.lower() and "anomaly_table_name" not in tf)
+check("runtime role は Neptune の Gremlin の読み書きと、既定のバスに events:PutEvents",
+      re.search(r'Sid\s*=\s*"NeptuneAnomalies"[\s\S]*?"neptune-db:ReadDataViaQuery", "neptune-db:WriteDataViaQuery"[\s\S]*?neptune-db:\$\{var\.region\}:\$\{local\.account_id\}:\$\{local\.neptune_resource_id\}/\*', tf) is not None
       and re.search(r'"events:PutEvents"[\s\S]*?Resource = local\.event_bus_arn', tf) is not None)
-check("runtime role は anomalies の GSI（status-last_seen-index）に dynamodb:Query（未通知の再送と trap の TTL で引く）",
-      re.search(r'Action\s*=\s*"dynamodb:Query"\s*\n\s*Resource\s*=\s*"\$\{local\.anomaly_table_arn\}/index/status-last_seen-index"', tf) is not None)
+check("EMR の SG から Neptune の SG へ 8182 を開ける（送信と受信の両方）",
+      re.search(r'resource "aws_vpc_security_group_egress_rule" "emr_neptune"[\s\S]*?from_port\s*=\s*8182[\s\S]*?referenced_security_group_id = local\.neptune_sg_id', tf) is not None
+      and re.search(r'resource "aws_vpc_security_group_ingress_rule" "neptune_from_emr"[\s\S]*?security_group_id\s*=\s*local\.neptune_sg_id[\s\S]*?from_port\s*=\s*8182', tf) is not None)
+_aec = next(ast.literal_eval(n.value) for n in tree.body if isinstance(n, ast.Assign) and getattr(n.targets[0], "id", "") == "ANOMALY_EVENT_COLUMNS")
+_rules_tree = ast.parse(open(os.path.join(ROOT, "workflow", "rules.py"), encoding="utf-8").read())
+_pec = next(ast.literal_eval(n.value) for n in _rules_tree.body if isinstance(n, ast.Assign) and getattr(n.targets[0], "id", "") == "PROPOSAL_EVENT_COLUMNS")
+for _t, _cols, _src in (("anomaly_events", _aec, "spark/snmp_sinks.py の ANOMALY_EVENT_COLUMNS"), ("proposal_events", _pec, "workflow/rules.py の PROPOSAL_EVENT_COLUMNS")):
+    _blk = re.search(r'resource "aws_s3tables_table" "' + _t + r'" \{(.*?)\n\}\n', tf, re.S)
+    check(f"証跡のテーブル {_t} をいつも作り（count 無し）、列はどれも required = false（Spark / PyArrow の列は nullable）",
+          _blk is not None and "count" not in _blk.group(1) and "required = true" not in _blk.group(1).replace(" ", "").replace("required=true", "required = true"))
+    check(f"{_t} の列と順は {_src} と同じ",
+          re.findall(r'name\s*=\s*"(\w+)"\s*\n\s*type\s*=\s*"(\w+)"', _blk.group(1)) == [tuple(c) for c in _cols])
 check("events のエンドポイント（Interface、2 AZ、private DNS）を持つ",
       re.search(r'resource "aws_vpc_endpoint" "events"[\s\S]*?"com\.amazonaws\.\$\{var\.region\}\.events"[\s\S]*?vpc_endpoint_type\s*=\s*"Interface"[\s\S]*?slice\(local\.subnet_ids, 0, 2\)[\s\S]*?private_dns_enabled\s*=\s*true', tf, re.S) is not None)
 check("build の引数は spark / args（格納先ごとに Kafka を読む）", [a.arg for a in funcs["build"].args.args] == ["spark", "args"])
@@ -388,8 +408,8 @@ check("deploy-env.sh は SINK_* を読めるキーに持つ",
       all(re.search(rf'(?<![A-Z_]){k}(?![A-Z_])', open(os.path.join(ROOT, "ops", "deploy-env.sh"), encoding="utf-8").read()) for k in ("SINK_S3", "SINK_OPENSEARCH", "SINK_PROMETHEUS")))
 check("up.sh は analytics を stream の後に apply し、job を STREAMING で起こす（名前は snmp-sinks）",
       up.index("tf_apply pipeline/stream") < up.index("tf_apply pipeline/analytics") < up.index("--name snmp-sinks --mode STREAMING"))
-check("up.sh は s3tables / prometheus のエンドポイントと opensearch の OCU を SINK_* ごとに費用に足し、opensearch は analytics を作るときだけ OCU の注意を出す",
-      re.search(r'COST_CENTS=\$\(\(COST_CENTS \+ 17\)\)\n\s*if \[ -n "\$SINK_S3" \]; then COST_CENTS=\$\(\(COST_CENTS \+ 3\)\); fi\n\s*if \[ -n "\$SINK_PROMETHEUS" \]; then COST_CENTS=\$\(\(COST_CENTS \+ 3\)\); fi\n\s*if \[ -n "\$SINK_OPENSEARCH" \]; then COST_CENTS=\$\(\(COST_CENTS \+ 33\)\); fi', up) is not None
+check("up.sh は s3tables のエンドポイントを常に（証跡のテーブルがある）、prometheus のエンドポイントと opensearch の OCU を SINK_* ごとに費用に足し、opensearch は analytics を作るときだけ OCU の注意を出す",
+      re.search(r'COST_CENTS=\$\(\(COST_CENTS \+ 20\)\)\n\s*if \[ -n "\$SINK_PROMETHEUS" \]; then COST_CENTS=\$\(\(COST_CENTS \+ 3\)\); fi\n\s*if \[ -n "\$SINK_OPENSEARCH" \]; then COST_CENTS=\$\(\(COST_CENTS \+ 33\)\); fi', up) is not None
       and re.search(r'\*,opensearch,\*\) if \[ -z "\$SKIP_ANALYTICS" \]; then printf', up) is not None)
 check("up.sh は同じ SpecHash のジョブが動いていれば起こさない", "--states SUBMITTED PENDING SCHEDULED RUNNING" in up
       and "jobRun.tags.SpecHash" in up and 'if [ "$spec" != "$JOB_SPEC" ]; then STALE=' in up)
@@ -403,19 +423,26 @@ check("check.sh は spark/ の .py を構文検査に入れ、spark/snmp_sinks.p
       re.search(r"find [\w /]*\bspark\b [^\n]*-name '\*\.py'", checksh) is not None
       and os.path.isfile(os.path.join(ROOT, "spark", "snmp_sinks.py")) and "snmp_to_iceberg" not in checksh)
 check("up.sh の WORKFLOW=1 は SKIP_ANALYTICS があれば止まる（Spark の検知が無いとワーカーが起きない）",
-      re.search(r'if \[ -n "\$WORKFLOW" \]; then\n[\s\S]*?-n "\$SKIP_ANALYTICS"[\s\S]*?die "WORKFLOW は lab と stream と analytics が要る', up) is not None)
+      re.search(r'if \[ -n "\$WORKFLOW" \]; then\n[\s\S]*?-n "\$SKIP_ANALYTICS"[\s\S]*?-n "\$SKIP_GRAPH"[\s\S]*?die "WORKFLOW は lab と stream と analytics と graph が要る', up) is not None)
+check("up.sh は SKIP_GRAPH=1 で analytics を作るなら止まる（検知が異常を Neptune に書く）",
+      re.search(r'if \[ -n "\$SKIP_GRAPH" \] && \[ -z "\$SKIP_ANALYTICS" \]; then\n\s*die "analytics は graph が要る', up) is not None
+      and up.index('SKIP_STREAM=1 なので analytics も作らない') < up.index('die "analytics は graph が要る'))
 check("up.sh は PIPELINE=0 なら lab / stream / analytics / graph を全部飛ばす",
       re.search(r'else\n\s*SKIP_LAB=1; SKIP_STREAM=1; SKIP_ANALYTICS=1; SKIP_GRAPH=1\n', up) is not None)
 check("deploy.env.example に SINK_S3 / SINK_OPENSEARCH / SINK_PROMETHEUS の行がある（既定 1）。カンマ区切りの SINKS は使わない",
       all(re.search(rf'^#{k}=1$', env_example, re.M) is not None for k in ("SINK_S3", "SINK_OPENSEARCH", "SINK_PROMETHEUS"))
       and re.search(r'^#?\s*SINKS=', env_example, re.M) is None)
-# iceberg を外したら S3 Tables も s3tables のエンドポイントも作らない
-for _res in ('resource "aws_s3tables_table_bucket" "tables"', 'resource "aws_s3tables_namespace" "netops"', 'resource "aws_s3tables_table" "snmp_metrics"', 'resource "aws_vpc_endpoint" "s3tables"'):
-    check(f"{_res} は sink_iceberg の count", re.search(re.escape(_res) + r' \{\n  count = local\.sink_iceberg \? 1 : 0\n', tf) is not None)
-check("実行ロールの S3TablesCatalog と Spark のカタログの設定は iceberg があるときだけ",
-      re.search(r'Sid\s*=\s*"S3TablesCatalog"[\s\S]*?\}\] : s if local\.sink_iceberg\]', tf) is not None
-      and re.search(r'warehouse=\$\{local\.table_bucket_arn\}",\n\s*\] : c if local\.sink_iceberg\]', tf) is not None
-      and "aws_s3tables_table_bucket.tables.arn" not in tf)
+# iceberg を外しても、証跡があるのでテーブルバケット・namespace・s3tables のエンドポイント・カタログはいつも作る。生データの snmp_metrics だけ外す
+check('resource "aws_s3tables_table" "snmp_metrics" は sink_iceberg の count',
+      re.search(r'resource "aws_s3tables_table" "snmp_metrics" \{\n  count = local\.sink_iceberg \? 1 : 0\n', tf) is not None)
+for _res in ('resource "aws_s3tables_table_bucket" "tables"', 'resource "aws_s3tables_namespace" "netops"', 'resource "aws_vpc_endpoint" "s3tables"'):
+    check(f"{_res} はいつも作る（count 無し）", re.search(re.escape(_res) + r' \{\n  count', tf) is None and _res in tf)
+check("count を外したバケット・namespace・エンドポイントは moved で state の [0] を引き継ぐ（作り直さない）",
+      all(re.search(r'moved \{\n\s*from = ' + re.escape(r) + r'\[0\]\n\s*to\s*= ' + re.escape(r) + r'\n', tf) for r in
+          ("aws_s3tables_table_bucket.tables", "aws_s3tables_namespace.netops", "aws_vpc_endpoint.s3tables")))
+check("実行ロールの S3TablesCatalog と Spark のカタログの設定はいつも入る",
+      re.search(r'Sid\s*=\s*"S3TablesCatalog"', tf) is not None and "if local.sink_iceberg]" not in tf.split('Sid    = "S3TablesCatalog"')[1].split("OpenSearchCollection")[0]
+      and "warehouse=${local.table_bucket_arn}" in tf and "c if local.sink_iceberg" not in tf)
 
 # outputs の JSON が本当に JSON になる形か（jsonencode の中身の構造を軽く見る）
 check("job_driver_json は sparkSubmit の 3 キー", all(k in tf for k in ("entryPoint ", "entryPointArguments", "sparkSubmitParameters")))

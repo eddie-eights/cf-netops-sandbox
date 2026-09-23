@@ -98,13 +98,3 @@ resource "aws_vpc_endpoint" "stream" {
   tags = { Name = "${local.name_prefix}-${each.key}" }
 }
 
-resource "aws_vpc_endpoint" "dynamodb" {
-  count = var.create_dynamodb_endpoint ? 1 : 0
-
-  vpc_id            = local.vpc_id
-  service_name      = "com.amazonaws.${var.region}.dynamodb"
-  vpc_endpoint_type = "Gateway"
-  route_table_ids   = local.route_table_ids
-
-  tags = { Name = "${local.name_prefix}-dynamodb" }
-}

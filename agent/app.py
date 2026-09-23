@@ -6,8 +6,8 @@
      無ければ（terraform/agent の create_knowledge_base = false。既定）資料なしでモデルとツールだけで答える
   2. 資料と質問を Converse に渡す。ガードレールは質問（guardContent）と回答を判定する。
      モデルがトポロジのツール（topology.py。機器一覧・隣接・影響範囲・全体図。Neptune があればそこから、
-     無ければコンテナ内の静的データ）、異常一覧（anomalies.py。DynamoDB。status=all で過去の分も）、
-     修復案の履歴（proposals.py。DynamoDB。読むだけで承認はできない）を使うと言ったら、
+     無ければコンテナ内の静的データ）、異常一覧（anomalies.py。Neptune の anomaly 頂点。status=all で過去の分も）、
+     修復案の履歴（proposals.py。Neptune の proposal 頂点。読むだけで承認はできない）を使うと言ったら、
      結果を返して最大 MAX_TOOL_ROUNDS 回まで往復する。Gateway（MCP。terraform/workflow）があれば
      ツールはそちら（mcp_client.py）から取り、届かなければコンテナ内の関数に戻す
   3. 回答の末尾に参照した資料のファイル名を付けて返す

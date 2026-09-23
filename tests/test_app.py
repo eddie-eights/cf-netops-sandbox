@@ -173,10 +173,10 @@ check("link_choices は 10 本の (表示, a|a_if|b)", len(lc) == 10 and ("carri
 check("役割の無いリンクは種別だけ", ("hq-ce-01 eth3 - hq-host-01 eth1  [l2]", "hq-ce-01|eth3|hq-host-01") in lc)
 check("link_choices の値は remove_link の引数に戻せる", all(v.count("|") == 2 and v.split("|")[0] < v.split("|")[2] for _, v in lc))
 a = app.anomalies
-check("異常一覧はテーブル未設定なら error と空リスト", a.list_anomalies()["anomalies"] == [] and "terraform/pipeline/stream" in a.list_anomalies()["error"])
+check("異常一覧は Neptune 未設定なら error と空リスト", a.list_anomalies()["anomalies"] == [] and "terraform/pipeline/graph" in a.list_anomalies()["error"])
 check("app.run_tool は list_anomalies を anomalies に振る", "error" in app.run_tool("list_anomalies", {"status": "open"}) and app.run_tool("list_devices", {})["count"] == 10)
 check("anomalies.run_tool の未知ツール", "unknown" in a.run_tool("nope", {})["error"])
-check("app.run_tool は list_proposals を proposals に振る（テーブル未設定なので案内）", "terraform/workflow" in app.run_tool("list_proposals", {})["error"])
+check("app.run_tool は list_proposals を proposals に振る（Neptune 未設定なので案内）", "terraform/workflow" in app.run_tool("list_proposals", {})["error"])
 # 過去の異常・修復履歴・状態に答えられるようにした（2026-09-18）
 check("list_anomalies は status=all と device_id を受ける", {"status", "limit", "device_id"} == set(a.TOOL_SPECS[0]["toolSpec"]["inputSchema"]["json"]["properties"]) and "all" in a.TOOL_SPECS[0]["toolSpec"]["description"])
 check("system prompt は過去 → status=all、履歴 → list_proposals、承認はしない、と言う",

@@ -8,11 +8,6 @@ output "bootstrap_brokers" {
   value       = aws_msk_cluster.stream.bootstrap_brokers_sasl_iam
 }
 
-output "anomaly_table_name" {
-  description = "DynamoDB table of the anomaly list (also in SSM /<prefix>/anomaly-table)"
-  value       = aws_dynamodb_table.anomalies.name
-}
-
 output "msk_security_group_id" {
   description = "Security group of the brokers and MSK Connect workers (terraform/pipeline/analytics opens 9098 from the EMR workers on it)"
   value       = aws_security_group.msk.id
@@ -26,9 +21,4 @@ output "upload_plugin_command" {
 output "sink_prefix" {
   description = "Where MSK Connect writes the raw messages"
   value       = "s3://${local.bucket}/stream/"
-}
-
-output "anomaly_table_arn" {
-  description = "ARN of the anomaly table (terraform/pipeline/analytics lets the Spark job write it, terraform/workflow lets the tools Lambda read it)"
-  value       = aws_dynamodb_table.anomalies.arn
 }

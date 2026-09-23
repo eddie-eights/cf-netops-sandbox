@@ -70,13 +70,18 @@ def query(gremlin: str):
     return _un(res.get("result", {})).get("data", []) if isinstance(res.get("result"), dict) else _un(res.get("result"))
 
 
+_ESCAPES = {"\\": "\\\\", "'": "\\'", "\n": "\\n", "\r": "\\r", "\t": "\\t"}
+
+
 def _q(v) -> str:
-    """Gremlin のリテラル。文字列は ' で囲み、None は書かない（呼ぶ側で落とす）"""
+    """Gremlin のリテラル。文字列は ' で囲み、None は書かない（呼ぶ側で落とす）。
+    Neptune の文字列の Gremlin は生の改行や制御文字を受け付けないので \\n / \\uXXXX に直す（修復案の本文や承認者の名前に何が入っても壊れない。
+    spark/snmp_sinks.py の gremlin_literal、workflow/awsio.py の _q と同じ）"""
     if isinstance(v, bool):
         return "true" if v else "false"
     if isinstance(v, (int, float)):
         return str(v)
-    return "'" + str(v).replace("\\", "\\\\").replace("'", "\\'") + "'"
+    return "'" + "".join(_ESCAPES.get(ch) or ("\\u%04x" % ord(ch) if ord(ch) < 0x20 or ord(ch) == 0x7F else ch) for ch in str(v)) + "'"
 
 
 def _props(d: dict, keys) -> str:
@@ -258,3 +263,36 @@ def set_status(device_id: str, if_name: str = "", status: str = "DOWN", only_if:
     elif any(r is False for r in reg):
         out["unregistered"] = True
     return out
+
+
+# ---------------------------------------------------------------- 異常と修復案の頂点（2026-09-24 に DynamoDB から移した）
+# 異常（label anomaly）は Spark の detect（spark/snmp_sinks.py の NeptuneAnomalies）、修復案（label proposal）は terraform/workflow のワーカー
+# （workflow/awsio.py）が書く。トポロジの頂点とは辺でつながず、device_id で引く。ここは読むのと、承認タブの decide だけ（agent/proposals.py）
+def _record(m: dict, id_key: str) -> dict:
+    """elementMap() の 1 件を、id を id_key（anomaly_id / proposal_id）に置き換えた dict に"""
+    d = {k: v for k, v in m.items() if k not in ("id", "label")}
+    d[id_key] = m.get("id")
+    return d
+
+
+def list_records(label: str, id_key: str, order_by: str, status: str = "", device_id: str = "", limit: int = 20) -> list:
+    """label の頂点を order_by（epoch 秒）の新しい順に limit 件。status / device_id があればその値だけ（絞ってから数える）"""
+    q = f"g.V().hasLabel({_q(label)})"
+    if status:
+        q += f".has('status',{_q(status)})"
+    if device_id:
+        q += f".has('device_id',{_q(device_id)})"
+    return [_record(m, id_key) for m in query(f"{q}.order().by({_q(order_by)},desc).limit({int(limit)}).elementMap()")]
+
+
+def get_record(label: str, id_key: str, vid: str) -> dict:
+    rows = query(f"g.V({_q(vid)}).hasLabel({_q(label)}).elementMap()")
+    return _record(rows[0], id_key) if rows else {}
+
+
+def update_record(label: str, vid: str, fields: dict, only_status: str = "") -> bool:
+    """頂点の fields を書き換える（property は single）。only_status なら今の status がそれのときだけ。書けたら True。
+    has と property が 1 本の Gremlin なので、読んでから書くあいだに別の書き手が割り込まない"""
+    cond = f".has('status',{_q(only_status)})" if only_status else ""
+    props = "".join(f".property(single,{_q(k)},{_q(v)})" for k, v in fields.items() if v is not None and v != "")
+    return bool(query(f"g.V({_q(vid)}).hasLabel({_q(label)}){cond}{props}.id()"))

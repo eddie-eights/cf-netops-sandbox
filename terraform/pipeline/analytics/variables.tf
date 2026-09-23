@@ -90,7 +90,7 @@ variable "sinks" {
   }
 }
 
-# ---------------------------------------------------------------- detection (Spark -> DynamoDB -> EventBridge)
+# ---------------------------------------------------------------- detection (Spark -> Neptune + S3 Tables anomaly_events -> EventBridge)
 variable "device_map" {
   description = "alias=device_id,... (management IPs, interface and loopback addresses, hostnames) the detection query uses to name a device when a message has no sysName tag (traps) or the sysName differs from the device_id. ops/up.sh generates it from the lab definition with lab/lab_topology.py --device-map, so the device list lives in one place. Empty means only sysName tags are matched and trap sources stay raw IPs (they show up as unregistered devices in Neptune)."
   type        = string
@@ -98,7 +98,7 @@ variable "device_map" {
 }
 
 variable "event_bus" {
-  description = "EventBridge event bus the job puts AnomalyOpened events on. terraform/workflow subscribes to the same bus."
+  description = "EventBridge event bus the job puts AnomalyOpened / AnomalyResolved events on. terraform/workflow and terraform/pipeline/graph subscribe to the same bus."
   type        = string
   default     = "default"
 }

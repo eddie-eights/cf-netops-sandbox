@@ -8,11 +8,6 @@ output "service_name" {
   value       = aws_ecs_service.workflow.name
 }
 
-output "proposal_table_name" {
-  description = "DynamoDB table of the proposals (web tab 承認 reads and decides here)"
-  value       = aws_dynamodb_table.proposals.name
-}
-
 output "anomaly_queue_url" {
   description = "SQS queue the AnomalyOpened events land in (the worker long-polls it)"
   value       = aws_sqs_queue.anomalies.url

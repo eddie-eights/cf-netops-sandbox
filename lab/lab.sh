@@ -128,7 +128,7 @@ case "${1:-}" in
     echo "$w"
     if iptables -t nat -S PREROUTING 2>/dev/null | grep -q -- "--comment $FW_TAG"; then
       echo "== Telegraf（stream。別の EC2）=="
-      echo "  ポーリング（10 秒周期）と snmpd の linkDown トラップ（5 秒周期の monitor）が MSK に流れ、analytics の Spark が異常を DynamoDB に書く（EventBridge にも出す）。"
+      echo "  ポーリング（10 秒周期）と snmpd の linkDown トラップ（5 秒周期の monitor）が MSK に流れ、analytics の Spark が異常を Neptune に書く（S3 Tables に履歴、EventBridge にも出す）。"
       echo "  GUI の「異常一覧」か、エージェントに「今の異常は？」と聞くと hq-ce-01 eth1 の link_down が出る。戻すのは 'lab heal-main'"
     fi
     ;;

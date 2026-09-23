@@ -18,7 +18,7 @@ flowchart LR
 
 - EC2 にパブリック IP も受信ルールも無い。SSM Agent が内側から ssmmessages へつなぐ。
 - Runtime を呼ぶのは EC2 のインスタンスロール。ブラウザに AWS の認証情報は置かない。
-- ツールは Neptune（無ければ `agent/data/` の静的な 10 台）、DynamoDB、OpenSearch Serverless、Prometheus を読む。
+- ツールは Neptune（トポロジ・異常・修復案。無ければトポロジは `agent/data/` の静的な 10 台）、OpenSearch Serverless、Prometheus を読む。
 
 ## パイプラインと WORKFLOW
 
@@ -30,14 +30,17 @@ flowchart LR
   SPARK -->|"全トピック（正本）"| ICE["S3 Tables<br/>snmp_metrics"]
   SPARK -->|"traps / logs"| OS["OpenSearch<br/>snmp-logs"]
   SPARK -->|"metrics"| PROM["Prometheus"]
-  SPARK -->|"link_down"| DDB["DynamoDB<br/>異常テーブル"]
+  SPARK -->|"開いた / 閉じた"| AEV["S3 Tables<br/>anomaly_events（証跡）"]
+  SPARK -->|"異常の「いま」"| NEP["Neptune<br/>トポロジ + 異常 + 修復案"]
   SPARK -->|"AnomalyOpened"| EB["EventBridge"]
-  EB --> GL["graph の Lambda<br/>Neptune の status"]
+  EB --> GL["graph の Lambda<br/>IF の status"] --> NEP
   EB --> SQS["SQS"] --> WF["Temporal（ECS Fargate）<br/>調査 → 承認 → 修復"]
+  WF <-->|"修復案"| NEP
+  WF -->|"作成・承認・却下・適用・確認"| PEV["S3 Tables<br/>proposal_events（証跡）"]
   WF -->|"SSM Run Command"| LAB
 ```
 
-WORKFLOW の流れは [workflow.md](workflow.md)。
+WORKFLOW の流れは [workflow.md](workflow.md)、データの置き場は [data-stores.md](data-stores.md)。
 
 ## どのファイルがどこで動くか
 
@@ -73,7 +76,7 @@ terraform/
 ├── agent/         AGENT=1     Runtime / ガードレール / KB
 ├── pipeline/      PIPELINE=1
 │   ├── lab/         containerlab の EC2 と Telegraf の EC2（stream を作るとき）
-│   ├── stream/      MSK / MSK Connect / 異常テーブル
+│   ├── stream/      MSK / MSK Connect
 │   ├── analytics/   EMR Serverless / S3 Tables / OpenSearch / Prometheus
 │   └── graph/       Neptune
 └── workflow/      WORKFLOW=1  Temporal on ECS / Gateway（MCP）

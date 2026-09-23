@@ -7,24 +7,28 @@ Neptune / S3 / OpenSearch / Prometheus を見て原因分析 → 修復の提案
 1 プロセスで 2 つを動かす:
   - starter: ANOMALY_QUEUE_URL があれば SQS を long polling（20 秒）し、届いた AnomalyOpened ごとに investigate-<anomaly_id>#<first_seen> の
     ワークフローを起こす（id は発生ごと。閉じて開き直した次の発生は別のワークフローと別の修復案になる）。
-    キューが無ければ従来どおり POLL_INTERVAL 秒ごとに anomalies テーブルの open を見る
+    キューが無ければ従来どおり POLL_INTERVAL 秒ごとに Neptune の異常の頂点（label anomaly）の open を見る
     （同じ id は Temporal が二重起動を弾く。同じ発生の修復案が既にあれば起こさない。起こすのは rules.START_KINDS（link_down）だけ）。
     SQS のメッセージは、起こした・起こす理由が無い・もう起きている（WorkflowAlreadyStartedError。同じ発生の重複配達）のどれかなら消し、
-    それ以外の失敗（Temporal や DynamoDB に届かない）なら消さずに残して、可視性タイムアウトのあとで配り直させる
+    それ以外の失敗（Temporal や Neptune に届かない）なら消さずに残して、可視性タイムアウトのあとで配り直させる
   - worker: ワークフロー InvestigateAnomaly とアクティビティを回す
 
 ワークフローの段: get_anomaly（もう閉じた・別の発生なら何もせず obsolete で終わる）→ investigate（AgentCore Runtime に JSON で答えさせる）
   → put_proposal（pending。proposal_id = <anomaly_id>#<first_seen>、同じ id が既にあれば上書きしない）
-  → 人の判断を proposals テーブルで待つ（web の「承認」タブが status を approved / rejected に変える。シグナル decide でも通る）
+  → 人の判断を Neptune の修復案の頂点で待つ（web の「承認」タブが status を approved / rejected に変える。シグナル decide でも通る）
+  → record_decision（シグナルで決まったなら頂点にも書く。承認・却下を証跡に残す）
   → approved なら、打つ直前に同じ発生がまだ open か確かめる（閉じていれば obsolete にして打たない）
   → apply_on_lab（SSM Run Command で `sudo lab <cmd>`。cmd は rules.ALLOWED_ACTIONS だけ）→ applied / failed
   → verify（VERIFY_ATTEMPTS 回、30 秒おきに異常が resolved か見る）→ verified / failed
   APPROVAL_TIMEOUT_MINUTES 過ぎたら expired。rejected なら何もしない。
-状態は全部 proposals テーブルに書くので、web は Temporal を知らなくてよい。
+修復案の「いま」は全部 Neptune の頂点（label proposal、id = proposal_id）に書くので、web は Temporal を知らなくてよい。
+status が変わるたびに S3 Tables の proposal_events に 1 行足す（created / approved / rejected / expired / obsolete / applied / failed / verified。
+rules.proposal_event）。Temporal の dev server は SQLite をタスクの中に持つだけで、タスクが入れ替わると履歴ごと消えるので、証跡はこちらに残す。
+証跡は「頂点を書いてから 1 行足す」の順で、足す前に落ちたらアクティビティの再試行で足し直す（二重に入ったら event_id で落とす）。
 
 3 ファイルに分けてある（同じディレクトリに置いて import する。Dockerfile は workflow/*.py を全部入れる）:
   rules.py   判断だけの純粋関数（プロンプト・JSON の読み取り・許可コマンド・起こすかどうか）
-  awsio.py   環境変数と AWS 呼び出し（DynamoDB / AgentCore / SSM / SQS）
+  awsio.py   環境変数と AWS 呼び出し（Neptune / S3 Tables / AgentCore / SSM / SQS）
   worker.py  ここ。Temporal のアクティビティ・ワークフロー・starter・main
 """
 
@@ -61,6 +65,12 @@ log = logging.getLogger("worker")
 RETRY = RetryPolicy(maximum_attempts=3, initial_interval=timedelta(seconds=5))
 
 
+async def _audit(event: str, proposal: dict, detail: str = "", decided_by: str = "") -> None:
+    """修復案の証跡（S3 Tables の proposal_events）に 1 行足す"""
+    row = rules.proposal_event(event, proposal, int(time.time()), detail, decided_by)
+    await asyncio.to_thread(awsio.append_proposal_events, [row], rules.PROPOSAL_EVENT_COLUMNS)
+
+
 # ---------------------------------------------------------------- アクティビティ（外に触る側。awsio を別スレッドで呼ぶ）
 @activity.defn
 async def get_anomaly(anomaly_id: str) -> dict:
@@ -87,18 +97,21 @@ async def put_proposal(anomaly: dict, finding: dict, wf_id: str) -> str:
     aid = anomaly["anomaly_id"]
     first_seen = int(anomaly.get("first_seen") or 0)
     pid = rules.proposal_id(aid, first_seen)
-    written = await asyncio.to_thread(awsio.write_proposal, {
+    item = {
         "proposal_id": pid, "anomaly_id": aid, "device_id": anomaly.get("device_id", ""),
         "kind": anomaly.get("kind", ""), "target": anomaly.get("target", ""),
         "first_seen": first_seen, "status": "pending",
         "cause": finding["cause"], "action": finding["action"], "command": finding["command"],
         "reason": finding["reason"], "agent_response": finding["agent_response"],
         "workflow_id": wf_id, "created_at": now, "updated_at": now,
-    }, True)
+    }
+    written = await asyncio.to_thread(awsio.write_proposal, item, True)
     if not written:
         existing = await asyncio.to_thread(awsio.read_proposal, pid)
         if existing.get("workflow_id") != wf_id:
             raise ApplicationError(f"proposal {pid} は別のワークフロー（{existing.get('workflow_id', '-')}）が書いた", non_retryable=True)
+    # 書けたあとで落ちて再試行されたときも足す（証跡が抜けるより、同じ event_id が二重に入るほうがよい）
+    await _audit("created", item, finding["reason"])
     return pid
 
 
@@ -109,8 +122,25 @@ async def get_decision(proposal_id: str) -> str:
 
 
 @activity.defn
+async def record_decision(proposal_id: str, decision: str, via_signal: bool = False) -> str:
+    """人の判断を確定して証跡に残し、効いた判断（approved / rejected）を返す。
+    シグナル decide で決まったときは頂点にも書く（pending のときだけ。web が先に決めていればそちらが効く）"""
+    if via_signal:
+        now = int(time.time())
+        await asyncio.to_thread(awsio.update_proposal, proposal_id,
+                                {"status": decision, "decided_by": "temporal-signal", "decided_at": now}, "pending")
+    p = await asyncio.to_thread(awsio.read_proposal, proposal_id)
+    effective = p.get("status") if p.get("status") in ("approved", "rejected") else decision
+    await _audit(effective, {**p, "proposal_id": proposal_id}, decided_by=str(p.get("decided_by") or ""))
+    return effective
+
+
+@activity.defn
 async def set_status(proposal_id: str, status: str, fields: dict | None = None) -> None:
-    await asyncio.to_thread(awsio.update_proposal, proposal_id, {"status": status, **(fields or {})})
+    fields = fields or {}
+    await asyncio.to_thread(awsio.update_proposal, proposal_id, {"status": status, **fields})
+    p = await asyncio.to_thread(awsio.read_proposal, proposal_id)
+    await _audit(status, {**p, "proposal_id": proposal_id}, fields.get("apply_output") or fields.get("verify_note") or "")
 
 
 @activity.defn
@@ -140,7 +170,7 @@ async def anomaly_resolved(anomaly_id: str, first_seen: int = 0) -> bool:
     return bool(first_seen) and bool(a) and int(a.get("first_seen") or 0) != int(first_seen)
 
 
-ACTIVITIES = [get_anomaly, investigate, put_proposal, get_decision, set_status, still_open, apply_on_lab, anomaly_resolved]
+ACTIVITIES = [get_anomaly, investigate, put_proposal, get_decision, record_decision, set_status, still_open, apply_on_lab, anomaly_resolved]
 
 
 # ---------------------------------------------------------------- ワークフロー（決定的な側。AWS には触らない）
@@ -170,19 +200,19 @@ class InvestigateAnomaly:
 
         workflow.logger.info("proposal %s: pending (action=%s)", pid, finding["action"])
 
-        # 人の判断を待つ（テーブルの status か、シグナル decide）
+        # 人の判断を待つ（頂点の status か、シグナル decide）
         deadline = workflow.now() + timedelta(minutes=APPROVAL_TIMEOUT_MINUTES)
-        decision = ""
+        decision, via_signal = "", False
         while workflow.now() < deadline:
             # wait_condition は timeout に達すると asyncio.TimeoutError を投げ、それをそのまま漏らすと
             # ワークフロー自体が失敗する（temporalio は TimeoutError をタスク失敗でなくワークフロー失敗にする。
-            # 2026-09-18 に承認しても applied に進まない原因だった）。時間切れは「まだ決まっていない」なので握って表を見る
+            # 2026-09-18 に承認しても applied に進まない原因だった）。時間切れは「まだ決まっていない」なので握って頂点を見る
             try:
                 await workflow.wait_condition(lambda: bool(self._decision), timeout=timedelta(seconds=DECISION_POLL))
             except asyncio.TimeoutError:
                 pass
             if self._decision:
-                decision = self._decision
+                decision, via_signal = self._decision, True
                 break
             status = await workflow.execute_activity(get_decision, pid, **opts)
             if status in ("approved", "rejected"):
@@ -192,6 +222,7 @@ class InvestigateAnomaly:
             workflow.logger.info("proposal %s: expired", pid)
             await workflow.execute_activity(set_status, args=[pid, "expired", {"verify_note": "承認待ちのまま時間切れ"}], **opts)
             return "expired"
+        decision = await workflow.execute_activity(record_decision, args=[pid, decision, via_signal], **opts)
         workflow.logger.info("proposal %s: %s", pid, decision)
         if decision == "rejected":
             return "rejected"
@@ -260,9 +291,9 @@ async def handle_message(client: Client, body: str) -> None:
         return
     a = await asyncio.to_thread(awsio.read_anomaly, aid)
     if not a:
-        log.warning("starter: anomaly %s がテーブルに無い（メッセージは消す）", aid)
+        log.warning("starter: anomaly %s が Neptune に無い（メッセージは消す）", aid)
         return
-    # テーブルは状態の確かめにだけ使う。イベントの発生（first_seen）と今の行が違えば、その発生はもう閉じている
+    # Neptune の頂点は状態の確かめにだけ使う。イベントの発生（first_seen）と今の行が違えば、その発生はもう閉じている
     if first_seen and int(a.get("first_seen") or 0) != first_seen:
         log.info("starter: %s#%s はもう別の発生になっている（消す）", aid, first_seen)
         return
@@ -273,7 +304,7 @@ async def starter_queue(client: Client) -> None:
     """SQS（EventBridge のルールが流す AnomalyOpened）を待つ。1 通ずつ起こして消す。
     WorkflowAlreadyStartedError は start_for が False にする（同じ発生の重複配達で、その発生は既に走っているので消してよい。
     残すと可視性タイムアウトごとに配り直され、5 回で DLQ に落ちて「処理できなかった」ものと見分けがつかなくなる）。
-    Temporal や DynamoDB に届かないなどの失敗は消さずに残す（配り直し、直らなければ DLQ）"""
+    Temporal や Neptune に届かないなどの失敗は消さずに残す（配り直し、直らなければ DLQ）"""
     for m in await asyncio.to_thread(awsio.receive_messages):
         try:
             await handle_message(client, m.get("Body", ""))
@@ -315,13 +346,13 @@ async def connect() -> Client:
 
 
 async def main() -> None:
-    for k in ("ANOMALY_TABLE", "PROPOSAL_TABLE", "AGENT_RUNTIME_ARN"):
+    for k in ("NEPTUNE_ENDPOINT", "AUDIT_TABLE_BUCKET_ARN", "AUDIT_NAMESPACE", "AGENT_RUNTIME_ARN"):
         if not getattr(awsio, k):
             raise SystemExit(f"{k} が無い")
     client = await connect()
     worker = Worker(client, task_queue=TASK_QUEUE, workflows=[InvestigateAnomaly], activities=ACTIVITIES)
     log.info("worker up: queue=%s source=%s poll=%ss approval_timeout=%smin lab=%s", TASK_QUEUE,
-             "sqs" if awsio.ANOMALY_QUEUE_URL else "table", POLL_INTERVAL, APPROVAL_TIMEOUT_MINUTES,
+             "sqs" if awsio.ANOMALY_QUEUE_URL else "neptune", POLL_INTERVAL, APPROVAL_TIMEOUT_MINUTES,
              awsio.LAB_INSTANCE_ID or "-")
     await asyncio.gather(worker.run(), starter(client))
 

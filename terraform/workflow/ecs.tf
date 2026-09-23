@@ -1,7 +1,7 @@
 # ---------------------------------------------------------------- network
 resource "aws_security_group" "task" {
   name        = "${local.name_prefix}-workflow"
-  description = "Workflow task - HTTPS to the VPC endpoints (ECR, logs, DynamoDB gateway, SSM, AgentCore, SQS)"
+  description = "Workflow task - HTTPS to the VPC endpoints (ECR, logs, S3 gateway, s3tables, SSM, AgentCore, SQS) and 8182 to Neptune"
   vpc_id      = local.vpc_id
 
   tags = { Name = "${local.name_prefix}-workflow" }
@@ -9,7 +9,7 @@ resource "aws_security_group" "task" {
 
 resource "aws_vpc_security_group_egress_rule" "task_https" {
   security_group_id = aws_security_group.task.id
-  description       = "ECR / logs / DynamoDB / SSM / bedrock-agentcore / sqs endpoints"
+  description       = "ECR / logs / S3 gateway / s3tables / SSM / bedrock-agentcore / sqs endpoints"
   ip_protocol       = "tcp"
   from_port         = 443
   to_port           = 443
@@ -22,6 +22,29 @@ resource "aws_vpc_security_group_ingress_rule" "endpoints_from_task" {
   ip_protocol                  = "tcp"
   from_port                    = 443
   to_port                      = 443
+  referenced_security_group_id = aws_security_group.task.id
+}
+
+# 異常と修復案の「いま」を Neptune（terraform/pipeline/graph）に読み書きする。Neptune の SG はあちらのルートのものだが、相手のタスクの SG がこのルートにあるので、ここで足す
+resource "aws_vpc_security_group_egress_rule" "task_neptune" {
+  count = local.neptune_sg_id != "" ? 1 : 0
+
+  security_group_id            = aws_security_group.task.id
+  description                  = "Gremlin to Neptune (terraform/pipeline/graph)"
+  ip_protocol                  = "tcp"
+  from_port                    = 8182
+  to_port                      = 8182
+  referenced_security_group_id = local.neptune_sg_id
+}
+
+resource "aws_vpc_security_group_ingress_rule" "neptune_from_task" {
+  count = local.neptune_sg_id != "" ? 1 : 0
+
+  security_group_id            = local.neptune_sg_id
+  description                  = "Workflow task of terraform/workflow"
+  ip_protocol                  = "tcp"
+  from_port                    = 8182
+  to_port                      = 8182
   referenced_security_group_id = aws_security_group.task.id
 }
 
@@ -105,9 +128,11 @@ resource "aws_ecs_task_definition" "workflow" {
         { name = "TEMPORAL_ADDRESS", value = "localhost:7233" },
         { name = "AWS_REGION", value = var.region },
         { name = "PARAM_PREFIX", value = local.param_prefix },
-        { name = "ANOMALY_TABLE", value = local.anomaly_table },
         { name = "ANOMALY_QUEUE_URL", value = aws_sqs_queue.anomalies.url },
-        { name = "PROPOSAL_TABLE", value = aws_dynamodb_table.proposals.name },
+        { name = "NEPTUNE_ENDPOINT", value = local.neptune_endpoint },
+        { name = "AUDIT_TABLE_BUCKET_ARN", value = local.audit_bucket_arn },
+        { name = "AUDIT_NAMESPACE", value = local.audit_namespace },
+        { name = "PROPOSAL_EVENTS_TABLE", value = local.proposal_events_table_name },
         { name = "AGENT_RUNTIME_ARN", value = local.runtime_arn },
         { name = "LAB_INSTANCE_ID", value = local.lab_instance_id },
         { name = "POLL_INTERVAL", value = tostring(var.poll_interval_seconds) },
@@ -133,6 +158,14 @@ resource "aws_ecs_task_definition" "workflow" {
     precondition {
       condition     = local.runtime_arn != ""
       error_message = "terraform/agent の state から agent_runtime_arn が読めない。terraform/agent を先に apply する（deploy.env の AGENT=1）。"
+    }
+    precondition {
+      condition     = local.neptune_endpoint != "" && local.neptune_data_arn != "" && local.neptune_sg_id != ""
+      error_message = "terraform/pipeline/graph の state から cluster_endpoint / cluster_resource_id / neptune_security_group_id が読めない。異常と修復案の「いま」は Neptune にあるので、terraform/pipeline/graph を先に apply する（2026-09-24 から）。"
+    }
+    precondition {
+      condition     = local.audit_bucket_arn != "" && local.audit_namespace != "" && local.proposal_events_table_name != ""
+      error_message = "terraform/pipeline/analytics の state から table_bucket_arn / table_namespace / proposal_events_table_name が読めない。修復案の証跡は S3 Tables の proposal_events に書くので、terraform/pipeline/analytics を先に apply する（2026-09-24 から）。"
     }
   }
 }

@@ -1,28 +1,31 @@
-"""修復案（DynamoDB。terraform/workflow のワーカーが書く）を画面に出し、人の承認・却下を書き戻す。
+"""修復案（Neptune の頂点 label=proposal。terraform/workflow のワーカーが書く）を画面に出し、人の承認・却下を書き戻す。
 
-テーブル名は環境変数 PROPOSAL_TABLE、無ければ SSM の <PARAM_PREFIX>/proposal-table（terraform/workflow が書く）。
-どちらも無ければ「まだ配備されていない」を返して、WORKFLOW を作っていない構成でも落ちない。
-項目: proposal_id（= <anomaly_id>#<first_seen>。発生ごとに 1 件。閉じて開き直した次の発生は別の行）, anomaly_id, device_id, kind, target,
+2026-09-24 までは DynamoDB の表（terraform/workflow）だった。いまは Neptune（terraform/pipeline/graph）の頂点で、読み書きは agent/graph.py の
+list_records / get_record / update_record。Neptune の接続先が無ければ「まだ配備されていない」を返して、WORKFLOW を作っていない構成でも落ちない。
+頂点: id = proposal_id（= <anomaly_id>#<first_seen>。発生ごとに 1 件。閉じて開き直した次の発生は別の頂点）, anomaly_id, device_id, kind, target,
 first_seen（異常の発生時刻）, status（pending → approved / rejected（人）→ applied → verified / failed（ワーカー）、expired（時間切れ）、
 obsolete（承認のあいだに異常が閉じた・開き直したので打たなかった））,
 cause, action（heal-main / check / none）, command, reason, agent_response, workflow_id,
 created_at / updated_at / decided_at（epoch 秒）, decided_by, apply_output, verify_note。
-承認・却下は status = pending のときだけ通る（ConditionExpression）。ワーカーは Temporal のシグナルではなく、
-このテーブルの status をポーリングして進む（画面と Temporal を直接つながない）。
-DynamoDB の読み方（クライアントの使い回し・表名・整形）は agent/toolkit.py に置いてある（anomalies.py と共通）。
+承認・却下は status = pending のときだけ通る（has('status','pending') と property が 1 本の Gremlin）。ワーカーは Temporal のシグナルではなく、
+この頂点の status をポーリングして進む（画面と Temporal を直接つながない）。作成・承認・却下・適用・確認の履歴はワーカーが
+S3 Tables の proposal_events に 1 行ずつ残す（workflow/worker.py。画面は S3 Tables に触らない）。
+
+Neptune の書き込み許可は Runtime にも付いている（terraform/pipeline/graph の access.tf。頂点のラベル単位では絞れない）。
+チャットから承認させない（HITL）のはコードの線で、decide をエージェントのツール（TOOL_SPECS）に出さないことで守る。
 """
 
 import time
 
 from botocore.exceptions import BotoCoreError, ClientError
 
+import graph
 import toolkit
 
-INDEX = "status-updated_at-index"  # GSI。パーティションキーが status、ソートキーが updated_at
 STATUSES = ("pending", "approved", "rejected", "applied", "verified", "failed", "expired", "obsolete")
 QUERYABLE = STATUSES + ("all",)  # 一覧で指定できる値（all は全部）
 DECISIONS = ("approved", "rejected")  # 人が決められるのはこの 2 つだけ
-TABLE = toolkit.Param("PROPOSAL_TABLE", "proposal-table")  # 表の名前（環境変数か SSM）
+NOT_DEPLOYED = "修復案はまだ配備されていない（terraform/pipeline/graph と terraform/workflow を apply すると使える）"
 
 
 def _decorate(p: dict) -> dict:
@@ -33,70 +36,46 @@ def _decorate(p: dict) -> dict:
 
 
 def list_proposals(status: str = "pending", limit: int = 50, device_id: str = "") -> dict:
-    """status の修復案を新しい順に（updated_at）。status が all なら全件（Scan）。device_id があればその機器だけ。
-
-    all だけ Scan なのは、GSI のパーティションキーが status で、8 つの status を 1 回の Query では取れないため
-    （8 回 Query するより 1 往復の Scan のほうが安い。この PoC の表は数十件）。
-    """
-    table = TABLE.value()
-    if not table:
-        return {"error": "修復案はまだ配備されていない（terraform/workflow を apply すると使える）", "proposals": []}
+    """status の修復案を新しい順に（updated_at）。status が all なら全部。device_id があればその機器だけ（Gremlin の中で絞る）"""
+    if not graph.configured():
+        return {"error": NOT_DEPLOYED, "proposals": []}
     status = status if status in QUERYABLE else "pending"
     limit = max(1, min(int(limit), 100))
-    read = toolkit.read_count(device_id, limit)
-    client = toolkit.client("dynamodb")
     try:
-        if status == "all":
-            res = client.scan(TableName=table, Limit=read)
-            items = sorted(res.get("Items", []), key=lambda i: int(i.get("updated_at", {}).get("N", "0")), reverse=True)
-        else:
-            res = client.query(
-                TableName=table, IndexName=INDEX, KeyConditionExpression="#s = :s",
-                ExpressionAttributeNames={"#s": "status"}, ExpressionAttributeValues={":s": {"S": status}},
-                ScanIndexForward=False, Limit=read)
-            items = res.get("Items", [])
+        items = graph.list_records("proposal", "proposal_id", "updated_at", "" if status == "all" else status, device_id, limit)
     except (ClientError, BotoCoreError) as e:
         return {"error": f"修復案を読めない: {str(e)[:200]}", "proposals": []}
-    # 機器で絞って limit 件に切ってから整形する（返さない行を整形しても捨てるだけなので）
-    proposals = [_decorate(toolkit.plain(i)) for i in toolkit.narrow(items, device_id, limit)]
+    proposals = [_decorate(p) for p in items]
     return {"status": status, "count": len(proposals), "proposals": proposals}
 
 
 def get_proposal(proposal_id: str) -> dict:
     """1 件だけ引く（画面の承認タブが、決める直前の状態を確かめるのに使う）。無ければ空の辞書"""
-    table = TABLE.value()
-    if not table:
+    if not graph.configured() or not proposal_id:
         return {}
     try:
-        res = toolkit.client("dynamodb").get_item(TableName=table, Key={"proposal_id": {"S": proposal_id}})
+        p = graph.get_record("proposal", "proposal_id", proposal_id)
     except (ClientError, BotoCoreError):
         return {}
-    return _decorate(toolkit.plain(res["Item"])) if "Item" in res else {}
+    return _decorate(p) if p else {}
 
 
 def decide(proposal_id: str, decision: str, decided_by: str = "web") -> dict:
     """pending の修復案を approved / rejected にする。pending でなければ何もしない（誰かが先に決めた・ワーカーが進めた）"""
-    table = TABLE.value()
-    if not table:
-        return {"error": "修復案はまだ配備されていない（terraform/workflow を apply すると使える）"}
+    if not graph.configured():
+        return {"error": NOT_DEPLOYED}
     if decision not in DECISIONS:
         return {"error": f"decision は {' / '.join(DECISIONS)} のどれか"}
     if not proposal_id:
         return {"error": "proposal_id が空"}
     now = int(time.time())
+    fields = {"status": decision, "decided_by": decided_by[:64], "decided_at": now, "updated_at": now}
     try:
-        toolkit.client("dynamodb").update_item(
-            TableName=table, Key={"proposal_id": {"S": proposal_id}},
-            UpdateExpression="SET #s = :d, decided_by = :b, decided_at = :n, updated_at = :n",
-            ConditionExpression="#s = :p",
-            ExpressionAttributeNames={"#s": "status"},
-            ExpressionAttributeValues={":d": {"S": decision}, ":p": {"S": "pending"}, ":b": {"S": decided_by[:64]}, ":n": {"N": str(now)}})
-    except ClientError as e:
-        if e.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
-            return {"error": f"{proposal_id} は pending ではない（先に決まったか、ワーカーが進めた）"}
+        done = graph.update_record("proposal", proposal_id, fields, only_status="pending")
+    except (ClientError, BotoCoreError) as e:
         return {"error": f"更新できない: {str(e)[:200]}"}
-    except BotoCoreError as e:
-        return {"error": f"更新できない: {str(e)[:200]}"}
+    if not done:
+        return {"error": f"{proposal_id} は pending ではない（先に決まったか、ワーカーが進めた）"}
     return {"proposal_id": proposal_id, "status": decision, "decided_by": decided_by, "decided_at": now}
 
 

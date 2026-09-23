@@ -1,7 +1,7 @@
-"""「異常一覧」タブと「承認」タブの中身。どちらも DynamoDB の表を読むだけ。
+"""「異常一覧」タブと「承認」タブの中身。どちらも Neptune の頂点を読む（承認タブは status も書き戻す）。
 
-  異常一覧  terraform/pipeline/analytics の Spark が書いた anomalies（anomalies.py）
-  承認      terraform/workflow のワーカーが書いた proposals（proposals.py）。承認・却下はここから書き戻す
+  異常一覧  terraform/pipeline/analytics の Spark が書いた anomaly の頂点（anomalies.py）
+  承認      terraform/workflow のワーカーが書いた proposal の頂点（proposals.py）。承認・却下はここから書き戻す。履歴は S3 Tables の proposal_events（ワーカーが書く）
 
 未配備のときは list_* が error を返すので、その文言をそのまま画面に出す。
 """
@@ -72,7 +72,7 @@ APPROVER_MAX = 40  # decided_by に残す名前の長さ（proposals.decide は 
 def decide_proposal(proposal_id: str, decision: str, status: str, approver: str = "", confirmed: bool = False):
     """承認・却下を書く。名前（decided_by に「<名前> (web)」で残す）は両方に要り、承認は「詳細を読んだ」の確認も要る。
     Web は SSM のポートフォワーディングの先で認証が無く、誰が押したかを画面の外から知る手段が無いので、自分で名乗ってもらう。
-    足りなければ DynamoDB には触らず、表と選択もそのまま残す"""
+    足りなければ Neptune には触らず、表と選択もそのまま残す"""
     proposal_id = (proposal_id or "").strip()
     name = " ".join((approver or "").split())[:APPROVER_MAX]
     if not proposal_id:

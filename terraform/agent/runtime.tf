@@ -134,7 +134,7 @@ resource "aws_bedrockagentcore_agent_runtime" "agent" {
       BEDROCK_REGION    = var.region
       GUARDRAIL_ID      = aws_bedrock_guardrail.this.guardrail_id
       GUARDRAIL_VERSION = aws_bedrock_guardrail_version.r1.version
-      # terraform/pipeline/stream / terraform/pipeline/graph が書く SSM（anomaly-table / neptune-endpoint）の接頭辞。無ければ静的データで動く
+      # terraform/pipeline/graph が書く SSM（neptune-endpoint。トポロジ・異常・修復案）の接頭辞。無ければ静的データで動く
       PARAM_PREFIX = local.param_prefix
     },
     # KB を作らないときは KNOWLEDGE_BASE_ID を渡さない（agent は Retrieve を飛ばしてモデルとツールだけで答える）

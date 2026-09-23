@@ -2,7 +2,7 @@
 # and a Python worker in the VPC of terraform/base/core. The Spark job of terraform/pipeline/analytics puts an AnomalyOpened event on EventBridge
 # when it opens an anomaly; events.tf routes it to an SQS queue and the worker starts one workflow per anomaly. The workflow asks the
 # chat runtime (AgentCore) for a cause and a fix (the runtime looks at Neptune / OpenSearch / Prometheus through the MCP tools),
-# writes a proposal to DynamoDB, waits for a human decision (web tab "承認"), applies the fix on the lab EC2 (terraform/pipeline/lab)
+# writes a proposal to Neptune (label proposal) and one audit row per step to S3 Tables (proposal_events), waits for a human decision (web tab "承認"), applies the fix on the lab EC2 (terraform/pipeline/lab)
 # through SSM Run Command and checks that the anomaly resolved. Temporal runs on ECS now (EKS later - 2026-09-17 user decision).
 # The AgentCore Gateway (MCP) exposes the agent tools through a Lambda in the VPC so the runtime can read Neptune, the logs
 # collection and the metrics workspace over MCP. Costs about 0.06 USD per hour while it exists (Fargate + endpoints) - destroy it the same day.
@@ -16,8 +16,9 @@ locals {
 data "aws_caller_identity" "current" {}
 data "aws_partition" "current" {}
 
-# VPC / サブネット / SG / ロール名は terraform/base/core、Runtime ARN は terraform/agent、異常テーブルは terraform/pipeline/stream、lab EC2 は terraform/pipeline/lab、
-# Neptune の SG は terraform/pipeline/graph、OpenSearch / Prometheus は terraform/pipeline/analytics の state から読む（graph / analytics は無くてもよい）
+# VPC / サブネット / SG / ロール名は terraform/base/core、Runtime ARN は terraform/agent、lab EC2 は terraform/pipeline/lab、
+# Neptune（異常と修復案の「いま」）は terraform/pipeline/graph、証跡の S3 Tables と OpenSearch / Prometheus は terraform/pipeline/analytics の state から読む。
+# ワーカーは Neptune と証跡が無いと動かないので graph と analytics は必須（ecs.tf の precondition）
 data "terraform_remote_state" "main" {
   backend = "local"
 
@@ -31,14 +32,6 @@ data "terraform_remote_state" "agent" {
 
   config = {
     path = "${path.module}/../agent/terraform.tfstate"
-  }
-}
-
-data "terraform_remote_state" "stream" {
-  backend = "local"
-
-  config = {
-    path = "${path.module}/../pipeline/stream/terraform.tfstate"
   }
 }
 
@@ -85,24 +78,25 @@ locals {
   # agent が無いとワークフローが原因を聞く先が無い。下の precondition で「agent を先に」と出す
   runtime_arn = try(data.terraform_remote_state.agent.outputs.agent_runtime_arn, "")
 
-  # 修復案を読む 2 つのロール（チャットの Runtime と Web の EC2）。書けるのは web だけ（proposals.tf の decide_access）
+  # SSM とゲートウェイを使う 2 つのロール（チャットの Runtime と Web の EC2）。修復案の読み書き（Neptune）は terraform/pipeline/graph の access.tf が付ける
   web_role_name     = data.terraform_remote_state.main.outputs.web_role_name
   reader_role_names = toset([data.terraform_remote_state.main.outputs.runtime_role_name, local.web_role_name])
-
-  # 修復案テーブルとその GSI。3 つのポリシー（tools Lambda / ワーカー / 読む側のロール）が同じものを指す
-  proposal_table_arns = [aws_dynamodb_table.proposals.arn, "${aws_dynamodb_table.proposals.arn}/index/*"]
-
-  # stream が無いと異常が無い。下の precondition で「stream を先に」と出す
-  anomaly_table     = try(data.terraform_remote_state.stream.outputs.anomaly_table_name, "")
-  anomaly_table_arn = local.anomaly_table == "" ? "" : "arn:${local.partition}:dynamodb:${var.region}:${local.account_id}:table/${local.anomaly_table}"
 
   # lab が無ければ Apply の段は打つ先が無い（ワーカーは proposal を failed にする）
   lab_instance_id = try(data.terraform_remote_state.lab.outputs.lab_instance_id, "")
 
-  # graph / analytics が無ければ tools Lambda は異常テーブルと静的トポロジだけを見る（許可も SG の穴も付かない）
+  # Neptune（異常と修復案の「いま」）。graph が無ければ空で、ecs.tf の precondition が「graph を先に」と出す
   neptune_sg_id       = try(data.terraform_remote_state.graph.outputs.neptune_security_group_id, "")
   neptune_resource_id = try(data.terraform_remote_state.graph.outputs.cluster_resource_id, "")
+  neptune_host        = try(data.terraform_remote_state.graph.outputs.cluster_endpoint, "")
+  neptune_endpoint    = local.neptune_host == "" ? "" : "${local.neptune_host}:8182"
   neptune_data_arn    = local.neptune_resource_id == "" ? "" : "arn:${local.partition}:neptune-db:${var.region}:${local.account_id}:${local.neptune_resource_id}/*"
+
+  # 修復案の証跡（S3 Tables の proposal_events）。analytics が無ければ空で、ecs.tf の precondition が「analytics を先に」と出す
+  audit_bucket_arn           = try(data.terraform_remote_state.analytics.outputs.table_bucket_arn, "")
+  audit_namespace            = try(data.terraform_remote_state.analytics.outputs.table_namespace, "")
+  proposal_events_table_name = try(data.terraform_remote_state.analytics.outputs.proposal_events_table_name, "")
+  proposal_events_table_arn  = try(data.terraform_remote_state.analytics.outputs.proposal_events_table_arn, "")
 
   opensearch_collection_name = try(data.terraform_remote_state.analytics.outputs.opensearch_collection_name, "")
   opensearch_collection_arn  = try(data.terraform_remote_state.analytics.outputs.opensearch_collection_arn, "")

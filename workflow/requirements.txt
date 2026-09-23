@@ -1,2 +1,4 @@
 temporalio==1.33.0
 boto3>=1.40,<2
+# 修復案の証跡（S3 Tables の proposal_events）に append する。S3 Tables の Iceberg REST エンドポイントに SigV4 でつなぐ
+pyiceberg[pyarrow]==0.10.0

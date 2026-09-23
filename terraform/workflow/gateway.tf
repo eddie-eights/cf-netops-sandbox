@@ -2,7 +2,7 @@
 # The chat runtime (agent/app.py) lists the tools through the gateway URL (SSM <prefix>/gateway-url) and calls them over MCP
 # instead of its built-in functions. The Lambda runs the same agent/topology.py, agent/anomalies.py, agent/evidence.py and
 # agent/proposals.py inside the VPC (subnet a), so it reads Neptune (terraform/pipeline/graph), the logs collection and the metrics
-# workspace (terraform/pipeline/analytics), the anomaly table (terraform/pipeline/stream) and the proposal table (proposals.tf).
+# workspace (terraform/pipeline/analytics). Anomalies and proposals are Neptune vertices too (labels anomaly / proposal, 2026-09-24).
 # Without graph / analytics the topology comes from data/ and the evidence tools say so.
 
 locals {
@@ -60,7 +60,7 @@ resource "aws_iam_role" "tools" {
   count = var.create_gateway ? 1 : 0
 
   name               = "${local.name_prefix}-tools"
-  description        = "Tools Lambda behind the MCP gateway - reads the anomaly and proposal tables, Neptune, the logs collection and the metrics workspace"
+  description        = "Tools Lambda behind the MCP gateway - reads Neptune (topology, anomalies, proposals), the logs collection and the metrics workspace"
   assume_role_policy = data.aws_iam_policy_document.lambda_trust.json
 }
 
@@ -71,19 +71,6 @@ data "aws_iam_policy_document" "tools" {
     resources = ["arn:${local.partition}:logs:${var.region}:${local.account_id}:log-group:/aws/lambda/${local.name_prefix}-tools:*"]
   }
 
-  statement {
-    sid       = "Anomalies"
-    actions   = ["dynamodb:Query", "dynamodb:GetItem", "dynamodb:Scan"]
-    resources = [local.anomaly_table_arn, "${local.anomaly_table_arn}/index/*"]
-  }
-
-  # 修復案は読むだけ。UpdateItem は付けない（承認・却下は web ロールだけが書ける。proposals.tf の decide_access）
-  statement {
-    sid       = "ProposalsRead"
-    actions   = ["dynamodb:Query", "dynamodb:GetItem", "dynamodb:Scan"]
-    resources = local.proposal_table_arns
-  }
-
   # VPC の中で動くので ENI を作る（AWSLambdaVPCAccessExecutionRole と同じ中身。マネージドポリシーは付けない）
   statement {
     sid       = "VpcEni"
@@ -91,13 +78,14 @@ data "aws_iam_policy_document" "tools" {
     resources = ["*"]
   }
 
-  # Neptune のエンドポイント（terraform/pipeline/graph）と異常テーブル名（terraform/pipeline/stream）を SSM から引く
+  # Neptune のエンドポイント（terraform/pipeline/graph）を SSM から引く
   statement {
     sid       = "Parameters"
     actions   = ["ssm:GetParameter"]
     resources = ["arn:${local.partition}:ssm:${var.region}:${local.account_id}:parameter${local.param_prefix}/*"]
   }
 
+  # トポロジ・異常・修復案を読むだけ。Write は付けない（ツールに承認・却下は無い。proposals.tf の冒頭）
   dynamic "statement" {
     for_each = local.neptune_data_arn != "" ? [1] : []
     content {
@@ -131,7 +119,7 @@ resource "aws_security_group" "tools" {
   count = var.create_gateway ? 1 : 0
 
   name        = "${local.name_prefix}-tools"
-  description = "Tools Lambda - HTTPS to the VPC endpoints (DynamoDB gateway, SSM, aoss, aps, logs) and 8182 to Neptune"
+  description = "Tools Lambda - HTTPS to the VPC endpoints (SSM, aoss, aps, logs) and 8182 to Neptune"
   vpc_id      = local.vpc_id
 
   tags = { Name = "${local.name_prefix}-tools" }
@@ -141,7 +129,7 @@ resource "aws_vpc_security_group_egress_rule" "tools_https" {
   count = var.create_gateway ? 1 : 0
 
   security_group_id = aws_security_group.tools[0].id
-  description       = "DynamoDB gateway, SSM / aoss / aps / logs endpoints"
+  description       = "SSM / aoss / aps / logs endpoints"
   ip_protocol       = "tcp"
   from_port         = 443
   to_port           = 443
@@ -243,8 +231,6 @@ resource "aws_lambda_function" "tools" {
   environment {
     variables = {
       PARAM_PREFIX         = local.param_prefix # graph.py が <prefix>/neptune-endpoint を引く（無ければ data/ の静的トポロジ）
-      ANOMALY_TABLE        = local.anomaly_table
-      PROPOSAL_TABLE       = aws_dynamodb_table.proposals.name
       OPENSEARCH_ENDPOINT  = local.opensearch_endpoint
       OPENSEARCH_INDEX     = local.opensearch_index
       PROMETHEUS_QUERY_URL = local.prometheus_query_url

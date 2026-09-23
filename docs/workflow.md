@@ -11,16 +11,19 @@ flowchart LR
   SPARK["Spark<br/>異常を開く"] -->|"AnomalyOpened"| EB["EventBridge"] --> SQS["SQS<br/>prefix-anomalies"]
   SQS -->|"long polling 20 秒"| WK["worker<br/>link_down の発生ごとにワークフロー"]
   WK -->|"原因と修復案を聞く"| RT["AgentCore Runtime"]
-  WK -->|"pending で置く"| PT["修復案テーブル<br/>DynamoDB"]
+  WK -->|"pending で置く"| PT["修復案の頂点<br/>Neptune（label proposal）"]
   WEB["Web の「承認」タブ"] -->|"承認 / 却下"| PT
   PT -->|"approved を見る"| WK
+  WK -->|"1 段ごとに 1 行"| PEV["証跡<br/>S3 Tables proposal_events"]
   WK -->|"SSM Run Command<br/>sudo lab heal-main"| LAB["lab の EC2"]
 ```
 
 - temporal（`start-dev`、データは SQLite）と worker は、ECS Fargate の 1 タスクに入っている。Temporal の履歴はタスクと一緒に消える。
-- Web と worker は修復案テーブルの `status` だけでやり取りする。
-- ワークフローと修復案は発生ごと（`investigate-<anomaly_id>#<first_seen>` と `<anomaly_id>#<first_seen>`）。閉じて開き直した次の発生は、前の修復案を上書きせず別の行になる。起こすのは `link_down` だけ（trap は 10 分で自動的に閉じる印なので起こさない）。
-- SQS のメッセージは、起こした・起こす理由が無い・同じ発生のワークフローが既に走っている、のどれかなら消す。Temporal や DynamoDB に届かないときは消さずに残し、配り直させる（5 回で DLQ）。
+- Web と worker は修復案の頂点の `status` だけでやり取りする。承認・却下は `pending` のときだけ書ける（`has('status','pending')` と書き込みが 1 本の Gremlin）。
+- 作成・承認・却下・時間切れ・適用・確認は、worker が S3 Tables の `proposal_events` に 1 行ずつ足す（`event_id` = `<proposal_id>#<event>`。再試行で二重に入ることがあるので、集計では `event_id` で落とす）。承認・却下の行は worker が頂点の変化を拾ったときに書くので、worker が止まっていると遅れて入る。
+- 承認・却下はチャットのツールに出していない。Neptune の IAM は頂点ごとに絞れないので、この線はコードで引いている。
+- ワークフローと修復案は発生ごと（`investigate-<anomaly_id>#<first_seen>` と `<anomaly_id>#<first_seen>`）。閉じて開き直した次の発生は、前の修復案を上書きせず別の頂点になる。起こすのは `link_down` だけ（trap は 10 分で自動的に閉じる印なので起こさない）。
+- SQS のメッセージは、起こした・起こす理由が無い・同じ発生のワークフローが既に走っている、のどれかなら消す。Temporal や Neptune に届かないときは消さずに残し、配り直させる（5 回で DLQ）。
 - 同じルートで AgentCore Gateway（MCP）と tools Lambda も作る。Runtime はツールを Gateway 経由で呼ぶ（届かなければコンテナの中のツールで答える）。
 
 ## 修復案の状態

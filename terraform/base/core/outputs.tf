@@ -30,7 +30,7 @@ output "instance_subnet_id" {
 }
 
 output "route_table_ids" {
-  description = "Read by terraform/pipeline/stream (DynamoDB gateway endpoint)"
+  description = "Read by terraform/pipeline/lab (route of the lab management network to the lab EC2)"
   value       = [aws_route_table.private.id]
 }
 

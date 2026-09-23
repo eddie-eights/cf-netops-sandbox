@@ -1,6 +1,6 @@
 # netops-poc - PIPELINE stream root module. MSK (2 brokers, IAM auth) receives SNMP polls, traps and FRR logs from the Telegraf EC2 (terraform/pipeline/lab, create_telegraf),
-# the Spark job of terraform/pipeline/analytics writes link_down / trap anomalies to the DynamoDB table made here, and MSK Connect keeps the raw
-# messages in the asset bucket (S3 sink). The chat runtime, the web and the workflow tools read the anomaly table. Costs about 0.13 USD per hour while it exists - destroy it the same day.
+# the Spark job of terraform/pipeline/analytics reads them (anomalies go to Neptune and to the S3 Tables anomaly_events, not here since 2026-09-24),
+# and MSK Connect keeps the raw messages in the asset bucket (S3 sink). Costs about 0.13 USD per hour while it exists - destroy it the same day.
 
 # リソース名の接頭辞であり Project タグの値。デプロイする人の名前（var.owner）から作るので、
 # 1 つの AWS アカウントを何人かで使っても、自分の名前で自分のリソースを探せる
@@ -34,7 +34,6 @@ locals {
 
   vpc_id            = data.terraform_remote_state.main.outputs.vpc_id
   subnet_ids        = data.terraform_remote_state.main.outputs.runtime_subnet_ids
-  route_table_ids   = data.terraform_remote_state.main.outputs.route_table_ids
   endpoint_sg_id    = data.terraform_remote_state.main.outputs.endpoint_security_group_id
   bucket            = data.terraform_remote_state.main.outputs.kb_bucket_name
   reader_role_names = toset([data.terraform_remote_state.main.outputs.runtime_role_name, data.terraform_remote_state.main.outputs.web_role_name])

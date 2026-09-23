@@ -1,62 +1,38 @@
-"""異常一覧（DynamoDB。terraform/pipeline/analytics の Spark ジョブ（spark/snmp_sinks.py の detect）が書く。2026-09-17 までは stream の detector Lambda）をエージェントのツールと画面に出す。
+"""異常一覧（Neptune の頂点 label=anomaly。terraform/pipeline/analytics の Spark ジョブ（spark/snmp_sinks.py の detect）が書く）をエージェントのツールと画面に出す。
 
-テーブル名は環境変数 ANOMALY_TABLE、無ければ SSM の <PARAM_PREFIX>/anomaly-table（terraform/pipeline/stream が書く）。
-どちらも無ければ「まだ配備されていない」を返して、PIPELINE を作っていない構成でも落ちない。
-項目: anomaly_id（<機器>#<種別>#<対象>）, device_id, kind（link_down / trap）, target, status（open / resolved）,
-first_seen / last_seen / resolved_at（epoch 秒）, source（poll / trap）, detail。
-DynamoDB の読み方（クライアントの使い回し・表名・整形）は agent/toolkit.py に置いてある（proposals.py と共通）。
+2026-09-24 までは DynamoDB の表（terraform/pipeline/stream）だった。いまは Neptune（terraform/pipeline/graph）の頂点で、読み方は agent/graph.py の list_records。
+Neptune の接続先が無ければ（graph.configured() が False）「まだ配備されていない」を返して、PIPELINE を作っていない構成でも落ちない。
+頂点: id = anomaly_id（<機器>#<種別>#<対象>）, device_id, kind（link_down / trap）, target, status（open / resolved）,
+first_seen / last_seen / resolved_at（epoch 秒）, source（poll / trap）, detail, notified。
+開いた・閉じたの履歴は S3 Tables の anomaly_events（Athena で読む。docs/data-stores.md）。ここが見せるのは発生ごとの「いま」だけ。
 """
 
 from botocore.exceptions import BotoCoreError, ClientError
 
+import graph
 import toolkit
 
-INDEX = "status-last_seen-index"  # GSI。パーティションキーが status、ソートキーが last_seen
 STATUSES = ("open", "resolved")
 QUERYABLE = STATUSES + ("all",)  # ツールと画面が指定できる値（all は両方）
-TABLE = toolkit.Param("ANOMALY_TABLE", "anomaly-table")  # 表の名前（環境変数か SSM）
-
-
-def _query(client, table: str, status: str, limit: int) -> list:
-    """GSI をその status だけ、新しい順（ScanIndexForward=False）に limit 件まで"""
-    res = client.query(
-        TableName=table, IndexName=INDEX, KeyConditionExpression="#s = :s",
-        ExpressionAttributeNames={"#s": "status"}, ExpressionAttributeValues={":s": {"S": status}},
-        ScanIndexForward=False, Limit=limit)
-    return res.get("Items", [])
 
 
 def list_anomalies(status: str = "open", limit: int = 20, device_id: str = "") -> dict:
     """status（open / resolved / all）の異常を新しい順に。Spark が最後に見た時刻（last_seen）で並ぶ。
-
-    all は「これまでの異常は」に答えるためのもの（2026-09-18）。GSI のパーティションキーが status なので
-    1 回の Query では両方取れない。open と resolved を別々に引いて last_seen で並べ直す（読むのは最大 2×read 件）。
-    Limit は機器の絞り込みより先に効くので、device_id があるときは多めに読んでから絞る。
-    """
-    table = TABLE.value()
-    if not table:
-        return {"error": "異常一覧はまだ配備されていない（terraform/pipeline/stream を apply すると使える）", "anomalies": []}
+    all は「これまでの異常は」に答えるためのもの（2026-09-18）。機器と status の絞り込みは Gremlin の中でやる（絞ってから limit 件）"""
+    if not graph.configured():
+        return {"error": "異常一覧はまだ配備されていない（terraform/pipeline/graph と analytics を apply すると使える）", "anomalies": []}
     status = status if status in QUERYABLE else "open"
     limit = max(1, min(int(limit), 100))
-    read = toolkit.read_count(device_id, limit)
-    client = toolkit.client("dynamodb")
     try:
-        if status == "all":
-            items = _query(client, table, "open", read) + _query(client, table, "resolved", read)
-            items.sort(key=lambda i: int(i.get("last_seen", {}).get("N", "0")), reverse=True)
-        else:
-            items = _query(client, table, status, read)
+        items = graph.list_records("anomaly", "anomaly_id", "last_seen", "" if status == "all" else status, device_id, limit)
     except (ClientError, BotoCoreError) as e:
         return {"error": f"異常一覧を読めなかった: {str(e)[:200]}", "anomalies": []}
-    rows = []
-    for it in toolkit.narrow(items, device_id, limit):  # 返す行だけを整形する
-        r = toolkit.plain(it)
+    for r in items:
         r["first_seen_jst"] = toolkit.jst(r.get("first_seen"))
         r["last_seen_jst"] = toolkit.jst(r.get("last_seen"))
         if r.get("resolved_at"):
             r["resolved_at_jst"] = toolkit.jst(r["resolved_at"])
-        rows.append(r)
-    return {"status": status, "count": len(rows), "anomalies": rows}
+    return {"status": status, "count": len(items), "anomalies": items}
 
 
 TOOL_SPECS = [

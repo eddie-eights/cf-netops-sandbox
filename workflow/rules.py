@@ -1,10 +1,11 @@
 """ワーカーの「判断」の部分。AWS にも Temporal にも触らない純粋な関数だけを置く。
 
-ここにあるのは 4 つ:
+ここにあるのは 5 つ:
   - build_prompt        エージェント（AgentCore Runtime）に投げる質問文
   - parse_agent_json    返ってきた文から JSON を取り出す
   - normalize_action    lab EC2 で打ってよいコマンドの許可リスト
   - should_start / workflow_id / proposal_id / event_from_message  どの異常でワークフローを起こすかの判定と、発生ごとの id
+  - proposal_event      修復案の証跡（S3 Tables の proposal_events）の 1 行
 
 AWS も Temporal も要らないので、tests/test_workflow.py はこのファイルの関数を直接呼んで確かめられる。
 逆に言うと、ここに boto3 や temporalio を持ち込むとテストが動かなくなる。入れない。
@@ -112,3 +113,30 @@ def event_from_message(body: str) -> tuple[str, int]:
 
 def anomaly_id_from_message(body: str) -> str:
     return event_from_message(body)[0]
+
+
+# ---------------------------------------------------------------- 修復案の証跡（S3 Tables の proposal_events。2026-09-24）
+# 列は terraform/pipeline/analytics/tables.tf の proposal_events と同じ順・同じ型。時刻は epoch 秒で組み、awsio が書くときに tz 付きにする
+PROPOSAL_EVENT_COLUMNS = (
+    ("event_id", "string"), ("proposal_id", "string"), ("anomaly_id", "string"), ("event", "string"), ("status", "string"),
+    ("device_id", "string"), ("action", "string"), ("cause", "string"), ("command", "string"), ("decided_by", "string"),
+    ("detail", "string"), ("event_time", "timestamptz"),
+)
+# created は pending で置いたとき。ほかは status の移り変わりそのもの
+PROPOSAL_EVENTS = ("created", "approved", "rejected", "expired", "obsolete", "applied", "failed", "verified")
+
+
+def proposal_event(event: str, proposal: dict, now: int, detail: str = "", decided_by: str = "") -> dict:
+    """proposal_events の 1 行。event_id = <proposal_id>#<event>（1 つの修復案で同じ出来事は 1 回だけ。
+    アクティビティの再試行で二重に入ったら event_id で重複を落とす）"""
+    if event not in PROPOSAL_EVENTS:
+        raise ValueError(f"unknown proposal event: {event}")
+    pid = str(proposal.get("proposal_id") or "")
+    return {
+        "event_id": f"{pid}#{event}", "proposal_id": pid, "anomaly_id": str(proposal.get("anomaly_id") or ""),
+        "event": event, "status": "pending" if event == "created" else event,
+        "device_id": str(proposal.get("device_id") or ""), "action": str(proposal.get("action") or ""),
+        "cause": str(proposal.get("cause") or ""), "command": str(proposal.get("command") or ""),
+        "decided_by": str(decided_by or proposal.get("decided_by") or ""), "detail": str(detail or "")[:4000],
+        "event_time": int(now),
+    }

@@ -1,61 +1,15 @@
-# ---------------------------------------------------------------- proposal table (one item per anomaly occurrence, "いま" の状態)
-# proposal_id = <anomaly_id>#<first_seen>（発生ごと）. status: pending → approved / rejected（人）→ applied → verified / failed（ワーカー）, expired（時間切れ）, obsolete（承認のあいだに異常が閉じた）
-resource "aws_dynamodb_table" "proposals" {
-  name         = "${local.name_prefix}-proposals"
-  billing_mode = "PAY_PER_REQUEST"
-  hash_key     = "proposal_id"
-
-  attribute {
-    name = "proposal_id"
-    type = "S"
-  }
-
-  attribute {
-    name = "status"
-    type = "S"
-  }
-
-  attribute {
-    name = "updated_at"
-    type = "N"
-  }
-
-  global_secondary_index {
-    name            = "status-updated_at-index"
-    hash_key        = "status"
-    range_key       = "updated_at"
-    projection_type = "ALL"
-  }
-
-  lifecycle {
-    precondition {
-      condition     = local.anomaly_table != ""
-      error_message = "terraform/pipeline/stream の state（terraform/pipeline/stream/terraform.tfstate）から anomaly_table_name が読めない。terraform/pipeline/stream を先に apply する。"
-    }
-  }
-}
-
-# web と Runtime はテーブル名を SSM から引く（agent/proposals.py）
-resource "aws_ssm_parameter" "proposal_table" {
-  name  = "${local.param_prefix}/proposal-table"
-  type  = "String"
-  value = aws_dynamodb_table.proposals.name
-}
+# ---------------------------------------------------------------- proposals（修復案）
+# 修復案の「いま」は Neptune の頂点（label proposal、id = <anomaly_id>#<first_seen> で発生ごと）。status: pending → approved / rejected（人）
+# → applied → verified / failed（ワーカー）, expired（時間切れ）, obsolete（承認のあいだに異常が閉じた）。
+# 作成・承認・却下・適用・確認は 1 行ずつ S3 Tables の proposal_events（terraform/pipeline/analytics の tables.tf）に残る。
+# 以前は DynamoDB のテーブルだった（2026-09-24 に Neptune と S3 Tables に寄せた）。
+#
+# Neptune の読み書きは terraform/pipeline/graph の access.tf が Runtime と web の両方に付ける（neptune-db は頂点のラベル単位で
+# 絞れない）。なので「チャットからは承認できない」（HITL）は IAM ではなくコードで守る: agent/proposals.py の decide を呼ぶのは web の承認タブだけで、
+# チャットのツール（TOOL_SPECS）には decide が無い。
 
 # ---------------------------------------------------------------- access for the chat runtime and the web EC2 (terraform/base/core roles)
-# Both read (the chat tool list_proposals and the approval tab), but only the web EC2 writes: approving and rejecting is what a
-# person does in the approval tab, so the chat runtime gets no UpdateItem. The HITL line is drawn in IAM, not only in the code.
 data "aws_iam_policy_document" "reader_access" {
-  statement {
-    sid = "Proposals"
-    actions = [
-      "dynamodb:Query",
-      "dynamodb:GetItem",
-      "dynamodb:Scan",
-    ]
-    resources = local.proposal_table_arns
-  }
-
   statement {
     sid       = "Parameters"
     actions   = ["ssm:GetParameter"]
@@ -78,19 +32,4 @@ resource "aws_iam_role_policy" "reader_access" {
   name   = "${local.name_prefix}-workflow-access"
   role   = each.value
   policy = data.aws_iam_policy_document.reader_access.json
-}
-
-# 承認・却下を書けるのは web EC2 だけ（agent/proposals.py の decide。pending のときだけ通る ConditionExpression 付き）
-data "aws_iam_policy_document" "decide_access" {
-  statement {
-    sid       = "Decide"
-    actions   = ["dynamodb:UpdateItem"]
-    resources = [aws_dynamodb_table.proposals.arn]
-  }
-}
-
-resource "aws_iam_role_policy" "decide_access" {
-  name   = "${local.name_prefix}-workflow-decide"
-  role   = local.web_role_name
-  policy = data.aws_iam_policy_document.decide_access.json
 }

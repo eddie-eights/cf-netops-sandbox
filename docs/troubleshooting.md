@@ -54,7 +54,7 @@ Web のログは Web の EC2 で `sudo journalctl -u <prefix>-web -n 100`、起�
 | 症状 | 原因と直し方 |
 |---|---|
 | 異常一覧には出るのに、トポロジも調査ワークフローも動かない（`ops/up.sh` を打ち直した直後） | 古い Spark のジョブが動いたまま。手順 7-5 は `SpecHash` タグの無い（この仕組みより前の）ジョブも古いとみなして止めるので、`ops/up.sh` を打ち直す。止まらなければ `cancel-job-run`（[pipeline.md](pipeline.md) の「変えたとき」） |
-| 同じ link down が 2 件になり、片方の対象が `?` | 同じ（古いスクリプト）。残った `<機器>#link_down#?` は自動で resolved にならないので、DynamoDB の anomalies と proposals から消す |
+| 同じ link down が 2 件になり、片方の対象が `?` | 同じ（古いスクリプト）。残った `<機器>#link_down#?` は自動で resolved にならないので、Neptune の `anomaly` と `proposal` の頂点を消す（`g.V('<機器>#link_down#?').drop()`。修復案は id が `<機器>#link_down#?#` で始まるもの） |
 | トポロジに赤い線が出ない | `/aws/lambda/<prefix>-graph-status` のログを見る |
 | 承認しても approved のまま進まない | ワーカーのイメージが古い。`deploy.env` の `IMAGE_TAG` を上げて `ops/up.sh`（[workflow.md](workflow.md)） |
 

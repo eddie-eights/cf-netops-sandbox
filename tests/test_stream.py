@@ -1,5 +1,6 @@
-"""異常検知（spark/snmp_sinks.py の detect）の模擬テスト。boto3 のクライアントを差し替えて DynamoDB と EventBridge への書き込みを確かめ、
-terraform/pipeline/stream から detector Lambda が消えて anomalies テーブルだけが残っていることも確かめる。
+"""異常検知（spark/snmp_sinks.py の detect）の模擬テスト。Neptune の Gremlin（HTTP の POST）と EventBridge を差し替えて、
+異常の「いま」（Neptune の anomaly の頂点）と履歴（S3 Tables の anomaly_events に渡す行）とイベントを確かめ、
+terraform/pipeline/stream に detector Lambda も DynamoDB の異常テーブルも無いことも確かめる（2026-09-24 に DynamoDB をやめた）。
 実行は python3 tests/test_stream.py（pyspark も boto3 も要らない。snmp_sinks.py は pyspark を関数の中で import する）。"""
 import importlib.util, ipaddress, json, os, re, sys
 
@@ -13,7 +14,7 @@ def check(name, cond):
     passed += 1
     print("ok", name)
 
-# ---- terraform/pipeline/stream: detector Lambda は analytics の Spark に寄せた
+# ---- terraform/pipeline/stream: detector Lambda は analytics の Spark に寄せ、異常の「いま」は Neptune に置く
 TF_DIR = os.path.join(ROOT, "terraform", "pipeline", "stream")
 tf = ""
 for name in sorted(os.listdir(TF_DIR)):
@@ -24,9 +25,9 @@ check("stream/detector.py は無い（検知は spark/snmp_sinks.py）", not os.
 check("terraform/pipeline/stream に detector の Lambda が無い", '"detector"' not in tf and "stream/detector.py" not in tf and "archive_file" not in tf)
 check("terraform/pipeline/stream に lambda のエンドポイントが無い", '.lambda"' not in tf)
 check("terraform/pipeline/stream は sts のエンドポイントを create_sts_endpoint で切れる", 'variable "create_sts_endpoint"' in tf and 'toset(["sts"])' in tf)
-check("terraform/pipeline/stream は anomalies テーブルを持つ", re.search(r'resource "aws_dynamodb_table" "anomalies"', tf) is not None)
-check("output に anomaly_table_name と anomaly_table_arn がある（analytics が読む）",
-      'output "anomaly_table_name"' in tf and 'output "anomaly_table_arn"' in tf)
+check("terraform/pipeline/stream に DynamoDB が無い（異常の「いま」は Neptune、履歴は S3 Tables。2026-09-24）",
+      "aws_dynamodb" not in tf and "anomaly_table" not in tf and "dynamodb:" not in tf and ".dynamodb" not in tf
+      and not os.path.exists(os.path.join(TF_DIR, "anomalies.tf")))
 check("detector_logs の output は無い", "detector_logs" not in tf)
 check("MSK は Kafka 4 以上の KRaft（kafka_version の既定が N.N.x.kraft で、検査が .kraft を強いる）",
       re.search(r'variable "kafka_version" \{[^}]*default\s*=\s*"[4-9]\.\d+\.x\.kraft"', tf) is not None and "x\\\\.kraft$" in tf)
@@ -40,13 +41,24 @@ mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 with open(SRC, encoding="utf-8") as f:
     src = f.read()
-check("argparse に --anomaly-table / --device-map / --event-bus / --event-source がある",
-      all(f'"--{a}"' in src for a in ("anomaly-table", "device-map", "event-bus", "event-source")))
-check("build は --anomaly-table があるときだけ detect のクエリを足す",
-      re.search(r'if args\.anomaly_table:[\s\S]*?http_query\(rows, "detect"', src) is not None)
+check("argparse に --neptune-endpoint / --anomaly-events-table / --device-map / --event-bus / --event-source があり、--anomaly-table は無い",
+      all(f'"--{a}"' in src for a in ("neptune-endpoint", "anomaly-events-table", "device-map", "event-bus", "event-source"))
+      and '"--anomaly-table"' not in src and 'client("dynamodb")' not in src and "update_item" not in src)
+check("build は --neptune-endpoint があるときだけ detect のクエリを足し、履歴の書き手（S3 Tables）を渡す",
+      re.search(r'if args\.neptune_endpoint:[\s\S]*?NeptuneAnomalies\([\s\S]*?make_history_writer\(spark, args\.anomaly_events_table\)[\s\S]*?http_query\(rows, "detect"', src) is not None)
+BASE = ["--bootstrap", "b", "--checkpoint", "c", "--sinks", "iceberg", "--iceberg-table", "cat.ns.t"]
 check("Source の既定は netops.spark（terraform は <接頭辞>.spark を渡す）、DetailType は AnomalyOpened / AnomalyResolved",
       mod.EVENT_SOURCE == "netops.spark" and mod.EVENT_DETAIL_TYPE == "AnomalyOpened" and mod.EVENT_RESOLVED_TYPE == "AnomalyResolved"
-      and mod.parse_args(["--bootstrap", "b", "--checkpoint", "c", "--sinks", "iceberg", "--iceberg-table", "cat.ns.t"]).event_source == "netops.spark")
+      and mod.parse_args(BASE).event_source == "netops.spark")
+try:
+    import contextlib, io
+    with contextlib.redirect_stderr(io.StringIO()):
+        mod.parse_args(BASE + ["--neptune-endpoint", "n:8182"])
+    _refused = False
+except SystemExit:
+    _refused = True
+check("--neptune-endpoint だけで --anomaly-events-table が無ければ引数の段階で止める（履歴を残さずに検知しない）",
+      _refused and mod.parse_args(BASE + ["--neptune-endpoint", "n:8182", "--anomaly-events-table", "s3tables.netops.anomaly_events"]).neptune_endpoint == "n:8182")
 check("parse_device_map は小文字にそろえ、空白と空の要素を落とす",
       mod.parse_device_map(" HQ-CE-01.lab.example = hq-ce-01 ,=x,y=") == {"hq-ce-01.lab.example": "hq-ce-01"})
 check("device は sysName を小文字・FQDN の先頭で引き、無ければ送り元 IP を device map で引く（どれも無ければ IP / ?）",
@@ -60,100 +72,94 @@ check("parse_device_map は = の無い要素を捨てる",
       mod.parse_device_map("203.0.113.11=hq-ce-01,garbage,203.0.113.12=dc-ce-01") == {"203.0.113.11": "hq-ce-01", "203.0.113.12": "dc-ce-01"}
       and mod.parse_device_map("") == {})
 
+# ---- Gremlin のリテラルと GraphSON
+check("gremlin_literal は \\ と ' と改行・タブ・制御文字を逃がす（Neptune の文字列の Gremlin は生の改行を受け付けない）",
+      mod.gremlin_literal("a'b\\c\nd\re\tf\x01g") == r"'a\'b\\c\nd\re\tf\u0001g'"
+      and mod.gremlin_literal(True) == "true" and mod.gremlin_literal(12) == "12" and mod.gremlin_literal("日本") == "'日本'")
+check("graphson は g:List / g:Map / g:Int64 / g:T を素の値にする",
+      mod.graphson({"@type": "g:List", "@value": [{"@type": "g:Map", "@value": [
+          {"@type": "g:T", "@value": "id"}, "k", "n", {"@type": "g:Int64", "@value": 5}, "b", False]}]}) == [{"id": "k", "n": 5, "b": False}])
 
-# ---- boto3 の低レベルクライアントの模擬
-class ConditionalCheckFailedException(Exception):
-    pass
+
+# ---- Neptune の模擬（NeptuneAnomalies が組む 4 つの形の Gremlin だけを読む）
+def lit(s, i):
+    """s[i:] の先頭のリテラルを読んで (値, 次の位置)"""
+    if s[i] == "'":
+        out, i = [], i + 1
+        while s[i] != "'":
+            if s[i] == "\\":
+                c = s[i + 1]
+                if c == "u":
+                    out.append(chr(int(s[i + 2:i + 6], 16))); i += 6; continue
+                out.append({"n": "\n", "r": "\r", "t": "\t"}.get(c, c)); i += 2; continue
+            assert s[i] not in "\n\r", "生の改行"
+            out.append(s[i]); i += 1
+        return "".join(out), i + 1
+    m = re.compile(r"true|false|-?\d+(\.\d+)?").match(s, i)
+    v = m.group(0)
+    return (v == "true") if v in ("true", "false") else (float(v) if "." in v else int(v)), m.end()
 
 
-class FakeDynamo:
-    """update_item と query（GSI の status-last_seen-index）だけ。条件は A = :x / A <> :x / A < :x / attribute_not_exists(A) を AND / OR でつないだものを読む。
-    UpdateExpression は SET a=:x, b=if_not_exists(b,:y) と REMOVE。ReturnValues（ALL_NEW / ALL_OLD）と
-    ReturnValuesOnConditionCheckFailure（例外の response["Item"]）も本物と同じ形で返す"""
-    class exceptions:
-        ConditionalCheckFailedException = ConditionalCheckFailedException
+def lits(s):
+    out, i = [], 0
+    while i < len(s):
+        if s[i] in "',":
+            if s[i] == ",":
+                i += 1; continue
+            v, i = lit(s, i); out.append(v)
+        else:
+            v, i = lit(s, i); out.append(v)
+    return out
 
-    def __init__(self, page=100):
-        self.items = {}
-        self.calls = []     # update_item の引数
-        self.queries = []   # query の引数
-        self.page = page    # query の 1 ページの件数（LastEvaluatedKey を試す）
 
-    @staticmethod
-    def _v(t):
-        if t is None:
-            return None
-        if "N" in t:
-            return int(t["N"])
-        return t.get("S", t.get("BOOL"))
+class FakeNeptune:
+    """頂点は {id: {property: 値}}。queries に打たれた Gremlin を残す"""
+    def __init__(self):
+        self.v = {}
+        self.queries = []
 
-    def _cond(self, expr, item, names, values):
-        def term(x):
-            x = x.strip()
-            m = re.fullmatch(r"attribute_not_exists\((\S+)\)", x)
-            if m:
-                return item is None or names.get(m.group(1), m.group(1)) not in item
-            m = re.fullmatch(r"(\S+) (=|<>|<) (:\w+)", x)
-            a = self._v((item or {}).get(names.get(m.group(1), m.group(1))))
-            b = self._v(values[m.group(3)])
-            if m.group(2) == "=":
-                return a is not None and a == b
-            if m.group(2) == "<>":
-                return a != b
-            return a is not None and a < b
-        return any(all(term(t) for t in alt.split(" AND ")) for alt in expr.split(" OR "))
+    def em(self, k):
+        return {"id": k, "label": "anomaly", **self.v[k]}
 
-    def update_item(self, **kw):
-        self.calls.append(kw)
-        key = kw["Key"]["anomaly_id"]["S"]
-        names, values = kw.get("ExpressionAttributeNames", {}), kw["ExpressionAttributeValues"]
-        old = self.items.get(key)
-        cond = kw.get("ConditionExpression")
-        if cond and not self._cond(cond, old, names, values):
-            e = ConditionalCheckFailedException("condition")
-            e.response = {"Error": {"Code": "ConditionalCheckFailedException"}}
-            if kw.get("ReturnValuesOnConditionCheckFailure") == "ALL_OLD" and old is not None:
-                e.response["Item"] = dict(old)
-            raise e
-        item = dict(old or {"anomaly_id": {"S": key}})
-        expr = kw["UpdateExpression"]
-        if " REMOVE " in expr:
-            expr, removed = expr.split(" REMOVE ", 1)
-            for attr in removed.split(","):
-                item.pop(names.get(attr.strip(), attr.strip()), None)
-        for lhs, rhs in re.findall(r"([#\w]+)=(if_not_exists\([^)]*\)|:\w+)", expr):
-            attr = names.get(lhs, lhs)
-            m = re.fullmatch(r"if_not_exists\((\w+),(:\w+)\)", rhs)
-            if m:
-                if attr not in item:
-                    item[attr] = values[m.group(2)]
-            else:
-                item[attr] = values[rhs]
-        self.items[key] = item
-        if kw.get("ReturnValues") == "ALL_NEW":
-            return {"Attributes": dict(item)}
-        if kw.get("ReturnValues") == "ALL_OLD" and old is not None:
-            return {"Attributes": old}
-        return {}
-
-    def query(self, **kw):
-        self.queries.append(kw)
-        assert kw["IndexName"] == "status-last_seen-index"
-        names, values = kw.get("ExpressionAttributeNames", {}), kw["ExpressionAttributeValues"]
-        # ページの順は anomaly_id の順にしておく（前のページの行が閉じて外れても、続きの位置が決まる）
-        hits = sorted(k for k, it in self.items.items()
-                      if self._cond(kw["KeyConditionExpression"], it, names, values)
-                      and (not kw.get("FilterExpression") or self._cond(kw["FilterExpression"], it, names, values)))
-        if kw.get("ExclusiveStartKey"):
-            hits = [k for k in hits if k > kw["ExclusiveStartKey"]["anomaly_id"]["S"]]
-        page = hits[:self.page]
-        out = {"Items": [dict(self.items[k]) for k in page]}
-        if len(hits) > self.page:
-            out["LastEvaluatedKey"] = {"anomaly_id": {"S": page[-1]}}
-        return out
+    def __call__(self, g):
+        self.queries.append(g)
+        m = re.fullmatch(r"g\.V\((.*)\)\.hasLabel\('anomaly'\)\.elementMap\(\)", g)
+        if m:
+            return [self.em(k) for k in lits(m.group(1)) if k in self.v]
+        m = re.fullmatch(r"g\.V\((.+?)\)\.fold\(\)\.coalesce\(unfold\(\),addV\('anomaly'\)\.property\(id,(.+?)\)\)"
+                         r"(\.sideEffect\(properties\('resolved_at'\)\.drop\(\)\))?((?:\.property\(single,.+?\))*)\.id\(\)", g)
+        if m:
+            k = lits(m.group(1))[0]
+            assert lits(m.group(2))[0] == k
+            item = self.v.setdefault(k, {})
+            if m.group(3):
+                item.pop("resolved_at", None)
+            body, i = m.group(4), 0
+            while i < len(body):
+                assert body.startswith(".property(single,", i), body[i:]
+                n, i = lit(body, i + len(".property(single,"))
+                assert body[i] == ","
+                val, i = lit(body, i + 1)
+                assert body[i] == ")"
+                i += 1
+                item[n] = val
+            return [k]
+        m = re.fullmatch(r"g\.V\((.+?)\)\.hasLabel\('anomaly'\)\.has\('status',(.+?)\)\.has\((.+?),(.+?)\)\.property\(single,'notified',true\)\.id\(\)", g)
+        if m:
+            k, st, f, val = (lits(x)[0] for x in m.groups())
+            it = self.v.get(k)
+            if it and it.get("status") == st and it.get(f) == val:
+                it["notified"] = True
+                return [k]
+            return []
+        m = re.fullmatch(r"g\.V\(\)\.hasLabel\('anomaly'\)\.has\('status','open'\)\.has\('kind','trap'\)\.has\('last_seen',lt\((\d+)\)\)\.elementMap\(\)", g)
+        if m:
+            cut = int(m.group(1))
+            return [self.em(k) for k, it in sorted(self.v.items()) if it.get("status") == "open" and it.get("kind") == "trap" and it.get("last_seen", 0) < cut]
+        raise AssertionError("知らない Gremlin: " + g)
 
     def plain(self, key):
-        return {k: self._v(v) for k, v in self.items[key].items()}
+        return dict(self.v[key])
 
 
 class FakeEvents:
@@ -188,12 +194,30 @@ class Clock:
         return self.t
 
 
-def make(page=100, clock=None):
-    ddb, ev = FakeDynamo(page), FakeEvents()
+class History(list):
+    """履歴の書き手（S3 Tables の append）の模擬。1 回の呼び出しの行をまとめて足し、呼ばれた順に order へ残す"""
+    def __init__(self, order):
+        super().__init__()
+        self.order = order
+    def __call__(self, rows):
+        assert rows, "空の append はしない"
+        self.order.append(("history", [r["event_id"] for r in rows]))
+        self.extend(rows)
+
+
+def make(clock=None):
+    nep, ev = FakeNeptune(), FakeEvents()
+    order = []
+    hist = History(order)
+    def post(g):
+        if ".property(single," in g and "notified',true" not in g:
+            order.append(("neptune", g))
+        return nep(g)
     sleeps.clear()
-    send = mod.make_detect_sender("t", mod.parse_device_map("203.0.113.11=hq-ce-01,203.0.113.12=dc-ce-01"), "ap-northeast-1", "default",
-                                  "demo-poc.spark", dynamodb=ddb, events_client=ev, clock=clock or Clock(), sleep=sleeps.append)
-    return send, ddb, ev
+    send = mod.make_detect_sender(mod.NeptuneAnomalies("n:8182", "ap-northeast-1", post=post), hist,
+                                  mod.parse_device_map("203.0.113.11=hq-ce-01,203.0.113.12=dc-ce-01"), "ap-northeast-1", "default",
+                                  "demo-poc.spark", events_client=ev, clock=clock or Clock(), sleep=sleeps.append)
+    return send, nep, ev, hist
 
 
 sleeps = []
@@ -222,19 +246,21 @@ check("機器名は sysName > device map > IP > ?",
       and mod.device({"tags": {}}, {}) == "?")
 
 # ---- ポーリング
-send, ddb, ev = make()
-check("正常なポーリング（up）は何も書かない", send([iface("203.0.113.11", "eth1", 1)]) == [] and ddb.items == {} and ev.calls == [])
-check("lo は見ない", send([iface("203.0.113.11", "lo", 2)]) == [] and ddb.items == {})
+send, nep, ev, hist = make()
+check("正常なポーリング（up）は何も書かない", send([iface("203.0.113.11", "eth1", 1)]) == [] and nep.v == {} and ev.calls == [] and hist == [])
+check("lo は見ない", send([iface("203.0.113.11", "lo", 2)]) == [] and nep.v == {})
 check("dict でない行や関係ない measurement は捨てる",
       send([None, "garbage", {"measurement": "cpu", "tags": {}, "fields": {"usage": 1}}, {"measurement": "interface", "tags": {}, "fields": {}}]) == []
-      and ddb.items == {})
+      and nep.v == {})
 
 opened = send([iface("203.0.113.11", "eth1", 2)])
 key = "hq-ce-01#link_down#eth1"
-row = ddb.plain(key)
+row = nep.plain(key)
 check("down → open（device_id / kind / target / source=poll / detail / first_seen=last_seen）",
       row["status"] == "open" and row["device_id"] == "hq-ce-01" and row["kind"] == "link_down" and row["target"] == "eth1"
       and row["source"] == "poll" and row["detail"] == "eth1 is down (poll)" and row["first_seen"] == row["last_seen"])
+check("Neptune の書き込みは property(single, …)（既定の set だと値が積み上がる）",
+      all(".property(" not in q.replace(".property(single,", "").replace(".property(id,", "") for q in nep.queries))
 check("新しく open になったものだけ返し、AnomalyOpened を 1 件出す",
       [o["anomaly_id"] for o in opened] == [key] and len(ev.calls) == 1 and len(ev.calls[0]) == 1)
 entry = ev.calls[0][0]
@@ -243,144 +269,160 @@ check("put_events の Source（--event-source がそのまま入る）/ DetailTy
 check("Detail に anomaly_id / device_id / kind / target / first_seen / detail / source",
       detail == {"anomaly_id": key, "device_id": "hq-ce-01", "kind": "link_down", "target": "eth1", "first_seen": row["first_seen"],
                  "detail": "eth1 is down (poll)", "source": "poll"})
-
 first = row["first_seen"]
-ddb.items[key]["first_seen"] = {"N": str(first - 100)}   # 前から開いていたことにする
-check("開いたままの down は first_seen を残し、イベントは出さない",
-      send([iface("203.0.113.11", "eth1", 2)]) == [] and ddb.plain(key)["first_seen"] == first - 100 and len(ev.calls) == 1)
+check("開いたら履歴に opened を 1 行（event_id / occurrence_id は <anomaly_id>#<first_seen> から。resolved_at は空）",
+      len(hist) == 1 and hist[0] == {"event_id": f"{key}#{first}#opened", "anomaly_id": key, "occurrence_id": f"{key}#{first}", "event": "opened",
+                                     "device_id": "hq-ce-01", "kind": "link_down", "target": "eth1", "source": "poll",
+                                     "detail": "eth1 is down (poll)", "first_seen": first, "resolved_at": None, "event_time": first})
+check("履歴の列は tables.tf の anomaly_events と同じ", [c for c, _ in mod.ANOMALY_EVENT_COLUMNS] == list(hist[0]))
+
+nep.v[key]["first_seen"] = first - 100   # 前から開いていたことにする
+check("開いたままの down は first_seen を残し、イベントも履歴も出さない",
+      send([iface("203.0.113.11", "eth1", 2)]) == [] and nep.plain(key)["first_seen"] == first - 100 and len(ev.calls) == 1 and len(hist) == 1)
 check("up → resolved（resolved_at が付く）",
-      send([iface("203.0.113.11", "eth1", 1)]) == [] and ddb.plain(key)["status"] == "resolved" and "resolved_at" in ddb.plain(key))
+      send([iface("203.0.113.11", "eth1", 1)]) == [] and nep.plain(key)["status"] == "resolved" and "resolved_at" in nep.plain(key))
 entry = ev.calls[-1][0]
 check("open → resolved で AnomalyResolved を 1 件出す（Detail に anomaly_id / device_id / kind / target / resolved_at / source）",
       len(ev.calls) == 2 and len(ev.calls[1]) == 1 and entry["DetailType"] == "AnomalyResolved" and entry["Source"] == "demo-poc.spark"
       and json.loads(entry["Detail"]) == {"anomaly_id": key, "device_id": "hq-ce-01", "kind": "link_down", "target": "eth1",
-                                          "resolved_at": ddb.plain(key)["resolved_at"], "source": "poll"})
-check("resolved のあとの up は何もしない（ConditionExpression。AnomalyResolved も出さない）",
-      send([iface("203.0.113.11", "eth1", 1)]) == [] and ddb.plain(key)["status"] == "resolved" and len(ev.calls) == 2)
+                                          "resolved_at": nep.plain(key)["resolved_at"], "source": "poll"})
+check("閉じたら履歴に resolved を 1 行（同じ発生の occurrence_id、resolved_at 付き）",
+      len(hist) == 2 and hist[1]["event"] == "resolved" and hist[1]["occurrence_id"] == f"{key}#{first - 100}"
+      and hist[1]["event_id"] == f"{key}#{first - 100}#resolved" and hist[1]["resolved_at"] == nep.plain(key)["resolved_at"])
+check("resolved のあとの up は何もしない（AnomalyResolved も履歴も出さない）",
+      send([iface("203.0.113.11", "eth1", 1)]) == [] and nep.plain(key)["status"] == "resolved" and len(ev.calls) == 2 and len(hist) == 2)
 reopened = send([iface("203.0.113.11", "eth1", 2)])
 check("resolved → 再 open はイベントをもう一度出し、first_seen を今にして resolved_at を消す（worker が起こし直せるように。2026-09-18）",
-      len(reopened) == 1 and reopened[0]["first_seen"] >= first and ddb.plain(key)["status"] == "open"
-      and ddb.plain(key)["first_seen"] == reopened[0]["first_seen"] and "resolved_at" not in ddb.plain(key)
-      and len(ev.calls) == 3 and ev.calls[-1][0]["DetailType"] == "AnomalyOpened")
+      len(reopened) == 1 and reopened[0]["first_seen"] >= first and nep.plain(key)["status"] == "open"
+      and nep.plain(key)["first_seen"] == reopened[0]["first_seen"] and "resolved_at" not in nep.plain(key)
+      and len(ev.calls) == 3 and ev.calls[-1][0]["DetailType"] == "AnomalyOpened" and hist[-1]["event"] == "opened")
 
-send, ddb, ev = make()
-check("ifDescr が無ければ ifIndex", send([iface("203.0.113.12", None, 2, ifindex="3")]) and "dc-ce-01#link_down#3" in ddb.items)
-send, ddb, ev = make()
-check("sysName があれば device map より優先", send([iface("203.0.113.12", "eth0", "2", sysname="r2")]) and "r2#link_down#eth0" in ddb.items)
-send, ddb, ev = make()
+send, nep, ev, hist = make()
+send([iface("203.0.113.11", "eth1", 2), iface("203.0.113.12", "eth2", 2)])
+check("履歴は Neptune より先に書く（落ちたら同じバッチを読み直すので、証跡から開閉が抜けない）",
+      [o[0] for o in hist.order][:1] == ["history"] and len([o for o in hist.order if o[0] == "history"]) == 1)
+send, nep, ev, hist = make()
+check("ifDescr が無ければ ifIndex", send([iface("203.0.113.12", None, 2, ifindex="3")]) and "dc-ce-01#link_down#3" in nep.v)
+send, nep, ev, hist = make()
+check("sysName があれば device map より優先", send([iface("203.0.113.12", "eth0", "2", sysname="r2")]) and "r2#link_down#eth0" in nep.v)
+send, nep, ev, hist = make()
 check("同じキーが 1 バッチに何度も出たら最後の状態だけ書く（down → up なら何も残らない）",
-      send([iface("203.0.113.11", "eth1", 2), iface("203.0.113.11", "eth1", 1)]) == [] and ddb.items == {} and ev.calls == [])
-send, ddb, ev = make()
-check("同じキーが 1 バッチに何度も出ても開くのは 1 回（AnomalyOpened も 1 件）",
+      send([iface("203.0.113.11", "eth1", 2), iface("203.0.113.11", "eth1", 1)]) == [] and nep.v == {} and ev.calls == [] and hist == [])
+send, nep, ev, hist = make()
+check("同じキーが 1 バッチに何度も出ても開くのは 1 回（AnomalyOpened も履歴も 1 件）",
       len(send([iface("203.0.113.11", "eth1", 2), iface("203.0.113.11", "eth1", 2)])) == 1
-      and sum("first_seen=:n" in c["UpdateExpression"] for c in ddb.calls) == 1 and ev.types() == ["AnomalyOpened"])
-send, ddb, ev = make()
+      and sum("'first_seen'" in q and "addV" in q for q in nep.queries) == 1 and ev.types() == ["AnomalyOpened"] and len(hist) == 1)
+send, nep, ev, hist = make()
 check("1 バッチの中は ts の順に並べて最後の状態を採る（collect の順は時刻の順ではない。up が先に来ても down(新) が勝つ）",
       len(send([iface("203.0.113.11", "eth1", 2, ts=20.0), iface("203.0.113.11", "eth1", 1, ts=10.0)])) == 1
-      and ddb.plain("hq-ce-01#link_down#eth1")["status"] == "open")
+      and nep.plain("hq-ce-01#link_down#eth1")["status"] == "open")
 check("逆に up(新) が後なら resolved",
       send([iface("203.0.113.11", "eth1", 1, ts=40.0), iface("203.0.113.11", "eth1", 2, ts=30.0)]) == []
-      and ddb.plain("hq-ce-01#link_down#eth1")["status"] == "resolved")
+      and nep.plain("hq-ce-01#link_down#eth1")["status"] == "resolved")
+send, nep, ev, hist = make()
+send([iface("203.0.113.11", f"eth{i}", 1) for i in range(mod.NEPTUNE_IDS_PER_QUERY + 5)])
+check(f"キーが {mod.NEPTUNE_IDS_PER_QUERY} を超えたら g.V(…) を分けて読む",
+      sum(q.endswith(".hasLabel('anomaly').elementMap()") and q.startswith("g.V('") for q in nep.queries) == 2)
 
 # ---- trap
-send, ddb, ev = make()
+send, nep, ev, hist = make()
 opened = send([trap("203.0.113.11", mod.LINK_DOWN, {".1.3.6.1.2.1.2.2.1.2.3": "eth3", ".1.3.6.1.2.1.2.2.1.1.3": 3})])
 key = "hq-ce-01#link_down#eth3"
 check("linkDown trap（MIB 無しの数値 OID）は ifDescr の varbind から target を取り source=trap",
-      [o["anomaly_id"] for o in opened] == [key] and ddb.plain(key)["source"] == "trap" and ddb.plain(key)["detail"] == "eth3 is down (trap)")
-check("linkUp trap で resolved", send([trap("203.0.113.11", mod.LINK_UP, {".1.3.6.1.2.1.2.2.1.2.3": "eth3"})]) == [] and ddb.plain(key)["status"] == "resolved")
-send, ddb, ev = make()
+      [o["anomaly_id"] for o in opened] == [key] and nep.plain(key)["source"] == "trap" and nep.plain(key)["detail"] == "eth3 is down (trap)")
+check("linkUp trap で resolved", send([trap("203.0.113.11", mod.LINK_UP, {".1.3.6.1.2.1.2.2.1.2.3": "eth3"})]) == [] and nep.plain(key)["status"] == "resolved"
+      and hist[-1]["source"] == "trap")
+send, nep, ev, hist = make()
 send([{"measurement": "snmp_trap", "tags": {"source": "203.0.113.11", "oid": mod.LINK_DOWN, "name": "iso.3.6.1.6.3.1.1.5.3", "mib": ""},
        "fields": {"iso.3.6.1.2.1.2.2.1.2.38": "eth1", "iso.3.6.1.2.1.2.2.1.1.38": 38, "iso.3.6.1.2.1.1.3.0": 882671}}])
 check("Telegraf 1.40 の \"iso.\" 始まりの数値 OID でも ifDescr を取る（source タグでも機器名が出る。2026-09-18 実機）",
-      "hq-ce-01#link_down#eth1" in ddb.items and ddb.plain("hq-ce-01#link_down#eth1")["target"] == "eth1")
+      "hq-ce-01#link_down#eth1" in nep.v and nep.plain("hq-ce-01#link_down#eth1")["target"] == "eth1")
 send([trap("203.0.113.11", mod.LINK_DOWN, {"ifDescr": "eth4", "ifIndex": 4})])
-check("MIB がある varbind 名（ifDescr）でも取れる", "hq-ce-01#link_down#eth4" in ddb.items)
-send, ddb, ev = make()
+check("MIB がある varbind 名（ifDescr）でも取れる", "hq-ce-01#link_down#eth4" in nep.v)
+send, nep, ev, hist = make()
 send([trap("203.0.113.11", mod.LINK_DOWN, {"ifIndex.5": 5})])
-check("ifDescr が無い trap は ifIndex", "hq-ce-01#link_down#5" in ddb.items)
-send, ddb, ev = make()
+check("ifDescr が無い trap は ifIndex", "hq-ce-01#link_down#5" in nep.v)
+send, nep, ev, hist = make()
 opened = send([trap("203.0.113.11", ".1.3.6.1.6.3.1.1.5.5", {})])
 key = "hq-ce-01#trap#.1.3.6.1.6.3.1.1.5.5"
-check("linkDown / linkUp 以外の trap は kind=trap で open", key in ddb.items and ddb.plain(key)["kind"] == "trap" and ddb.plain(key)["detail"] == "trap .1.3.6.1.6.3.1.1.5.5"
+check("linkDown / linkUp 以外の trap は kind=trap で open", key in nep.v and nep.plain(key)["kind"] == "trap" and nep.plain(key)["detail"] == "trap .1.3.6.1.6.3.1.1.5.5"
       and opened[0]["kind"] == "trap")
+send, nep, ev, hist = make()
+odd = "eth'1\\x\ny"
+send([iface("203.0.113.11", odd, 2)])
+check("インタフェース名に ' や \\ や改行があっても Gremlin が壊れず、そのまま戻る", nep.plain(f"hq-ce-01#link_down#{odd}")["target"] == odd)
 
 # ---- PutEvents の 10 件制限
-send, ddb, ev = make()
+send, nep, ev, hist = make()
 opened = send([iface("203.0.113.11", f"eth{i}", 2) for i in range(23)])
-check("新しい異常が 10 件を超えたら put_events を分ける", len(opened) == 23 and [len(c) for c in ev.calls] == [10, 10, 3])
+check("新しい異常が 10 件を超えたら put_events を分ける", len(opened) == 23 and [len(c) for c in ev.calls] == [10, 10, 3] and len(hist) == 23)
 
 # ---- イベントが届かなかったとき（2026-09-24 のレビュー: 以前は put_events の失敗を見ず、開いた異常のワークフローが起きないままだった）
 K1 = "hq-ce-01#link_down#eth1"
-send, ddb, ev = make()
+send, nep, ev, hist = make()
 ev.fail = ["first"]
 send([iface("203.0.113.11", "eth1", 2), iface("203.0.113.11", "eth2", 2)])
 check("FailedEntryCount の entry だけ打ち直し、届いたら notified=true",
       [len(c) for c in ev.calls] == [2, 1] and sleeps == [2] and ev.calls[1][0] == ev.calls[0][0]
-      and ddb.plain(K1)["notified"] is True and ddb.plain("hq-ce-01#link_down#eth2")["notified"] is True)
-send, ddb, ev = make()
+      and nep.plain(K1)["notified"] is True and nep.plain("hq-ce-01#link_down#eth2")["notified"] is True)
+send, nep, ev, hist = make()
 ev.fail = ["all", "all", "raise"]
 opened = send([iface("203.0.113.11", "eth1", 2)])
 check(f"{mod.EVENT_RETRIES} 回とも届かなければ落とさずに notified=false のまま残す（例外でもクエリを止めない）",
       len(opened) == 1 and len(ev.calls) == mod.EVENT_RETRIES and sleeps == [2, 4]
-      and ddb.plain(K1)["status"] == "open" and ddb.plain(K1)["notified"] is False)
-first = ddb.plain(K1)["first_seen"]
-check("次のバッチで同じ down が来たら、開いたまま（first_seen はそのまま）で AnomalyOpened を出し直す",
+      and nep.plain(K1)["status"] == "open" and nep.plain(K1)["notified"] is False)
+first = nep.plain(K1)["first_seen"]
+check("次のバッチで同じ down が来たら、開いたまま（first_seen はそのまま）で AnomalyOpened を出し直す（履歴は足さない）",
       send([iface("203.0.113.11", "eth1", 2)]) == [] and len(ev.calls) == 4 and ev.calls[-1][0]["DetailType"] == "AnomalyOpened"
-      and json.loads(ev.calls[-1][0]["Detail"])["first_seen"] == first and ddb.plain(K1)["notified"] is True)
+      and json.loads(ev.calls[-1][0]["Detail"])["first_seen"] == first and nep.plain(K1)["notified"] is True and len(hist) == 1)
 check("届いたあとは出し直さない", send([iface("203.0.113.11", "eth1", 2)]) == [] and len(ev.calls) == 4)
 ev.fail = ["all", "all", "all"]
 send([iface("203.0.113.11", "eth1", 1)])
-check("AnomalyResolved が届かなければ resolved で notified=false", ddb.plain(K1)["status"] == "resolved" and ddb.plain(K1)["notified"] is False)
+check("AnomalyResolved が届かなければ resolved で notified=false", nep.plain(K1)["status"] == "resolved" and nep.plain(K1)["notified"] is False)
 n = len(ev.calls)
 send([iface("203.0.113.11", "eth1", 1)])
 check("次の up で AnomalyResolved を出し直し（resolved_at は最初のまま）、届いたら notified=true",
       len(ev.calls) == n + 1 and ev.calls[-1][0]["DetailType"] == "AnomalyResolved"
-      and json.loads(ev.calls[-1][0]["Detail"])["resolved_at"] == ddb.plain(K1)["resolved_at"] and ddb.plain(K1)["notified"] is True)
+      and json.loads(ev.calls[-1][0]["Detail"])["resolved_at"] == nep.plain(K1)["resolved_at"] and nep.plain(K1)["notified"] is True
+      and len(hist) == 2)
 check("そのあとの up は何も出さない", send([iface("203.0.113.11", "eth1", 1)]) == [] and len(ev.calls) == n + 1)
-send, ddb, ev = make()
+send, nep, ev, hist = make()
 send([iface("203.0.113.11", "eth1", 2)])
-del ddb.items[K1]["notified"]
-check("notified の無い古い項目は届いたものとみなす（出し直さない）", send([iface("203.0.113.11", "eth1", 2)]) == [] and len(ev.calls) == 1)
-send, ddb, ev = make()
+del nep.v[K1]["notified"]
+check("notified の無い古い頂点は届いたものとみなす（出し直さない）", send([iface("203.0.113.11", "eth1", 2)]) == [] and len(ev.calls) == 1)
+send, nep, ev, hist = make()
 ev.fail = ["all", "all", "all"]
 send([iface("203.0.113.11", "eth1", 2)])
 send([iface("203.0.113.11", "eth1", 1)])
 check("届かなかった開きのあとで閉じたら、古い開きには印を付けない（AnomalyResolved の方で notified を見る）",
-      ddb.plain(K1)["status"] == "resolved" and ddb.plain(K1)["notified"] is True and ev.types()[-1] == "AnomalyResolved")
+      nep.plain(K1)["status"] == "resolved" and nep.plain(K1)["notified"] is True and ev.types()[-1] == "AnomalyResolved")
 
 # ---- trap の TTL（link 以外の trap には「直った」の知らせが無い）
 clk = Clock()
-send, ddb, ev = make(page=1, clock=clk)
+send, nep, ev, hist = make(clock=clk)
 T1, T2 = "hq-ce-01#trap#.1.3.6.1.6.3.1.1.5.5", "dc-ce-01#trap#.1.3.6.1.6.3.1.1.5.5"
 send([trap("203.0.113.11", ".1.3.6.1.6.3.1.1.5.5", {}), trap("203.0.113.12", ".1.3.6.1.6.3.1.1.5.5", {}), iface("203.0.113.11", "eth1", 2)])
+sweeps = lambda: sum("has('kind','trap')" in q for q in nep.queries)
 clk.t += mod.TRAP_TTL - 1
-check("TRAP_TTL に満たなければ閉じない", send([]) == [] and ddb.plain(T1)["status"] == "open")
+check("TRAP_TTL に満たなければ閉じない", send([]) == [] and nep.plain(T1)["status"] == "open")
 clk.t += 30
-check("TRAP_SWEEP 秒たたないうちは見回らない", send([]) == [] and ddb.plain(T1)["status"] == "open" and len(ddb.queries) == 2)
+check("TRAP_SWEEP 秒たたないうちは見回らない", send([]) == [] and nep.plain(T1)["status"] == "open" and sweeps() == 2)
 clk.t += mod.TRAP_SWEEP
 n = len(ev.calls)
 send([])
-check("最後の trap から TRAP_TTL 秒たった trap を resolved にし、AnomalyResolved（source=ttl）を出す。ページをまたいでも全部",
-      ddb.plain(T1)["status"] == "resolved" and ddb.plain(T2)["status"] == "resolved"
+check("最後の trap から TRAP_TTL 秒たった trap を resolved にし、AnomalyResolved（source=ttl）を出す",
+      nep.plain(T1)["status"] == "resolved" and nep.plain(T2)["status"] == "resolved"
       and sorted(d["anomaly_id"] for d in ev.details()[-2:]) == sorted([T1, T2]) and all(d["source"] == "ttl" for d in ev.details()[-2:])
-      and ev.types()[-2:] == ["AnomalyResolved", "AnomalyResolved"] and len(ev.calls) == n + 1
-      and ddb.queries[-1].get("ExclusiveStartKey") is not None and ddb.plain(T1)["notified"] is True)
-check("link_down は TTL で閉じない（ポーリングの up で閉じる）", ddb.plain(K1)["status"] == "open")
-check("見回りは status-last_seen-index を kind=trap で引く",
-      ddb.queries[-1]["IndexName"] == mod.ANOMALY_INDEX == "status-last_seen-index" and ddb.queries[-1]["ExpressionAttributeValues"][":k"] == {"S": "trap"})
+      and ev.types()[-2:] == ["AnomalyResolved", "AnomalyResolved"] and len(ev.calls) == n + 1 and nep.plain(T1)["notified"] is True)
+check("TTL で閉じたものも履歴に resolved（source=ttl）", sorted(r["anomaly_id"] for r in hist[-2:]) == sorted([T1, T2])
+      and all(r["event"] == "resolved" and r["source"] == "ttl" for r in hist[-2:]))
+check("link_down は TTL で閉じない（ポーリングの up で閉じる）", nep.plain(K1)["status"] == "open")
 send([trap("203.0.113.11", ".1.3.6.1.6.3.1.1.5.5", {})])
-check("閉じた trap がまた来たら開き直す（別の発生）", ddb.plain(T1)["status"] == "open" and ddb.plain(T1)["first_seen"] == clk.t)
-# GSI は結果整合。見回りが古い last_seen を読んでも、本体の last_seen が新しければ閉じない
+check("閉じた trap がまた来たら開き直す（別の発生）", nep.plain(T1)["status"] == "open" and nep.plain(T1)["first_seen"] == clk.t)
 clk.t += mod.TRAP_TTL + mod.TRAP_SWEEP
-stale = dict(ddb.items[T1])
 send([trap("203.0.113.11", ".1.3.6.1.6.3.1.1.5.5", {})])
-_query = ddb.query
-ddb.query = lambda **kw: {"Items": [stale]}
-clk.t += mod.TRAP_SWEEP
-send([])
-ddb.query = _query
-check("GSI が古い行を返しても、本体の last_seen が新しければ閉じない", ddb.plain(T1)["status"] == "open")
+check("見回りと同じバッチに trap が来たキーは閉じない（来た trap で last_seen が進む）",
+      nep.plain(T1)["status"] == "open" and nep.plain(T1)["last_seen"] == clk.t and hist[-1]["event"] == "opened")
 
 # ---- 異常にしない trap と OID の形
 check("coldStart / warmStart / nsNotifyShutdown / nsNotifyRestart は異常にしない（\"iso.\" でも \"1.\" でも）",
@@ -394,6 +436,7 @@ check("知らない trap は異常として開く（許可リストにしない�
       == ("trap", ".1.3.6.1.4.1.9.9.41.2.0.1"))
 _src = open(SRC, encoding="utf-8").read()
 check("detect は空のマイクロバッチでも sender を呼ぶ（TTL の見回りと出し直しを止めない）", 'if records or name == "detect":' in _src)
+
 
 # ---- ログの経路: FRR の log file → lab の EC2 の /var/log/netops-lab/<機器名> → rsyslog → Telegraf の EC2 の socket_listener → Kafka の logs → Spark（2026-09-19）
 def _read(*parts):

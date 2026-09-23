@@ -4,9 +4,8 @@
 
   runner()              TOOLS（ツール名 → 関数）から run_tool を作る。4 モジュールが同じものを持っていた
   client() / session()  boto3 のクライアントとセッションをプロセスに 1 つだけ作って使い回す
-  Param                 「環境変数が先、無ければ SSM」の設定値（表の名前・Neptune の接続先・Gateway の URL・Runtime の ARN）
-  plain() / jst() / narrow() / read_count()
-                        DynamoDB の表（anomalies.py と proposals.py）を同じ読み方にするためのもの
+  Param                 「環境変数が先、無ければ SSM」の設定値（Neptune の接続先・Gateway の URL・Runtime の ARN）
+  jst()                 epoch 秒を日本時間の文字列に（anomalies.py と proposals.py）
 
 このファイルは 4 か所で動く。AgentCore Runtime のコンテナ（agent/Dockerfile）、tools Lambda の zip
 （terraform/workflow/gateway.tf の archive_file）、Web の EC2（terraform/base/core の出力 upload_web_command）、
@@ -27,8 +26,6 @@ PARAM_PREFIX = os.environ.get("PARAM_PREFIX", "")
 REGION = os.environ.get("AWS_REGION") or os.environ.get("BEDROCK_REGION") or None
 JST = timezone(timedelta(hours=9))
 TTL = 60  # 設定値を SSM から引き直す間隔（秒）。まだ配備していないときに毎回叩かないため
-# 機器で絞るときに読む件数。DynamoDB の Limit は絞り込みより先に効くので、返す件数より多めに読む（この PoC の表は数十件）
-READ_WHEN_FILTERING = 100
 
 _clients: dict = {}
 _sessions: list = []
@@ -86,7 +83,7 @@ def session():
 class Param:
     """環境変数 <env> が先で、無ければ SSM の <PARAM_PREFIX>/<param> から引いて覚えておく設定値。
 
-    Terraform が apply したときに決まるもの（表の名前・Neptune の接続先・Gateway の URL・Runtime の ARN）を、
+    Terraform が apply したときに決まるもの（Neptune の接続先・Gateway の URL・Runtime の ARN）を、
     どのモジュールも同じ手順で読むためのもの。どちらも無ければ空文字を返し、呼ぶ側はそれを見て
     「まだ配備されていない」と案内する（その機能をまだ作っていない構成でも落ちないため）。
     引けなかったときは ttl 秒のあいだ SSM を引き直さない（まだ無いものを毎回叩かない）。
@@ -113,32 +110,7 @@ class Param:
         return self.cached
 
 
-# ---------------------------------------------------------------- DynamoDB の表
-def read_count(device_id: str, limit: int) -> int:
-    """DynamoDB から読む件数。機器で絞るなら多めに読む（絞った結果が limit 件に足りなくならないように）"""
-    return READ_WHEN_FILTERING if device_id else limit
-
-
-def narrow(items: list, device_id: str, limit: int) -> list:
-    """読んだ項目を機器で絞って limit 件に切る。**整形する前に呼ぶ**（返さない行を整形しても捨てるだけなので）"""
-    if device_id:
-        items = [i for i in items if i.get("device_id", {}).get("S") == device_id]
-    return items[:limit]
-
-
-def plain(item: dict) -> dict:
-    """DynamoDB の型付きの項目（{"S": "x"} / {"N": "1"}）を素の値の辞書に"""
-    out = {}
-    for k, v in item.items():
-        if "S" in v:
-            out[k] = v["S"]
-        elif "N" in v:
-            out[k] = int(v["N"]) if v["N"].lstrip("-").isdigit() else float(v["N"])
-        elif "BOOL" in v:
-            out[k] = v["BOOL"]
-    return out
-
-
+# ---------------------------------------------------------------- 表示
 def jst(epoch) -> str:
     """epoch 秒を日本時間の「2026-09-18 12:34:56」に。空や 0 なら空文字"""
     return datetime.fromtimestamp(int(epoch), JST).strftime("%Y-%m-%d %H:%M:%S") if epoch else ""

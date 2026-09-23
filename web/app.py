@@ -4,7 +4,7 @@
   config.py         環境変数（.env / systemd）の読み出しと、agent/ のモジュールへのパス通し
   chat.py           「チャット」タブ。質問を AgentCore Runtime に送る
   topology_view.py  「トポロジ」タブ。SVG の図・機器の表・Neptune でのリンク編集
-  incident_view.py  「異常一覧」「承認」タブ。DynamoDB の anomalies と proposals
+  incident_view.py  「異常一覧」「承認」タブ。Neptune の anomaly / proposal の頂点
 
 agent/ の topology.py / anomalies.py / graph.py / proposals.py / toolkit.py をそのまま同じディレクトリに置いて import する
 （terraform/base/core の出力 upload_web_command が web/*.py と一緒に S3 へ上げる）。
@@ -76,7 +76,7 @@ with gr.Blocks(title=f"{TITLE} チャット") as demo:
             an_status = gr.Radio(["open", "resolved"], value="open", label="状態（open = 未解消）", scale=3)
             an_refresh = gr.Button("更新", scale=1)
         an_msg = gr.Markdown()
-        an_table = gr.Dataframe(pd.DataFrame(columns=iv.ANOMALY_COLS), interactive=False, wrap=True, label="異常（Spark が DynamoDB に書いたもの）")
+        an_table = gr.Dataframe(pd.DataFrame(columns=iv.ANOMALY_COLS), interactive=False, wrap=True, label="異常（Spark が Neptune に書いたもの。開いた・閉じたの履歴は S3 Tables の anomaly_events）")
         an_refresh.click(iv.anomaly_table, [an_status], [an_msg, an_table])
         an_status.change(iv.anomaly_table, [an_status], [an_msg, an_table])
         demo.load(iv.anomaly_table, [an_status], [an_msg, an_table])
@@ -88,7 +88,7 @@ with gr.Blocks(title=f"{TITLE} チャット") as demo:
             pr_refresh = gr.Button("更新", scale=1)
         pr_msg = gr.Markdown()
         pr_table = gr.Dataframe(pd.DataFrame(columns=iv.PROPOSAL_COLS), interactive=False, wrap=True, column_widths=iv.PROPOSAL_WIDTHS,
-                                label="修復案（ワーカーが DynamoDB に書いたもの。長い列は折り返し。全文は下の「詳細」）")
+                                label="修復案（ワーカーが Neptune に書いたもの。長い列は折り返し。全文は下の「詳細」）")
         with gr.Row():
             pr_id = gr.Dropdown([], value=None, allow_custom_value=True, scale=4,
                                 label="proposal_id（表の 1 列目。選ぶと下に全文が出る）")
@@ -106,7 +106,7 @@ with gr.Blocks(title=f"{TITLE} チャット") as demo:
         # 選び直したら「読んだ」を外す（前の案で入れたチェックのまま別の案を承認させない）
         pr_id.change(lambda _: False, [pr_id], [pr_ok])
         # 30 秒ごとに描き直す（Spark の検知が 1 分、ワーカーの確認が 30 秒おきなので、ボタンを押さなくても追える。
-        # 読むのは Neptune 1 回と DynamoDB のクエリ 2 回で、開いているブラウザの数だけ）。proposal_id の選択はそのまま残す
+        # 読むのは Neptune のクエリ 3 回（トポロジ・異常・修復案）で、開いているブラウザの数だけ）。proposal_id の選択はそのまま残す
         ticker = gr.Timer(30)
         ticker.tick(tv.redraw_topology, None, [topo_html, topo_table])
         ticker.tick(iv.anomaly_table, [an_status], [an_msg, an_table])

@@ -30,7 +30,7 @@ resource "aws_iam_role_policy_attachment" "execution" {
 # ---------------------------------------------------------------- task role (the worker)
 resource "aws_iam_role" "task" {
   name               = "${local.name_prefix}-workflow-task"
-  description        = "Workflow worker - anomaly queue, anomaly and proposal tables, chat runtime, SSM Run Command on the lab EC2, ECS Exec"
+  description        = "Workflow worker - anomaly queue, Neptune (anomalies and proposals), proposal audit table (S3 Tables), chat runtime, SSM Run Command on the lab EC2, ECS Exec"
   assume_role_policy = data.aws_iam_policy_document.ecs_tasks_trust.json
 }
 
@@ -41,29 +41,34 @@ data "aws_iam_policy_document" "task" {
     resources = [aws_sqs_queue.anomalies.arn]
   }
 
+  # 異常の頂点を読み、修復案の頂点を読み書きする（workflow/awsio.py の gremlin）
   statement {
-    sid = "Anomalies"
+    sid = "Neptune"
     actions = [
-      "dynamodb:Query",
-      "dynamodb:GetItem",
-      "dynamodb:Scan",
+      "neptune-db:ReadDataViaQuery",
+      "neptune-db:WriteDataViaQuery",
+      "neptune-db:DeleteDataViaQuery",
+      "neptune-db:GetQueryStatus",
     ]
-    resources = [
-      local.anomaly_table_arn,
-      "${local.anomaly_table_arn}/index/*",
-    ]
+    resources = [local.neptune_data_arn]
   }
 
+  # 修復案の証跡を proposal_events に append する（PyIceberg から S3 Tables の Iceberg REST エンドポイント）
   statement {
-    sid = "Proposals"
+    sid = "AuditTable"
     actions = [
-      "dynamodb:Query",
-      "dynamodb:GetItem",
-      "dynamodb:Scan",
-      "dynamodb:PutItem",
-      "dynamodb:UpdateItem",
+      "s3tables:GetTableBucket",
+      "s3tables:GetNamespace",
+      "s3tables:GetTable",
+      "s3tables:GetTableMetadataLocation",
+      "s3tables:UpdateTableMetadataLocation",
+      "s3tables:GetTableData",
+      "s3tables:PutTableData",
     ]
-    resources = local.proposal_table_arns
+    resources = [
+      local.audit_bucket_arn,
+      "${local.audit_bucket_arn}/table/*",
+    ]
   }
 
   statement {

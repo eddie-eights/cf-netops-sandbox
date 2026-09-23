@@ -1,8 +1,9 @@
 # netops-poc - PIPELINE analytics root module. A Spark streaming job on EMR Serverless reads the Telegraf messages
 # (topics metrics / traps) from MSK (terraform/pipeline/stream) and stores them in S3 Tables (Iceberg, all topics), OpenSearch Serverless
 # (log topics) and Amazon Managed Service for Prometheus (metric topics) - see var.sinks. The same job detects link_down / trap anomalies,
-# writes them to the DynamoDB table of terraform/pipeline/stream and puts an AnomalyOpened event on the default EventBridge bus (terraform/workflow listens).
-# The table bucket is the long-term record of the pipeline; DynamoDB (terraform/pipeline/stream) keeps only the current anomalies.
+# keeps the current ones as anomaly vertices in Neptune (terraform/pipeline/graph), appends every open / resolve to the S3 Tables anomaly_events
+# (audit trail) and puts AnomalyOpened / AnomalyResolved on the default EventBridge bus (terraform/workflow and terraform/pipeline/graph listen).
+# The table bucket is the long-term record of the pipeline (raw messages, anomaly_events, and proposal_events written by terraform/workflow).
 # Costs about 0.17 USD per hour while the streaming job runs - ops/down.sh cancels the job and destroys this root.
 
 # リソース名の接頭辞であり Project タグの値。デプロイする人の名前（var.owner）から作るので、
@@ -14,7 +15,7 @@ locals {
 data "aws_caller_identity" "current" {}
 data "aws_partition" "current" {}
 
-# VPC / サブネット / SG / バケットは terraform/base/core、MSK は terraform/pipeline/stream の state から読む
+# VPC / サブネット / SG / バケットは terraform/base/core、MSK は terraform/pipeline/stream、Neptune は terraform/pipeline/graph の state から読む
 data "terraform_remote_state" "main" {
   backend = "local"
 
@@ -31,6 +32,14 @@ data "terraform_remote_state" "stream" {
   }
 }
 
+data "terraform_remote_state" "graph" {
+  backend = "local"
+
+  config = {
+    path = "${path.module}/../graph/terraform.tfstate"
+  }
+}
+
 locals {
   account_id = data.aws_caller_identity.current.account_id
   partition  = data.aws_partition.current.partition
@@ -42,12 +51,16 @@ locals {
   bucket_arn     = "arn:${local.partition}:s3:::${local.bucket}"
 
   # stream が無いと読む Kafka が無い。下の precondition で「stream を先に」と出す
-  msk_cluster_arn   = try(data.terraform_remote_state.stream.outputs.msk_cluster_arn, "")
-  msk_sg_id         = try(data.terraform_remote_state.stream.outputs.msk_security_group_id, "")
-  bootstrap         = try(data.terraform_remote_state.stream.outputs.bootstrap_brokers, "")
-  anomaly_table     = try(data.terraform_remote_state.stream.outputs.anomaly_table_name, "")
-  anomaly_table_arn = "arn:${local.partition}:dynamodb:${var.region}:${local.account_id}:table/${local.anomaly_table}"
-  event_bus_arn     = "arn:${local.partition}:events:${var.region}:${local.account_id}:event-bus/${var.event_bus}"
+  msk_cluster_arn = try(data.terraform_remote_state.stream.outputs.msk_cluster_arn, "")
+  msk_sg_id       = try(data.terraform_remote_state.stream.outputs.msk_security_group_id, "")
+  bootstrap       = try(data.terraform_remote_state.stream.outputs.bootstrap_brokers, "")
+
+  # 検知は異常の「いま」を Neptune に書く。graph が無いと検知できないので、network.tf の precondition で「graph を先に」と出す
+  neptune_host        = try(data.terraform_remote_state.graph.outputs.cluster_endpoint, "")
+  neptune_endpoint    = "${local.neptune_host}:8182"
+  neptune_sg_id       = try(data.terraform_remote_state.graph.outputs.neptune_security_group_id, "")
+  neptune_resource_id = try(data.terraform_remote_state.graph.outputs.cluster_resource_id, "")
+  event_bus_arn       = "arn:${local.partition}:events:${var.region}:${local.account_id}:event-bus/${var.event_bus}"
 
   # arn:aws:kafka:<region>:<account>:cluster/<name>/<uuid> → topic/<name>/<uuid>/* と group/<name>/<uuid>/*
   topic_arns = "${replace(local.msk_cluster_arn, ":cluster/", ":topic/")}/*"
@@ -67,8 +80,9 @@ locals {
   log_group        = "/aws/emr-serverless/${local.name_prefix}"
   table_bucket     = "${local.name_prefix}-tables"
   iceberg_table    = "${local.catalog_name}.${var.namespace}.${var.table_name}"
-  # iceberg を選ばないときはテーブルバケットも s3tables のエンドポイントも作らない（tables.tf / network.tf）
-  table_bucket_arn = local.sink_iceberg ? aws_s3tables_table_bucket.tables[0].arn : ""
+  # 証跡（tables.tf）。テーブルバケットと s3tables のエンドポイントは iceberg を選ばなくても作る
+  anomaly_events_table = "${local.catalog_name}.${var.namespace}.${aws_s3tables_table.anomaly_events.name}"
+  table_bucket_arn     = aws_s3tables_table_bucket.tables.arn
 
   # 格納先（sinks.tf。spark/snmp_sinks.py の --sinks と同じ名前）
   sink_iceberg    = contains(var.sinks, "iceberg")

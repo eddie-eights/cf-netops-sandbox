@@ -16,16 +16,18 @@ flowchart LR
   SPARK -->|"SINK_S3"| ICE["S3 Tables<br/>snmp_metrics"]
   SPARK -->|"SINK_OPENSEARCH"| OS["OpenSearch<br/>snmp-logs"]
   SPARK -->|"SINK_PROMETHEUS"| PROM["Prometheus"]
-  SPARK -->|"link_down の open / resolved"| DDB["DynamoDB<br/>異常テーブル"]
+  SPARK -->|"開いた / 閉じた（証跡）"| AEV["S3 Tables<br/>anomaly_events"]
+  SPARK -->|"異常の open / resolved"| NEP["Neptune（graph）<br/>トポロジ・状態・異常"]
   SPARK -->|"AnomalyOpened / Resolved"| EB["EventBridge"]
-  EB --> GL["Lambda graph-status"] --> NEP["Neptune（graph）<br/>トポロジと状態"]
+  EB --> GL["Lambda graph-status"] --> NEP
 ```
 
 - lab は Web やエージェントとはつながっていない。使うのは SNMP とログの発生源としてだけ。
 - Telegraf は lab とは別の EC2 で動く（stream を作るときだけ。`terraform/pipeline/lab` の `create_telegraf`）。Telegraf だけを止める・作り直す・ログを見ることができる。
 - 機器は lab の EC2 の中の docker network（`203.0.113.0/24`）にいる。Telegraf の EC2 からのポーリングは VPC のルートで lab の EC2 を通り、trap は lab の EC2 が Telegraf へ DNAT し、FRR のログは lab の EC2 の rsyslog が Telegraf の `5140/tcp` へ送る。この 3 つは lab の EC2 で `sudo lab forward` が張る（`lab up` が毎回呼ぶ）。
-- 履歴の正本は S3 Tables。Web の「異常一覧」とエージェントの `list_anomalies` は DynamoDB を読む。
-- Neptune が無いとき（`SKIP_GRAPH=1`）は、トポロジは `agent/data/` の静的データになる。
+- 履歴の正本は S3 Tables。異常の「いま」は Neptune の頂点 `anomaly` で、Web の「異常一覧」とエージェントの `list_anomalies` はそれを読む。開いた・閉じたの履歴は `anomaly_events` に残る（[data-stores.md](data-stores.md)）。
+- 検知が Neptune に書くので、analytics は graph が要る。`SKIP_GRAPH=1` にするなら `SKIP_ANALYTICS=1` も書く（トポロジは `agent/data/` の静的データになり、異常一覧は出ない）。
+- テーブルバケットは `SINK_S3=0` でも作る（証跡の置き場）。`ops/down.sh` はバケットごと消すので、証跡も消える。
 
 ## lab に入る
 
