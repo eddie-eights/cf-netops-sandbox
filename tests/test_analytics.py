@@ -347,7 +347,10 @@ check("up.sh の SPARK_VERSION は emr_release_label の Spark（3.5.6）", re.s
 check("up.sh のスクリプトは spark/snmp_sinks.py", re.search(r'^SPARK_SCRIPT=spark/snmp_sinks\.py$', up, re.M) is not None and "snmp_to_iceberg" not in up)
 check("up.sh は SINK_S3 / SINK_OPENSEARCH / SINK_PROMETHEUS（既定 1）を terraform/pipeline/analytics の sinks に組んで渡す",
       re.search(r'^SINK_S3="\$\{SINK_S3:-1\}"; SINK_OPENSEARCH="\$\{SINK_OPENSEARCH:-1\}"; SINK_PROMETHEUS="\$\{SINK_PROMETHEUS:-1\}"$', up, re.M) is not None
-      and 'ANALYTICS_VARS=(-var "sinks=[$SINKS_TF]")' in up and 'tf_apply pipeline/analytics "${ANALYTICS_VARS[@]}"' in up)
+      and 'ANALYTICS_VARS=(-var "sinks=[$SINKS_TF]" -var "device_map=$DEVICE_MAP")' in up and 'tf_apply pipeline/analytics "${ANALYTICS_VARS[@]}"' in up)
+check("up.sh は検知の device map を lab の定義から作って渡し（lab/lab_topology.py --device-map）、graph の投入は Spark のジョブより先",
+      'DEVICE_MAP=$("${PY[@]}" lab/lab_topology.py lab --device-map)' in up
+      and up.index("7-3b. Neptune が空なら") < up.index("tf_apply pipeline/analytics") < up.index('log "7-5. Spark'))
 check("up.sh は AGENT=0 でも CloudWatch へのログを切らない（logs のエンドポイントは土台の共用のもの。2026-09-18）",
       "cloudwatch_logging=false" not in up and re.search(r'variable "cloudwatch_logging" \{[^}]*default\s*=\s*true', tf) is not None)
 _core = "".join(open(os.path.join(ROOT, "terraform", "base", "core", n), encoding="utf-8").read() for n in sorted(os.listdir(os.path.join(ROOT, "terraform", "base", "core"))) if n.endswith(".tf"))

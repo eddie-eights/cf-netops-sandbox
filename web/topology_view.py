@@ -16,8 +16,8 @@ from config import log
 import graph  # config が sys.path を通したあとで読む（agent/graph.py）
 import topology
 
-ROLE_ORDER = ["core", "pe", "distribution", "aggregation", "access", "ce", "host"]
-ROLE_LABEL = {"pe": "キャリア PE", "ce": "拠点 CE", "host": "LAN 端末"}
+ROLE_ORDER = topology.ROLE_ORDER
+ROLE_LABEL = {"pe": "キャリア PE", "ce": "拠点 CE", "host": "LAN 端末", "unknown": "未登録"}
 DOWN_COLOR = "#c62828"
 
 
@@ -43,10 +43,14 @@ def device_table() -> pd.DataFrame:
         degree[l["b"]] = degree.get(l["b"], 0) + 1
     rows = []
     for d in topology.DEVICES:
+        # 落ちているインタフェース（検知が Neptune のインタフェースの頂点に書いたもの）。未登録の IF には印を付ける
+        bad = [f'{i["name"]} {i["status"]}' + ("（未登録）" if i.get("registered") is False else "")
+               for i in d.get("interfaces") or [] if (i.get("status") or "UP") != "UP"]
         rows.append({
             "機器": d["device_id"], "拠点": d["site"], "役割": d["role"], "AS": d.get("asn") or "",
             "管理 IP": d.get("mgmt_ip") or "", "リンク数": degree.get(d["device_id"], 0),
-            "監視": "対象" if d.get("enabled") else "対象外", "状態": d.get("status") or "UP",
+            "監視": "未登録" if d.get("registered") is False else "対象" if d.get("enabled") else "対象外",
+            "状態": d.get("status") or "UP", "IF の異常": ", ".join(bad),
         })
     rows.sort(key=lambda r: (ROLE_ORDER.index(r["役割"]) if r["役割"] in ROLE_ORDER else 99, r["機器"]))
     return pd.DataFrame(rows)
@@ -58,7 +62,7 @@ def topology_svg() -> str:
     layers = {}
     for n in topology.DEVICES:
         layers.setdefault(n["role"], []).append(n["device_id"])
-    roles = [r for r in ROLE_ORDER if r in layers]
+    roles = [r for r in ROLE_ORDER if r in layers] + sorted(r for r in layers if r not in ROLE_ORDER)  # 知らない役割も描く
     width, row_h, top, left, node_w, node_h = 860, 150, 50, 70, 132, 44
     pos = {}
     for i, role in enumerate(roles):
@@ -90,10 +94,12 @@ def topology_svg() -> str:
                    f'{html.escape((l.get("a_if") or "") + "/" + (l.get("b_if") or ""))}</text>')
     for dev, (x, y) in pos.items():
         n = topology.NODES[dev]
-        fill = {"pe": "#e8f0fe", "ce": "#e6f4ea", "host": "#f3f4f6"}.get(n["role"], "#fff")
+        fill = {"pe": "#e8f0fe", "ce": "#e6f4ea", "host": "#f3f4f6", "unknown": "#fff4e5"}.get(n["role"], "#fff")
         asn = f'AS {n["asn"]}' if n.get("asn") else n["site"]
         st = n.get("status") or "UP"
         border = f'stroke="{DOWN_COLOR}" stroke-width="2.5"' if st != "UP" else 'stroke="#374151" stroke-width="1.2"'
+        if n.get("registered") is False:
+            border += ' stroke-dasharray="4 3"'
         out.append(f'<rect x="{x - node_w / 2:.0f}" y="{y - node_h / 2:.0f}" width="{node_w}" height="{node_h}" rx="6" '
                    f'fill="{fill}" {border}><title>{html.escape(dev + " " + st)}</title></rect>')
         out.append(f'<text x="{x:.0f}" y="{y - 3:.0f}" text-anchor="middle" fill="#111827" font-weight="600">{html.escape(dev)}</text>')
@@ -104,6 +110,7 @@ def topology_svg() -> str:
     legend = ('<p style="font-size:12px;color:#6b7480;margin:4px 0 0">'
               '実線 = 主回線 / 破線 = 副回線 / 太線 = 1 Gbps 以上。青 = eBGP、紫 = iBGP、灰 = 拠点 LAN。'
               '<span style="color:#c62828">赤</span> = 落ちている（Spark の検知が Neptune の status に反映したもの。復旧すると戻る）。'
+              '橙の点線の枠 = 未登録（トポロジに無い機器から検知だけが来た。lab に足したなら ops/sync-graph.sh --replace で登録する）。'
               f'アドレスと帯域はすべて架空（lab と同じ）。元データ: {html.escape(src)}</p>')
     return "".join(out) + legend
 

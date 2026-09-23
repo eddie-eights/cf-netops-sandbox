@@ -532,6 +532,10 @@ if [ -z "$SKIP_LAB" ]; then
     log "5-1b. Telegraf の材料（telegraf/ と Telegraf の rpm）を s3://$KB_BUCKET/telegraf/ に置く"
     fetch "https://dl.influxdata.com/telegraf/releases/$TELEGRAF_RPM" "$TELEGRAF_RPM" || die "Telegraf の rpm が取れない（社内 PC なら docs/setup.md「社内 PC の CA」）"
     aws s3 sync --only-show-errors telegraf/ "s3://$KB_BUCKET/telegraf/"
+    # ポーリング先は lab の定義から作る（機器の一覧を lab の定義 1 か所にする。telegraf.sh render が telegraf.conf.in の __SNMP_AGENTS__ を埋める）
+    SNMP_AGENTS=$("${PY[@]}" lab/lab_topology.py lab --snmp-agents) || die "lab/lab_topology.py が lab の定義からポーリング先を作れなかった"
+    printf '%s\n' "$SNMP_AGENTS" | aws s3 cp --only-show-errors - "s3://$KB_BUCKET/telegraf/snmp_agents.txt"
+    echo "Telegraf のポーリング先: $SNMP_AGENTS"
     aws s3 cp --only-show-errors "$TELEGRAF_RPM" "s3://$KB_BUCKET/telegraf/"
   fi
 fi
@@ -610,18 +614,40 @@ if [ -n "$LAB_INSTANCE_ID" ]; then
   fi
 fi
 
-# ---- 7-3. analytics ------------------------------------------------------------------
+# ---- 7-3. graph と投入 --------------------------------------------------------------
+# Spark のジョブ（7-5）より先にトポロジを入れる。後だと、起動直後の検知が Neptune に無い機器に当たって「未登録」の頂点ができる
+# （graph.seed が入れ直すときに引き継ぐので壊れはしないが、画面に一時的に未登録が出る）。graph は 3-2 から裏で走っていて、
+# stream（MSK に 20〜30 分）の方が長いので、ここで待ってもたいてい待たない
+if [ -n "$GRAPH_PID" ]; then
+  log "7-3. graph の apply が終わるのを待つ"
+  rc=0; wait "$GRAPH_PID" || rc=$?; GRAPH_PID=""
+  if [ "$rc" -ne 0 ]; then
+    tail -n 40 "$GRAPH_LOG" >&2
+    die "terraform/pipeline/graph の apply に失敗した（全文: ${GRAPH_LOG}）。直したらもう一度 ops/up.sh"
+  fi
+  tail -n 3 "$GRAPH_LOG"
+  log "7-3b. Neptune が空なら lab の定義からトポロジを入れる（初期ロード。入っていれば何もしない。入れ直すのは ops/sync-graph.sh --replace）"
+  # lab/lab_topology.py が lab/wanlab.clab.yml.in と lab/frr/*.conf から機器と回線を作り（手元で打つ）、ops/seed_graph.py を Web の EC2 の上で
+  # Web と同じ環境変数と依存で動かして Neptune に入れる。コマンドに記号を入れないよう、スクリプトもトポロジも base64 で渡す
+  LAB_TOPOLOGY_B64=$("${PY[@]}" lab/lab_topology.py lab | base64 | tr -d '\n') || die "lab/lab_topology.py が lab の定義を読めなかった"
+  run_on_instance "$INSTANCE_ID" "echo $(base64 < ops/seed_graph.py | tr -d '\n') | base64 -d | NAME_PREFIX=$PREFIX LAB_TOPOLOGY_B64=$LAB_TOPOLOGY_B64 /usr/bin/python3.13 -"
+fi
+
+# ---- 7-4. analytics ------------------------------------------------------------------
 if [ -z "$SKIP_ANALYTICS" ]; then
-  log "7-3. analytics（terraform/pipeline/analytics。EMR Serverless と格納先: ${SINKS}。数分）"
+  log "7-4. analytics（terraform/pipeline/analytics。EMR Serverless と格納先: ${SINKS}。数分）"
   # ドライバーのログは CloudWatch Logs へ出す（logs のエンドポイントは土台の共用のもの。analytics を作るなら必ずある）
-  ANALYTICS_VARS=(-var "sinks=[$SINKS_TF]")
+  # 検知の device map（別名=機器名,...）も lab の定義から作る。trap には sysName が無いので、送り元の IP から機器名を引くのに要る
+  DEVICE_MAP=$("${PY[@]}" lab/lab_topology.py lab --device-map) || die "lab/lab_topology.py が lab の定義から device map を作れなかった"
+  ANALYTICS_VARS=(-var "sinks=[$SINKS_TF]" -var "device_map=$DEVICE_MAP")
   tf_apply pipeline/analytics "${ANALYTICS_VARS[@]}"
   APP_ID=$(tf pipeline/analytics output -raw application_id); echo "APP_ID=$APP_ID"
-  log "7-4. Spark のストリーミングジョブ（Kafka → ${SINKS}）を起こす（動いていれば何もしない）"
+  log "7-5. Spark のストリーミングジョブ（Kafka → ${SINKS}）を起こす（動いていれば何もしない）"
   RUNNING=$(aws emr-serverless list-job-runs --region "$REGION" --application-id "$APP_ID" \
     --states SUBMITTED PENDING SCHEDULED RUNNING --query 'jobRuns[].id' --output text)
   if [ -n "$RUNNING" ] && [ "$RUNNING" != None ]; then
-    echo "ジョブが動いている（${RUNNING}）"
+    # 引数（device map など）は起動したときのまま。lab の機器を変えたら、ジョブを止めてから打ち直す（docs/pipeline.md）
+    echo "ジョブが動いている（${RUNNING}。lab の機器を変えたなら止めてから打ち直す。device map は起動時の引数）"
   else
     JOB_RUN_ID=$(aws emr-serverless start-job-run --region "$REGION" --application-id "$APP_ID" \
       --execution-role-arn "$(tf pipeline/analytics output -raw runtime_role_arn)" \
@@ -634,21 +660,7 @@ if [ -z "$SKIP_ANALYTICS" ]; then
   fi
 fi
 
-# ---- 8. graph と投入 --------------------------------------------------------------
-if [ -n "$GRAPH_PID" ]; then
-  log "8. graph の apply が終わるのを待つ"
-  rc=0; wait "$GRAPH_PID" || rc=$?; GRAPH_PID=""
-  if [ "$rc" -ne 0 ]; then
-    tail -n 40 "$GRAPH_LOG" >&2
-    die "terraform/pipeline/graph の apply に失敗した（全文: ${GRAPH_LOG}）。直したらもう一度 ops/up.sh"
-  fi
-  tail -n 3 "$GRAPH_LOG"
-  log "8-2. Neptune が空なら lab の定義からトポロジを入れる（初期ロード。入っていれば何もしない。入れ直すのは ops/sync-graph.sh --replace）"
-  # lab/lab_topology.py が lab/wanlab.clab.yml.in と lab/frr/*.conf から機器と回線を作り（手元で打つ）、ops/seed_graph.py を Web の EC2 の上で
-  # Web と同じ環境変数と依存で動かして Neptune に入れる。コマンドに記号を入れないよう、スクリプトもトポロジも base64 で渡す
-  LAB_TOPOLOGY_B64=$("${PY[@]}" lab/lab_topology.py lab | base64 | tr -d '\n') || die "lab/lab_topology.py が lab の定義を読めなかった"
-  run_on_instance "$INSTANCE_ID" "echo $(base64 < ops/seed_graph.py | tr -d '\n') | base64 -d | NAME_PREFIX=$PREFIX LAB_TOPOLOGY_B64=$LAB_TOPOLOGY_B64 /usr/bin/python3.13 -"
-fi
+# ---- 8-3. Web ---------------------------------------------------------------------
 if [ -z "$SKIP_STREAM" ] || [ -z "$SKIP_GRAPH" ]; then
   log "8-3. Web を再起動する（起動時に SSM の異常テーブルと Neptune を読むため）"
   run_on_instance "$INSTANCE_ID" "systemctl restart $PREFIX-web.service; $WEB_ACTIVE"

@@ -20,8 +20,8 @@ import graph
 import toolkit
 
 DATA_DIR = os.environ.get("TOPOLOGY_DATA_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "data"))
-# 段の順（上が上流）。frontend の ROLE_ORDER と同じ
-ROLE_ORDER = ["core", "pe", "distribution", "aggregation", "access", "ce", "host"]
+# 段の順（上が上流）。frontend の ROLE_ORDER と同じ。unknown は検知が先に来た未登録の機器（graph.set_status が作る）
+ROLE_ORDER = ["core", "pe", "distribution", "aggregation", "access", "ce", "host", "unknown"]
 MAX_HOPS = 6
 TTL = int(os.environ.get("TOPOLOGY_TTL", "60"))
 log = logging.getLogger("topology")
@@ -96,6 +96,7 @@ def _public(d: dict) -> dict:
     return {
         "device_id": d["device_id"], "site": d["site"], "role": d["role"], "mgmt_ip": d.get("mgmt_ip"),
         "asn": d.get("asn"), "monitored": bool(d.get("enabled")), "status": d.get("status") or "UP",
+        "registered": d.get("registered") is not False,
     }
 
 
@@ -138,10 +139,11 @@ def topology_graph() -> dict:
 
 
 def interfaces(device_id: str) -> list[str]:
-    """device_id につながるリンクに出てくる、その機器側のインタフェース名（Web の編集画面の選択肢）。
-    機器にインタフェースの一覧は無い（devices.yaml に持たない）ので、いま使われているものだけ"""
+    """device_id のインタフェース名（Web の編集画面の選択肢）。Neptune に lab の定義から入れた一覧があればそれと、
+    つながるリンクに出てくるその機器側の名前（静的データには一覧が無いので、いま使われているものだけ）"""
     names = {l["a_if"] if l["a"] == device_id else l["b_if"] for l in LINKS if device_id in (l["a"], l["b"])}
-    return sorted(n for n in names if n)
+    names |= {i.get("name") for i in (DEVICE_BY_ID.get(device_id) or {}).get("interfaces") or []}
+    return sorted((n for n in names if n), key=lambda n: (len(n), n))
 
 
 def link_choices() -> list[tuple[str, str]]:
@@ -158,10 +160,10 @@ def link_choices() -> list[tuple[str, str]]:
 TOOL_SPECS = [
     {"toolSpec": {
         "name": "list_devices",
-        "description": "監視対象ネットワークの機器一覧（拠点 site、役割 role、管理 IP、AS 番号、いまの状態 status = UP / DOWN / ALARM）。site や role で絞れる。",
+        "description": "監視対象ネットワークの機器一覧（拠点 site、役割 role、管理 IP、AS 番号、いまの状態 status = UP / DOWN / ALARM、registered = false はトポロジに未登録で検知だけが来た機器 role=unknown）。site や role で絞れる。",
         "inputSchema": {"json": {"type": "object", "properties": {
             "site": {"type": "string", "description": "拠点名で絞る（hq / dc / br1 / br2 / carrier）。空なら全部"},
-            "role": {"type": "string", "description": "役割で絞る（pe / ce / host）。空なら全部"},
+            "role": {"type": "string", "description": "役割で絞る（pe / ce / host / unknown）。空なら全部"},
         }}},
     }},
     {"toolSpec": {

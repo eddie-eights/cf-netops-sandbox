@@ -2,7 +2,7 @@
 # The Spark job of terraform/pipeline/analytics puts AnomalyOpened / AnomalyResolved on the default bus when a link goes down / comes back.
 # This rule sends both to a small Lambda in the VPC (graph/status_handler.py + agent/graph.py) that sets the property "status"
 # (DOWN / UP, ALARM for other traps) on the link edge or the device vertex. The web draws DOWN in red and the chat tools return it.
-# The static topology itself comes from lab/ (ops/up.sh 8-2 and ops/sync-graph.sh seed it through the web EC2) - not from here.
+# The static topology itself comes from lab/ (ops/up.sh 7-3b and ops/sync-graph.sh seed it through the web EC2) - not from here.
 # Cost: the rule is free, the Lambda is a few invocations per anomaly (free tier), no NAT and no new interface endpoint
 # (Neptune is in the VPC; the Lambda service writes its logs without going through the VPC).
 

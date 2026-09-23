@@ -2,6 +2,10 @@
 # __KAFKA_BROKERS__ / __AWS_REGION__ を埋めて /etc/telegraf/telegraf.conf に書く。ブローカーは SSM パラメータ /<接頭辞>/msk-bootstrap
 # （terraform/pipeline/stream が書く）から取る。
 #
+# ポーリング先（inputs.snmp の agents）は __SNMP_AGENTS__ で、telegraf.sh render が同じディレクトリの snmp_agents.txt で埋める。
+# snmp_agents.txt は ops/up.sh の 5-1b が lab の定義から作って s3://<バケット>/telegraf/ に置く（lab/lab_topology.py --snmp-agents。
+# 機器の一覧を lab の定義 1 か所にするため、ここに IP を書かない）。
+#
 # 流れ: CE の snmpd を 10 秒ごとにポーリング（ifTable）+ snmpd からの trap を udp 162 で受ける + FRR のログを tcp 5140 で受ける
 #       → MSK（IAM 認証、TLS）
 #   metrics トピック: interface（ifDescr / ifOperStatus / ifInErrors ...）と system（sysName / sysUpTime）
@@ -23,9 +27,9 @@
   omit_hostname = true
   snmp_translator = "gosmi"
 
-# ---- ポーリング。agents は CE の管理 IP（snmpd は CE の netns に相乗り）。lab の EC2 を経由する（上の注記）
+# ---- ポーリング。agents は監視対象（snmpd のサイドカーが付く CE）の管理 IP（snmpd は CE の netns に相乗り）。lab の EC2 を経由する（上の注記）
 [[inputs.snmp]]
-  agents = ["udp://203.0.113.11:161", "udp://203.0.113.12:161", "udp://203.0.113.13:161", "udp://203.0.113.14:161"]
+  agents = [__SNMP_AGENTS__]
   version = 2
   community = "public"
   timeout = "5s"

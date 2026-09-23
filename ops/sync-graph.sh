@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lab の定義（lab/wanlab.clab.yml.in + lab/frr/*.conf）から作ったトポロジを Neptune に入れる。ops/up.sh の 8-2 と同じ処理を単独で打つ版。
+# lab の定義（lab/wanlab.clab.yml.in + lab/frr/*.conf）から作ったトポロジを Neptune に入れる。ops/up.sh の 7-3b と同じ処理を単独で打つ版。
 # 設計の「静的なトポロジ構成の同期（初期 & 定期ロード）」の、定期ロードのほう。lab を変えたら打つ（cron で回してもよい）。
 #
 # 使い方（展開したフォルダの直下で。ops/up.sh と同じ deploy.env と AWS の認証情報）:

@@ -124,7 +124,9 @@ LOG_GROUP=$(terraform -chdir=terraform/pipeline/analytics output -raw log_group_
 
 ## Neptune のトポロジ
 
-Neptune に入れる機器と回線は、lab の定義（`lab/wanlab.clab.yml.in` の `links:` と `lab/frr/<機器>.conf`）から `lab/lab_topology.py` が作る。`ops/up.sh` は Neptune が空のときだけ入れる。
+Neptune に入れる機器・インタフェース・回線は、lab の定義（`lab/wanlab.clab.yml.in` と `lab/frr/<機器>.conf`）から `lab/lab_topology.py` が作る。インタフェースはリンクの両端だけでなく管理の eth0 なども全部入れる。`ops/up.sh` は Spark のジョブを起こす前に、Neptune が空のときだけ入れる。
+
+同じ定義から、Telegraf のポーリング先（`--snmp-agents` → `s3://<バケット>/telegraf/snmp_agents.txt`）と、Spark の検知が trap の送り元を機器名に直す device map（`--device-map`。hostname・管理 IP・全インタフェースのアドレス → 機器名）も作る。機器の一覧はこの 1 か所だけにある。
 
 ```bash
 ops/sync-graph.sh              # 空のときに入れる
@@ -135,6 +137,7 @@ ops/sync-graph.sh --dry-run    # 作った JSON を出すだけ
 - Web の「トポロジ」タブの「静的データを投入」は `agent/data/` を入れる。同じタブでリンクの追加と削除もできる。
 - 状態は Lambda `<prefix>-graph-status` が書く。`link_down` なら回線の辺に `DOWN` / `UP`、ほかの trap なら機器に `ALARM` / `UP`。
 - 入れ直すと状態は全部 `UP` に戻る。
+- トポロジに無い機器やインタフェースの異常は捨てず、「未登録」の頂点（`registered=false`、機器は `role=unknown`）として残す。Web の図では橙の点線の枠、表の「監視」は「未登録」になる。Lambda のログには WARNING で `UNREGISTERED` が出る。lab に足した機器なら `ops/sync-graph.sh --replace` で登録すると置き換わり、`UP` でない状態は引き継ぐ。
 
 ## 変えたとき
 
@@ -142,8 +145,8 @@ ops/sync-graph.sh --dry-run    # 作った JSON を出すだけ
 |---|---|
 | `lab/` の設定（`lab/frr/` など） | `ops/up.sh` を打つ（手順 5 で S3 に置き直す）→ lab に入って `sudo systemctl restart <prefix>-lab` |
 | `telegraf/telegraf.conf.in` | `ops/up.sh` を打つ（手順 5 で `s3://<バケット>/telegraf/` に置き直す）→ `aws ec2 reboot-instances --region ap-northeast-1 --instance-ids "$TELEGRAF_INSTANCE_ID"`（起動のたびに S3 から取り直す）。lab の EC2 はそのまま |
-| `spark/snmp_sinks.py` | 動いているジョブを止めてから `ops/up.sh` を打つ（手順 7-4 で新しいジョブが起きる）。止めるコマンドは下 |
-| lab の機器や回線 | 上のあと `ops/sync-graph.sh --replace` |
+| `spark/snmp_sinks.py` | 動いているジョブを止めてから `ops/up.sh` を打つ（手順 7-5 で新しいジョブが起きる）。止めるコマンドは下 |
+| lab の機器や回線 | 上のあと `ops/sync-graph.sh --replace`。監視する機器を足したら Telegraf の EC2 も再起動（ポーリング先を取り直す）し、Spark のジョブも止めてから `ops/up.sh`（device map はジョブの引数） |
 
 ジョブを止めるコマンド（`$APP_ID` と `$JOB_RUN_ID` は上の「Spark を確かめる」で入れる）:
 

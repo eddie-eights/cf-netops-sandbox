@@ -92,9 +92,9 @@ variable "sinks" {
 
 # ---------------------------------------------------------------- detection (Spark -> DynamoDB -> EventBridge)
 variable "device_map" {
-  description = "ip=device_id,... used by the detection query when a message has no sysName tag (traps). Matches lab/wanlab.clab.yml.in and agent/data/devices.yaml."
+  description = "alias=device_id,... (management IPs, interface and loopback addresses, hostnames) the detection query uses to name a device when a message has no sysName tag (traps) or the sysName differs from the device_id. ops/up.sh generates it from the lab definition with lab/lab_topology.py --device-map, so the device list lives in one place. Empty means only sysName tags are matched and trap sources stay raw IPs (they show up as unregistered devices in Neptune)."
   type        = string
-  default     = "203.0.113.11=hq-ce-01,203.0.113.12=dc-ce-01,203.0.113.13=br1-ce-01,203.0.113.14=br2-ce-01"
+  default     = ""
 }
 
 variable "event_bus" {

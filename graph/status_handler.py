@@ -6,7 +6,9 @@ Neptune の機器と回線の動的な状態（property status）を書く。設
   AnomalyResolved 同じ要素を UP に戻す
 
 zip には agent/graph.py を同梱する（Gremlin の組み立てと boto3 の neptunedata はそちら）。エンドポイントは環境変数 NEPTUNE_ENDPOINT。
-トポロジに無い機器やインタフェースは updated 0 で終わる（エラーにしない。検知がトポロジの投入より先に来ることがある）。
+トポロジに無い機器やインタフェースは捨てずに「未登録」の頂点として Neptune に残し（graph.set_status）、WARNING で UNREGISTERED を
+ログに出す（登録漏れの印。CloudWatch Logs Insights で `filter @message like /UNREGISTERED/` と探す。lab に足した機器は
+ops/sync-graph.sh --replace で登録すると、未登録の頂点は置き換わる）。
 """
 import json
 import logging
@@ -40,5 +42,9 @@ def handler(event, context=None):
     if isinstance(detail, str):
         detail = json.loads(detail)
     r = apply(event.get("detail-type", ""), detail)
-    log.info("%s %s -> %s", event.get("detail-type"), json.dumps(detail, ensure_ascii=False), json.dumps(r, ensure_ascii=False))
+    if r.get("unregistered"):
+        log.warning("UNREGISTERED 未登録の機器・インタフェースの異常（トポロジに登録する）: %s %s -> %s", event.get("detail-type"),
+                    json.dumps(detail, ensure_ascii=False), json.dumps(r, ensure_ascii=False))
+    else:
+        log.info("%s %s -> %s", event.get("detail-type"), json.dumps(detail, ensure_ascii=False), json.dumps(r, ensure_ascii=False))
     return r

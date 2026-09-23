@@ -47,6 +47,15 @@ check("build は --anomaly-table があるときだけ detect のクエリを足
 check("Source の既定は netops.spark（terraform は <接頭辞>.spark を渡す）、DetailType は AnomalyOpened / AnomalyResolved",
       mod.EVENT_SOURCE == "netops.spark" and mod.EVENT_DETAIL_TYPE == "AnomalyOpened" and mod.EVENT_RESOLVED_TYPE == "AnomalyResolved"
       and mod.parse_args(["--bootstrap", "b", "--checkpoint", "c", "--sinks", "iceberg", "--iceberg-table", "cat.ns.t"]).event_source == "netops.spark")
+check("parse_device_map は小文字にそろえ、空白と空の要素を落とす",
+      mod.parse_device_map(" HQ-CE-01.lab.example = hq-ce-01 ,=x,y=") == {"hq-ce-01.lab.example": "hq-ce-01"})
+check("device は sysName を小文字・FQDN の先頭で引き、無ければ送り元 IP を device map で引く（どれも無ければ IP / ?）",
+      mod.device({"tags": {"sysName": "HQ-CE-01.lab.example"}}, {}) == "hq-ce-01"
+      and mod.device({"tags": {"sysName": "core-rtr"}}, {"core-rtr": "hq-ce-01"}) == "hq-ce-01"
+      and mod.device({"tags": {"sysName": "hq-ce-01.lab.example"}}, {"hq-ce-01.lab.example": "x"}) == "x"
+      and mod.device({"tags": {"sysName": "203.0.113.11"}}, {"203.0.113.11": "hq-ce-01"}) == "hq-ce-01"
+      and mod.device({"tags": {"agent_host": "172.16.1.2"}}, {"172.16.1.2": "hq-ce-01"}) == "hq-ce-01"
+      and mod.device({"tags": {"source": "198.51.100.9"}}, {}) == "198.51.100.9" and mod.device({"tags": {}}, {}) == "?")
 check("parse_device_map は = の無い要素を捨てる",
       mod.parse_device_map("203.0.113.11=hq-ce-01,garbage,203.0.113.12=dc-ce-01") == {"203.0.113.11": "hq-ce-01", "203.0.113.12": "dc-ce-01"}
       and mod.parse_device_map("") == {})
@@ -259,9 +268,22 @@ mgmt = re.search(r"^MGMT=(\S+)$", labsh, re.M).group(1)
 check("管理ネットワークが containerlab・lab.sh・lab の locals で同じ",
       re.search(rf"^\s*ipv4-subnet: {re.escape(mgmt)}$", clab, re.M) is not None
       and re.search(rf'^\s*mgmt_cidr\s*=\s*"{re.escape(mgmt)}"$', lab_locals, re.M) is not None)
-_agents = re.findall(r"udp://([\d.]+):161", re.search(r"^\s*agents = \[(.*)\]$", tele, re.M).group(1))
-check("Telegraf のポーリング先は全部管理ネットワークの中（VPC のルートで lab の EC2 へ行く）",
-      len(_agents) == 4 and all(ipaddress.ip_address(a) in ipaddress.ip_network(mgmt) for a in _agents))
+# ポーリング先は lab の定義から作る（lab/lab_topology.py --snmp-agents → snmp_agents.txt → telegraf.sh render が埋める）
+_lt_spec = importlib.util.spec_from_file_location("lab_topology", os.path.join(ROOT, "lab", "lab_topology.py"))
+lt = importlib.util.module_from_spec(_lt_spec); _lt_spec.loader.exec_module(lt)
+_lab_devices, _ = lt.load(os.path.join(ROOT, "lab"))
+_agents_line = lt.snmp_agents(_lab_devices)
+_agents = re.findall(r"udp://([\d.]+):161", _agents_line)
+check("Telegraf のポーリング先は lab の監視対象（enabled）の管理 IP で、全部管理ネットワークの中（VPC のルートで lab の EC2 へ行く）",
+      len(_agents) == 4 and sorted(_agents) == sorted(d["mgmt_ip"] for d in _lab_devices if d["enabled"])
+      and all(ipaddress.ip_address(a) in ipaddress.ip_network(mgmt) for a in _agents))
+check("telegraf.conf.in の agents は __SNMP_AGENTS__ を telegraf.sh render が snmp_agents.txt で埋める（形を確かめてから）",
+      re.search(r"^\s*agents = \[__SNMP_AGENTS__\]$", tele, re.M) is not None and 's#__SNMP_AGENTS__#$agents#' in tgsh
+      and re.search(r"^AGENTS_FILE=snmp_agents\.txt$", tgsh, re.M) is not None
+      and re.fullmatch(r'"udp://[0-9.]+:[0-9]+"(, *"udp://[0-9.]+:[0-9]+")*', _agents_line) is not None)
+check("up.sh と lab の upload_telegraf_command は snmp_agents.txt を s3://<バケット>/telegraf/ に置く",
+      'lab/lab_topology.py lab --snmp-agents' in _read("ops", "up.sh") and "/telegraf/snmp_agents.txt" in _read("ops", "up.sh")
+      and "lab/lab_topology.py lab --snmp-agents" in _read("terraform", "pipeline", "lab", "outputs.tf"))
 mgmt_gw = re.search(r"^MGMT_GW=(\S+)$", labsh, re.M).group(1)
 _snmpd = [n for n in os.listdir(os.path.join(ROOT, "lab", "snmpd")) if n.endswith(".conf")]
 check("snmpd の trap の宛先は lab.sh の MGMT_GW:162（forward が Telegraf へ DNAT する）",

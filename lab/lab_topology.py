@@ -9,10 +9,19 @@ tests/test_sync.py が確かめる（lab を変えて agent/data を直し忘れ
   - nodes: 名前 <拠点>-<役割>-<連番>（拠点と役割は名前から。group は使わない）、mgmt-ipv4 → mgmt_ip、
     network-mode: container:<機器> の snmpd サイドカーが付く機器 → enabled（SNMP の監視対象）
   - links: endpoints ["x:ethN", "y:ethM"] → 回線（a < b に正規化）
-  - frr/<機器>.conf: `router bgp <ASN>` → asn、`interface ethN` の description → 主/副（primary / secondary）と帯域（… 1G / 100M / 10G）
+  - frr/<機器>.conf: `router bgp <ASN>` → asn、`interface ethN` の description → 主/副（primary / secondary）と帯域（… 1G / 100M / 10G）、
+    `ip address` → そのインタフェースのアドレス、`hostname` → 別名
+  - nodes の exec の `ip addr add <アドレス>/<長さ> dev ethN`（host の LAN 側）→ そのインタフェースのアドレス
   - 回線の種別: 両端が pe なら ibgp、pe と ce なら ebgp、host が付くなら l2
 
+機器ごとに、回線の端だけでなく機器が持つインタフェースを全部（interfaces。containerlab の管理 IF の eth0、FRR の interface、exec で
+アドレスを振る IF。lo は除く）と、機器を指す別名（aliases。device_id / hostname / 管理 IP / 全インタフェースと lo のアドレス。小文字）を付ける。
+検知（Spark）とトポロジ（Neptune）で機器とインタフェースの名前が合わずに異常がどこにも付かない、を減らすため。
+機器の一覧はここ（lab の定義）1 か所にし、Telegraf のポーリング先と Spark の検知の device map もここから作る（ops/up.sh）。
+
 使い方: python3 lab/lab_topology.py [lab のディレクトリ]  → JSON（{"devices": [...], "links": [...]}）を標準出力に出す。
+        --device-map   Spark の検知の --device-map（別名=device_id,...。device_id と同じ別名は省く）を出す
+        --snmp-agents  Telegraf の inputs.snmp の agents（監視対象の管理 IP。"udp://<IP>:161", ... の形）を出す
 PyYAML があればそれで読み、無ければ（ops/up.sh を打つ PC の python3）この形の YAML だけ読める小さな読み取りで代える。
 """
 
@@ -22,6 +31,9 @@ import re
 import sys
 
 BANDWIDTH_RE = re.compile(r"\b(\d+(?:\.\d+)?)\s*([GM])\b")
+EXEC_ADDR_RE = re.compile(r"^ip addr(?:ess)? add (\S+?)(?:/\d+)? dev (\S+)")
+MGMT_IF = "eth0"      # containerlab が管理ネットワークにつなぐ IF（snmpd の ifTable にも出る）
+SNMP_PORT = 161       # lab/snmpd/*.conf の agentaddress
 
 
 # ---------------------------------------------------------------- YAML（PyYAML が無いときの代わり）
@@ -104,10 +116,14 @@ def load_yaml(text: str):
 
 # ---------------------------------------------------------------- FRR
 def parse_frr(text: str) -> dict:
-    """{"asn": int | None, "interfaces": {"eth1": {"description": "..."}}}"""
-    asn, ifaces, cur = None, {}, None
+    """{"asn": int | None, "interfaces": {"eth1": {"description": "...", "address": "172.16.1.2"}}}（hostname があれば "hostname" も）"""
+    asn, ifaces, cur, hostname = None, {}, None, None
     for raw in text.splitlines():
         line = raw.rstrip()
+        m = re.match(r"^hostname (\S+)", line)
+        if m:
+            hostname = m.group(1)
+            continue
         m = re.match(r"^interface (\S+)", line)
         if m:
             cur = ifaces.setdefault(m.group(1), {})
@@ -122,7 +138,14 @@ def parse_frr(text: str) -> dict:
         m = re.match(r"^ description (.+)$", line)
         if m and cur is not None:
             cur["description"] = m.group(1).strip()
-    return {"asn": asn, "interfaces": ifaces}
+            continue
+        m = re.match(r"^ ip address (\S+?)(?:/\d+)?$", line)
+        if m and cur is not None:
+            cur.setdefault("address", m.group(1))
+    out = {"asn": asn, "interfaces": ifaces}
+    if hostname:
+        out["hostname"] = hostname
+    return out
 
 
 def bandwidth_mbps(description: str):
@@ -151,6 +174,34 @@ def split_name(name: str) -> tuple[str, str]:
     return "-".join(parts[:-2]), parts[-2]
 
 
+def _if_key(name: str):
+    """eth2 < eth10 の順に並べる"""
+    m = re.match(r"^(.*?)(\d+)$", name)
+    return (m.group(1), int(m.group(2)), "") if m else (name, -1, name)
+
+
+def _inventory(d: dict, spec: dict, frr: dict, link_ifs: set) -> None:
+    """d に interfaces（[{"name", "address"}]）と aliases（小文字の別名）を足す"""
+    addr = {}
+    if d["mgmt_ip"]:
+        addr[MGMT_IF] = d["mgmt_ip"]
+    extra = []   # lo のアドレス（インタフェースには数えないが、trap の送り元になりうるので別名に入れる）
+    for name, f in (frr.get("interfaces") or {}).items():
+        if name.startswith("lo"):
+            extra.append(f.get("address") or "")
+        else:
+            addr[name] = f.get("address") or addr.get(name, "")
+    for cmd in spec.get("exec") or []:
+        m = EXEC_ADDR_RE.match(str(cmd).strip())
+        if m:
+            addr[m.group(2)] = m.group(1)
+    for name in link_ifs:
+        addr.setdefault(name, "")
+    d["interfaces"] = [{"name": n, "address": addr[n]} for n in sorted(addr, key=_if_key)]
+    names = [d["device_id"], d["hostname"], frr.get("hostname") or "", d["mgmt_ip"], *addr.values(), *extra]
+    d["aliases"] = sorted({str(x).strip().lower() for x in names if x})
+
+
 def build(topo: dict, frr: dict) -> tuple[list[dict], list[dict]]:
     """topo は containerlab の YAML（辞書）、frr は {機器名: parse_frr の結果}。戻り値は (devices, links)"""
     nodes = topo["topology"]["nodes"]
@@ -167,6 +218,13 @@ def build(topo: dict, frr: dict) -> tuple[list[dict], list[dict]]:
                         "mgmt_ip": spec.get("mgmt-ipv4") or "", "asn": frr.get(name, {}).get("asn")})
     for d in devices:
         d["enabled"] = d["device_id"] in monitored
+    link_ifs = {}
+    for item in topo["topology"].get("links") or []:
+        for end in item["endpoints"]:
+            dev, _, ifn = str(end).partition(":")
+            link_ifs.setdefault(dev, set()).add(ifn)
+    for d in devices:
+        _inventory(d, nodes[d["device_id"]] or {}, frr.get(d["device_id"], {}), link_ifs.get(d["device_id"], set()))
     role_of = {d["device_id"]: d["role"] for d in devices}
     links = []
     for item in topo["topology"].get("links") or []:
@@ -199,6 +257,22 @@ def build(topo: dict, frr: dict) -> tuple[list[dict], list[dict]]:
     return devices, links
 
 
+def device_map(devices: list[dict]) -> str:
+    """Spark の検知の --device-map（別名=device_id,...）。device_id そのものは省く（Spark は sysName をそのまま使う）。
+    1 つの別名が 2 台を指していたら止める（どちらの機器か決まらない）"""
+    owner = {}
+    for d in devices:
+        for a in d.get("aliases") or []:
+            if owner.setdefault(a, d["device_id"]) != d["device_id"]:
+                raise ValueError(f"別名 {a} が {owner[a]} と {d['device_id']} の両方にある")
+    return ",".join(f"{a}={dev}" for a, dev in sorted(owner.items()) if a != dev)
+
+
+def snmp_agents(devices: list[dict]) -> str:
+    """Telegraf の inputs.snmp の agents の中身（監視対象 = snmpd のサイドカーが付く機器の管理 IP）"""
+    return ", ".join(f'"udp://{d["mgmt_ip"]}:{SNMP_PORT}"' for d in devices if d.get("enabled") and d.get("mgmt_ip"))
+
+
 def load(lab_dir: str) -> tuple[list[dict], list[dict]]:
     path = os.path.join(lab_dir, "wanlab.clab.yml.in")
     with open(path, encoding="utf-8") as f:
@@ -213,6 +287,18 @@ def load(lab_dir: str) -> tuple[list[dict], list[dict]]:
 
 
 if __name__ == "__main__":
-    devices, links = load(sys.argv[1] if len(sys.argv) > 1 else os.path.dirname(os.path.abspath(__file__)))
-    json.dump({"devices": devices, "links": links}, sys.stdout, ensure_ascii=False, indent=1)
-    print()
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    flags = {a for a in sys.argv[1:] if a.startswith("--")}
+    if flags - {"--device-map", "--snmp-agents"} or len(flags) > 1:
+        sys.exit("使い方: lab_topology.py [lab のディレクトリ] [--device-map | --snmp-agents]")
+    devices, links = load(args[0] if args else os.path.dirname(os.path.abspath(__file__)))
+    if "--device-map" in flags:
+        print(device_map(devices))
+    elif "--snmp-agents" in flags:
+        agents = snmp_agents(devices)
+        if not agents:
+            sys.exit("監視対象（snmpd のサイドカーが付く機器）が 1 台も無い")
+        print(agents)
+    else:
+        json.dump({"devices": devices, "links": links}, sys.stdout, ensure_ascii=False, indent=1)
+        print()

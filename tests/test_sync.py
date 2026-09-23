@@ -67,14 +67,36 @@ try:
     d2, l2 = lt.load(os.path.join(ROOT, "lab"))
 finally:
     builtins.__import__ = real_import
+hq = next(d for d in devices if d["device_id"] == "hq-ce-01")
+check("インタフェースはリンクの両端だけでなく全部（管理の eth0 も、FRR / exec のアドレス付き）",
+      [(i["name"], i["address"]) for i in hq["interfaces"]][:2] == [("eth0", "203.0.113.11"), ("eth1", "172.16.1.2")]
+      and all({"name", "address"} <= set(i) for d in devices for i in d["interfaces"])
+      and all(any(i["name"] == (l["a_if"] if l["a"] == d["device_id"] else l["b_if"]) for i in d["interfaces"])
+              for l in links for d in devices if d["device_id"] in (l["a"], l["b"])))
+check("別名は device_id / hostname / 管理 IP / 全インタフェースのアドレスを小文字で", {"hq-ce-01", "203.0.113.11", "172.16.1.2"} <= set(hq["aliases"])
+      and all(a == a.lower() for d in devices for a in d["aliases"]))
+dm = lt.parse_device_map(lt.device_map(devices)) if hasattr(lt, "parse_device_map") else dict(x.split("=", 1) for x in lt.device_map(devices).split(","))
+check("device map は別名 → device_id（device_id 自身は省く）で、全機器の管理 IP を含む",
+      dm["172.16.1.2"] == "hq-ce-01" and "hq-ce-01" not in dm and all(dm.get(d["mgmt_ip"]) == d["device_id"] for d in devices if d["mgmt_ip"]))
+try:
+    lt.device_map([{"device_id": "a", "aliases": ["10.0.0.1"]}, {"device_id": "b", "aliases": ["10.0.0.1"]}])
+    dup = False
+except ValueError:
+    dup = True
+check("1 つの別名が 2 台を指していたら device map を作らずに止める", dup)
+check("snmp agents は監視対象（enabled）の管理 IP だけ", lt.snmp_agents(devices).count("udp://") == sum(1 for d in devices if d["enabled"])
+      and lt.snmp_agents([{"enabled": True, "mgmt_ip": "203.0.113.9"}, {"enabled": False, "mgmt_ip": "203.0.113.8"}]) == '"udp://203.0.113.9:161"')
+check("FRR の hostname と ip address も読む", lt.parse_frr("hostname R1\ninterface eth1\n ip address 10.0.0.1/30\n!\n")
+      == {"asn": None, "hostname": "R1", "interfaces": {"eth1": {"address": "10.0.0.1"}}})
 check("PyYAML が無くても同じ結果（自前の読み取り）", d2 == devices and l2 == links)
 check("自前の YAML 読み取りはコメント・引用符・真偽値・数値・flow list を読む",
       lt.load_yaml('a: "x # y"  # c\nb: [p, "q"]\nc:\n  - d: 1\n    e: true\n  - f\n') == {"a": "x # y", "b": ["p", "q"], "c": [{"d": 1, "e": True}, "f"]})
+check("CLI は --device-map / --snmp-agents をどちらか 1 つ受ける", '"--device-map", "--snmp-agents"' in read("lab", "lab_topology.py"))
 check("CLI は {devices, links} の JSON を出す", "json.dump" in read("lab", "lab_topology.py") and '"devices": devices, "links": links' in read("lab", "lab_topology.py"))
 
-# ---- ops/up.sh 8-2 と ops/sync-graph.sh は lab から作って base64 で渡す
+# ---- ops/up.sh 7-3b と ops/sync-graph.sh は lab から作って base64 で渡す
 up = read("ops", "up.sh"); sync = read("ops", "sync-graph.sh"); seed = read("ops", "seed_graph.py")
-check("up.sh 8-2 は lab/lab_topology.py の出力を LAB_TOPOLOGY_B64 で seed_graph.py に渡す", "lab/lab_topology.py lab | base64" in up and "LAB_TOPOLOGY_B64=$LAB_TOPOLOGY_B64 /usr/bin/python3.13 -" in up)
+check("up.sh 7-3b は lab/lab_topology.py の出力を LAB_TOPOLOGY_B64 で seed_graph.py に渡す", "lab/lab_topology.py lab | base64" in up and "LAB_TOPOLOGY_B64=$LAB_TOPOLOGY_B64 /usr/bin/python3.13 -" in up)
 check("sync-graph.sh は --replace で GRAPH_REPLACE=1、--dry-run は Neptune に触らない", "GRAPH_REPLACE=${REPLACE:-0}" in sync and "--replace) REPLACE=1" in sync and 'if [ -n "$DRY" ]; then printf' in sync)
 check("seed_graph.py は LAB_TOPOLOGY_B64 を読み、GRAPH_REPLACE=1 のときだけ入れ直す", 'os.environ.get("LAB_TOPOLOGY_B64")' in seed and 'os.environ.get("GRAPH_REPLACE") != "1"' in seed)
 
@@ -98,6 +120,21 @@ check("IF が分からない linkDown は機器に付ける", calls[-1] == ("hq-
 n = len(calls)
 check("機器が無い・知らない detail-type は何もしない", "ignored" in h.handler(ev("AnomalyOpened", device_id="?", kind="link_down", target="eth1"))
       and "ignored" in h.handler(ev("Other", device_id="hq-ce-01")) and len(calls) == n)
+import logging
+class _Cap(logging.Handler):
+    def __init__(self):
+        super().__init__(); self.records = []
+    def emit(self, record):
+        self.records.append(record)
+cap = _Cap(); h.log.addHandler(cap)
+fake_graph.set_status = lambda dev, ifn="", status="DOWN": (calls.append((dev, ifn, status)) or {"updated": 0, "unregistered": True})
+h.handler(ev("AnomalyOpened", device_id="zz-ce-09", kind="link_down", target="eth1"))
+check("未登録の機器・IF の異常は WARNING で UNREGISTERED をログに出す", calls[-1] == ("zz-ce-09", "eth1", "DOWN")
+      and cap.records[-1].levelno == logging.WARNING and "UNREGISTERED" in cap.records[-1].getMessage())
+fake_graph.set_status = lambda dev, ifn="", status="DOWN": (calls.append((dev, ifn, status)) or {"updated": 1})
+h.handler(ev("AnomalyResolved", device_id="hq-ce-01", kind="link_down", target="eth1"))
+check("登録済みなら INFO", cap.records[-1].levelno == logging.INFO)
+h.log.removeHandler(cap)
 check("detail が JSON 文字列でも読む", h.handler({"detail-type": "AnomalyOpened", "detail": json.dumps({"device_id": "dc-ce-01", "kind": "link_down", "target": "eth2"})})
       == {"updated": 1} and calls[-1] == ("dc-ce-01", "eth2", "DOWN"))
 

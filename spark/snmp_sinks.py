@@ -22,7 +22,7 @@ Telegraf の JSON 出力（outputs.kafka の data_format = "json"、json_timesta
   （terraform/pipeline/stream の anomalies。キーは <機器>#<種別>#<インタフェース>）に open で書き、up に戻ったポーリングと linkUp で resolved にする。
   新しく open になったときだけ EventBridge の既定のバスに Source <接頭辞>.spark（--event-source）/ DetailType AnomalyOpened を put_events する
   （terraform/workflow の events.tf がルールで SQS に流し、Temporal の worker が調査ワークフローを起こす）。
-  機器名は sysName タグ > --device-map（IP=機器名,...）の順で引く。以前 terraform/pipeline/stream の detector Lambda がしていたことをここに寄せた。
+  機器名は sysName タグ（小文字・ドメイン無しに揃える）> --device-map（別名=機器名,...。ops/up.sh が lab の定義から作る）の順で引く。以前 terraform/pipeline/stream の detector Lambda がしていたことをここに寄せた。
 
 HTTP の送信は driver でまとめて行う（マイクロバッチを collect する。PoC の量（機器数台、10 秒間隔）なら 1 分に数百行）。
 量が増えたら foreachPartition に移す。remote write の protobuf と snappy は外部ライブラリ無しで組む
@@ -65,7 +65,7 @@ def parse_args(argv):
     p.add_argument("--opensearch-index", default=OPENSEARCH_INDEX, help="opensearch: インデックス名")
     p.add_argument("--prometheus-url", default="", help="prometheus: remote write の URL（…/api/v1/remote_write）")
     p.add_argument("--anomaly-table", default="", help="detect: 異常を書く DynamoDB のテーブル名（terraform/pipeline/stream の anomalies。空なら検知しない）")
-    p.add_argument("--device-map", default="", help="detect: agent_host の IP から機器名を引く表（IP=機器名,... 。sysName タグがあればそちら）")
+    p.add_argument("--device-map", default="", help="detect: IP や別名から機器名を引く表（別名=機器名,... 。ops/up.sh が lab/lab_topology.py --device-map で作る。sysName タグがあればそちら）")
     p.add_argument("--event-bus", default="default", help="detect: 新しい異常を put_events する EventBridge のバス名")
     # バスは既定の 1 本を共有するので、Source を接頭辞ごとに変えないと、1 つの AWS アカウントを何人かで使ったとき
     # 他の人の異常が自分のルール（terraform/workflow と terraform/pipeline/graph）に当たる。terraform が <接頭辞>.spark を渡す
@@ -399,15 +399,29 @@ EVENT_RESOLVED_TYPE = "AnomalyResolved"   # open → resolved にした瞬間に
 
 
 def parse_device_map(text):
-    """"203.0.113.11=hq-ce-01,203.0.113.12=dc-ce-01" → {IP: 機器名}。= の無い要素は捨てる"""
-    return dict(p.split("=", 1) for p in (text or "").split(",") if "=" in p)
+    """"203.0.113.11=hq-ce-01,hq-ce-01.example.net=hq-ce-01" → {別名（小文字）: 機器名}。= の無い要素は捨てる。
+    ops/up.sh が lab/lab_topology.py --device-map（lab の定義の全機器の管理 IP・全インタフェースと lo のアドレス・hostname）から作って渡す"""
+    out = {}
+    for p in (text or "").split(","):
+        k, sep, v = p.partition("=")
+        if sep and k.strip() and v.strip():
+            out[k.strip().lower()] = v.strip()
+    return out
+
+
+IPV4_RE = re.compile(r"^\d{1,3}(\.\d{1,3}){3}$")
 
 
 def device(m, devmap):
-    """機器名。sysName タグ > device map（agent_host か source の IP）> IP そのもの > "?" """
+    """機器名。sysName タグ（小文字にして device map を引き、無ければドメインを落とす）> device map（agent_host か source の IP）> IP そのもの > "?"。
+    sysName が FQDN や大文字でもトポロジの device_id（小文字の短い名前）に合わせる"""
     t = m.get("tags") or {}
-    ip = t.get("agent_host") or t.get("source", "")
-    return t.get("sysName") or devmap.get(ip, ip or "?")
+    name = str(t.get("sysName") or "").strip().lower()
+    if name:
+        short = name if IPV4_RE.match(name) else name.split(".", 1)[0]
+        return devmap.get(name) or devmap.get(short) or short
+    ip = str(t.get("agent_host") or t.get("source") or "").strip().lower()
+    return devmap.get(ip, ip or "?")
 
 
 def events(m, devmap):

@@ -44,12 +44,13 @@
 | 3 | `terraform/base/core`。graph を作るなら裏で `terraform/pipeline/graph` を始める（ログは `ops/logs/graph-apply.log`） |
 | 3-3 | `terraform/agent` |
 | 4 | Web の部品を S3 に置く。`CREATE_KB=1` なら手順書を取り込む。Web を再起動 |
-| 5 | lab の rpm、S3 sink の zip、Spark の jar 6 本と `spark/snmp_sinks.py` を S3 に置く |
+| 5 | lab の rpm、Telegraf のポーリング先（lab の定義から作る）、S3 sink の zip、Spark の jar 6 本と `spark/snmp_sinks.py` を S3 に置く |
 | 6 | `terraform/pipeline/lab` |
 | 7 | `terraform/pipeline/stream`（MSK に 20〜30 分） |
-| 7-3 | `terraform/pipeline/analytics` |
-| 7-4 | Spark のジョブが動いていなければ起こす |
-| 8 | graph を待ち、Neptune が空ならトポロジを入れ、Web を再起動 |
+| 7-3 | graph を待ち、Neptune が空ならトポロジを入れる（検知より先） |
+| 7-4 | `terraform/pipeline/analytics`（検知の device map は lab の定義から作る） |
+| 7-5 | Spark のジョブが動いていなければ起こす |
+| 8-3 | Web を再起動 |
 | 8-5 | `terraform/workflow`。Temporal UI を開くコマンドを表示 |
 | 8-6 | Web を再起動 |
 | 9 | Runtime のロググループの保持を 7 日にする |
