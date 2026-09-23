@@ -172,6 +172,14 @@ state.update(answer={"coalesce(": [True]}, queries=[])
 check("set_status は IF 無しなら機器の頂点に single で書く（Neptune の既定の set だと値が積み重なる）",
       graph.set_status("hq-ce-01", "", "ALARM") == {"device_id": "hq-ce-01", "status": "ALARM", "updated": 1}
       and state["queries"] == ["g.V('hq-ce-01').property(single,'status','ALARM').coalesce(values('registered'),constant(true))"])
+state.update(answer={"coalesce(": []}, queries=[])
+check("only_if を渡すと、今の status がそれのときだけ書き、合わなければ未登録の頂点も作らない",
+      graph.set_status("hq-ce-01", "", "UP", only_if="ALARM") == {"device_id": "hq-ce-01", "status": "UP", "updated": 0}
+      and state["queries"] == ["g.V('hq-ce-01').has('status','ALARM').property(single,'status','UP').coalesce(values('registered'),constant(true))"])
+state.update(answer={"fold()": [], "coalesce(": []}, queries=[])
+check("only_if があれば UP 以外でも、合わなければ未登録の頂点を作らない",
+      "unregistered" not in graph.set_status("zz-ce-09", "", "ALARM", only_if="DOWN") and not any("addV" in q for q in state["queries"]))
+state.update(answer={"coalesce(": [True]}, queries=["x"])
 check("set_status は UP / DOWN / ALARM 以外を拒む", "error" in graph.set_status("hq-ce-01", "", "broken") and len(state["queries"]) == 1)
 state.update(answer={"fold()": [], "coalesce(": []}, queries=[])
 r = graph.set_status("zz-ce-09", "", "ALARM")

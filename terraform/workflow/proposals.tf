@@ -1,5 +1,5 @@
-# ---------------------------------------------------------------- proposal table (one item per anomaly, "いま" の状態)
-# proposal_id = anomaly_id. status: pending → approved / rejected（人）→ applied → verified / failed（ワーカー）, expired（時間切れ）
+# ---------------------------------------------------------------- proposal table (one item per anomaly occurrence, "いま" の状態)
+# proposal_id = <anomaly_id>#<first_seen>（発生ごと）. status: pending → approved / rejected（人）→ applied → verified / failed（ワーカー）, expired（時間切れ）, obsolete（承認のあいだに異常が閉じた）
 resource "aws_dynamodb_table" "proposals" {
   name         = "${local.name_prefix}-proposals"
   billing_mode = "PAY_PER_REQUEST"

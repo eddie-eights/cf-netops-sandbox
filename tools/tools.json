@@ -141,13 +141,13 @@
   },
   {
     "name": "list_proposals",
-    "description": "AI が出した修復案と、その後の履歴（状態、原因、打ったコマンド、決めた人、実行結果、確認結果）。「修復履歴は」「何を直した」「承認待ちは」と聞かれたらこれを呼ぶ。状態は pending（承認待ち）→ approved / rejected（人が決めた）→ applied（実行した）→ verified（直ったのを確かめた）/ failed、expired（時間切れ）。承認や却下はこのツールではできない（人が画面の承認タブで決める）。",
+    "description": "AI が出した修復案と、その後の履歴（状態、原因、打ったコマンド、決めた人、実行結果、確認結果）。「修復履歴は」「何を直した」「承認待ちは」と聞かれたらこれを呼ぶ。状態は pending（承認待ち）→ approved / rejected（人が決めた）→ applied（実行した）→ verified（直ったのを確かめた）/ failed、expired（時間切れ）、obsolete（承認のあいだに異常が閉じたので打たなかった）。承認や却下はこのツールではできない（人が画面の承認タブで決める）。",
     "inputSchema": {
       "type": "object",
       "properties": {
         "status": {
           "type": "string",
-          "description": "all（全部、既定）か pending / approved / rejected / applied / verified / failed / expired のどれか"
+          "description": "all（全部、既定）か pending / approved / rejected / applied / verified / failed / expired / obsolete のどれか"
         },
         "limit": {
           "type": "integer",

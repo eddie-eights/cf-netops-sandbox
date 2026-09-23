@@ -2,8 +2,9 @@
 
 テーブル名は環境変数 PROPOSAL_TABLE、無ければ SSM の <PARAM_PREFIX>/proposal-table（terraform/workflow が書く）。
 どちらも無ければ「まだ配備されていない」を返して、WORKFLOW を作っていない構成でも落ちない。
-項目: proposal_id（= anomaly_id）, anomaly_id, device_id, kind, target, first_seen（異常の発生時刻）,
-status（pending → approved / rejected（人）→ applied → verified / failed（ワーカー）、expired（時間切れ））,
+項目: proposal_id（= <anomaly_id>#<first_seen>。発生ごとに 1 件。閉じて開き直した次の発生は別の行）, anomaly_id, device_id, kind, target,
+first_seen（異常の発生時刻）, status（pending → approved / rejected（人）→ applied → verified / failed（ワーカー）、expired（時間切れ）、
+obsolete（承認のあいだに異常が閉じた・開き直したので打たなかった））,
 cause, action（heal-main / check / none）, command, reason, agent_response, workflow_id,
 created_at / updated_at / decided_at（epoch 秒）, decided_by, apply_output, verify_note。
 承認・却下は status = pending のときだけ通る（ConditionExpression）。ワーカーは Temporal のシグナルではなく、
@@ -18,7 +19,7 @@ from botocore.exceptions import BotoCoreError, ClientError
 import toolkit
 
 INDEX = "status-updated_at-index"  # GSI。パーティションキーが status、ソートキーが updated_at
-STATUSES = ("pending", "approved", "rejected", "applied", "verified", "failed", "expired")
+STATUSES = ("pending", "approved", "rejected", "applied", "verified", "failed", "expired", "obsolete")
 QUERYABLE = STATUSES + ("all",)  # 一覧で指定できる値（all は全部）
 DECISIONS = ("approved", "rejected")  # 人が決められるのはこの 2 つだけ
 TABLE = toolkit.Param("PROPOSAL_TABLE", "proposal-table")  # 表の名前（環境変数か SSM）
@@ -34,8 +35,8 @@ def _decorate(p: dict) -> dict:
 def list_proposals(status: str = "pending", limit: int = 50, device_id: str = "") -> dict:
     """status の修復案を新しい順に（updated_at）。status が all なら全件（Scan）。device_id があればその機器だけ。
 
-    all だけ Scan なのは、GSI のパーティションキーが status で、7 つの status を 1 回の Query では取れないため
-    （7 回 Query するより 1 往復の Scan のほうが安い。この PoC の表は数十件）。
+    all だけ Scan なのは、GSI のパーティションキーが status で、8 つの status を 1 回の Query では取れないため
+    （8 回 Query するより 1 往復の Scan のほうが安い。この PoC の表は数十件）。
     """
     table = TABLE.value()
     if not table:
@@ -111,10 +112,10 @@ TOOL_SPECS = [
         "name": "list_proposals",
         "description": "AI が出した修復案と、その後の履歴（状態、原因、打ったコマンド、決めた人、実行結果、確認結果）。"
                        "「修復履歴は」「何を直した」「承認待ちは」と聞かれたらこれを呼ぶ。"
-                       "状態は pending（承認待ち）→ approved / rejected（人が決めた）→ applied（実行した）→ verified（直ったのを確かめた）/ failed、expired（時間切れ）。"
+                       "状態は pending（承認待ち）→ approved / rejected（人が決めた）→ applied（実行した）→ verified（直ったのを確かめた）/ failed、expired（時間切れ）、obsolete（承認のあいだに異常が閉じたので打たなかった）。"
                        "承認や却下はこのツールではできない（人が画面の承認タブで決める）。",
         "inputSchema": {"json": {"type": "object", "properties": {
-            "status": {"type": "string", "description": "all（全部、既定）か pending / approved / rejected / applied / verified / failed / expired のどれか"},
+            "status": {"type": "string", "description": "all（全部、既定）か pending / approved / rejected / applied / verified / failed / expired / obsolete のどれか"},
             "limit": {"type": "integer", "description": "件数の上限（既定 20、最大 100）"},
             "device_id": {"type": "string", "description": "機器名（例 hq-ce-01）で絞る。空なら全機器"},
         }}},

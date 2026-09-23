@@ -27,7 +27,11 @@ class ClientError(Exception):
 class BotoCoreError(Exception):
     pass
 fake = {"get_item": {}, "update_item": None, "query": {"Items": []}, "get_parameter": ClientError("ParameterNotFound")}
+class ConditionalCheckFailed(Exception):
+    pass
+clients = []  # boto3.client に渡した (name, kw)
 class FakeClient:
+    exceptions = types.SimpleNamespace(ConditionalCheckFailedException=ConditionalCheckFailed)
     def __init__(self, name):
         self.name = name
     def __getattr__(self, op):
@@ -39,7 +43,7 @@ class FakeClient:
             return r if r is not None else {}
         return call
 boto3 = types.ModuleType("boto3")
-boto3.client = lambda name, **kw: FakeClient(name)
+boto3.client = lambda name, **kw: clients.append((name, kw)) or FakeClient(name)
 boto3.Session = lambda region_name=None: types.SimpleNamespace(get_credentials=lambda: None)
 botocore = types.ModuleType("botocore"); botocore_exc = types.ModuleType("botocore.exceptions")
 botocore_exc.ClientError = ClientError; botocore_exc.BotoCoreError = BotoCoreError
@@ -63,7 +67,18 @@ t_workflow.execute_activity = None; t_workflow.wait_condition = None; t_workflow
 t_workflow.unsafe = types.SimpleNamespace(imports_passed_through=contextlib.nullcontext)
 t_client = types.ModuleType("temporalio.client"); t_client.Client = object; t_client.WorkflowFailureError = Exception
 t_common = types.ModuleType("temporalio.common"); t_common.RetryPolicy = lambda **k: k
-t_exc = types.ModuleType("temporalio.exceptions"); t_exc.WorkflowAlreadyStartedError = Exception
+class ActivityError(Exception):
+    def __init__(self, msg="", cause=None):
+        super().__init__(msg)
+        self.cause = cause
+class ApplicationError(Exception):
+    def __init__(self, msg="", non_retryable=False):
+        super().__init__(msg)
+        self.non_retryable = non_retryable
+class WorkflowAlreadyStarted(Exception):
+    pass
+t_exc = types.ModuleType("temporalio.exceptions")
+t_exc.WorkflowAlreadyStartedError = WorkflowAlreadyStarted; t_exc.ActivityError = ActivityError; t_exc.ApplicationError = ApplicationError
 t_worker = types.ModuleType("temporalio.worker"); t_worker.Worker = object
 t_root = types.ModuleType("temporalio")
 sys.modules.update({"temporalio": t_root, "temporalio.activity": t_activity, "temporalio.workflow": t_workflow,
@@ -86,7 +101,7 @@ import evidence  # noqa: E402
 import handler  # noqa: E402
 
 # ---- workflow/rules.py の純粋な関数
-anomaly = {"anomaly_id": "hq-ce-01#link_down#eth1", "device_id": "hq-ce-01", "kind": "link_down", "target": "eth1",
+anomaly = {"anomaly_id": "hq-ce-01#link_down#eth1", "device_id": "hq-ce-01", "kind": "link_down", "target": "eth1", "status": "open",
            "first_seen": 1700000000, "detail": "ifOperStatus down", "first_seen_jst": "2023-11-15 07:13:20"}
 prompt = rules.build_prompt(anomaly)
 check("プロンプトに機器・種別・対象が入る", all(s in prompt for s in ("hq-ce-01", "link_down", "eth1")))
@@ -108,7 +123,17 @@ check("修復案が無ければ起こす", rules.should_start(anomaly, None) and
 check("同じ first_seen の修復案があれば起こさない", not rules.should_start(anomaly, {"first_seen": 1700000000, "status": "verified"}))
 check("first_seen が違えば（別の発生）起こす", rules.should_start(anomaly, {"first_seen": 1600000000}))
 check("anomaly_id が無ければ起こさない", not rules.should_start({}, None))
-check("ワークフロー id は investigate-<anomaly_id>", rules.workflow_id("a#b#c") == "investigate-a#b#c")
+check("link_down 以外（trap など）は起こさない", not rules.should_start({**anomaly, "kind": "trap"}, None) and rules.START_KINDS == {"link_down"})
+check("resolved の異常は起こさない（status が無い古い行は open 扱い）",
+      not rules.should_start({**anomaly, "status": "resolved"}, None) and rules.should_start({k: v for k, v in anomaly.items() if k != "status"}, None))
+check("ワークフロー id と修復案の id は発生ごと（<anomaly_id>#<first_seen>）",
+      rules.workflow_id("a#b#c", 5) == "investigate-a#b#c#5" and rules.proposal_id("a#b#c", 5) == "a#b#c#5"
+      and rules.proposal_id("a#b#c", None) == "a#b#c#0" and rules.workflow_id("a#b#c", "7") == "investigate-a#b#c#7")
+check("event_from_message は (anomaly_id, first_seen) を読み、first_seen が読めなければ 0",
+      rules.event_from_message(json.dumps({"detail": {"anomaly_id": "r1#link_down#eth1", "first_seen": 1700000000}})) == ("r1#link_down#eth1", 1700000000)
+      and rules.event_from_message(json.dumps({"detail": json.dumps({"anomaly_id": "x", "first_seen": "12"})})) == ("x", 12)
+      and rules.event_from_message(json.dumps({"detail": {"anomaly_id": "x", "first_seen": "bad"}})) == ("x", 0)
+      and rules.event_from_message("garbage") == ("", 0))
 # rules.py に boto3 / temporalio を持ち込むと、このテストも Temporal のサンドボックスも動かなくなる（分割の理由そのもの）
 check("rules.py は標準ライブラリ（json / re）しか読まない",
       set(re.findall(r"^import (\w+)", read("workflow", "rules.py"), re.M)) == {"json", "re"})
@@ -130,14 +155,23 @@ check("update_proposal は status / apply_output / updated_at を SET する",
 calls.clear()
 awsio.write_proposal({"proposal_id": "p1", "status": "pending", "first_seen": 1, "nothing": None})
 check("write_proposal は None を落として put_item する", calls[-1][1] == "put_item" and "nothing" not in calls[-1][2]["Item"]
-      and calls[-1][2]["Item"]["first_seen"] == {"N": "1"})
+      and calls[-1][2]["Item"]["first_seen"] == {"N": "1"} and "ConditionExpression" not in calls[-1][2])
+calls.clear()
+check("write_proposal(only_new) は proposal_id が無いときだけ書く（書けたら True）",
+      awsio.write_proposal({"proposal_id": "p1"}, True) is True and calls[-1][2]["ConditionExpression"] == "attribute_not_exists(proposal_id)")
+fake["put_item"] = ConditionalCheckFailed()
+check("既にあれば例外にせず False（人が決めた status を pending に戻さない）", awsio.write_proposal({"proposal_id": "p1"}, True) is False)
+fake["put_item"] = None
 
 class FakeBody:
     def __init__(self, data): self.data = data
     def read(self): return json.dumps(self.data).encode()
 calls.clear()
 fake["invoke_agent_runtime"] = {"response": FakeBody({"status": "success", "response": '{"cause":"c","action":"check","reason":"r"}'})}
+clients.clear()
 text = awsio.ask_agent("q")
+check("ask_agent は読み取り 150 秒・botocore の再送なし（やり直しは Temporal に任せる）",
+      clients[-1][0] == "bedrock-agentcore" and clients[-1][1]["config"] == {"read_timeout": 150, "connect_timeout": 10, "retries": {"max_attempts": 1}})
 kw = calls[-1][2]
 check("Runtime を InvokeAgentRuntime（qualifier DEFAULT、JSON の prompt、33 字以上の runtimeSessionId）で呼ぶ",
       calls[-1][:2] == ("bedrock-agentcore", "invoke_agent_runtime") and kw["qualifier"] == "DEFAULT"
@@ -322,8 +356,10 @@ check("app.py には行頭の import gradio がある（user_data の置き間�
       re.search(r"^import gradio as gr$", web, re.M) is not None
       and 'grep -q "^import gradio"' in read("terraform", "base", "core", "templates", "web_user_data.sh.tftpl"))
 incident = read("web", "incident_view.py")
-check("Web に「承認」タブがあり、proposals.decide で approved / rejected を書く",
-      'gr.Tab("承認")' in web and 'decide_proposal(i, "approved", s)' in web and 'decide_proposal(i, "rejected", s)' in web
+check("Web に「承認」タブがあり、名前と「読んだ」のチェックを添えて proposals.decide で approved / rejected を書く",
+      'gr.Tab("承認")' in web and 'iv.decide_proposal(i, "approved", s, w, ok), [pr_id, pr_status, pr_who, pr_ok]' in web
+      and 'iv.decide_proposal(i, "rejected", s, w, ok), [pr_id, pr_status, pr_who, pr_ok]' in web
+      and "pr_id.change(lambda _: False, [pr_id], [pr_ok])" in web
       and "import proposals" in incident and "proposals.decide(" in incident)
 # 入れ忘れても apply は通り、EC2 の起動時に ModuleNotFoundError になる（tools.zip と同じ事故）。
 # web/*.py は upload_web_command が web/ ごと上げるので、確かめるのは agent/ から借りるモジュールの側
@@ -431,4 +467,143 @@ check("Web の起動確認は is-active（落ちて再起動するまでの数�
       "ss -ltn 'sport = :8080' | grep -q LISTEN" in up and "systemctl is-active --quiet $PREFIX-web.service" not in up)
 check("lab の状態の照合は 1 つの空白で区切った lab=active containers=N をそのまま探す（空白を 2 つ要る形だと合わない）",
       '*" lab=active containers=$LAB_NODES "*)' in up)
+
+# ---- ワーカーの振る舞い（2026-09-24 のレビュー: 発生ごとの id・承認のあいだに閉じた異常・apply の失敗・SQS の消し方）
+import asyncio, datetime, logging  # noqa: E402
+_saved = {k: getattr(awsio, k) for k in ("read_anomaly", "read_proposal", "write_proposal", "receive_messages", "delete_message")}
+FS = 1700000000
+AID = anomaly["anomaly_id"]
+
+def run_wf(script, first_seen=FS):
+    """InvestigateAnomaly.run を、アクティビティを script（名前 → 返り値 / 例外 / 関数）に差し替えて回す。(結果, 呼んだアクティビティ)"""
+    seen = []
+    async def execute_activity(fn, *a, args=None, **opts):
+        params = list(args) if args is not None else list(a)
+        seen.append((fn.__name__, params, opts))
+        r = script[fn.__name__]
+        r = r(*params) if callable(r) else r
+        if isinstance(r, BaseException):
+            raise r
+        return r
+    async def wait_condition(fn, timeout=None):
+        raise asyncio.TimeoutError
+    t_workflow.execute_activity = execute_activity; t_workflow.wait_condition = wait_condition
+    t_workflow.now = datetime.datetime.now; t_workflow.info = lambda: types.SimpleNamespace(workflow_id="wf-1")
+    t_workflow.logger = logging.getLogger("wf")
+    worker.VERIFY_INTERVAL = 0
+    return asyncio.run(worker.InvestigateAnomaly().run(AID, first_seen)), seen
+
+finding = {"cause": "c", "action": "heal-main", "command": "sudo lab heal-main", "reason": "r", "agent_response": "{}"}
+base = {"get_anomaly": anomaly, "investigate": finding, "put_proposal": f"{AID}#{FS}", "get_decision": "approved",
+        "set_status": None, "still_open": True, "apply_on_lab": {"status": "Success", "output": "ok"}, "anomaly_resolved": True}
+res, seen = run_wf(base)
+names = [n for n, _, _ in seen]
+check("承認→打つ→閉じたら verified。確かめは同じ発生（anomaly_id + first_seen）で見る",
+      res == "verified" and names.index("still_open") < names.index("apply_on_lab")
+      and [p for n, p, _ in seen if n == "anomaly_resolved"][0] == [AID, FS] and [p for n, p, _ in seen if n == "still_open"][0] == [AID, FS])
+check("investigate の start_to_close は 4 分（AgentCore の読み取り 150 秒 1 回分が収まる）",
+      [o for n, _, o in seen if n == "investigate"][0]["start_to_close_timeout"] == datetime.timedelta(minutes=4))
+res, seen = run_wf({**base, "still_open": False})
+check("承認のあいだに異常が閉じていれば打たずに obsolete",
+      res == "obsolete" and "apply_on_lab" not in [n for n, _, _ in seen]
+      and [p[1] for n, p, _ in seen if n == "set_status"] == ["obsolete"])
+res, seen = run_wf({**base, "apply_on_lab": ActivityError("activity failed", cause=RuntimeError("SSM に届かない"))})
+st = [p for n, p, _ in seen if n == "set_status"]
+check("apply_on_lab の失敗（ActivityError）はワークフローを落とさず failed を書く（approved のまま残さない）",
+      res == "failed" and st[-1][1] == "failed" and "SSM に届かない" in st[-1][2]["apply_output"] and "anomaly_resolved" not in [n for n, _, _ in seen])
+res, seen = run_wf({**base, "get_anomaly": {**anomaly, "status": "resolved"}})
+check("起こしたあとで閉じていれば調べずに obsolete", res == "obsolete" and [n for n, _, _ in seen] == ["get_anomaly"])
+res, seen = run_wf({**base, "get_anomaly": {**anomaly, "first_seen": FS + 60}})
+check("開き直して別の発生になっていれば調べずに obsolete", res == "obsolete" and [n for n, _, _ in seen] == ["get_anomaly"])
+res, seen = run_wf({**base, "get_decision": "rejected"})
+check("却下なら何もしない", res == "rejected" and "apply_on_lab" not in [n for n, _, _ in seen] and "still_open" not in [n for n, _, _ in seen])
+
+# アクティビティ（awsio を差し替え）
+awsio.read_anomaly = lambda aid: {**anomaly, "first_seen": FS + 60}
+check("anomaly_resolved は開き直して first_seen が変わったら「この発生は閉じた」", asyncio.run(worker.anomaly_resolved(AID, FS)) is True)
+check("still_open は first_seen が違えば False", asyncio.run(worker.still_open(AID, FS)) is False and asyncio.run(worker.still_open(AID, FS + 60)) is True)
+awsio.read_anomaly = lambda aid: anomaly
+check("anomaly_resolved は同じ発生が open なら False", asyncio.run(worker.anomaly_resolved(AID, FS)) is False)
+written = []
+awsio.write_proposal = lambda item, only_new=False: written.append((item, only_new)) or True
+pid = asyncio.run(worker.put_proposal(anomaly, finding, "wf-1"))
+check("put_proposal は <anomaly_id>#<first_seen> を only_new で書く", pid == f"{AID}#{FS}" and written[-1][0]["proposal_id"] == pid and written[-1][1] is True)
+awsio.write_proposal = lambda item, only_new=False: False
+awsio.read_proposal = lambda p: {"proposal_id": p, "workflow_id": "wf-1", "status": "approved"}
+check("既にある修復案が自分の書いたもの（書けたあとで再試行）なら、それを使って進む", asyncio.run(worker.put_proposal(anomaly, finding, "wf-1")) == pid)
+awsio.read_proposal = lambda p: {"proposal_id": p, "workflow_id": "wf-other"}
+try:
+    asyncio.run(worker.put_proposal(anomaly, finding, "wf-1")); err = None
+except ApplicationError as e:
+    err = e
+check("別のワークフローの修復案なら再試行しない失敗（上書きしない）", err is not None and err.non_retryable)
+
+# starter（SQS のメッセージ 1 通ずつ）
+class FakeTemporal:
+    def __init__(self, exc=None):
+        self.exc, self.started = exc, []
+    async def start_workflow(self, fn, args=None, id=None, task_queue=None):
+        self.started.append((args, id))
+        if self.exc:
+            raise self.exc
+msg = lambda fs: json.dumps({"detail": {"anomaly_id": AID, "first_seen": fs}})
+awsio.read_proposal = lambda p: {}
+tc = FakeTemporal()
+asyncio.run(worker.handle_message(tc, msg(FS)))
+check("メッセージの発生と表の発生が同じなら、その発生のワークフローを起こす",
+      tc.started == [([AID, FS], f"investigate-{AID}#{FS}")])
+tc = FakeTemporal()
+asyncio.run(worker.handle_message(tc, msg(FS - 60)))
+asyncio.run(worker.handle_message(tc, "garbage"))
+awsio.read_anomaly = lambda aid: {}
+asyncio.run(worker.handle_message(tc, msg(FS)))
+check("古い発生・読めない本文・表に無い異常は起こさない（例外にもしない = 消す）", tc.started == [])
+awsio.read_anomaly = lambda aid: anomaly
+deleted = []
+awsio.receive_messages = lambda: [{"Body": msg(FS), "ReceiptHandle": "r1"}]
+awsio.delete_message = lambda h: deleted.append(h)
+asyncio.run(worker.starter_queue(FakeTemporal(WorkflowAlreadyStarted())))
+check("もう起きている（WorkflowAlreadyStartedError = 同じ発生の重複配達）なら消す（残すと DLQ で本物の失敗と混ざる）", deleted == ["r1"])
+deleted.clear()
+asyncio.run(worker.starter_queue(FakeTemporal(RuntimeError("temporal に届かない"))))
+check("それ以外の失敗は消さずに残す（可視性タイムアウトのあとで配り直し、5 回で DLQ）", deleted == [])
+awsio.read_anomaly = lambda aid: (_ for _ in ()).throw(OSError("DynamoDB に届かない"))
+asyncio.run(worker.starter_queue(FakeTemporal()))
+check("DynamoDB に届かないときも消さない", deleted == [])
+for k, v in _saved.items():
+    setattr(awsio, k, v)
+
+# ---- web/incident_view.py の承認（gradio / pandas / config は差し替えて読む。config は環境変数と env ファイルを読むので本物は使わない）
+_gr = types.ModuleType("gradio"); _gr.update = lambda **k: ("update", k)
+_pd = types.ModuleType("pandas"); _pd.DataFrame = lambda rows, columns=None: rows
+_web_mods = {"gradio": _gr, "pandas": _pd, "config": types.ModuleType("config")}
+_prev = {k: sys.modules.get(k) for k in _web_mods}
+sys.modules.update(_web_mods)
+sys.path.insert(0, os.path.join(ROOT, "web"))
+import incident_view as iv  # noqa: E402
+for k, v in _prev.items():
+    if v is None:
+        sys.modules.pop(k, None)
+    else:
+        sys.modules[k] = v
+decided = []
+iv.proposals.decide = lambda pid, d, decided_by="": decided.append((pid, d, decided_by)) or {"proposal_id": pid, "status": d}
+iv.proposals.list_proposals = lambda status="pending", limit=100: {"proposals": [{"proposal_id": "p1", "status": status}]}
+nothing = ("update", {})
+check("名前が無ければ書かない（表と選択もそのまま）",
+      iv.decide_proposal("p1", "rejected", "pending", "  ", True)[1:] == (nothing, nothing) and decided == [])
+check("承認は「読んだ」のチェックが無ければ書かない", iv.decide_proposal("p1", "approved", "pending", "yamada", False)[1:] == (nothing, nothing) and decided == [])
+check("proposal_id が空なら書かない", iv.decide_proposal("", "approved", "pending", "yamada", True)[1:] == (nothing, nothing) and decided == [])
+r = iv.decide_proposal("p1", "approved", "pending", "  山田   太郎 ", True)
+check("名前は空白を詰めて「<名前> (web)」で decided_by に残し、選択は空に戻す（続けて押しても別の行に書かない）",
+      decided == [("p1", "approved", "山田 太郎 (web)")] and r[2] == ("update", {"choices": ["p1"], "value": None}))
+iv.decide_proposal("p1", "rejected", "pending", "x" * 100)
+check(f"却下はチェック無しで通り、名前は {iv.APPROVER_MAX} 字で切る", decided[-1] == ("p1", "rejected", "x" * iv.APPROVER_MAX + " (web)"))
+
+# ---- Temporal UI（8233）の SG（2026-09-24 のレビュー: ポートフォワーディングはつながっても SG で UI が開かなかった）
+check("タスクの SG は Web の SG から 8233 を受け、Web の SG はタスクの SG へ 8233 を出す",
+      re.search(r'resource "aws_vpc_security_group_ingress_rule" "task_ui_from_web" \{[\s\S]*?security_group_id\s*=\s*aws_security_group\.task\.id[\s\S]*?from_port\s*=\s*8233[\s\S]*?referenced_security_group_id\s*=\s*local\.web_sg_id', tf) is not None
+      and re.search(r'resource "aws_vpc_security_group_egress_rule" "web_to_task_ui" \{[\s\S]*?security_group_id\s*=\s*local\.web_sg_id[\s\S]*?from_port\s*=\s*8233[\s\S]*?referenced_security_group_id\s*=\s*aws_security_group\.task\.id', tf) is not None
+      and 'output "instance_security_group_id"' in main_out and "outputs.instance_security_group_id" in tf)
+check("修復案の status に obsolete がある（tools.json の説明も）", "obsolete" in proposals.STATUSES and all("obsolete" in t["description"] for t in tools if t["name"] == "list_proposals"))
 print(f"通過 {passed} / 失敗 0")

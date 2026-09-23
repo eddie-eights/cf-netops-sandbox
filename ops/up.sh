@@ -642,19 +642,45 @@ if [ -z "$SKIP_ANALYTICS" ]; then
   ANALYTICS_VARS=(-var "sinks=[$SINKS_TF]" -var "device_map=$DEVICE_MAP")
   tf_apply pipeline/analytics "${ANALYTICS_VARS[@]}"
   APP_ID=$(tf pipeline/analytics output -raw application_id); echo "APP_ID=$APP_ID"
-  log "7-5. Spark のストリーミングジョブ（Kafka → ${SINKS}）を起こす（動いていれば何もしない）"
+  log "7-5. Spark のストリーミングジョブ（Kafka → ${SINKS}）を起こす（同じスクリプトと引数で動いていれば何もしない）"
+  JOB_DRIVER=$(tf pipeline/analytics output -raw job_driver_json)
+  JOB_OVERRIDES=$(tf pipeline/analytics output -raw configuration_overrides_json)
+  # スクリプトと引数（device map・格納先・checkpoint など）のハッシュをジョブのタグ SpecHash に付けておき、動いているジョブと違えば
+  # 止めて起こし直す。STREAMING のジョブは起動したときの引数のまま動き続けるので、比べないと lab の機器を変えても古い device map のまま
+  # （checkpoint から続きを読むので、止めて起こし直してもデータは落ちない）
+  JOB_SPEC=$("${PY[@]}" -c 'import hashlib, sys; h = hashlib.sha256(open(sys.argv[1], "rb").read()); [h.update(a.encode()) for a in sys.argv[2:]]; print(h.hexdigest()[:16])' \
+    "$SPARK_SCRIPT" "$JOB_DRIVER" "$JOB_OVERRIDES")
   RUNNING=$(aws emr-serverless list-job-runs --region "$REGION" --application-id "$APP_ID" \
     --states SUBMITTED PENDING SCHEDULED RUNNING --query 'jobRuns[].id' --output text)
-  if [ -n "$RUNNING" ] && [ "$RUNNING" != None ]; then
-    # 引数（device map など）は起動したときのまま。lab の機器を変えたら、ジョブを止めてから打ち直す（docs/pipeline.md）
-    echo "ジョブが動いている（${RUNNING}。lab の機器を変えたなら止めてから打ち直す。device map は起動時の引数）"
+  [ "$RUNNING" != None ] || RUNNING=""
+  STALE=""
+  for id in $RUNNING; do
+    spec=$(aws emr-serverless get-job-run --region "$REGION" --application-id "$APP_ID" --job-run-id "$id" --query 'jobRun.tags.SpecHash' --output text 2>/dev/null || echo "")
+    if [ "$spec" != "$JOB_SPEC" ]; then STALE="$STALE $id"; fi
+  done
+  if [ -n "$RUNNING" ] && [ -z "$STALE" ]; then
+    echo "ジョブが同じスクリプトと引数で動いている（${RUNNING}。SpecHash=$JOB_SPEC）"
   else
+    if [ -n "$STALE" ]; then
+      echo "動いているジョブ（${STALE# }）はスクリプトか引数が違う（今は SpecHash=$JOB_SPEC）。止めて起こし直す"
+      for id in $STALE; do
+        aws emr-serverless cancel-job-run --region "$REGION" --application-id "$APP_ID" --job-run-id "$id" >/dev/null
+      done
+      LEFT=""
+      for i in $(seq 1 36); do  # 止まるまで最大 3 分（同じ checkpoint を 2 つのジョブが読み書きしないよう、止まってから起こす）
+        LEFT=$(aws emr-serverless list-job-runs --region "$REGION" --application-id "$APP_ID" \
+          --states SUBMITTED PENDING SCHEDULED RUNNING CANCELLING --query 'jobRuns[].id' --output text)
+        if [ -z "$LEFT" ] || [ "$LEFT" = None ]; then LEFT=""; break; fi
+        sleep 5
+      done
+      [ -z "$LEFT" ] || die "Spark のジョブ（${LEFT}）が 3 分たっても止まらない。$(tf pipeline/analytics output -raw list_job_runs_command) で見て、止まってから打ち直す"
+    fi
     JOB_RUN_ID=$(aws emr-serverless start-job-run --region "$REGION" --application-id "$APP_ID" \
       --execution-role-arn "$(tf pipeline/analytics output -raw runtime_role_arn)" \
       --name snmp-sinks --mode STREAMING \
-      --job-driver "$(tf pipeline/analytics output -raw job_driver_json)" \
-      --configuration-overrides "$(tf pipeline/analytics output -raw configuration_overrides_json)" \
-      --tags "Project=$PREFIX,owner=$OWNER" \
+      --job-driver "$JOB_DRIVER" \
+      --configuration-overrides "$JOB_OVERRIDES" \
+      --tags "Project=$PREFIX,owner=$OWNER,SpecHash=$JOB_SPEC" \
       --query jobRunId --output text)
     echo "JOB_RUN_ID=$JOB_RUN_ID （起動に 2〜5 分。様子は: $(tf pipeline/analytics output -raw list_job_runs_command)）"
   fi

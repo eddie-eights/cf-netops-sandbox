@@ -4,7 +4,7 @@
   - build_prompt        エージェント（AgentCore Runtime）に投げる質問文
   - parse_agent_json    返ってきた文から JSON を取り出す
   - normalize_action    lab EC2 で打ってよいコマンドの許可リスト
-  - should_start / workflow_id / anomaly_id_from_message  どの異常でワークフローを起こすかの判定
+  - should_start / workflow_id / proposal_id / event_from_message  どの異常でワークフローを起こすかの判定と、発生ごとの id
 
 AWS も Temporal も要らないので、tests/test_workflow.py はこのファイルの関数を直接呼んで確かめられる。
 逆に言うと、ここに boto3 や temporalio を持ち込むとテストが動かなくなる。入れない。
@@ -59,35 +59,56 @@ def normalize_action(action: str) -> tuple[str, str]:
     return NO_ACTION, ""
 
 
+# ワークフローを起こす異常の種類。trap（coldStart 以外の通知）は TTL で閉じるだけの「見えた」印で、打つ処置も無いので起こさない
+START_KINDS = {"link_down"}
+
+
 def should_start(anomaly: dict, existing: dict | None) -> bool:
-    """同じ異常（anomaly_id + first_seen）の修復案が既にあれば起こさない。無ければ起こす。
-    Spark（spark/snmp_sinks.py の detect）は resolved から開き直すと first_seen を今にするので、同じ異常が resolved → 再 open になれば起こし直す
-    （2026-09-18 まで first_seen が残っていて起こし直せなかった）"""
-    if not anomaly.get("anomaly_id"):
+    """open の link_down で、同じ発生（anomaly_id + first_seen）の修復案がまだ無ければ起こす。
+    Spark（spark/snmp_sinks.py の detect）は resolved から開き直すと first_seen を今にするので、開き直せば別の発生として起こし直す。
+    修復案は発生ごとの id（proposal_id）で引くので、existing があれば同じ発生（first_seen の比較は古い id の行のための保険）"""
+    if not anomaly.get("anomaly_id") or anomaly.get("kind") not in START_KINDS or anomaly.get("status", "open") != "open":
         return False
     if not existing:
         return True
     return int(existing.get("first_seen") or 0) != int(anomaly.get("first_seen") or 0)
 
 
-def workflow_id(anomaly_id: str) -> str:
-    return f"investigate-{anomaly_id}"
+def occurrence(anomaly_id: str, first_seen) -> str:
+    """1 回の発生の id。anomaly_id だけだと、閉じて開き直した次の発生が前の修復案とワークフローに重なる（2026-09-24）"""
+    return f"{anomaly_id}#{int(first_seen or 0)}"
 
 
-def anomaly_id_from_message(body: str) -> str:
-    """SQS のメッセージ本文（EventBridge のイベントそのまま）から anomaly_id を取る。読めなければ空"""
+def workflow_id(anomaly_id: str, first_seen) -> str:
+    return f"investigate-{occurrence(anomaly_id, first_seen)}"
+
+
+def proposal_id(anomaly_id: str, first_seen) -> str:
+    return occurrence(anomaly_id, first_seen)
+
+
+def event_from_message(body: str) -> tuple[str, int]:
+    """SQS のメッセージ本文（EventBridge のイベントそのまま）から (anomaly_id, first_seen) を取る。読めなければ ("", 0)"""
     try:
         data = json.loads(body or "")
     except ValueError:
-        return ""
+        return "", 0
     if not isinstance(data, dict):
-        return ""
+        return "", 0
     detail = data.get("detail")
     if isinstance(detail, str):
         try:
             detail = json.loads(detail)
         except ValueError:
-            return ""
+            return "", 0
     if not isinstance(detail, dict):
-        return ""
-    return str(detail.get("anomaly_id") or "")
+        return "", 0
+    try:
+        first_seen = int(detail.get("first_seen") or 0)
+    except (TypeError, ValueError):
+        first_seen = 0
+    return str(detail.get("anomaly_id") or ""), first_seen
+
+
+def anomaly_id_from_message(body: str) -> str:
+    return event_from_message(body)[0]

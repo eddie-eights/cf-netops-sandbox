@@ -76,6 +76,13 @@ resource "aws_iam_role_policy" "emr" {
         Resource = local.anomaly_table_arn
       },
       {
+        # 検知: link 以外の trap の open を GSI で探し、TRAP_TTL を過ぎたものを resolved にする（spark/snmp_sinks.py の sweep_traps）
+        Sid      = "AnomalyIndex"
+        Effect   = "Allow"
+        Action   = "dynamodb:Query"
+        Resource = "${local.anomaly_table_arn}/index/status-last_seen-index"
+      },
+      {
         # 新しい異常を EventBridge の既定のバスに出す（terraform/workflow の events.tf が受ける）
         Sid      = "AnomalyEvents"
         Effect   = "Allow"

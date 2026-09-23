@@ -83,7 +83,7 @@ with gr.Blocks(title=f"{TITLE} チャット") as demo:
         gr.Markdown("lab で `lab failover` を打つと、SNMP ポーリング（10 秒）か trap（5 秒）で `link_down` が出ます。`lab heal-main` で resolved に変わります。")
     with gr.Tab("承認"):
         with gr.Row():
-            pr_status = gr.Radio(["pending", "approved", "applied", "verified", "failed", "rejected", "expired", "all"],
+            pr_status = gr.Radio(["pending", "approved", "applied", "verified", "failed", "rejected", "expired", "obsolete", "all"],
                                  value="pending", label="状態（pending = 承認待ち）", scale=4)
             pr_refresh = gr.Button("更新", scale=1)
         pr_msg = gr.Markdown()
@@ -92,25 +92,31 @@ with gr.Blocks(title=f"{TITLE} チャット") as demo:
         with gr.Row():
             pr_id = gr.Dropdown([], value=None, allow_custom_value=True, scale=4,
                                 label="proposal_id（表の 1 列目。選ぶと下に全文が出る）")
+        pr_detail = gr.Markdown(label="詳細")
+        with gr.Row():
+            pr_who = gr.Textbox(label="決める人の名前（必須。決めた人の列に残る）", max_lines=1, max_length=iv.APPROVER_MAX, scale=2)
+            pr_ok = gr.Checkbox(label="上の詳細（原因・コマンド・理由）を読んだ", value=False, scale=2)
             pr_approve = gr.Button("承認して直す", variant="primary", scale=1)
             pr_reject = gr.Button("却下", scale=1)
-        pr_detail = gr.Markdown(label="詳細")
         pr_out = [pr_msg, pr_table, pr_id]
         pr_refresh.click(iv.proposal_table, [pr_status], pr_out)
         pr_status.change(iv.proposal_table, [pr_status], pr_out)
         demo.load(iv.proposal_table, [pr_status], pr_out)
         pr_id.change(iv.proposal_detail, [pr_id], [pr_detail])
+        # 選び直したら「読んだ」を外す（前の案で入れたチェックのまま別の案を承認させない）
+        pr_id.change(lambda _: False, [pr_id], [pr_ok])
         # 30 秒ごとに描き直す（Spark の検知が 1 分、ワーカーの確認が 30 秒おきなので、ボタンを押さなくても追える。
         # 読むのは Neptune 1 回と DynamoDB のクエリ 2 回で、開いているブラウザの数だけ）。proposal_id の選択はそのまま残す
         ticker = gr.Timer(30)
         ticker.tick(tv.redraw_topology, None, [topo_html, topo_table])
         ticker.tick(iv.anomaly_table, [an_status], [an_msg, an_table])
         ticker.tick(lambda st: iv.proposal_table(st)[:2], [pr_status], [pr_msg, pr_table])
-        pr_approve.click(lambda i, s: iv.decide_proposal(i, "approved", s), [pr_id, pr_status], pr_out)
-        pr_reject.click(lambda i, s: iv.decide_proposal(i, "rejected", s), [pr_id, pr_status], pr_out)
+        pr_approve.click(lambda i, s, w, ok: iv.decide_proposal(i, "approved", s, w, ok), [pr_id, pr_status, pr_who, pr_ok], pr_out)
+        pr_reject.click(lambda i, s, w, ok: iv.decide_proposal(i, "rejected", s, w, ok), [pr_id, pr_status, pr_who, pr_ok], pr_out)
         gr.Markdown("修復案は Temporal のワークフロー（terraform/workflow の ECS Fargate のワーカー）が出し、承認を待っています。"
                     "承認すると同じワークフローが lab EC2 で `sudo lab <コマンド>` を打ち（EC2 への入口は SSM Run Command。SSH は開けていない）、"
                     "異常が resolved になるまで 30 秒おきに数回確かめて verified にします。却下は何もしません。"
+                    "承認には名前と「詳細を読んだ」のチェックが要ります。打つ直前に異常がもう閉じていれば、打たずに obsolete にします。"
                     "承認待ちのまま 2 時間（approval_timeout_minutes）で expired になります。")
 
 if __name__ == "__main__":

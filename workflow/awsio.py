@@ -25,10 +25,19 @@ LAB_INSTANCE_ID = os.environ.get("LAB_INSTANCE_ID", "")
 REGION = os.environ.get("AWS_REGION", "ap-northeast-1")
 
 
-def _boto(name):
+def _boto(name, config=None):
     import boto3
 
-    return boto3.client(name, region_name=REGION)
+    return boto3.client(name, region_name=REGION, config=config)
+
+
+def _agent_config():
+    """AgentCore の invoke は、エージェントがツールを何本も回すと 1 分を超える。botocore の既定（読み取り 60 秒・3 回まで再送）だと
+    途中で切って同じ質問をもう一度投げ、アクティビティの start_to_close（worker.py）に届く前に 3 倍の時間と費用を使う。
+    読み取りを 150 秒まで待ち、再送はしない（やり直しは Temporal の RetryPolicy に任せる）"""
+    from botocore.config import Config
+
+    return Config(read_timeout=150, connect_timeout=10, retries={"max_attempts": 1})
 
 
 def _plain(item: dict) -> dict:
@@ -72,8 +81,15 @@ def read_proposal(proposal_id: str) -> dict:
     return _plain(res["Item"]) if "Item" in res else {}
 
 
-def write_proposal(item: dict) -> None:
-    _boto("dynamodb").put_item(TableName=PROPOSAL_TABLE, Item={k: _typed(v) for k, v in item.items() if v is not None})
+def write_proposal(item: dict, only_new: bool = False) -> bool:
+    """修復案を書く。only_new なら同じ proposal_id が無いときだけ書き、あれば書かずに False（人が決めた status を pending に戻さない）"""
+    kw = {"ConditionExpression": "attribute_not_exists(proposal_id)"} if only_new else {}
+    client = _boto("dynamodb")
+    try:
+        client.put_item(TableName=PROPOSAL_TABLE, Item={k: _typed(v) for k, v in item.items() if v is not None}, **kw)
+    except client.exceptions.ConditionalCheckFailedException:
+        return False
+    return True
 
 
 def update_proposal(proposal_id: str, fields: dict) -> None:
@@ -89,7 +105,7 @@ def update_proposal(proposal_id: str, fields: dict) -> None:
 # ---------------------------------------------------------------- AgentCore Runtime
 def ask_agent(prompt: str) -> str:
     session_id = f"workflow-{uuid.uuid4()}"  # runtimeSessionId は 33 文字以上
-    res = _boto("bedrock-agentcore").invoke_agent_runtime(
+    res = _boto("bedrock-agentcore", _agent_config()).invoke_agent_runtime(
         agentRuntimeArn=AGENT_RUNTIME_ARN, runtimeSessionId=session_id, qualifier="DEFAULT",
         contentType="application/json", accept="application/json",
         payload=json.dumps({"prompt": prompt}, ensure_ascii=False).encode("utf-8"))

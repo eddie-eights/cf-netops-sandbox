@@ -81,6 +81,7 @@ locals {
   vpc_id         = data.terraform_remote_state.main.outputs.vpc_id
   subnet_id      = data.terraform_remote_state.main.outputs.instance_subnet_id # サブネット a（ssm / bedrock-agentcore のエンドポイントがある方）
   endpoint_sg_id = data.terraform_remote_state.main.outputs.endpoint_security_group_id
+  web_sg_id      = data.terraform_remote_state.main.outputs.instance_security_group_id # Temporal UI の踏み台（ecs.tf の 8233）
   # agent が無いとワークフローが原因を聞く先が無い。下の precondition で「agent を先に」と出す
   runtime_arn = try(data.terraform_remote_state.agent.outputs.agent_runtime_arn, "")
 

@@ -1,5 +1,6 @@
 # ---------------------------------------------------------------- security groups
-# 受信ルールは置かない。ブラウザは SSM のポートフォワーディングで来る（SSM Agent が内側から ssmmessages へつなぎに行く）
+# 受信ルールは置かない。ブラウザは SSM のポートフォワーディングで来る（SSM Agent が内側から ssmmessages へつなぎに行く）。
+# Temporal UI への 8233 の送信ルールは terraform/workflow の ecs.tf が足す（相手のタスクの SG がそちらにあるため）
 resource "aws_security_group" "web" {
   name        = "${local.name_prefix}-web"
   description = "Chat web EC2 - no inbound, outbound HTTPS only"

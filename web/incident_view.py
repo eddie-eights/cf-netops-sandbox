@@ -44,7 +44,8 @@ def proposal_table(status: str = "pending"):
              "結果": (p.get("verify_note") or p.get("apply_output") or "")[:200]} for p in r.get("proposals", [])]
     msg = r["error"] if r.get("error") else f"{r.get('count', 0)} 件（{status}）"
     ids = [row["proposal_id"] for row in rows]
-    return msg, pd.DataFrame(rows, columns=PROPOSAL_COLS), gr.update(choices=ids, value=ids[0] if ids else None)
+    # 選択は空に戻す。先頭を選んでおくと、表が描き直されて先頭が別の修復案に替わったとき、見ていない案をそのまま承認できてしまう
+    return msg, pd.DataFrame(rows, columns=PROPOSAL_COLS), gr.update(choices=ids, value=None)
 
 
 def proposal_detail(proposal_id: str) -> str:
@@ -65,8 +66,22 @@ def proposal_detail(proposal_id: str) -> str:
     return "\n".join(lines)
 
 
-def decide_proposal(proposal_id: str, decision: str, status: str):
-    r = proposals.decide((proposal_id or "").strip(), decision, decided_by="web")
-    msg = r["error"] if r.get("error") else f"{r['proposal_id']} を {decision} にした（ワーカーが次の段に進める。状態を approved / applied / verified にして更新で追える）"
+APPROVER_MAX = 40  # decided_by に残す名前の長さ（proposals.decide は 64 字で切る。「 (web)」を足しても収まる）
+
+
+def decide_proposal(proposal_id: str, decision: str, status: str, approver: str = "", confirmed: bool = False):
+    """承認・却下を書く。名前（decided_by に「<名前> (web)」で残す）は両方に要り、承認は「詳細を読んだ」の確認も要る。
+    Web は SSM のポートフォワーディングの先で認証が無く、誰が押したかを画面の外から知る手段が無いので、自分で名乗ってもらう。
+    足りなければ DynamoDB には触らず、表と選択もそのまま残す"""
+    proposal_id = (proposal_id or "").strip()
+    name = " ".join((approver or "").split())[:APPROVER_MAX]
+    if not proposal_id:
+        return "proposal_id を選ぶ（表の 1 列目）", gr.update(), gr.update()
+    if not name:
+        return "決める人の名前を入れる（decided_by に残る）", gr.update(), gr.update()
+    if decision == "approved" and not confirmed:
+        return "「詳細を読んだ」にチェックを入れてから承認する（lab でコマンドが打たれる）", gr.update(), gr.update()
+    r = proposals.decide(proposal_id, decision, decided_by=f"{name} (web)")
+    msg = r["error"] if r.get("error") else f"{r['proposal_id']} を {decision} にした（{name}。ワーカーが次の段に進める。状態を approved / applied / verified にして更新で追える）"
     _, table, ids = proposal_table(status)
     return msg, table, ids

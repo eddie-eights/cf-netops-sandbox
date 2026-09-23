@@ -54,15 +54,19 @@ locals {
   group_arns = "${replace(local.msk_cluster_arn, ":cluster/", ":group/")}/*"
 
   # ops/up.sh が置く場所（ops/up.sh の手順 5）。スクリプトと jar は読むだけ、checkpoint と logs は書く
-  s3_prefix     = "analytics"
-  script_key    = "${local.s3_prefix}/snmp_sinks.py"
-  jars_prefix   = "${local.s3_prefix}/jars"
-  logs_prefix   = "${local.s3_prefix}/logs"
-  checkpoint    = "${local.s3_prefix}/checkpoint"
-  catalog_name  = "s3tables"
-  log_group     = "/aws/emr-serverless/${local.name_prefix}"
-  table_bucket  = "${local.name_prefix}-tables"
-  iceberg_table = "${local.catalog_name}.${var.namespace}.${var.table_name}"
+  s3_prefix   = "analytics"
+  script_key  = "${local.s3_prefix}/snmp_sinks.py"
+  jars_prefix = "${local.s3_prefix}/jars"
+  logs_prefix = "${local.s3_prefix}/logs"
+  checkpoint  = "${local.s3_prefix}/checkpoint"
+  # checkpoint は Kafka の offset を持つので、MSK を作り直すと新しいクラスタの offset と合わない（古い offset を読みに行って止まるか、
+  # 新しいトピックの頭を飛ばす）。MSK のクラスタの uuid（ARN の最後）をパスに入れ、クラスタが変われば checkpoint も新しくする
+  msk_cluster_uuid = try(element(split("/", local.msk_cluster_arn), 2), "none")
+  checkpoint_uri   = "s3://${local.bucket}/${local.checkpoint}/${local.msk_cluster_uuid}/"
+  catalog_name     = "s3tables"
+  log_group        = "/aws/emr-serverless/${local.name_prefix}"
+  table_bucket     = "${local.name_prefix}-tables"
+  iceberg_table    = "${local.catalog_name}.${var.namespace}.${var.table_name}"
   # iceberg を選ばないときはテーブルバケットも s3tables のエンドポイントも作らない（tables.tf / network.tf）
   table_bucket_arn = local.sink_iceberg ? aws_s3tables_table_bucket.tables[0].arn : ""
 

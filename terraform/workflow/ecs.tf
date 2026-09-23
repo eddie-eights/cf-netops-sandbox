@@ -25,6 +25,27 @@ resource "aws_vpc_security_group_ingress_rule" "endpoints_from_task" {
   referenced_security_group_id = aws_security_group.task.id
 }
 
+# Temporal UI（8233）は Web の EC2 を踏み台にした SSM のポートフォワーディングで開く（docs/workflow.md「Temporal UI を開く」）。
+# 踏み台の Web の SG から出て、タスクの SG に入る 2 本だけ開ける（どちらも相手の SG に限る。無いとセッションはつながっても UI が開かない）。
+# Web の SG は terraform/base/core のものだが、相手のタスクの SG がこのルートにあるので、ここで足す（gateway.tf の neptune_from_tools と同じ形）
+resource "aws_vpc_security_group_ingress_rule" "task_ui_from_web" {
+  security_group_id            = aws_security_group.task.id
+  description                  = "Temporal UI from the chat web EC2 (SSM port forwarding)"
+  ip_protocol                  = "tcp"
+  from_port                    = 8233
+  to_port                      = 8233
+  referenced_security_group_id = local.web_sg_id
+}
+
+resource "aws_vpc_security_group_egress_rule" "web_to_task_ui" {
+  security_group_id            = local.web_sg_id
+  description                  = "Temporal UI of the workflow task (SSM port forwarding)"
+  ip_protocol                  = "tcp"
+  from_port                    = 8233
+  to_port                      = 8233
+  referenced_security_group_id = aws_security_group.task.id
+}
+
 # ---------------------------------------------------------------- cluster / logs
 resource "aws_ecs_cluster" "workflow" {
   name = "${local.name_prefix}-workflow"

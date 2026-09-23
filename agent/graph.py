@@ -225,10 +225,12 @@ def _upsert_unregistered(vid: str, label: str, props: dict) -> None:
           ".property('registered',false))")
 
 
-def set_status(device_id: str, if_name: str = "", status: str = "DOWN") -> dict:
+def set_status(device_id: str, if_name: str = "", status: str = "DOWN", only_if: str = "") -> dict:
     """動的な状態を書く。if_name があればその機器のそのインタフェースが付く辺（a 側でも b 側でも）とインタフェースの頂点、無ければ機器の頂点。
     戻り値の updated は書いた要素の数。トポロジに無ければ未登録の頂点を作って unregistered: True を返す（UP に戻すだけのときは作らない）。
-    未登録の頂点に書いたときも unregistered: True。頂点の property は single で書く（Neptune の既定は set で、値が積み重なる）"""
+    未登録の頂点に書いたときも unregistered: True。頂点の property は single で書く（Neptune の既定は set で、値が積み重なる）。
+    only_if（機器の頂点だけ）を渡すと、今の status がそれのときだけ書く（trap の解消で ALARM を UP に戻すとき、
+    IF の分からない linkDown が付けた DOWN まで UP に上書きしないため）。合わなければ updated: 0 で何も作らない"""
     status = str(status).upper()
     if status not in STATUSES:
         return {"error": f"status は {' / '.join(STATUSES)} のどれか"}
@@ -246,9 +248,10 @@ def set_status(device_id: str, if_name: str = "", status: str = "DOWN") -> dict:
         elif any(r is False for r in reg):
             out["unregistered"] = True
         return out
-    reg = query(f"g.V({dev}).property(single,'status',{st}).coalesce(values('registered'),constant(true))")
+    cond = f".has('status',{_q(str(only_if).upper())})" if only_if else ""
+    reg = query(f"g.V({dev}){cond}.property(single,'status',{st}).coalesce(values('registered'),constant(true))")
     out = {"device_id": device_id, "status": status, "updated": len(reg)}
-    if not reg and status != "UP":
+    if not reg and status != "UP" and not only_if:
         _upsert_unregistered(device_id, "device", {"hostname": device_id, "site": "?", "role": "unknown", "enabled": False})
         query(f"g.V({dev}).property(single,'status',{st})")
         out["unregistered"] = True

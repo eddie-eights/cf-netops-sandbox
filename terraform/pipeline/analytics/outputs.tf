@@ -41,7 +41,7 @@ output "job_driver_json" {
       entryPoint = "s3://${local.bucket}/${local.script_key}"
       # 「cond ? [..] : []」は両辺の型が揃わず validate が落ちるので for … if で絞る
       entryPointArguments = concat(
-        ["--bootstrap", local.bootstrap, "--checkpoint", "s3://${local.bucket}/${local.checkpoint}/", "--sinks", join(",", var.sinks), "--region", var.region,
+        ["--bootstrap", local.bootstrap, "--checkpoint", local.checkpoint_uri, "--sinks", join(",", var.sinks), "--region", var.region,
           "--metric-topics", local.metric_topics, "--log-topics", local.log_topics,
           # Source を接頭辞ごとに変える。既定のバスは 1 つの AWS アカウントで共有なので、ここを固定にすると
           # 他の人の異常が自分の workflow / graph のルールに当たる（ルール名は接頭辞付きでも event_pattern は別）

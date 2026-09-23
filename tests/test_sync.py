@@ -103,7 +103,7 @@ check("seed_graph.py は LAB_TOPOLOGY_B64 を読み、GRAPH_REPLACE=1 のとき�
 # ---- status Lambda（graph.set_status を差し替えて呼び出しを見る）
 calls = []
 fake_graph = types.ModuleType("graph")
-fake_graph.set_status = lambda dev, ifn="", status="DOWN": (calls.append((dev, ifn, status)) or {"updated": 1})
+fake_graph.set_status = lambda dev, ifn="", status="DOWN", only_if="": (calls.append((dev, ifn, status) + ((only_if,) if only_if else ())) or {"updated": 1})
 sys.modules["graph"] = fake_graph
 h = load("graph/status_handler.py", "status_handler")
 ev = lambda t, **d: {"detail-type": t, "source": "demo-poc.spark", "detail": d}
@@ -114,7 +114,7 @@ check("AnomalyResolved は同じ回線を UP", calls[-1] == ("hq-ce-01", "eth1",
 h.handler(ev("AnomalyOpened", device_id="hq-ce-01", kind="trap", target=".1.3.6.1.6.3.1.1.5.1"))
 check("それ以外の trap は機器を ALARM", calls[-1] == ("hq-ce-01", "", "ALARM"))
 h.handler(ev("AnomalyResolved", device_id="hq-ce-01", kind="trap", target="x"))
-check("trap の解消は機器を UP", calls[-1] == ("hq-ce-01", "", "UP"))
+check("trap の解消は機器が ALARM のときだけ UP（linkDown の DOWN は上書きしない）", calls[-1] == ("hq-ce-01", "", "UP", "ALARM"))
 h.handler(ev("AnomalyOpened", device_id="hq-ce-01", kind="link_down", target="?"))
 check("IF が分からない linkDown は機器に付ける", calls[-1] == ("hq-ce-01", "", "DOWN"))
 n = len(calls)
@@ -127,11 +127,11 @@ class _Cap(logging.Handler):
     def emit(self, record):
         self.records.append(record)
 cap = _Cap(); h.log.addHandler(cap)
-fake_graph.set_status = lambda dev, ifn="", status="DOWN": (calls.append((dev, ifn, status)) or {"updated": 0, "unregistered": True})
+fake_graph.set_status = lambda dev, ifn="", status="DOWN", only_if="": (calls.append((dev, ifn, status) + ((only_if,) if only_if else ())) or {"updated": 0, "unregistered": True})
 h.handler(ev("AnomalyOpened", device_id="zz-ce-09", kind="link_down", target="eth1"))
 check("未登録の機器・IF の異常は WARNING で UNREGISTERED をログに出す", calls[-1] == ("zz-ce-09", "eth1", "DOWN")
       and cap.records[-1].levelno == logging.WARNING and "UNREGISTERED" in cap.records[-1].getMessage())
-fake_graph.set_status = lambda dev, ifn="", status="DOWN": (calls.append((dev, ifn, status)) or {"updated": 1})
+fake_graph.set_status = lambda dev, ifn="", status="DOWN", only_if="": (calls.append((dev, ifn, status) + ((only_if,) if only_if else ())) or {"updated": 1})
 h.handler(ev("AnomalyResolved", device_id="hq-ce-01", kind="link_down", target="eth1"))
 check("登録済みなら INFO", cap.records[-1].levelno == logging.INFO)
 h.log.removeHandler(cap)

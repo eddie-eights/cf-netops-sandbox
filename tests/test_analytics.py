@@ -146,8 +146,10 @@ check("job_driver の格納先の引数は選んだときだけ（for a in [...]
       and re.search(r'\["--opensearch-endpoint",\s*local\.opensearch_endpoint,\s*"--opensearch-index",\s*local\.opensearch_index\] : a if local\.sink_opensearch', args_block.group(1)) is not None
       and re.search(r'\["--prometheus-url",\s*local\.prometheus_remote_write_url\] : a if local\.sink_prometheus', args_block.group(1)) is not None)
 check("--sinks は var.sinks をカンマでつなぐ", 'join(",", var.sinks)' in args_block.group(1))
-check("--checkpoint は s3://<バケット>/analytics/checkpoint/（格納先ごとに下を切るのはスクリプト）",
-      '"s3://${local.bucket}/${local.checkpoint}/"' in args_block.group(1))
+check("--checkpoint は s3://<バケット>/analytics/checkpoint/<MSK の uuid>/（MSK を作り直したら checkpoint も新しく。格納先ごとに下を切るのはスクリプト）",
+      '"--checkpoint", local.checkpoint_uri' in args_block.group(1)
+      and re.search(r'msk_cluster_uuid\s*=\s*try\(element\(split\("/", local\.msk_cluster_arn\), 2\)', tf) is not None
+      and re.search(r'checkpoint_uri\s*=\s*"s3://\$\{local\.bucket\}/\$\{local\.checkpoint\}/\$\{local\.msk_cluster_uuid\}/"', tf) is not None)
 check("job_driver は jars を s3://<バケット>/analytics/jars/ から読む", "spark.jars=s3://${local.bucket}/${local.jars_prefix}/*.jar" in tf
       and re.search(r'jars_prefix\s*=\s*"\$\{local\.s3_prefix\}/jars"', tf) is not None and re.search(r's3_prefix\s*=\s*"analytics"', tf) is not None)
 check("ジョブは 2 vCPU（driver 1 + executor 1、動的割り当て無し）",
@@ -168,6 +170,8 @@ check("precondition は stream の anomaly_table_name も見る", 'local.anomaly
 check("runtime role は anomalies テーブルに dynamodb:UpdateItem、既定のバスに events:PutEvents",
       re.search(r'"dynamodb:UpdateItem"[\s\S]*?Resource = local\.anomaly_table_arn', tf) is not None
       and re.search(r'"events:PutEvents"[\s\S]*?Resource = local\.event_bus_arn', tf) is not None)
+check("runtime role は anomalies の GSI（status-last_seen-index）に dynamodb:Query（未通知の再送と trap の TTL で引く）",
+      re.search(r'Action\s*=\s*"dynamodb:Query"\s*\n\s*Resource\s*=\s*"\$\{local\.anomaly_table_arn\}/index/status-last_seen-index"', tf) is not None)
 check("events のエンドポイント（Interface、2 AZ、private DNS）を持つ",
       re.search(r'resource "aws_vpc_endpoint" "events"[\s\S]*?"com\.amazonaws\.\$\{var\.region\}\.events"[\s\S]*?vpc_endpoint_type\s*=\s*"Interface"[\s\S]*?slice\(local\.subnet_ids, 0, 2\)[\s\S]*?private_dns_enabled\s*=\s*true', tf, re.S) is not None)
 check("build の引数は spark / args（格納先ごとに Kafka を読む）", [a.arg for a in funcs["build"].args.args] == ["spark", "args"])
@@ -387,7 +391,10 @@ check("up.sh は analytics を stream の後に apply し、job を STREAMING �
 check("up.sh は s3tables / prometheus のエンドポイントと opensearch の OCU を SINK_* ごとに費用に足し、opensearch は analytics を作るときだけ OCU の注意を出す",
       re.search(r'COST_CENTS=\$\(\(COST_CENTS \+ 17\)\)\n\s*if \[ -n "\$SINK_S3" \]; then COST_CENTS=\$\(\(COST_CENTS \+ 3\)\); fi\n\s*if \[ -n "\$SINK_PROMETHEUS" \]; then COST_CENTS=\$\(\(COST_CENTS \+ 3\)\); fi\n\s*if \[ -n "\$SINK_OPENSEARCH" \]; then COST_CENTS=\$\(\(COST_CENTS \+ 33\)\); fi', up) is not None
       and re.search(r'\*,opensearch,\*\) if \[ -z "\$SKIP_ANALYTICS" \]; then printf', up) is not None)
-check("up.sh は動いているジョブがあれば起こさない", "--states SUBMITTED PENDING SCHEDULED RUNNING" in up)
+check("up.sh は同じ SpecHash のジョブが動いていれば起こさない", "--states SUBMITTED PENDING SCHEDULED RUNNING" in up
+      and "jobRun.tags.SpecHash" in up and 'if [ "$spec" != "$JOB_SPEC" ]; then STALE=' in up)
+check("up.sh は SpecHash が違うジョブを cancel してから、SpecHash のタグを付けて起こし直す（スクリプトや引数の変更を反映する）",
+      re.search(r'cancel-job-run[\s\S]*--name snmp-sinks --mode STREAMING[\s\S]*--tags "[^"]*SpecHash=\$JOB_SPEC"', up) is not None)
 check("up.sh は PIPELINE=1 で SKIP_STREAM=1 なら analytics も飛ばす", re.search(r'SKIP_STREAM=1 なので analytics も作らない[^\n]*\n\s*SKIP_ANALYTICS=1', up) is not None)
 check("down.sh は job を cancel → stop-application → destroy analytics → destroy graph の順",
       down.index("cancel-job-run") < down.index("stop-application") < down.index("destroy_root pipeline/analytics") < down.index("destroy_lambda_root pipeline/graph") < down.index("destroy_root pipeline/stream"))

@@ -3,7 +3,7 @@ Neptune の機器と回線の動的な状態（property status）を書く。設
 
   AnomalyOpened   kind=link_down → 機器 device_id のインタフェース target が付く回線（辺）を DOWN
                   それ以外（trap）  → 機器（頂点）を ALARM（トラップは機器が落ちた印ではないので DOWN にしない）
-  AnomalyResolved 同じ要素を UP に戻す
+  AnomalyResolved 同じ要素を UP に戻す（trap の解消は、機器が ALARM のときだけ UP。IF の分からない linkDown の DOWN は上書きしない）
 
 zip には agent/graph.py を同梱する（Gremlin の組み立てと boto3 の neptunedata はそちら）。エンドポイントは環境変数 NEPTUNE_ENDPOINT。
 トポロジに無い機器やインタフェースは捨てずに「未登録」の頂点として Neptune に残し（graph.set_status）、WARNING で UNREGISTERED を
@@ -34,7 +34,10 @@ def apply(detail_type: str, detail: dict) -> dict:
         return graph.set_status(device_id, target, status)
     if kind == "link_down":
         return graph.set_status(device_id, "", status)   # どのインタフェースか分からない linkDown は機器に付ける
-    return graph.set_status(device_id, "", "ALARM" if status == "DOWN" else "UP")
+    if status == "DOWN":
+        return graph.set_status(device_id, "", "ALARM")
+    # trap は TTL で閉じる（spark/snmp_sinks.py の TRAP_TTL）。そのあいだに機器が DOWN になっていたら、それは linkDown の印なので残す
+    return graph.set_status(device_id, "", "UP", only_if="ALARM")
 
 
 def handler(event, context=None):

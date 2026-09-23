@@ -10,7 +10,7 @@ Kafka と S3 Tables の jar、カタログの設定は spark-submit の --conf �
   prometheus  メトリクスのトピックだけ → Amazon Managed Service for Prometheus の remote write に SigV4 で POST（数値の field だけ）
 どのトピックがメトリクスでどれがログかは --metric-topics / --log-topics（既定は Telegraf の metrics と traps,logs。
 logs は FRR のログ。lab の EC2 の rsyslog が Telegraf の EC2 へ送る）。格納先ごとに別のストリーミングクエリ（別の Kafka の購読と checkpoint）に
-するので、1 つが落ちても他は進む。
+する。1 つが止まったらジョブを 1 で終わらせ、EMR Serverless に起こし直させる（どのクエリも checkpoint の続きから読む）。
 
 Telegraf の JSON 出力（outputs.kafka の data_format = "json"、json_timestamp_units = "1s"）は
   {"fields": {…}, "name": "<measurement>", "tags": {"agent_host": "…", "host": "…", …}, "timestamp": <秒>}
@@ -21,7 +21,9 @@ Telegraf の JSON 出力（outputs.kafka の data_format = "json"、json_timesta
   metrics の interface で ifOperStatus が down のインタフェース（ポーリング）と、traps の linkDown（即時）を DynamoDB の異常テーブル
   （terraform/pipeline/stream の anomalies。キーは <機器>#<種別>#<インタフェース>）に open で書き、up に戻ったポーリングと linkUp で resolved にする。
   新しく open になったときだけ EventBridge の既定のバスに Source <接頭辞>.spark（--event-source）/ DetailType AnomalyOpened を put_events する
-  （terraform/workflow の events.tf がルールで SQS に流し、Temporal の worker が調査ワークフローを起こす）。
+  （terraform/workflow の events.tf がルールで SQS に流し、Temporal の worker が調査ワークフローを起こす）。resolved にしたときは AnomalyResolved。
+  イベントが届いたかは項目の notified に残し、届かなかったものは次のバッチで出し直す。link 以外の trap は TRAP_TTL 秒 次の trap が来なければ
+  resolved にする（「直った」の trap が無いので）。coldStart / warmStart は異常にしない。
   機器名は sysName タグ（小文字・ドメイン無しに揃える）> --device-map（別名=機器名,...。ops/up.sh が lab の定義から作る）の順で引く。以前 terraform/pipeline/stream の detector Lambda がしていたことをここに寄せた。
 
 HTTP の送信は driver でまとめて行う（マイクロバッチを collect する。PoC の量（機器数台、10 秒間隔）なら 1 分に数百行）。
@@ -43,7 +45,6 @@ METRIC_TOPICS = "metrics"   # Telegraf の inputs.snmp（telegraf/telegraf.conf.
 LOG_TOPICS = "traps,logs"   # traps = Telegraf の inputs.snmp_trap、logs = inputs.socket_listener（FRR のログ。measurement は frr_log）
 SINKS = ("iceberg", "opensearch", "prometheus")
 TRIGGER = "60 seconds"
-REMIND = 300  # 落ちた格納先を ERROR で言い直す間隔（秒）
 HTTP_TIMEOUT = 30
 HTTP_RETRIES = 3        # 5xx と接続エラーだけ打ち直す。4xx は捨ててログに出す（古すぎるサンプルなどは何度打っても通らない）
 BULK_SIZE = 500         # 1 回の POST に載せる行数
@@ -393,6 +394,20 @@ def make_prometheus_sender(url, region):
 
 # ---------------------------------------------------------------- detect（異常 → DynamoDB + EventBridge）
 LINK_DOWN, LINK_UP = ".1.3.6.1.6.3.1.1.5.3", ".1.3.6.1.6.3.1.1.5.4"   # IF-MIB linkDown / linkUp の trap OID
+# snmpd が起きた・止まった知らせで、異常ではない（lab の up や snmpd の再起動のたびに来る）。異常にしない。
+# 知らない trap は異常として開く（許可リストにすると、知らない本物の異常を黙って捨てる）ので、ここは「捨てる」側の一覧
+IGNORED_TRAPS = {
+    ".1.3.6.1.6.3.1.1.5.1",       # SNMPv2-MIB coldStart
+    ".1.3.6.1.6.3.1.1.5.2",       # SNMPv2-MIB warmStart
+    ".1.3.6.1.4.1.8072.4.0.2",    # NET-SNMP-AGENT-MIB nsNotifyShutdown（snmpd が止まる）
+    ".1.3.6.1.4.1.8072.4.0.3",    # NET-SNMP-AGENT-MIB nsNotifyRestart（snmpd が設定を読み直した）
+}
+# link 以外の trap には「直った」の知らせが無い。最後の trap から TRAP_TTL 秒たったら resolved にする（見回りは TRAP_SWEEP 秒に 1 回）。
+# 以前は一度開くと閉じず、graph の status Lambda が機器を ALARM のままにしていた
+TRAP_TTL = 600
+TRAP_SWEEP = 60
+EVENT_RETRIES = 3   # put_events で落ちた entry（FailedEntryCount）だけ打ち直す回数。届かなかったものは notified=false のまま次のバッチで出し直す
+ANOMALY_INDEX = "status-last_seen-index"   # terraform/pipeline/stream の anomalies の GSI（status + last_seen）
 EVENT_SOURCE = "netops.spark"          # --event-source の既定。terraform は接頭辞に合わせて <接頭辞>.spark を渡す
 EVENT_DETAIL_TYPE = "AnomalyOpened"
 EVENT_RESOLVED_TYPE = "AnomalyResolved"   # open → resolved にした瞬間に出す（terraform/pipeline/graph の status Lambda が回線を UP に戻す）
@@ -424,6 +439,16 @@ def device(m, devmap):
     return devmap.get(ip, ip or "?")
 
 
+def _oid(v):
+    """数値 OID を ".1.3.6..." の形に揃える（Telegraf は MIB が無いと "iso.3.6..." と書く。下の varbind と同じ事情）"""
+    v = str(v or "").strip()
+    if v.startswith("iso."):
+        return ".1." + v[4:]
+    if v[:2] == "1.":
+        return "." + v
+    return v
+
+
 def events(m, devmap):
     """1 メトリクス（Telegraf の JSON）から (機器, 種別, インタフェース, 開く/閉じる, 元) の列を出す。関係ない行は []"""
     if not isinstance(m, dict):
@@ -439,7 +464,7 @@ def events(m, devmap):
             return []
         return [(device(m, devmap), "link_down", ifn, down, "poll")]
     if name == "snmp_trap":
-        oid = t.get("oid", "")
+        oid = _oid(t.get("oid", ""))
         if oid in (LINK_DOWN, LINK_UP):
             # MIB が無いと varbind の名前は数値 OID（末尾に ifIndex が付く）。ifDescr を優先し、無ければ ifIndex。
             # lab の Telegraf 1.40 は数値 OID を "iso.3.6.1.2.1.2.2.1.2.38" と書く（先頭が ".1." でなく "iso."。2026-09-18 実機）ので
@@ -452,6 +477,8 @@ def events(m, devmap):
                     ifn = str(v[0])
                     break
             return [(device(m, devmap), "link_down", ifn, oid == LINK_DOWN, "trap")]
+        if oid in IGNORED_TRAPS:
+            return []
         return [(device(m, devmap), "trap", oid, True, "trap")]
     return []
 
@@ -464,76 +491,194 @@ def anomaly_detail(kind, ifn, src):
     return f"{ifn} is down ({src})" if kind == "link_down" else f"trap {ifn}"
 
 
-def make_detect_sender(table_name, devmap, region, event_bus, event_source=EVENT_SOURCE, dynamodb=None, events_client=None):
+def _s(item, k):
+    return (item.get(k) or {}).get("S", "")
+
+
+def _n(item, k):
+    v = (item.get(k) or {}).get("N")
+    return int(v) if v is not None else 0
+
+
+def make_detect_sender(table_name, devmap, region, event_bus, event_source=EVENT_SOURCE, dynamodb=None, events_client=None,
+                       trap_ttl=TRAP_TTL, clock=time.time, sleep=time.sleep):
     """records（row_to_record の辞書）から異常を出し、DynamoDB に open / resolved を書き、新しく open になったものを AnomalyOpened、
     open から resolved になったものを AnomalyResolved として EventBridge に出す。戻り値は新しく open になったものだけ。
 
     dynamodb / events_client はテストで差し替える（無ければ boto3 で作る。EMR Serverless の Python に boto3 は入っている）。
-    同じマイクロバッチに同じキーが何度も出るときは最後の状態だけ書く（ポーリングは 10 秒間隔、トリガーは 60 秒）。
+    同じマイクロバッチに同じキーが何度も出るときは、ts の順に並べて最後の状態だけ書く（ポーリングは 10 秒間隔、トリガーは 60 秒。
+    collect の順は Kafka のパーティションの順で、時刻の順ではない。ts で並べないと down → up の up が先に来たとき open のまま残る）。
+
+    DynamoDB を先に書き、イベントはそのあとに出す。イベントが届いたかは項目の notified（BOOL）に残す:
+      開く / 閉じるときに notified=false を書き、put_events が通ったら true にする。通らなかった（例外・FailedEntryCount）ものは
+      false のまま残り、次のバッチで同じキーが来たとき出し直す（down / up のポーリングは 10 秒ごとに来る）。
+      notified の無い古い項目は届いたものとみなす（出し直さない）。
     """
     if dynamodb is None or events_client is None:
         import boto3
         dynamodb = dynamodb or boto3.client("dynamodb", region_name=region)
         events_client = events_client or boto3.client("events", region_name=region)
+    CCF = dynamodb.exceptions.ConditionalCheckFailedException
+    swept = {"at": 0}
+
+    def opened_detail(item):
+        return {"anomaly_id": _s(item, "anomaly_id"), "device_id": _s(item, "device_id"), "kind": _s(item, "kind"), "target": _s(item, "target"),
+                "first_seen": _n(item, "first_seen"), "detail": _s(item, "detail"), "source": _s(item, "source")}
+
+    def resolved_detail(item, src):
+        return {"anomaly_id": _s(item, "anomaly_id"), "device_id": _s(item, "device_id"), "kind": _s(item, "kind"), "target": _s(item, "target"),
+                "resolved_at": _n(item, "resolved_at"), "source": src}
+
+    def open_(key, dev, kind, ifn, src, now):
+        """(新しく開いたか, 出すイベントの detail か None)"""
+        values = {":o": {"S": "open"}, ":n": {"N": str(now)}, ":p": {"S": src}, ":t": {"S": anomaly_detail(kind, ifn, src)}}
+        try:
+            # たいていは開いたままの down（10 秒ごとのポーリング）。last_seen だけ進める
+            r = dynamodb.update_item(
+                TableName=table_name, Key={"anomaly_id": {"S": key}},
+                ConditionExpression="#s = :o",
+                UpdateExpression="SET last_seen=:n, #src=:p, detail=:t",
+                ExpressionAttributeNames={"#s": "status", "#src": "source"},
+                ExpressionAttributeValues=values, ReturnValues="ALL_NEW")
+            item = r.get("Attributes") or {}
+            if (item.get("notified") or {}).get("BOOL") is False:
+                return False, opened_detail(item)   # 前のバッチで AnomalyOpened が届かなかった。出し直す
+            return False, None
+        except CCF:
+            pass
+        # 無かった、または resolved から開き直した。1 回の条件付き更新で開く: first_seen を今にし、前の resolved_at を消す。
+        # workflow/worker.py は anomaly_id + first_seen を 1 つの発生として扱うので、開き直しは別の発生になる（2026-09-18）。
+        # 以前は SET のあとに REMOVE を別の update_item で打っていて、あいだで落ちると first_seen が古いまま残った
+        dynamodb.update_item(
+            TableName=table_name, Key={"anomaly_id": {"S": key}},
+            ConditionExpression="attribute_not_exists(anomaly_id) OR #s <> :o",
+            UpdateExpression="SET device_id=:d, kind=:k, target=:i, #s=:o, last_seen=:n, first_seen=:n, #src=:p, detail=:t, notified=:f REMOVE resolved_at",
+            ExpressionAttributeNames={"#s": "status", "#src": "source"},
+            ExpressionAttributeValues={**values, ":d": {"S": dev}, ":k": {"S": kind}, ":i": {"S": ifn}, ":f": {"BOOL": False}})
+        return True, {"anomaly_id": key, "device_id": dev, "kind": kind, "target": ifn, "first_seen": now,
+                      "detail": anomaly_detail(kind, ifn, src), "source": src}
+
+    def resolve(key, now):
+        """出す AnomalyResolved の detail か None"""
+        try:
+            r = dynamodb.update_item(
+                TableName=table_name, Key={"anomaly_id": {"S": key}},
+                ConditionExpression="#s = :o",
+                UpdateExpression="SET #s=:r, resolved_at=:n, last_seen=:n, notified=:f",
+                ExpressionAttributeNames={"#s": "status"},
+                ExpressionAttributeValues={":o": {"S": "open"}, ":r": {"S": "resolved"}, ":n": {"N": str(now)}, ":f": {"BOOL": False}},
+                ReturnValues="ALL_NEW", ReturnValuesOnConditionCheckFailure="ALL_OLD")
+            return r.get("Attributes") or {}
+        except CCF as e:
+            # 開いていない異常の up（正常時のポーリングは毎回ここ）。前のバッチで AnomalyResolved が届かなかったものだけ出し直す
+            old = (getattr(e, "response", None) or {}).get("Item") or {}
+            if _s(old, "status") == "resolved" and (old.get("notified") or {}).get("BOOL") is False:
+                return old
+            return None
+
+    def sweep_traps(now):
+        """link 以外の trap で、最後の trap から trap_ttl 秒たった open を resolved にする。出す AnomalyResolved の detail の列"""
+        cut = now - trap_ttl
+        out, start = [], None
+        while True:
+            kw = {"ExclusiveStartKey": start} if start else {}
+            r = dynamodb.query(
+                TableName=table_name, IndexName=ANOMALY_INDEX,
+                KeyConditionExpression="#s = :o AND last_seen < :c", FilterExpression="kind = :k",
+                ExpressionAttributeNames={"#s": "status"},
+                ExpressionAttributeValues={":o": {"S": "open"}, ":c": {"N": str(cut)}, ":k": {"S": "trap"}}, **kw)
+            for it in r.get("Items", []):
+                try:
+                    # GSI は結果整合なので、本体の last_seen でもう一度確かめてから閉じる（そのあいだに trap が来ていれば閉じない）
+                    a = dynamodb.update_item(
+                        TableName=table_name, Key={"anomaly_id": it["anomaly_id"]},
+                        ConditionExpression="#s = :o AND last_seen < :c",
+                        UpdateExpression="SET #s=:r, resolved_at=:n, notified=:f",
+                        ExpressionAttributeNames={"#s": "status"},
+                        ExpressionAttributeValues={":o": {"S": "open"}, ":c": {"N": str(cut)}, ":r": {"S": "resolved"},
+                                                   ":n": {"N": str(now)}, ":f": {"BOOL": False}},
+                        ReturnValues="ALL_NEW")
+                except CCF:
+                    continue
+                out.append(resolved_detail(a.get("Attributes") or {}, "ttl"))
+            start = r.get("LastEvaluatedKey")
+            if not start:
+                return out
+
+    def mark(detail_type, d):
+        """届いたイベントの項目に notified=true を付ける。そのあいだに開き直し・閉じ直しがあれば付けない（新しい方は新しい方で出す）"""
+        if detail_type == EVENT_DETAIL_TYPE:
+            cond, values = "#s = :s AND first_seen = :t", {":s": {"S": "open"}, ":t": {"N": str(d["first_seen"])}}
+        else:
+            cond, values = "#s = :s AND resolved_at = :t", {":s": {"S": "resolved"}, ":t": {"N": str(d["resolved_at"])}}
+        try:
+            dynamodb.update_item(
+                TableName=table_name, Key={"anomaly_id": {"S": d["anomaly_id"]}},
+                ConditionExpression=cond, UpdateExpression="SET notified=:y",
+                ExpressionAttributeNames={"#s": "status"}, ExpressionAttributeValues={**values, ":y": {"BOOL": True}})
+        except CCF:
+            pass
+
+    def emit(pending):
+        """[(DetailType, detail)] を put_events する（1 回 10 件まで）。落ちた entry だけ EVENT_RETRIES 回まで打ち直し、届いたものに印を付ける"""
+        left = pending
+        for attempt in range(1, EVENT_RETRIES + 1):
+            failed = []
+            for i in range(0, len(left), 10):
+                chunk = left[i:i + 10]
+                try:
+                    r = events_client.put_events(Entries=[{"Source": event_source, "DetailType": t, "EventBusName": event_bus, "Detail": json.dumps(d)}
+                                                          for t, d in chunk])
+                except Exception as e:  # noqa: BLE001 - 届かない（エンドポイント・スロットリング）ときも detect のクエリを落とさず、全部を失敗として打ち直す
+                    log(f"detect: put_events が例外: {type(e).__name__}: {str(e)[:200]}")
+                    failed += chunk
+                    continue
+                results = r.get("Entries") or []
+                for j, (t, d) in enumerate(chunk):
+                    res = results[j] if j < len(results) else {}
+                    if r.get("FailedEntryCount") and (res.get("ErrorCode") or not results):
+                        failed.append((t, d))
+                    else:
+                        mark(t, d)
+            if not failed:
+                return
+            log(f"detect: put_events で {len(failed)} 件失敗（{attempt} 回目）: {[d['anomaly_id'] for _, d in failed]}")
+            left = failed
+            if attempt < EVENT_RETRIES:
+                sleep(2 * attempt)
+        log(f"detect: {len(left)} 件のイベントが届かなかった（notified=false のまま。次のバッチで同じキーが来たら出し直す）")
 
     def send(records):
-        now = int(time.time())
+        now = int(clock())
         latest = {}
-        for rec in records:
-            if not isinstance(rec, dict):
-                continue
+        rows = sorted((r for r in records if isinstance(r, dict)), key=lambda r: _number(r.get("ts")) or 0.0)
+        for rec in rows:
             m = {"name": rec.get("measurement"), "tags": rec.get("tags") or {}, "fields": rec.get("fields") or {}}
             for dev, kind, ifn, opened, src in events(m, devmap):
                 latest[anomaly_key(dev, kind, ifn)] = (dev, kind, ifn, opened, src)
-        opened_now, resolved_now = [], []
+        opened_now, pending = [], []
         for key, (dev, kind, ifn, opened, src) in latest.items():
             if opened:
-                r = dynamodb.update_item(
-                    TableName=table_name,
-                    Key={"anomaly_id": {"S": key}},
-                    UpdateExpression="SET device_id=:d, kind=:k, target=:i, #s=:o, last_seen=:n, #src=:p, first_seen=if_not_exists(first_seen,:n), detail=:t",
-                    ExpressionAttributeNames={"#s": "status", "#src": "source"},
-                    ExpressionAttributeValues={":d": {"S": dev}, ":k": {"S": kind}, ":i": {"S": ifn}, ":o": {"S": "open"},
-                                               ":n": {"N": str(now)}, ":p": {"S": src}, ":t": {"S": anomaly_detail(kind, ifn, src)}},
-                    ReturnValues="ALL_OLD",
-                )
-                before = (r.get("Attributes") or {}).get("status", {}).get("S")
-                if before == "resolved":
-                    # 開き直しは新しい異常として扱う: first_seen を今にし、前の resolved_at を消す。
-                    # workflow/worker.py は anomaly_id + first_seen で修復案の有無を見るので、first_seen が前のままだと
-                    # 直したあとにもう一度落ちても調査ワークフローが起きない（2026-09-18 に lab の failover の 2 回目で気づいた）
-                    dynamodb.update_item(
-                        TableName=table_name,
-                        Key={"anomaly_id": {"S": key}},
-                        UpdateExpression="SET first_seen=:n REMOVE resolved_at",
-                        ExpressionAttributeValues={":n": {"N": str(now)}},
-                    )
-                if before != "open":   # 無かった、または resolved から開き直した
-                    opened_now.append({"anomaly_id": key, "device_id": dev, "kind": kind, "target": ifn, "first_seen": now,
-                                       "detail": anomaly_detail(kind, ifn, src), "source": src})
+                fresh, d = open_(key, dev, kind, ifn, src, now)
+                if fresh:
+                    opened_now.append(d)
+                if d:
+                    pending.append((EVENT_DETAIL_TYPE, d))
             else:
-                try:
-                    dynamodb.update_item(
-                        TableName=table_name,
-                        Key={"anomaly_id": {"S": key}},
-                        ConditionExpression="#s = :o",
-                        UpdateExpression="SET #s=:r, resolved_at=:n, last_seen=:n",
-                        ExpressionAttributeNames={"#s": "status"},
-                        ExpressionAttributeValues={":o": {"S": "open"}, ":r": {"S": "resolved"}, ":n": {"N": str(now)}},
-                    )
-                except dynamodb.exceptions.ConditionalCheckFailedException:
-                    continue  # 開いていない異常の up は何もしない（正常時のポーリングは毎回ここ）
-                resolved_now.append({"anomaly_id": key, "device_id": dev, "kind": kind, "target": ifn, "resolved_at": now, "source": src})
-        entries = ([{"Source": event_source, "DetailType": EVENT_DETAIL_TYPE, "EventBusName": event_bus, "Detail": json.dumps(o)} for o in opened_now]
-                   + [{"Source": event_source, "DetailType": EVENT_RESOLVED_TYPE, "EventBusName": event_bus, "Detail": json.dumps(o)} for o in resolved_now])
-        for i in range(0, len(entries), 10):   # PutEvents は 1 回 10 件まで
-            r = events_client.put_events(Entries=entries[i:i + 10])
-            if r.get("FailedEntryCount"):
-                log(f"detect: put_events で {r['FailedEntryCount']} 件失敗: {r.get('Entries')}")
+                item = resolve(key, now)
+                if item is not None:
+                    pending.append((EVENT_RESOLVED_TYPE, resolved_detail(item, src) if _s(item, "anomaly_id") else
+                                    {"anomaly_id": key, "device_id": dev, "kind": kind, "target": ifn, "resolved_at": now, "source": src}))
+        if now - swept["at"] >= TRAP_SWEEP:
+            swept["at"] = now
+            pending += [(EVENT_RESOLVED_TYPE, d) for d in sweep_traps(now)]
+        if pending:
+            emit(pending)
         if opened_now:
             log("detect: 新しい異常 " + ", ".join(o["anomaly_id"] for o in opened_now))
-        if resolved_now:
-            log("detect: 解消 " + ", ".join(o["anomaly_id"] for o in resolved_now))
+        resolved = [d["anomaly_id"] for t, d in pending if t == EVENT_RESOLVED_TYPE]
+        if resolved:
+            log("detect: 解消 " + ", ".join(resolved))
         return opened_now
 
     return send
@@ -544,8 +689,10 @@ def http_query(rows, name, checkpoint, sender):
     """マイクロバッチごとに driver で collect して sender に渡す foreachBatch のクエリ"""
     def each_batch(batch_df, batch_id):
         records = [row_to_record(r) for r in batch_df.collect()]
-        if records:
+        # detect は空のバッチでも呼ぶ（trap の TTL の見回りと、出し損ねたイベントの出し直しを送信の有無に縛らない）
+        if records or name == "detect":
             sender(records)
+        if records:
             log(f"{name}: batch {batch_id} で {len(records)} 行を送った")
 
     return (
@@ -596,22 +743,27 @@ def main(argv):
     queries = build(spark, args)
     log("格納先: " + ", ".join(f"{s}({sink_topics(s, args.metric_topics, args.log_topics)})" for s in args.sinks)
         + (f"; 検知: DynamoDB {args.anomaly_table} → EventBridge {args.event_bus}（Source {args.event_source}）" if args.anomaly_table else "; 検知: なし（--anomaly-table が空）"))
-    # 1 つのクエリが落ちても他は続ける。全部止まったら 1 で終わる（EMR Serverless の STREAMING モードがジョブごと起こし直す）
-    # ジョブは RUNNING のままなので、落ちた格納先は外から見えない。どれが落ちたかを名前つきの ERROR で出し、
-    # 残りが動いているあいだ REMIND 秒ごとに言い直す（CloudWatch Logs で "ERROR sink" を引けば分かる）
+    # どれか 1 つでもクエリが止まったら、残りも止めて 1 で終わる。EMR Serverless の STREAMING モードがジョブごと起こし直し、
+    # 止まったクエリも checkpoint の続きから読み直す（データは落ちない）。以前は他が動いているあいだ ERROR を出すだけでジョブが RUNNING のまま残り、
+    # 一時的な失敗（HTTP の 5xx が HTTP_RETRIES 回続いた、DynamoDB / EventBridge の例外）で止まったクエリが二度と戻らなかった。
+    # 起こし直しの回数はジョブの retry policy（STREAMING の既定は 1 時間に 5 回）まで。超えるとジョブが FAILED になる（docs/pipeline.md）
     dead = {}
-    while any(q.isActive for q in queries):
+    while not dead:
         try:
-            spark.streams.awaitAnyTermination(REMIND)
+            spark.streams.awaitAnyTermination()
         except Exception:  # noqa: BLE001 - 落ちたクエリの例外。下で名前ごとに拾う
             pass
         spark.streams.resetTerminated()
-        for q in queries:
-            if not q.isActive and q.name not in dead:
-                dead[q.name] = str(q.exception() or "例外なしで終了")[:500]
-        for name, why in dead.items():
-            log(f"ERROR sink {name} が止まっている（他は継続。直すにはジョブの起動し直し）: {why}")
-    return 1 if dead else 0
+        dead = {q.name: str(q.exception() or "例外なしで終了")[:500] for q in queries if not q.isActive}
+    for name, why in dead.items():
+        log(f"ERROR sink {name} が止まった（ジョブを 1 で終わらせて起こし直させる。checkpoint の続きから読む）: {why}")
+    for q in queries:
+        if q.isActive:
+            try:
+                q.stop()
+            except Exception as e:  # noqa: BLE001 - 止めるときの例外は終わり方を変えない
+                log(f"sink {q.name} を止めるときの例外: {str(e)[:200]}")
+    return 1
 
 
 if __name__ == "__main__":
