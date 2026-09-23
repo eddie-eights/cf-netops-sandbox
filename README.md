@@ -94,3 +94,4 @@ ops/down.sh
 | [workflow.md](docs/workflow.md) | 承認の流れと Temporal UI |
 | [troubleshooting.md](docs/troubleshooting.md) | うまくいかないとき |
 | [development.md](docs/development.md) | 手元のテスト、変更するときの決まり、Web を手元で動かす |
+| [data-stores.md](docs/data-stores.md) | 勉強会メモ: データの置き場（S3 Tables / DynamoDB / Neptune）と、Neptune に寄せるかの論点 |
