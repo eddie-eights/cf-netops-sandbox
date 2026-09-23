@@ -23,7 +23,7 @@ Telegraf の JSON 出力（outputs.kafka の data_format = "json"、json_timesta
   新しく open になったときだけ EventBridge の既定のバスに Source <接頭辞>.spark（--event-source）/ DetailType AnomalyOpened を put_events する
   （terraform/workflow の events.tf がルールで SQS に流し、Temporal の worker が調査ワークフローを起こす）。resolved にしたときは AnomalyResolved。
   イベントが届いたかは項目の notified に残し、届かなかったものは次のバッチで出し直す。link 以外の trap は TRAP_TTL 秒 次の trap が来なければ
-  resolved にする（「直った」の trap が無いので）。coldStart / warmStart は異常にしない。
+  resolved にする（「直った」の trap が無いので）。coldStart / warmStart と snmpd の停止・再起動の知らせ（IGNORED_TRAPS）は異常にしない。
   機器名は sysName タグ（小文字・ドメイン無しに揃える）> --device-map（別名=機器名,...。ops/up.sh が lab の定義から作る）の順で引く。以前 terraform/pipeline/stream の detector Lambda がしていたことをここに寄せた。
 
 HTTP の送信は driver でまとめて行う（マイクロバッチを collect する。PoC の量（機器数台、10 秒間隔）なら 1 分に数百行）。
