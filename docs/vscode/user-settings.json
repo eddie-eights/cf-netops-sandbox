@@ -61,6 +61,17 @@
   "chatgpt.composerEnterBehavior": "enter",
   "chatgpt.followUpQueueMode": "steer",
 
+  // YAML（Red Hat の拡張）。CI のワークフローにはスキーマを自動で当てない
+  "yaml.disableSchemaDetection": [
+    "**/.github/workflows/*.yml",
+    "**/.github/workflows/*.yaml",
+    "**/.gitea/workflows/*.yml",
+    "**/.gitea/workflows/*.yaml",
+    "**/.forgejo/workflows/*.yml",
+    "**/.forgejo/workflows/*.yaml"
+  ],
+  "redhat.telemetry.enabled": false,
+
   // その他
   "update.showReleaseNotes": false,
   "makefile.configureOnOpen": true
