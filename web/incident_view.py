@@ -66,6 +66,18 @@ def proposal_detail(proposal_id: str) -> str:
     return "\n".join(lines)
 
 
+APPROVE_CHECK_LABEL = "② 上の詳細（原因・コマンド・理由）を読んだ ── 承認にはこのチェックが要る（lab でコマンドが打たれる）"
+
+
+def approve_button(confirmed: bool, approver: str) -> dict:
+    """承認ボタンの見た目。名前と「読んだ」のチェックがそろうまで押せなくし、何が足りないかをボタンの文字で出す
+    （decide_proposal も同じことを確かめる。こちらは押す前に気づかせるためのもの）"""
+    missing = [w for w, ok in (("名前", bool((approver or "").strip())), ("チェック", bool(confirmed))) if not ok]
+    if missing:
+        return gr.update(value=f"③ 承認して直す（{'と'.join(missing)}が要る）", interactive=False)
+    return gr.update(value="③ 承認して直す", interactive=True)
+
+
 APPROVER_MAX = 40  # decided_by に残す名前の長さ（proposals.decide は 64 字で切る。「 (web)」を足しても収まる）
 
 

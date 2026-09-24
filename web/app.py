@@ -93,11 +93,14 @@ with gr.Blocks(title=f"{TITLE} チャット") as demo:
             pr_id = gr.Dropdown([], value=None, allow_custom_value=True, scale=4,
                                 label="proposal_id（表の 1 列目。選ぶと下に全文が出る）")
         pr_detail = gr.Markdown(label="詳細")
+        # 承認の手順を上から順に並べる（①名前 → ②チェック → ③ボタン）。チェックは承認ボタンの真上に置き、
+        # 名前とチェックがそろうまで承認ボタンを押せなくする（チェックが横に並んでいると気づかれず、押しても進まなかった。2026-09-24）
         with gr.Row():
-            pr_who = gr.Textbox(label="決める人の名前（必須。決めた人の列に残る）", max_lines=1, max_length=iv.APPROVER_MAX, scale=2)
-            pr_ok = gr.Checkbox(label="上の詳細（原因・コマンド・理由）を読んだ", value=False, scale=2)
-            pr_approve = gr.Button("承認して直す", variant="primary", scale=1)
-            pr_reject = gr.Button("却下", scale=1)
+            pr_who = gr.Textbox(label="① 決める人の名前（必須。決めた人の列に残る）", max_lines=1, max_length=iv.APPROVER_MAX, scale=2)
+            with gr.Column(scale=2):
+                pr_ok = gr.Checkbox(label=iv.APPROVE_CHECK_LABEL, value=False)
+                pr_approve = gr.Button(iv.approve_button(False, "")["value"], variant="primary", interactive=False)
+            pr_reject = gr.Button("却下（名前だけで押せる）", scale=1)
         # 承認・却下の結果（足りない入力の案内も）はボタンのすぐ下に出す。表の上の pr_msg は 30 秒ごとの描き直しが件数で上書きするので、
         # そこに出すと押しても何も起きないように見える（2026-09-24。「読んだ」のチェック漏れの案内が見えなかった）
         pr_result = gr.Markdown()
@@ -108,6 +111,8 @@ with gr.Blocks(title=f"{TITLE} チャット") as demo:
         pr_id.change(iv.proposal_detail, [pr_id], [pr_detail])
         # 選び直したら「読んだ」を外す（前の案で入れたチェックのまま別の案を承認させない）
         pr_id.change(lambda _: False, [pr_id], [pr_ok])
+        pr_ok.change(iv.approve_button, [pr_ok, pr_who], [pr_approve])
+        pr_who.change(iv.approve_button, [pr_ok, pr_who], [pr_approve])
         # 30 秒ごとに描き直す（Spark の検知が 1 分、ワーカーの確認が 30 秒おきなので、ボタンを押さなくても追える。
         # 読むのは Neptune のクエリ 3 回（トポロジ・異常・修復案）で、開いているブラウザの数だけ）。proposal_id の選択はそのまま残す
         ticker = gr.Timer(30)

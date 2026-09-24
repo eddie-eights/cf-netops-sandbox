@@ -674,6 +674,16 @@ iv.proposals.list_proposals = lambda status="pending", limit=100: {"proposals": 
 nothing = ("update", {})
 check("名前が無ければ書かない（表と選択もそのまま）",
       iv.decide_proposal("p1", "rejected", "pending", "  ", True)[1:] == (nothing, nothing) and decided == [])
+ab = lambda ok, name: iv.approve_button(ok, name)[1]  # テストの gr.update は ("update", kwargs) を返す
+check("承認ボタンは名前とチェックがそろうまで押せず、足りないものを文字で出す",
+      ab(False, "")["interactive"] is False and "名前とチェックが要る" in ab(False, "")["value"]
+      and ab(True, " ")["interactive"] is False and "名前が要る" in ab(True, " ")["value"]
+      and "チェックが要る" in ab(False, "yamada")["value"]
+      and ab(True, "yamada") == {"value": "③ 承認して直す", "interactive": True})
+check("承認のチェックは承認ボタンの真上（同じ Column）にあり、チェックと名前が変わるたびにボタンを描き直す",
+      re.search(r"with gr\.Column\(scale=2\):\n\s+pr_ok = gr\.Checkbox\(label=iv\.APPROVE_CHECK_LABEL.*\n\s+pr_approve = gr\.Button\(", web) is not None
+      and "pr_ok.change(iv.approve_button, [pr_ok, pr_who], [pr_approve])" in web
+      and "pr_who.change(iv.approve_button, [pr_ok, pr_who], [pr_approve])" in web)
 check("承認は「読んだ」のチェックが無ければ書かない", iv.decide_proposal("p1", "approved", "pending", "yamada", False)[1:] == (nothing, nothing) and decided == [])
 check("proposal_id が空なら書かない", iv.decide_proposal("", "approved", "pending", "yamada", True)[1:] == (nothing, nothing) and decided == [])
 r = iv.decide_proposal("p1", "approved", "pending", "  山田   太郎 ", True)
