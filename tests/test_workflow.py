@@ -408,6 +408,9 @@ check("Web に「承認」タブがあり、名前と「読んだ」のチェッ
       and 'iv.decide_proposal(i, "rejected", s, w, ok), [pr_id, pr_status, pr_who, pr_ok]' in web
       and "pr_id.change(lambda _: False, [pr_id], [pr_ok])" in web
       and "import proposals" in incident and "proposals.decide(" in incident)
+check("承認・却下の結果はボタンの下の pr_result に出す（表の上の pr_msg は 30 秒ごとの描き直しが上書きし、押しても何も起きないように見える）",
+      web.count("[pr_id, pr_status, pr_who, pr_ok],\n                          [pr_result, pr_table, pr_id])") == 2
+      and "[pr_id, pr_status, pr_who, pr_ok], pr_out)" not in web)
 # 入れ忘れても apply は通り、EC2 の起動時に ModuleNotFoundError になる（tools.zip と同じ事故）。
 # web/*.py は upload_web_command が web/ ごと上げるので、確かめるのは agent/ から借りるモジュールの側
 web_shared = set()

@@ -98,6 +98,9 @@ with gr.Blocks(title=f"{TITLE} チャット") as demo:
             pr_ok = gr.Checkbox(label="上の詳細（原因・コマンド・理由）を読んだ", value=False, scale=2)
             pr_approve = gr.Button("承認して直す", variant="primary", scale=1)
             pr_reject = gr.Button("却下", scale=1)
+        # 承認・却下の結果（足りない入力の案内も）はボタンのすぐ下に出す。表の上の pr_msg は 30 秒ごとの描き直しが件数で上書きするので、
+        # そこに出すと押しても何も起きないように見える（2026-09-24。「読んだ」のチェック漏れの案内が見えなかった）
+        pr_result = gr.Markdown()
         pr_out = [pr_msg, pr_table, pr_id]
         pr_refresh.click(iv.proposal_table, [pr_status], pr_out)
         pr_status.change(iv.proposal_table, [pr_status], pr_out)
@@ -111,8 +114,10 @@ with gr.Blocks(title=f"{TITLE} チャット") as demo:
         ticker.tick(tv.redraw_topology, None, [topo_html, topo_table])
         ticker.tick(iv.anomaly_table, [an_status], [an_msg, an_table])
         ticker.tick(lambda st: iv.proposal_table(st)[:2], [pr_status], [pr_msg, pr_table])
-        pr_approve.click(lambda i, s, w, ok: iv.decide_proposal(i, "approved", s, w, ok), [pr_id, pr_status, pr_who, pr_ok], pr_out)
-        pr_reject.click(lambda i, s, w, ok: iv.decide_proposal(i, "rejected", s, w, ok), [pr_id, pr_status, pr_who, pr_ok], pr_out)
+        pr_approve.click(lambda i, s, w, ok: iv.decide_proposal(i, "approved", s, w, ok), [pr_id, pr_status, pr_who, pr_ok],
+                          [pr_result, pr_table, pr_id])
+        pr_reject.click(lambda i, s, w, ok: iv.decide_proposal(i, "rejected", s, w, ok), [pr_id, pr_status, pr_who, pr_ok],
+                          [pr_result, pr_table, pr_id])
         gr.Markdown("修復案は Temporal のワークフロー（terraform/workflow の ECS Fargate のワーカー）が出し、承認を待っています。"
                     "承認すると同じワークフローが lab EC2 で `sudo lab <コマンド>` を打ち（EC2 への入口は SSM Run Command。SSH は開けていない）、"
                     "異常が resolved になるまで 30 秒おきに数回確かめて verified にします。却下は何もしません。"
