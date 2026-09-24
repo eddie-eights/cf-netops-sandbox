@@ -19,5 +19,5 @@
 # containerlab_version = "0.79.0"
 # telegraf_version     = "1.40.0"
 # frr_image_tag        = "10.2.1"
-# snmpd_image_tag      = "v1"
+# snmpd_image_tag      = "v2"
 # multitool_image_tag  = "v0.10.0"

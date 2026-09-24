@@ -102,7 +102,7 @@ variable "frr_image_tag" {
 variable "snmpd_image_tag" {
   description = "Tag pushed to <prefix>-lab-snmpd"
   type        = string
-  default     = "v1"
+  default     = "v2"
 }
 
 variable "multitool_image_tag" {

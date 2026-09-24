@@ -9,7 +9,7 @@ output "frr_repository_url" {
 }
 
 output "snmpd_repository_url" {
-  description = "Build lab/snmpd and push it here with tag v1 (step 2 of ops/up.sh)."
+  description = "Build lab/snmpd and push it here with tag v2 (step 2 of ops/up.sh)."
   value       = try(aws_ecr_repository.lab["snmpd"].repository_url, "")
 }
 

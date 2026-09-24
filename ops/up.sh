@@ -62,7 +62,7 @@ REGION=ap-northeast-1
 # terraform/pipeline/stream の s3_sink_plugin_key）。変えるときは両方を変える
 FRR_TAG=10.2.1
 MULTITOOL_TAG=v0.10.0
-SNMPD_TAG=v1
+SNMPD_TAG=v2
 CONTAINERLAB_VERSION=0.79.0
 TELEGRAF_VERSION=1.40.0
 CONTAINERLAB_RPM="containerlab_${CONTAINERLAB_VERSION}_linux_arm64.rpm"
