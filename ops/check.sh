@@ -31,7 +31,7 @@ for r in "${ROOTS[@]}"; do
 done
 
 log "3. ops スクリプトの構文"
-bash -n ops/up.sh ops/down.sh ops/deploy-env.sh ops/check.sh ops/vscode-setup.sh
+bash -n ops/up.sh ops/down.sh ops/deploy-env.sh ops/check.sh
 if command -v python3 >/dev/null; then PY=(python3); else PY=(uv run --python 3.13 python); fi
 # .py は名指しにせず全部見る（名指しにすると、ファイルを足したときに検査から漏れる）
 find agent ops spark tests tools web workflow -name '*.py' -not -path '*/__pycache__/*' -print0 |

@@ -32,3 +32,5 @@ ops/logs/
 *.part
 # ops/up.sh の手順 5-3 で取る Spark の jar
 jars/
+# VS Code のワークスペース設定は各自の手元だけに置く
+.vscode/

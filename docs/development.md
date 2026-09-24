@@ -52,16 +52,6 @@ uv run python web/app.py
 
 ブラウザで http://127.0.0.1:8080 を開く。環境変数の意味は `.env.example` に書いてある。
 
-## VS Code（任意）
-
-`.vscode/` はフォルダを開くだけで効く。拡張を入れるなら WSL のターミナルで打つ。
-
-```bash
-bash ops/vscode-setup.sh
-```
-
-ユーザー設定とキー割り当ての例は `docs/vscode/user-settings.json` と `docs/vscode/keybindings.json`。Ctrl+Shift+P の「ユーザー設定を開く (JSON)」「キーボードショートカットを開く (JSON)」に、要るところだけ貼る。
-
 ## 入っていないもの
 
 - 会話の永続化。履歴は Runtime のセッションの中にだけあり、画面を再読み込みすると消える。
