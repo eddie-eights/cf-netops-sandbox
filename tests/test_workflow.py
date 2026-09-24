@@ -684,6 +684,12 @@ check("承認のチェックは承認ボタンの真上（同じ Column）にあ
       re.search(r"with gr\.Column\(scale=2\):\n\s+pr_ok = gr\.Checkbox\(label=iv\.APPROVE_CHECK_LABEL.*\n\s+pr_approve = gr\.Button\(", web) is not None
       and "pr_ok.change(iv.approve_button, [pr_ok, pr_who], [pr_approve])" in web
       and "pr_who.change(iv.approve_button, [pr_ok, pr_who], [pr_approve])" in web)
+check("状態は表示だけ日本語で、ラジオの値・一覧に渡す値は英語のまま（Neptune の status と同じ）",
+      set(iv.PROPOSAL_STATUS_JA) == set(proposals.STATUSES) | {"all"} and set(iv.ANOMALY_STATUS_JA) == {"open", "resolved"}
+      and ("承認待ち", "pending") in iv.status_choices(iv.PROPOSAL_STATUS_JA)
+      and "gr.Radio(iv.status_choices(iv.PROPOSAL_STATUS_JA), value=\"pending\"" in web
+      and "gr.Radio(iv.status_choices(iv.ANOMALY_STATUS_JA), value=\"open\"" in web
+      and iv.proposal_table("pending")[0].endswith("件（承認待ち）") and iv.proposal_table("pending")[1][0]["状態"] == "承認待ち")
 check("承認は「読んだ」のチェックが無ければ書かない", iv.decide_proposal("p1", "approved", "pending", "yamada", False)[1:] == (nothing, nothing) and decided == [])
 check("proposal_id が空なら書かない", iv.decide_proposal("", "approved", "pending", "yamada", True)[1:] == (nothing, nothing) and decided == [])
 r = iv.decide_proposal("p1", "approved", "pending", "  山田   太郎 ", True)

@@ -73,18 +73,17 @@ with gr.Blocks(title=f"{TITLE} チャット") as demo:
         topo_refresh.click(tv.refresh_topology, [la, lb], [topo_html, topo_table, la, lb, del_sel])
     with gr.Tab("異常一覧"):
         with gr.Row():
-            an_status = gr.Radio(["open", "resolved"], value="open", label="状態（open = 未解消）", scale=3)
+            an_status = gr.Radio(iv.status_choices(iv.ANOMALY_STATUS_JA), value="open", label="状態", scale=3)
             an_refresh = gr.Button("更新", scale=1)
         an_msg = gr.Markdown()
         an_table = gr.Dataframe(pd.DataFrame(columns=iv.ANOMALY_COLS), interactive=False, wrap=True, label="異常（Spark が Neptune に書いたもの。開いた・閉じたの履歴は S3 Tables の anomaly_events）")
         an_refresh.click(iv.anomaly_table, [an_status], [an_msg, an_table])
         an_status.change(iv.anomaly_table, [an_status], [an_msg, an_table])
         demo.load(iv.anomaly_table, [an_status], [an_msg, an_table])
-        gr.Markdown("lab で `lab failover` を打つと、SNMP ポーリング（10 秒）か trap（5 秒）で `link_down` が出ます。`lab heal-main` で resolved に変わります。")
+        gr.Markdown("lab で `lab failover` を打つと、SNMP ポーリング（10 秒）か trap（5 秒）で `link_down` が出ます。`lab heal-main` で「解消済み」に変わります。")
     with gr.Tab("承認"):
         with gr.Row():
-            pr_status = gr.Radio(["pending", "approved", "applied", "verified", "failed", "rejected", "expired", "obsolete", "all"],
-                                 value="pending", label="状態（pending = 承認待ち）", scale=4)
+            pr_status = gr.Radio(iv.status_choices(iv.PROPOSAL_STATUS_JA), value="pending", label="状態", scale=4)
             pr_refresh = gr.Button("更新", scale=1)
         pr_msg = gr.Markdown()
         pr_table = gr.Dataframe(pd.DataFrame(columns=iv.PROPOSAL_COLS), interactive=False, wrap=True, column_widths=iv.PROPOSAL_WIDTHS,
@@ -125,9 +124,9 @@ with gr.Blocks(title=f"{TITLE} チャット") as demo:
                           [pr_result, pr_table, pr_id])
         gr.Markdown("修復案は Temporal のワークフロー（terraform/workflow の ECS Fargate のワーカー）が出し、承認を待っています。"
                     "承認すると同じワークフローが lab EC2 で `sudo lab <コマンド>` を打ち（EC2 への入口は SSM Run Command。SSH は開けていない）、"
-                    "異常が resolved になるまで 30 秒おきに数回確かめて verified にします。却下は何もしません。"
-                    "承認には名前と「詳細を読んだ」のチェックが要ります。打つ直前に異常がもう閉じていれば、打たずに obsolete にします。"
-                    "承認待ちのまま 2 時間（approval_timeout_minutes）で expired になります。")
+                    "異常が解消するまで 30 秒おきに数回確かめて「復旧を確認」にします（戻らなければ「失敗」）。却下は何もしません。"
+                    "承認には名前と「詳細を読んだ」のチェックが要ります。打つ直前に異常がもう閉じていれば、打たずに「不要（先に解消）」にします。"
+                    "承認待ちのまま 2 時間（approval_timeout_minutes）で「期限切れ」になります。")
 
 if __name__ == "__main__":
     demo.queue(default_concurrency_limit=4).launch(

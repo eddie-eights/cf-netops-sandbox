@@ -23,13 +23,30 @@ PROPOSAL_COLS = ["proposal_id", "状態", "機器", "種別", "対象", "原因"
 PROPOSAL_WIDTHS = ["14%", "6%", "7%", "7%", "5%", "16%", "6%", "9%", "16%", "7%", "7%", "5%", "12%"]
 
 
+# 状態の日本語。変えるのは画面の表示だけで、Neptune・証跡・ワーカー・ツールの値（open / pending など）はそのまま
+ANOMALY_STATUS_JA = {"open": "未解消", "resolved": "解消済み"}
+PROPOSAL_STATUS_JA = {
+    "pending": "承認待ち", "approved": "承認済み（修復待ち）", "applied": "修復した（確認中）", "verified": "復旧を確認",
+    "failed": "失敗", "rejected": "却下", "expired": "期限切れ", "obsolete": "不要（先に解消）", "all": "すべて",
+}
+
+
+def status_choices(ja: dict) -> list:
+    """gr.Radio の choices。表示は日本語、関数に渡る値は英語のまま"""
+    return [(label, value) for value, label in ja.items()]
+
+
+def _ja(ja: dict, status: str) -> str:
+    return ja.get(status, status)
+
+
 # ---------------------------------------------------------------- 異常一覧
 def anomaly_table(status: str = "open"):
     r = anomalies.list_anomalies(status=status, limit=100)
-    rows = [{"機器": a.get("device_id", ""), "種別": a.get("kind", ""), "対象": a.get("target", ""), "状態": a.get("status", ""),
+    rows = [{"機器": a.get("device_id", ""), "種別": a.get("kind", ""), "対象": a.get("target", ""), "状態": _ja(ANOMALY_STATUS_JA, a.get("status", "")),
              "発生": a.get("first_seen_jst", ""), "最終確認": a.get("last_seen_jst", ""), "解消": a.get("resolved_at_jst", ""),
              "経路": a.get("source", "")} for a in r.get("anomalies", [])]
-    msg = r["error"] if r.get("error") else f"{r.get('count', 0)} 件（{'未解消' if status == 'open' else '解消済み'}）"
+    msg = r["error"] if r.get("error") else f"{r.get('count', 0)} 件（{_ja(ANOMALY_STATUS_JA, status)}）"
     return msg, pd.DataFrame(rows, columns=ANOMALY_COLS)
 
 
@@ -37,12 +54,12 @@ def anomaly_table(status: str = "open"):
 def proposal_table(status: str = "pending"):
     """表と、proposal_id の選択肢（表の 1 列目と同じ）"""
     r = proposals.list_proposals(status=status, limit=100)
-    rows = [{"proposal_id": p.get("proposal_id", ""), "状態": p.get("status", ""), "機器": p.get("device_id", ""),
+    rows = [{"proposal_id": p.get("proposal_id", ""), "状態": _ja(PROPOSAL_STATUS_JA, p.get("status", "")), "機器": p.get("device_id", ""),
              "種別": p.get("kind", ""), "対象": p.get("target", ""), "原因": p.get("cause", ""), "処置": p.get("action", ""),
              "コマンド": p.get("command", ""), "理由": p.get("reason", ""), "作成": p.get("created_at_jst", ""),
              "更新": p.get("updated_at_jst", ""), "決めた人": p.get("decided_by", ""),
              "結果": (p.get("verify_note") or p.get("apply_output") or "")[:200]} for p in r.get("proposals", [])]
-    msg = r["error"] if r.get("error") else f"{r.get('count', 0)} 件（{status}）"
+    msg = r["error"] if r.get("error") else f"{r.get('count', 0)} 件（{_ja(PROPOSAL_STATUS_JA, status)}）"
     ids = [row["proposal_id"] for row in rows]
     # 選択は空に戻す。先頭を選んでおくと、表が描き直されて先頭が別の修復案に替わったとき、見ていない案をそのまま承認できてしまう
     return msg, pd.DataFrame(rows, columns=PROPOSAL_COLS), gr.update(choices=ids, value=None)
@@ -56,7 +73,7 @@ def proposal_detail(proposal_id: str) -> str:
     p = proposals.get_proposal(proposal_id)
     if not p:
         return f"`{proposal_id}` は無い（更新を押す）"
-    lines = [f"**{html.escape(proposal_id)}** — {p.get('status', '')}（{p.get('device_id', '')} / {p.get('kind', '')} / {p.get('target', '')}）", ""]
+    lines = [f"**{html.escape(proposal_id)}** — {_ja(PROPOSAL_STATUS_JA, p.get('status', ''))}（{p.get('device_id', '')} / {p.get('kind', '')} / {p.get('target', '')}）", ""]
     for label, key in (("原因", "cause"), ("処置", "action"), ("コマンド", "command"), ("理由", "reason"),
                        ("実行結果", "apply_output"), ("確認結果", "verify_note"), ("決めた人", "decided_by"),
                        ("作成", "created_at_jst"), ("更新", "updated_at_jst")):
@@ -94,6 +111,6 @@ def decide_proposal(proposal_id: str, decision: str, status: str, approver: str 
     if decision == "approved" and not confirmed:
         return "「詳細を読んだ」にチェックを入れてから承認する（lab でコマンドが打たれる）", gr.update(), gr.update()
     r = proposals.decide(proposal_id, decision, decided_by=f"{name} (web)")
-    msg = r["error"] if r.get("error") else f"{r['proposal_id']} を {decision} にした（{name}。ワーカーが次の段に進める。状態を approved / applied / verified にして更新で追える）"
+    msg = r["error"] if r.get("error") else f"{r['proposal_id']} を「{_ja(PROPOSAL_STATUS_JA, decision)}」にした（{name}。ワーカーが次の段に進める。状態を「承認済み」→「修復した」→「復旧を確認」に切り替えて追える）"
     _, table, ids = proposal_table(status)
     return msg, table, ids
