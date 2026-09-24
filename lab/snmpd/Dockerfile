@@ -1,4 +1,4 @@
-FROM alpine:3.20
+FROM alpine:3.24
 # 社内の証明書で apk が落ちるときは certs/ に社内のルート証明書（.crt / .pem）を置く（docs/pipeline.md の「動かないとき」。イメージには残らない）
 RUN --mount=type=bind,source=certs,target=/certs \
     set -eu; \
