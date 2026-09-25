@@ -96,4 +96,4 @@ ops/down.sh
 | [workflow.md](docs/workflow.md) | 承認の流れと Temporal UI |
 | [troubleshooting.md](docs/troubleshooting.md) | うまくいかないとき |
 | [development.md](docs/development.md) | 手元のテスト、変更するときの決まり、Web を手元で動かす |
-| [data-stores.md](docs/data-stores.md) | 勉強会メモ: データの置き場（Neptune に「いま」、S3 Tables に履歴と証跡）と、DynamoDB をやめた理由 |
+| [data-stores.md](docs/data-stores.md) | 勉強会メモ: データの置き場（Neptune に「いま」、S3 Tables に履歴と証跡）と DynamoDB をやめた理由、6 つのコンテナイメージの役目と全部 arm64 な理由、Neptune の基礎（Aurora との関係、AZ 冗長、障害をグラフにする意味）、MSK のブートストラップサーバーと `msk-bootstrap` の読み取り（Telegraf だけが SSM を読む理由と IAM の 2 段） |
