@@ -1,6 +1,7 @@
 # netops-poc - PIPELINE stream root module. MSK (2 brokers, IAM auth) receives SNMP polls, traps and FRR logs from the Telegraf EC2 (terraform/pipeline/lab, create_telegraf),
-# the Spark job of terraform/pipeline/analytics reads them (anomalies go to Neptune and to the S3 Tables anomaly_events, not here since 2026-09-24),
-# and MSK Connect keeps the raw messages in the asset bucket (S3 sink). Costs about 0.13 USD per hour while it exists - destroy it the same day.
+# and the Spark job of terraform/pipeline/analytics reads them (raw messages go to S3 Tables, anomalies to Neptune and to the S3 Tables anomaly_events,
+# not here since 2026-09-24). The MSK Connect S3 sink that also copied the raw messages to the asset bucket was removed on 2026-09-26
+# (Spark already stores every topic in S3 Tables). Costs about 0.57 USD per hour while it exists - destroy it the same day.
 
 # リソース名の接頭辞であり Project タグの値。デプロイする人の名前（var.owner）から作るので、
 # 1 つの AWS アカウントを何人かで使っても、自分の名前で自分のリソースを探せる
@@ -11,7 +12,7 @@ locals {
 data "aws_caller_identity" "current" {}
 data "aws_partition" "current" {}
 
-# VPC / サブネット / SG / バケット / ロール名は terraform/base/core と terraform/pipeline/lab の state から読む
+# VPC / サブネット / ロール名は terraform/base/core と terraform/pipeline/lab の state から読む
 data "terraform_remote_state" "main" {
   backend = "local"
 
@@ -34,8 +35,6 @@ locals {
 
   vpc_id            = data.terraform_remote_state.main.outputs.vpc_id
   subnet_ids        = data.terraform_remote_state.main.outputs.runtime_subnet_ids
-  endpoint_sg_id    = data.terraform_remote_state.main.outputs.endpoint_security_group_id
-  bucket            = data.terraform_remote_state.main.outputs.kb_bucket_name
   reader_role_names = toset([data.terraform_remote_state.main.outputs.runtime_role_name, data.terraform_remote_state.main.outputs.web_role_name])
 
   # Telegraf の EC2（terraform/pipeline/lab の create_telegraf）が無いと送信元が無い。network.tf の precondition で「lab を先に」と出す
@@ -45,9 +44,6 @@ locals {
   # ブローカー 2 台 = サブネット 2 つ（terraform/base/core の Runtime サブネット）
   broker_subnet_ids = slice(local.subnet_ids, 0, 2)
 
-  # arn:aws:kafka:<region>:<account>:cluster/<name>/<uuid> → topic/<name>/<uuid>/* と group/<name>/<uuid>/*
+  # arn:aws:kafka:<region>:<account>:cluster/<name>/<uuid> → topic/<name>/<uuid>/*
   topic_arns = "${replace(aws_msk_cluster.stream.arn, ":cluster/", ":topic/")}/*"
-  group_arns = "${replace(aws_msk_cluster.stream.arn, ":cluster/", ":group/")}/*"
-
-  bucket_arn = "arn:${local.partition}:s3:::${local.bucket}"
 }

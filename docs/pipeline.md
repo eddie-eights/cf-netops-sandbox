@@ -11,7 +11,6 @@ flowchart LR
   end
   CLAB -->|"SNMP ポーリング 10 秒 / trap / FRR のログ（rsyslog）"| TG["Telegraf の EC2<br/>（terraform/pipeline/lab）"]
   TG --> MSK["MSK（stream）<br/>metrics / traps / logs"]
-  MSK -.->|"CREATE_S3_SINK"| RAW["S3 の stream/<br/>生データ（JSON）"]
   MSK --> SPARK["Spark（analytics）<br/>EMR Serverless"]
   SPARK -->|"SINK_S3"| ICE["S3 Tables<br/>snmp_metrics"]
   SPARK -->|"SINK_OPENSEARCH"| OS["OpenSearch<br/>snmp-logs"]

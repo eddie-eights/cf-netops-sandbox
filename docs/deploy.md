@@ -16,11 +16,10 @@
 | `WORKFLOW` | Temporal での調査と修復。`AGENT=1` と `PIPELINE=1` が要り、`SKIP_LAB` / `SKIP_STREAM` / `SKIP_ANALYTICS` とは一緒に書けない |
 | `CREATE_KB` | ナレッジベース（+$0.36/h）。`AGENT=1` のとき |
 | `SKIP_LAB` | lab を作らない（-$0.09/h）。`SKIP_STREAM=1` も要る |
-| `SKIP_STREAM` | stream と Telegraf の EC2 を作らない（-$1.28/h）。analytics も外れる |
+| `SKIP_STREAM` | stream と Telegraf の EC2 を作らない（-$1.14/h）。analytics も外れる |
 | `SKIP_ANALYTICS` | analytics を作らない（-$0.56/h）。異常一覧は使えない |
 | `SKIP_GRAPH` | Neptune を作らない（-$0.14/h）。トポロジは静的データになる |
 | `SINK_S3` / `SINK_OPENSEARCH` / `SINK_PROMETHEUS` | Spark の格納先。既定は 3 つとも `1`。`0` にするとリソースごと作らない。3 つとも `0` は止まる |
-| `CREATE_S3_SINK` | `0` で MSK Connect の S3 sink を作らない（-$0.14/h） |
 | `IMAGE_TAG` | エージェントとワーカーのイメージのタグ。既定 `v1` |
 | `KEEP_ECR` | `1` で `ops/down.sh` が ECR を残す（保管料は月数円） |
 | `AWS_PROFILE` / `LOCAL_PORT` / `NO_PORTFORWARD` | プロファイル / PC 側のポート（既定 8080）/ ポートフォワーディングを開かない |
@@ -30,7 +29,7 @@
 | `TF_VERBOSE` | `1` で terraform の出力を全部出す。既定は要点だけで、全文は `ops/logs/tf-<ルート>-apply.log` |
 
 - 空でない環境変数が `deploy.env` より優先する（`PIPELINE=1 ops/up.sh`）。`1` をその回だけ打ち消すときは `0` を渡す。
-- 値は `1` / `0` のほか `true` / `false`、`yes` / `no` も書ける。`CREATE_S3_SINK` と `KEEP_ECR` は `1` / `0` だけ。
+- 値は `1` / `0` のほか `true` / `false`、`yes` / `no` も書ける。`KEEP_ECR` は `1` / `0` だけ。
 - 知らないキーや同じキーの 2 回目があると、何も作らずに止まる。
 - `deploy.env` はシェルとして実行しない（値の先頭の `~/` だけ読み替える）。別のファイルを使うなら `DEPLOY_ENV_FILE` にパスを入れる。
 
@@ -44,7 +43,7 @@
 | 3 | `terraform/base/core`。graph を作るなら裏で `terraform/pipeline/graph` を始める（ログは `ops/logs/graph-apply.log`） |
 | 3-3 | `terraform/agent` |
 | 4 | Web の部品を S3 に置く。`CREATE_KB=1` なら手順書を取り込む。Web を再起動 |
-| 5 | lab の rpm、Telegraf のポーリング先（lab の定義から作る）、S3 sink の zip、Spark の jar 6 本と `spark/snmp_sinks.py` を S3 に置く |
+| 5 | lab の rpm、Telegraf のポーリング先（lab の定義から作る）、Spark の jar 6 本と `spark/snmp_sinks.py` を S3 に置く |
 | 6 | `terraform/pipeline/lab` |
 | 7 | `terraform/pipeline/stream`（MSK に 20〜30 分） |
 | 7-3 | graph を待ち、Neptune が空ならトポロジを入れる（検知より先） |
@@ -58,7 +57,6 @@
 
 - スクリプトの中は `-auto-approve`。できているものは飛ばすので、落ちたら打ち直せばよい。
 - 途中で落ちたときは、裏の graph の apply が終わるまで待ってから止まる。その間ターミナルを閉じない。
-- **S3 sink の zip が取れないとき**は、ブラウザで `confluentinc-kafka-connect-s3-12.1.11.zip` を Confluent Hub から取って直下に置くか、`CREATE_S3_SINK=0` にする。
 
 ## `ops/down.sh` がすること
 

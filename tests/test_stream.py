@@ -24,7 +24,9 @@ for name in sorted(os.listdir(TF_DIR)):
 check("stream/detector.py は無い（検知は spark/snmp_sinks.py）", not os.path.exists(os.path.join(ROOT, "stream", "detector.py")))
 check("terraform/pipeline/stream に detector の Lambda が無い", '"detector"' not in tf and "stream/detector.py" not in tf and "archive_file" not in tf)
 check("terraform/pipeline/stream に lambda のエンドポイントが無い", '.lambda"' not in tf)
-check("terraform/pipeline/stream は sts のエンドポイントを create_sts_endpoint で切れる", 'variable "create_sts_endpoint"' in tf and 'toset(["sts"])' in tf)
+check("terraform/pipeline/stream に MSK Connect の S3 sink が無い（Spark が S3 Tables に入れるので 2026-09-26 に削除。sts のエンドポイントも一緒に）",
+      not os.path.exists(os.path.join(TF_DIR, "sink.tf")) and "mskconnect" not in tf and "create_s3_sink" not in tf
+      and "kafkaconnect" not in tf and "create_sts_endpoint" not in tf and "aws_vpc_endpoint" not in tf)
 check("terraform/pipeline/stream に DynamoDB が無い（異常の「いま」は Neptune、履歴は S3 Tables。2026-09-24）",
       "aws_dynamodb" not in tf and "anomaly_table" not in tf and "dynamodb:" not in tf and ".dynamodb" not in tf
       and not os.path.exists(os.path.join(TF_DIR, "anomalies.tf")))
@@ -516,8 +518,7 @@ _lab_tg = _read("terraform", "pipeline", "lab", "telegraf.tf")
 check("stream の stream_produce は Telegraf が lab の state に無くても role が空にならない（down.sh の destroy が検証で止まらない。2026-09-19）",
       'role = coalesce(local.telegraf_role_name, "${local.name_prefix}-telegraf")' in _access
       and re.search(r'resource "aws_iam_role" "telegraf" \{[\s\S]*?name\s+= "\$\{local\.name_prefix\}-telegraf"', _lab_tg) is not None)
-sink_tf = _read("terraform", "pipeline", "stream", "sink.tf")
-check("S3 sink と Spark の既定は logs も読む", '"metrics,traps,logs"' in sink_tf and mod.LOG_TOPICS == "traps,logs"
+check("Spark の既定は logs も読む", mod.LOG_TOPICS == "traps,logs"
       and mod.sink_topics("opensearch", mod.METRIC_TOPICS, mod.LOG_TOPICS) == "traps,logs")
 
 print(f"通過 {passed} / 失敗 0")

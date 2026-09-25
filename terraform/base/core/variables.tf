@@ -94,7 +94,7 @@ variable "create_s3_gateway_endpoint" {
 }
 
 variable "create_shared_endpoints" {
-  description = "Create ecr.api / ecr.dkr / logs interface endpoints (2 AZ). The runtime, the lab EC2, the workflow worker, the Spark job and MSK Connect use them. ops/up.sh passes false when only the base (or only graph) is deployed. Set false if the VPC already has them."
+  description = "Create ecr.api / ecr.dkr / logs interface endpoints (2 AZ). The runtime, the lab EC2, the workflow worker and the Spark job use them. ops/up.sh passes false when only the base (or only graph) is deployed. Set false if the VPC already has them."
   type        = bool
   default     = true
 }

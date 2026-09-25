@@ -13,8 +13,8 @@
 #   KEEP_ECR   ECR を残すか。1 = 残す、0 = 消す（既定）。それ以外の値は何も消さずに止まる
 #   AWS_PROFILE / AWS_CA_BUNDLE / OPENSEARCH_CACERT_FILE  ops/up.sh と同じ
 #
-# PIPELINE / AGENT / WORKFLOW / SKIP_* / CREATE_S3_SINK / CREATE_KB は見ない。機能の設定に関係なく、state にリソースが載っているルートを全部消す
-# （作っていないルートは飛ばし、S3 sink の有無は state から読む）。analytics は Spark のジョブを止めてから消す。
+# PIPELINE / AGENT / WORKFLOW / SKIP_* / CREATE_KB は見ない。機能の設定に関係なく、state にリソースが載っているルートを全部消す
+# （作っていないルートは飛ばす）。analytics は Spark のジョブを止めてから消す。
 #
 # 社内の SSL 検査がある PC では ops/up.sh と同じく AWS_CA_BUNDLE（または OPENSEARCH_CACERT_FILE）を入れてから打つ。
 # terraform/agent の destroy は（KB を作っていたとき）ベクトルインデックスを消すために OpenSearch Serverless のエンドポイントへ HTTPS でつなぐ。
@@ -59,7 +59,7 @@ has_resources() {  # has_resources <ルート>  state があり、リソース�
 }
 # SG が消えないときの DependencyViolation は「まだ何かが掴んでいる」としか言わないので、掴んでいるものを名指しで出す。
 # 掴んでいるのは 2 種類ある:
-#   1. ENI — サービスが持つもの（RequesterManaged=true。MSK のブローカー、MSK Connect のワーカー、VPC エンドポイント、
+#   1. ENI — サービスが持つもの（RequesterManaged=true。MSK のブローカー、VPC エンドポイント、
 #      AgentCore Runtime）は自分では消せないので、AWS 側が片付けるのを待つしかない。それ以外で status=available のものは
 #      誰も使っていない残骸なので、ここで消す
 #   2. 他の SG のルート — その SG をこの SG から参照していると、参照している側が消えるまでこの SG は消せない
@@ -182,12 +182,7 @@ fi
 destroy_lambda_root workflow "$PREFIX-tools" -var "worker_image_tag=${IMAGE_TAG:-destroy}"
 destroy_root pipeline/analytics
 destroy_lambda_root pipeline/graph "$PREFIX-graph-status"
-STREAM_VARS=()
-# S3 sink 無しで作った stream（CREATE_S3_SINK=0 ops/up.sh）は、既定の create_s3_sink=true のまま destroy すると zip の有無を確かめに行って止まる
-if has_resources pipeline/stream && ! tf pipeline/stream state list 2>/dev/null | grep -Eq '\.(connect|s3_sink)\['; then
-  STREAM_VARS+=(-var create_s3_sink=false)
-fi
-destroy_root pipeline/stream ${STREAM_VARS[@]+"${STREAM_VARS[@]}"}
+destroy_root pipeline/stream
 
 log "2. lab"
 destroy_root pipeline/lab
@@ -280,6 +275,6 @@ if [ -n "$FAILED_ROOTS" ]; then
   echo
   echo "NG: 消えなかったルート:${FAILED_ROOTS}（全文は ops/logs/tf-*-destroy.log）"
   echo "これ以外は消してあるので、時間課金が残っているのは上のルートだけ。上に出た RequesterManaged=True の ENI が残っているなら"
-  echo "AWS 側が片付けるのを待つしかない（MSK / MSK Connect は数分〜十数分、AgentCore Runtime は最大 8 時間）。待って ops/down.sh を打ち直す"
+  echo "AWS 側が片付けるのを待つしかない（MSK は数分〜十数分、AgentCore Runtime は最大 8 時間）。待って ops/down.sh を打ち直す"
   exit 1
 fi

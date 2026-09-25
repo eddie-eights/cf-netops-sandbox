@@ -28,10 +28,10 @@ flowchart LR
 |---|---|---|
 | 土台（必ず） | VPC、Web の EC2、S3、ECR | 約 $0.05/h |
 | `AGENT=1`（既定） | チャット（Runtime + ガードレール）。`CREATE_KB=1` で手順書の検索も | 約 $0.13/h（KB は +$0.36/h） |
-| `PIPELINE=1` | lab → MSK → Spark → S3 Tables / OpenSearch / Prometheus、異常検知、Neptune のトポロジ | 約 $1.51/h |
+| `PIPELINE=1` | lab → MSK → Spark → S3 Tables / OpenSearch / Prometheus、異常検知、Neptune のトポロジ | 約 $1.37/h |
 | `WORKFLOW=1` | Temporal で調査 → 承認 → 修復。AGENT と PIPELINE が要る | 約 $0.06/h |
 
-全部で約 $1.75/h。**1 か月置くと約 $1,280（約 19 万円）になるので、使い終わったら当日中に消す。**
+全部で約 $1.61/h。**1 か月置くと約 $1,180（約 17 万円）になるので、使い終わったら当日中に消す。**
 
 ## 手順
 

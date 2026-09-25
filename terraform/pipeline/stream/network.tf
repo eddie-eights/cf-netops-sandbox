@@ -1,6 +1,6 @@
 # ---------------------------------------------------------------- security groups
-# msk の description の「the lab EC2」は Telegraf が lab の EC2 にいたころの文言。description を変えると SG の作り直しになり、
-# ブローカーの ENI が付いたままでは消せないので残す（実際に 9098 を許しているのは下の msk_from_telegraf）
+# msk の description の「the lab EC2」は Telegraf が lab の EC2 にいたころ、「MSK Connect」は S3 sink があったころ（2026-09-26 に削除）の文言。
+# description を変えると SG の作り直しになり、ブローカーの ENI が付いたままでは消せないので残す（実際に 9098 を許しているのは下の msk_from_telegraf）
 resource "aws_security_group" "msk" {
   name        = "${local.name_prefix}-msk"
   description = "MSK brokers - Kafka IAM (9098) from the lab EC2, from MSK Connect and from the EMR Serverless workers (terraform/pipeline/analytics)"
@@ -16,18 +16,9 @@ resource "aws_security_group" "msk" {
   }
 }
 
-resource "aws_vpc_security_group_egress_rule" "msk_https" {
-  security_group_id = aws_security_group.msk.id
-  description       = "MSK Connect workers - S3 gateway, logs / sts endpoints"
-  ip_protocol       = "tcp"
-  from_port         = 443
-  to_port           = 443
-  cidr_ipv4         = "0.0.0.0/0"
-}
-
 resource "aws_vpc_security_group_egress_rule" "msk_kafka" {
   security_group_id = aws_security_group.msk.id
-  description       = "Kafka between brokers and Connect workers (all carry this group)"
+  description       = "Kafka between the brokers (all carry this group)"
   ip_protocol       = "tcp"
   from_port         = 9092
   to_port           = 9098
@@ -36,7 +27,7 @@ resource "aws_vpc_security_group_egress_rule" "msk_kafka" {
 
 resource "aws_vpc_security_group_ingress_rule" "msk_self" {
   security_group_id            = aws_security_group.msk.id
-  description                  = "Brokers and MSK Connect workers talk to each other"
+  description                  = "Brokers talk to each other"
   ip_protocol                  = "tcp"
   from_port                    = 9092
   to_port                      = 9098
@@ -52,49 +43,6 @@ resource "aws_vpc_security_group_ingress_rule" "msk_from_telegraf" {
   referenced_security_group_id = local.telegraf_sg_id
 }
 
-resource "aws_vpc_security_group_ingress_rule" "endpoints_from_msk" {
-  security_group_id            = local.endpoint_sg_id
-  description                  = "MSK Connect worker logs through the endpoints of terraform/base/core"
-  ip_protocol                  = "tcp"
-  from_port                    = 443
-  to_port                      = 443
-  referenced_security_group_id = aws_security_group.msk.id
-}
-
-resource "aws_security_group" "stream_endpoints" {
-  count = var.create_sts_endpoint ? 1 : 0
-
-  name        = "${local.name_prefix}-stream-endpoints"
-  description = "sts interface endpoint - HTTPS from the MSK security group"
-  vpc_id      = local.vpc_id
-
-  tags = { Name = "${local.name_prefix}-stream-endpoints" }
-}
-
-resource "aws_vpc_security_group_ingress_rule" "stream_endpoints_from_msk" {
-  count = var.create_sts_endpoint ? 1 : 0
-
-  security_group_id            = aws_security_group.stream_endpoints[0].id
-  description                  = "HTTPS from the MSK Connect workers"
-  ip_protocol                  = "tcp"
-  from_port                    = 443
-  to_port                      = 443
-  referenced_security_group_id = aws_security_group.msk.id
-}
-
-# ---------------------------------------------------------------- VPC endpoints
-# MSK Connect のワーカーは MSK のサブネット / SG に置かれ、IAM ロールを引き受けるのに STS へ届く必要がある（NAT が無いので interface endpoint。1 AZ で足りる）。
-# 本当に要るかは確認できていない（2026-09-17）。detector Lambda を Spark に寄せたので lambda のエンドポイントは外した
-resource "aws_vpc_endpoint" "stream" {
-  for_each = var.create_sts_endpoint ? toset(["sts"]) : toset([])
-
-  vpc_id              = local.vpc_id
-  service_name        = "com.amazonaws.${var.region}.${each.key}"
-  vpc_endpoint_type   = "Interface"
-  private_dns_enabled = true
-  subnet_ids          = [local.subnet_ids[0]]
-  security_group_ids  = [aws_security_group.stream_endpoints[0].id]
-
-  tags = { Name = "${local.name_prefix}-${each.key}" }
-}
+# 443 の egress と endpoints 側の ingress、sts のエンドポイントは MSK Connect のワーカー（S3 sink）のためのもので、sink と一緒に 2026-09-26 に外した。
+# ブローカー自身はログを MSK が届けるので VPC エンドポイントを通らない
 

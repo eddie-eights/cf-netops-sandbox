@@ -17,13 +17,6 @@ variable "owner" {
   }
 }
 
-# ---------------------------------------------------------------- network (same VPC as terraform/base/core)
-variable "create_sts_endpoint" {
-  description = "sts interface endpoint (1 AZ, first subnet) for the MSK Connect workers, because the VPC has no NAT. Whether MSK Connect really needs it has not been verified (2026-09-17). Set false if the VPC already has one."
-  type        = bool
-  default     = true
-}
-
 # ---------------------------------------------------------------- MSK
 variable "kafka_version" {
   description = "MSK provisioned Kafka version, KRaft mode only (the .kraft suffix selects KRaft; Kafka 4 has no ZooKeeper mode). 4.1.x is the newest for Standard brokers, 4.2.x is Express brokers only (list-kafka-versions and the MSK supported versions page, checked 2026-09-18)."
@@ -48,36 +41,12 @@ variable "broker_instance_type" {
 }
 
 variable "log_retention_days" {
-  description = "Retention of the broker and MSK Connect log groups."
+  description = "Retention of the broker log group."
   type        = number
   default     = 7
 
   validation {
     condition     = contains([1, 3, 7, 14, 30], var.log_retention_days)
     error_message = "log_retention_days must be one of 1, 3, 7, 14, 30."
-  }
-}
-
-# ---------------------------------------------------------------- MSK Connect S3 sink
-variable "create_s3_sink" {
-  description = "MSK Connect S3 sink (1 MCU, about 0.11 USD per hour). Needs the plugin zip at s3_sink_plugin_key before apply (step 5 of ops/up.sh). Set false to run without the sink."
-  type        = bool
-  default     = true
-}
-
-variable "kafka_connect_version" {
-  description = "Kafka Connect version of MSK Connect. The allowed values are not listed in the provider documentation (not verified) - 2.7.1 is the value shown in the MSK Connect documentation examples."
-  type        = string
-  default     = "2.7.1"
-}
-
-variable "s3_sink_plugin_key" {
-  description = "Key of the Confluent S3 sink connector zip in the asset bucket of terraform/base/core (download from Confluent Hub and upload before apply; step 5 of ops/up.sh does this)."
-  type        = string
-  default     = "stream/confluentinc-kafka-connect-s3-12.1.11.zip"
-
-  validation {
-    condition     = can(regex("^[A-Za-z0-9._/-]+[.]zip$", var.s3_sink_plugin_key))
-    error_message = "s3_sink_plugin_key must be an S3 key that ends with .zip."
   }
 }

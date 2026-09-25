@@ -217,7 +217,7 @@ flowchart LR
 
 ## MSK とクライアントのつなぎ
 
-Telegraf・Spark・MSK Connect が「どのブローカーにつなぐか」をどう知るか。2026-09-25 に手動構築（手順 5）で確かめた内容。
+Telegraf・Spark が「どのブローカーにつなぐか」をどう知るか。2026-09-25 に手動構築（手順 5）で確かめた内容。
 
 ### 15. msk-bootstrap の読み取り
 
@@ -246,7 +246,6 @@ Runtime と Web のロールに付く `<prefix>-stream-parameters-read` は `par
 | クライアント | ブローカーの知り方 | 理由 |
 |---|---|---|
 | Telegraf（EC2） | SSM `/<prefix>/msk-bootstrap` を起動時に読む | MSK より先に作られ、自分で起動するから |
-| MSK Connect の S3 sink | コネクタ作成時に `bootstrapServers` として埋め込む（[sink.tf](../terraform/pipeline/stream/sink.tf)） | MSK の後に作るので、作成時に分かっている |
 | Spark（EMR Serverless） | [terraform/pipeline/analytics](../terraform/pipeline/analytics) が stream の state の `bootstrap_brokers` を読み、ジョブの引数 `--bootstrap` で渡す（[spark/snmp_sinks.py](../spark/snmp_sinks.py)） | ジョブは起動のたびに引数をもらえるので、パラメータストアを引く必要が無い |
 
 **確かめ方。** Telegraf の EC2 に SSM セッションで入り `sudo tg status`。`render` が通ると「`/etc/telegraf/telegraf.conf` を作った（brokers: …）」がログに出て、unit が active になる。`sudo tg test` はポーリングだけを 1 回まわして標準出力に出す（MSK には送らない）ので、機器との疎通と MSK との疎通を切り分けられる。

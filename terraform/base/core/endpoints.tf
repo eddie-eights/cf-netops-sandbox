@@ -6,7 +6,7 @@ locals {
 }
 
 # VPC の中から S3 に出る経路はこれだけ。許すのは 4 つ: この root module のバケット（EC2 が web/ を取る、lab が lab/ を取る、
-# MSK Connect が stream/ に書き、Spark が analytics/ を読み書きする）、ECR のレイヤー置き場（Runtime のイメージ取得）、
+# Spark が analytics/ を読み書きする）、ECR のレイヤー置き場（Runtime のイメージ取得）、
 # AL2023 の dnf リポジトリ（EC2 に python3.13 を入れる）、S3 Tables のデータ置き場（terraform/pipeline/analytics の Spark が parquet を書く。
 # S3 Tables のテーブルバケットのデータは `<uuid>--table-s3` という名前の S3 バケットに置かれ、S3 の API で読み書きする。2026-09-17 確認）。
 # バケットへの操作の絞り込みは各ロールの IAM ポリシーで行う（ここで絞ると 2026-09-15 のように ListBucket が落ちて web/ の取得が失敗する）。
@@ -86,7 +86,7 @@ resource "aws_vpc_endpoint" "ssm" {
 
 # ---------------------------------------------------------------- VPC endpoints shared by the features (2 AZ)
 # ecr.api / ecr.dkr / logs は 1 つの機能のものではない: Runtime（agent）と lab の EC2 と Fargate のワーカー（workflow）が ECR からイメージを取り、
-# Runtime と Spark のジョブ（analytics）と MSK Connect（stream）が CloudWatch Logs に書く。2026-09-17 まで terraform/agent が持っていて、
+# Runtime と Spark のジョブ（analytics）が CloudWatch Logs に書く。2026-09-17 まで terraform/agent が持っていて、
 # AGENT=0 PIPELINE=1 だと lab の docker pull と Spark のログ出力が届かずに落ちた（同日に実測）。Runtime の ENI が 2 AZ に置かれるので 2 AZ に置く。
 # 同じ VPC に private DNS 付きの同じサービスのエンドポイントは 2 本作れないので、他のルートでは作らない
 resource "aws_vpc_endpoint" "shared" {

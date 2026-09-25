@@ -37,10 +37,9 @@
 #   SKIP_ANALYTICS=1        PIPELINE=1 で analytics（Spark → S3 Tables / OpenSearch / Prometheus と異常検知）を作らない。「異常一覧」は使えない
 #   SINK_S3=0 / SINK_OPENSEARCH=0 / SINK_PROMETHEUS=0
 #                           analytics の Spark の格納先を 1 つずつ外す（既定は 3 つとも 1。0 にするとリソースごと作らない。1 つ以上は要る）。
-#                           SINK_S3 = 全トピック → S3 Tables（Iceberg。MSK Connect の S3 sink の CREATE_S3_SINK とは別物）、SINK_OPENSEARCH = traps と logs（FRR のログ）→ OpenSearch Serverless、
+#                           SINK_S3 = 全トピック → S3 Tables（Iceberg）、SINK_OPENSEARCH = traps と logs（FRR のログ）→ OpenSearch Serverless、
 #                           SINK_PROMETHEUS = metrics → Amazon Managed Service for Prometheus。terraform/pipeline/analytics の var.sinks（iceberg / opensearch / prometheus）に組んで渡す。
 #   SKIP_GRAPH=1            PIPELINE=1 で graph（Neptune）を作らない。analytics の検知が異常を Neptune に書くので、SKIP_ANALYTICS=1（か SKIP_STREAM=1）も要る
-#   CREATE_S3_SINK=0        MSK Connect の S3 sink を作らない（Confluent の zip が取れないとき。ops/down.sh は state を見て合わせる）
 #   IMAGE_TAG               エージェント（WORKFLOW=1 ではワーカーも）のイメージのタグ。既定 v1。ECR にそのタグが無いときだけ PC の docker buildx でビルドして push する（タグは上書きできない）
 #   ADMIN_ARN               terraform/agent の kb_admin_principal_arn（CREATE_KB=1 のとき）。既定は空（Terraform が今の認証情報から決める）
 #   VPC_CIDR                terraform/base/core の vpc_cidr（社内と重なるとき）
@@ -50,7 +49,7 @@
 #   NO_PORTFORWARD=1        ポートフォワーディングを開かずに終わる
 #   TF_VERBOSE=1            terraform の出力を全部画面に出す（既定は進みと結果だけ。全文は ops/logs/tf-<ルート>-apply.log）
 #   AWS_PROFILE / AWS_CA_BUNDLE  AWS CLI と terraform がそのまま読む
-# AGENT / PIPELINE / WORKFLOW / CREATE_KB / SKIP_* / SINK_* / NO_PORTFORWARD は 1 / 0 のほか true / false、yes / no でも書ける（CREATE_S3_SINK と ops/down.sh の KEEP_ECR は 1 か 0 だけ）。
+# AGENT / PIPELINE / WORKFLOW / CREATE_KB / SKIP_* / SINK_* / NO_PORTFORWARD は 1 / 0 のほか true / false、yes / no でも書ける（ops/down.sh の KEEP_ECR は 1 か 0 だけ）。
 #
 # 手順 6（利用者への権限）は人に渡す作業なので入れていない。
 set -euo pipefail
@@ -58,8 +57,8 @@ set -euo pipefail
 REGION=ap-northeast-1
 # デプロイする人の名前 OWNER は deploy.env に書くので、OWNER と接頭辞 PREFIX=<owner>-nwc-poc が確定するのは
 # load_deploy_env のあと（手順 0 の resolve_name_prefix。必須なので、無ければそこで止まる。形の検査も ops/deploy-env.sh）
-# 下の 5 つは Terraform の変数の既定値に合わせてある（terraform/pipeline/lab の *_image_tag / containerlab_version / telegraf_version、
-# terraform/pipeline/stream の s3_sink_plugin_key）。変えるときは両方を変える
+# 下の 5 つは Terraform の変数の既定値に合わせてある（terraform/pipeline/lab の *_image_tag / containerlab_version / telegraf_version）。
+# 変えるときは両方を変える
 FRR_TAG=10.2.1
 MULTITOOL_TAG=v0.10.0
 SNMPD_TAG=v2
@@ -67,8 +66,6 @@ CONTAINERLAB_VERSION=0.79.0
 TELEGRAF_VERSION=1.40.0
 CONTAINERLAB_RPM="containerlab_${CONTAINERLAB_VERSION}_linux_arm64.rpm"
 TELEGRAF_RPM="telegraf-${TELEGRAF_VERSION}-1.aarch64.rpm"
-S3_SINK_ZIP=confluentinc-kafka-connect-s3-12.1.11.zip
-S3_SINK_URL="https://hub-downloads.confluent.io/api/plugins/confluentinc/kafka-connect-s3/versions/12.1.11/$S3_SINK_ZIP"
 # analytics の Spark ジョブに足す jar（Maven Central。2026-09-17 に 6 本とも取れることを確認）。EMR Serverless 7.13.0 の Spark 3.5.6 に合わせてある。
 # terraform/pipeline/analytics の emr_release_label を変えるときは spark-sql-kafka とその依存（kafka-clients / commons-pool2 は spark-sql-kafka の pom の版）も変える
 JARS_DIR=jars
@@ -176,9 +173,6 @@ fetch() {  # fetch <URL> <ファイル名>  展開したフォルダの直下に
   curl -fL --retry 3 -o "$2.part" "$1" || { rm -f "$2.part"; return 1; }
   mv "$2.part" "$2"
 }
-is_zip() {  # is_zip <ファイル>
-  "${PY[@]}" -c 'import sys, zipfile; sys.exit(0 if zipfile.is_zipfile(sys.argv[1]) else 1)' "$1"
-}
 GRAPH_PID=""
 GRAPH_LOG=ops/logs/graph-apply.log
 on_exit() {  # 途中で止まっても、バックグラウンドの graph の apply は終わるまで待つ（打ち直したときに state のロックでぶつからないように）
@@ -197,11 +191,6 @@ resolve_name_prefix  # OWNER（必須。terraform の -var owner にそのまま
 log "   デプロイする人の名前: ${OWNER}（リソース名の接頭辞と Project タグは ${PREFIX}）"
 IMAGE_TAG="${IMAGE_TAG:-v1}"
 LOCAL_PORT="${LOCAL_PORT:-8080}"
-CREATE_S3_SINK="${CREATE_S3_SINK:-1}"
-case "$CREATE_S3_SINK" in
-  0|1) ;;
-  *) die "CREATE_S3_SINK は 1（作る。既定）か 0（作らない）（いまは「${CREATE_S3_SINK}」）。まだ何も作っていない" ;;
-esac
 # analytics の Spark の格納先。SINK_S3 / SINK_OPENSEARCH / SINK_PROMETHEUS を 1 / 0 で書く（既定は 3 つとも 1）。
 # 0 にした格納先は Spark が書かないだけでなく、リソースも作らない。
 # terraform/pipeline/analytics の var.sinks（list）に渡すので、["iceberg","opensearch"] の形に組む（SINKS_TF）
@@ -303,7 +292,7 @@ echo "作るルート: $ROOTS"
 #   + 共用のエンドポイント 8（ecr.api / ecr.dkr / logs の 3 本 × 2 AZ。AGENT か lab か analytics を作るときだけ。2026-09-18 に agent から土台へ移した）、
 # agent = 5（bedrock-runtime × 2 AZ + bedrock-agentcore 1 本）
 #   + CREATE_KB なら 36（OpenSearch Serverless の OCU 33 + bedrock-agent-runtime のエンドポイント 3）、
-# lab = 9、graph = 14、stream = 71（MSK Connect の S3 sink 無しなら 57）+ Telegraf の EC2 1（terraform/pipeline/lab が作る t4g.micro。
+# lab = 9、graph = 14、stream = 57 + Telegraf の EC2 1（terraform/pipeline/lab が作る t4g.micro。
 #   公表単価 $0.0108/h からで、Price List API では確かめていない）、
 # analytics = 20（ストリーミングのジョブが動いている間の EMR Serverless の 2 vCPU + 異常検知の events エンドポイント 2 本 17。単価は 2026-09-17 に確認。
 #   + s3tables のエンドポイント 2 本 3。証跡の anomaly_events / proposal_events があるので SINK_S3=0 でも作る。2026-09-24。テーブルは無料）
@@ -321,8 +310,8 @@ fi
 if [ -z "$SKIP_LAB" ]; then COST_CENTS=$((COST_CENTS + 9)); fi
 if [ -z "$SKIP_GRAPH" ]; then COST_CENTS=$((COST_CENTS + 14)); fi
 if [ -z "$SKIP_STREAM" ]; then
-  # MSK は kafka.m5.large × 2 で 0.542（Kafka 4 は t3.small を受け付けない。2026-09-18）。MSK Connect 1 MCU で +0.14
-  if [ "$CREATE_S3_SINK" = 1 ]; then COST_CENTS=$((COST_CENTS + 71)); else COST_CENTS=$((COST_CENTS + 57)); fi
+  # MSK は kafka.m5.large × 2 で 0.542（Kafka 4 は t3.small を受け付けない。2026-09-18）
+  COST_CENTS=$((COST_CENTS + 57))
   COST_CENTS=$((COST_CENTS + 1))   # Telegraf の EC2
 fi
 if [ -z "$SKIP_ANALYTICS" ]; then
@@ -541,22 +530,8 @@ if [ -z "$SKIP_LAB" ]; then
     aws s3 cp --only-show-errors "$TELEGRAF_RPM" "s3://$KB_BUCKET/telegraf/"
   fi
 fi
-STREAM_VARS=()
-if [ -z "$SKIP_STREAM" ]; then
-  if [ "$CREATE_S3_SINK" = 0 ]; then
-    echo "CREATE_S3_SINK=0 なので S3 sink は作らない"
-    STREAM_VARS+=(-var create_s3_sink=false)
-  else
-    log "5-2. S3 sink のプラグイン（Confluent の zip）を s3://$KB_BUCKET/stream/ に置く"
-    if ! fetch "$S3_SINK_URL" "$S3_SINK_ZIP" || ! is_zip "$S3_SINK_ZIP"; then
-      rm -f "$S3_SINK_ZIP"
-      die "Confluent の zip が取れない（利用条件への同意が要るとページが返る）。ブラウザで $S3_SINK_URL を開いて取り、展開したフォルダの直下に $S3_SINK_ZIP の名前で置いて打ち直す。S3 sink が要らなければ deploy.env に CREATE_S3_SINK=0 を書いて打ち直す"
-    fi
-    aws s3 cp --only-show-errors "$S3_SINK_ZIP" "s3://$KB_BUCKET/stream/$S3_SINK_ZIP"
-  fi
-fi
 if [ -z "$SKIP_ANALYTICS" ]; then
-  log "5-3. Spark のスクリプトと jar（Kafka / MSK IAM / S3 Tables カタログ）を s3://$KB_BUCKET/analytics/ に置く"
+  log "5-2. Spark のスクリプトと jar（Kafka / MSK IAM / S3 Tables カタログ）を s3://$KB_BUCKET/analytics/ に置く"
   mkdir -p "$JARS_DIR"
   for url in "${JAR_URLS[@]}"; do
     fetch "$url" "$JARS_DIR/${url##*/}" || die "jar が取れない: $url （社内 PC なら docs/setup.md「社内 PC の CA」）"
@@ -579,7 +554,7 @@ fi
 # ---- 7. stream ------------------------------------------------------------------
 if [ -z "$SKIP_STREAM" ]; then
   log "7. stream（terraform/pipeline/stream。MSK の作成に 20〜30 分）"
-  tf_apply pipeline/stream ${STREAM_VARS[@]+"${STREAM_VARS[@]}"}
+  tf_apply pipeline/stream
 fi
 
 # ---- 7-2. lab と Telegraf の中を確かめる ------------------------------------------------

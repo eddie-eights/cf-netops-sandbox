@@ -45,12 +45,12 @@ output "runtime_security_group_id" {
 }
 
 output "endpoint_security_group_id" {
-  description = "Read by terraform/agent (its interface endpoints use this SG) and terraform/pipeline/lab / terraform/pipeline/stream, which add 443 ingress rules so the lab EC2 and MSK Connect can reach the endpoints"
+  description = "Read by terraform/agent (its interface endpoints use this SG) and terraform/pipeline/lab / terraform/pipeline/analytics, which add 443 ingress rules so the lab EC2 and the EMR workers can reach the endpoints"
   value       = aws_security_group.endpoints.id
 }
 
 output "kb_bucket_name" {
-  description = "Read by terraform/agent (docs/), terraform/pipeline/lab (lab/) and terraform/pipeline/stream (stream/)"
+  description = "Read by terraform/agent (docs/), terraform/pipeline/lab (lab/ telegraf/) and terraform/pipeline/analytics (analytics/)"
   value       = aws_s3_bucket.kb.bucket
 }
 

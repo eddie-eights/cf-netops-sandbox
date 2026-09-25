@@ -26,8 +26,6 @@ lab/snmpd/certs/*.pem
 *.tfvars
 !*.tfvars.example
 terraform/**/.build/
-# 手順 s-1 で取るファイル
-confluentinc-*.zip
 ops/logs/
 *.part
 # ops/up.sh の手順 5-3 で取る Spark の jar

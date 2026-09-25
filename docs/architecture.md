@@ -26,7 +26,6 @@ flowchart LR
 flowchart LR
   LAB["lab の EC2<br/>containerlab + FRR"] -->|"SNMP ポーリング 10 秒 / trap / FRR のログ"| TG["Telegraf の EC2"] --> MSK["MSK<br/>metrics / traps / logs"]
   MSK --> SPARK["Spark（EMR Serverless）"]
-  MSK -.->|"任意"| S3SINK["MSK Connect の S3 sink"]
   SPARK -->|"全トピック（正本）"| ICE["S3 Tables<br/>snmp_metrics"]
   SPARK -->|"traps / logs"| OS["OpenSearch<br/>snmp-logs"]
   SPARK -->|"metrics"| PROM["Prometheus"]
@@ -76,7 +75,7 @@ terraform/
 ├── agent/         AGENT=1     Runtime / ガードレール / KB
 ├── pipeline/      PIPELINE=1
 │   ├── lab/         containerlab の EC2 と Telegraf の EC2（stream を作るとき）
-│   ├── stream/      MSK / MSK Connect
+│   ├── stream/      MSK
 │   ├── analytics/   EMR Serverless / S3 Tables / OpenSearch / Prometheus
 │   └── graph/       Neptune
 └── workflow/      WORKFLOW=1  Temporal on ECS / Gateway（MCP）

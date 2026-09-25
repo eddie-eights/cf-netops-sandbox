@@ -15,7 +15,7 @@
 - **apply と destroy は同じ人（同じロール）で打つ。**OpenSearch のデータアクセスポリシーには apply した人の ARN が入るので、別の人が destroy すると 403 になる。自動で ARN が取れないときは `ADMIN_ARN` に書く。
 - ガードレールの判定は、東京以外の APAC のリージョン（大阪、ソウル、ムンバイ、シンガポール、シドニー）で行われることがある。データを国内に留める決まりがあるなら使えない。
 - Session Manager の設定で KMS の暗号化を必須にしているなら、`kms` のエンドポイントとインスタンスロールへの `kms:Decrypt` が別に要る（この Terraform には入れていない）。
-- **PIPELINE は組織の SCP / IAM で止められやすい**（EC2 の t4g.large、Neptune、MSK、MSK Connect、EMR Serverless、S3 Tables）。apply が `explicitly denied` で止まったら、管理者に許可を頼むか `SKIP_*` で外す。
+- **PIPELINE は組織の SCP / IAM で止められやすい**（EC2 の t4g.large、Neptune、MSK、EMR Serverless、S3 Tables）。apply が `explicitly denied` で止まったら、管理者に許可を頼むか `SKIP_*` で外す。
 
 ## 利用者の PC 側
 

@@ -9,16 +9,6 @@ output "bootstrap_brokers" {
 }
 
 output "msk_security_group_id" {
-  description = "Security group of the brokers and MSK Connect workers (terraform/pipeline/analytics opens 9098 from the EMR workers on it)"
+  description = "Security group of the brokers (terraform/pipeline/analytics opens 9098 from the EMR workers on it)"
   value       = aws_security_group.msk.id
-}
-
-output "upload_plugin_command" {
-  description = "Upload command of the Confluent S3 sink zip (step 5 of ops/up.sh). The zip must be there before the first apply when create_s3_sink is true."
-  value       = "aws s3 cp ${basename(var.s3_sink_plugin_key)} s3://${local.bucket}/${var.s3_sink_plugin_key}"
-}
-
-output "sink_prefix" {
-  description = "Where MSK Connect writes the raw messages"
-  value       = "s3://${local.bucket}/stream/"
 }
