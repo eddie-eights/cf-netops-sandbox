@@ -1,8 +1,10 @@
-# ---------------------------------------------------------------- Spark の格納先（var.sinks で選ぶ。Kafka を 3 つの格納先に分ける）
+# ---------------------------------------------------------------- Spark の格納先（var.sinks で選ぶ。Kafka を 4 つの格納先に分ける）
 # iceberg    = 全トピック → tables.tf の S3 Tables（常に作る。テーブルは無料）
 # opensearch = ログのトピック → ここで作る OpenSearch Serverless の TIMESERIES コレクション（VPC エンドポイント経由だけ）
 # prometheus = メトリクスのトピック → ここで作る Amazon Managed Service for Prometheus のワークスペース（aps-workspaces のエンドポイント経由）
-# 4 本目の Splunk は Spark を通さず Kafka の sink（MSK Connect の Splunk Connect for Kafka）にする予定で、まだ作らない
+# splunk     = 全トピック → AWS の外にある Splunk の HTTP Event Collector（var.splunk_hec_url）。Splunk 自体はここでは作らない。
+#              ここにあるのは実行ロールの ssm:GetParameter（token。access.tf）と HEC のポートの egress（network.tf）と job_driver の引数（outputs.tf）だけ。
+#              2026-09-26 まで MSK Connect の Splunk Connect for Kafka にする予定だったが、Spark から直接書くことにした（コネクタのワーカー分の費用と VPC エンドポイントが要らない）
 
 # ---------------------------------------------------------------- opensearch
 resource "aws_opensearchserverless_security_policy" "logs_encryption" {

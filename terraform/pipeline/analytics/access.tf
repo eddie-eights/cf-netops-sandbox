@@ -1,7 +1,7 @@
 # ---------------------------------------------------------------- runtime role of the Spark job
 resource "aws_iam_role" "emr" {
   name        = "${local.name_prefix}-emr-runtime"
-  description = "EMR Serverless job runtime - reads MSK, writes the sinks (S3 Tables, OpenSearch Serverless, Prometheus) and the anomalies (Neptune, S3 Tables), reads the script and jars from the asset bucket"
+  description = "EMR Serverless job runtime - reads MSK, writes the sinks (S3 Tables, OpenSearch Serverless, Prometheus, Splunk HEC with the token from SSM) and the anomalies (Neptune, S3 Tables), reads the script and jars from the asset bucket"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -119,6 +119,15 @@ resource "aws_iam_role_policy" "emr" {
         Action   = "aps:RemoteWrite"
         Resource = local.sink_prometheus ? aws_prometheus_workspace.metrics[0].arn : ""
       }] : s if local.sink_prometheus],
+      [for s in [{
+        # HEC の token（SSM の SecureString）を起動時に読む。ssm のエンドポイントは terraform/base/core（create_ssm_endpoints）。
+        # 復号は SSM の AWS 管理キー aws/ssm のキーポリシーが ssm 経由の呼び出しに許しているので kms:Decrypt は要らない
+        # （自分の KMS キーで暗号化したパラメータなら、そのキーに kms:Decrypt を足す）
+        Sid      = "SplunkHecToken"
+        Effect   = "Allow"
+        Action   = "ssm:GetParameter"
+        Resource = local.splunk_token_parameter_arn
+      }] : s if local.sink_splunk],
     )
   })
 }

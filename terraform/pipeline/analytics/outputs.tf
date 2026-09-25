@@ -50,6 +50,9 @@ output "job_driver_json" {
         [for a in ["--iceberg-table", local.iceberg_table] : a if local.sink_iceberg],
         [for a in ["--opensearch-endpoint", local.opensearch_endpoint, "--opensearch-index", local.opensearch_index] : a if local.sink_opensearch],
         [for a in ["--prometheus-url", local.prometheus_remote_write_url] : a if local.sink_prometheus],
+        # token の値は渡さない（SSM のパラメータ名だけ。ジョブが起動時に読む）
+        [for a in ["--splunk-hec-url", var.splunk_hec_url, "--splunk-token-parameter", local.splunk_token_parameter, "--splunk-index", var.splunk_index] : a if local.sink_splunk],
+        [for a in ["--splunk-skip-verify"] : a if local.sink_splunk && var.splunk_skip_tls_verify],
       )
       # Iceberg のカタログはいつも開く（検知が証跡の anomaly_events に書く。2026-09-24）
       sparkSubmitParameters = join(" ", concat(
@@ -102,8 +105,18 @@ output "log_group_name" {
 }
 
 output "sinks" {
-  description = "Where the streaming job stores the messages (var.sinks: iceberg = all topics, opensearch = log topics, prometheus = metric topics)"
+  description = "Where the streaming job stores the messages (var.sinks: iceberg = all topics, opensearch = log topics, prometheus = metric topics, splunk = all topics)"
   value       = var.sinks
+}
+
+output "splunk_hec_url" {
+  description = "HTTP Event Collector the splunk sink posts every topic to (empty unless sinks has splunk). The Splunk itself is outside this Terraform"
+  value       = local.sink_splunk ? var.splunk_hec_url : ""
+}
+
+output "splunk_token_parameter" {
+  description = "SSM SecureString parameter the job reads the HEC token from (empty unless sinks has splunk). Create it by hand; Terraform never reads the value"
+  value       = local.sink_splunk ? local.splunk_token_parameter : ""
 }
 
 output "opensearch_collection_endpoint" {

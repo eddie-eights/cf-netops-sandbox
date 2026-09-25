@@ -29,6 +29,7 @@ flowchart LR
   SPARK -->|"全トピック（正本）"| ICE["S3 Tables<br/>snmp_metrics"]
   SPARK -->|"traps / logs"| OS["OpenSearch<br/>snmp-logs"]
   SPARK -->|"metrics"| PROM["Prometheus"]
+  SPARK -.->|"全トピック（SINK_SPLUNK=1 のとき）"| SPL["Splunk HEC<br/>AWS の外"]
   SPARK -->|"開いた / 閉じた"| AEV["S3 Tables<br/>anomaly_events（証跡）"]
   SPARK -->|"異常の「いま」"| NEP["Neptune<br/>トポロジ + 異常 + 修復案"]
   SPARK -->|"AnomalyOpened"| EB["EventBridge"]

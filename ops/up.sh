@@ -38,7 +38,11 @@
 #   SINK_S3=0 / SINK_OPENSEARCH=0 / SINK_PROMETHEUS=0
 #                           analytics の Spark の格納先を 1 つずつ外す（既定は 3 つとも 1。0 にするとリソースごと作らない。1 つ以上は要る）。
 #                           SINK_S3 = 全トピック → S3 Tables（Iceberg）、SINK_OPENSEARCH = traps と logs（FRR のログ）→ OpenSearch Serverless、
-#                           SINK_PROMETHEUS = metrics → Amazon Managed Service for Prometheus。terraform/pipeline/analytics の var.sinks（iceberg / opensearch / prometheus）に組んで渡す。
+#                           SINK_PROMETHEUS = metrics → Amazon Managed Service for Prometheus。terraform/pipeline/analytics の var.sinks（iceberg / opensearch / prometheus / splunk）に組んで渡す。
+#   SINK_SPLUNK=1           4 本目の格納先: 全トピック → AWS の外にある Splunk の HTTP Event Collector（既定 0。Splunk 自体は作らない）。
+#                           SPLUNK_HEC_URL（https://<host>:8088。VPC の中から届くもの。VPC に NAT も IGW も無い）が要り、HEC の token は
+#                           SSM の SecureString /<接頭辞>/splunk/hec-token に手で入れておく（deploy.env には書かない。手順 7-4 で有無だけ確かめる）。
+#                           SPLUNK_INDEX（既定は空 = token の既定の index）、SPLUNK_SKIP_TLS_VERIFY=1（自己署名の Splunk の検証用）は任意
 #   SKIP_GRAPH=1            PIPELINE=1 で graph（Neptune）を作らない。analytics の検知が異常を Neptune に書くので、SKIP_ANALYTICS=1（か SKIP_STREAM=1）も要る
 #   IMAGE_TAG               エージェント（WORKFLOW=1 ではワーカーも）のイメージのタグ。既定 v1。ECR にそのタグが無いときだけ PC の docker buildx でビルドして push する（タグは上書きできない）
 #   ADMIN_ARN               terraform/agent の kb_admin_principal_arn（CREATE_KB=1 のとき）。既定は空（Terraform が今の認証情報から決める）
@@ -193,14 +197,24 @@ IMAGE_TAG="${IMAGE_TAG:-v1}"
 LOCAL_PORT="${LOCAL_PORT:-8080}"
 # analytics の Spark の格納先。SINK_S3 / SINK_OPENSEARCH / SINK_PROMETHEUS を 1 / 0 で書く（既定は 3 つとも 1）。
 # 0 にした格納先は Spark が書かないだけでなく、リソースも作らない。
+# SINK_SPLUNK（既定 0）は AWS の外の Splunk の HEC に送る 4 本目。SPLUNK_HEC_URL が要る（token は SSM。手順 7-4 で有無を確かめる）
 # terraform/pipeline/analytics の var.sinks（list）に渡すので、["iceberg","opensearch"] の形に組む（SINKS_TF）
 SINK_S3="${SINK_S3:-1}"; SINK_OPENSEARCH="${SINK_OPENSEARCH:-1}"; SINK_PROMETHEUS="${SINK_PROMETHEUS:-1}"
-flag_value SINK_S3; flag_value SINK_OPENSEARCH; flag_value SINK_PROMETHEUS
+SINK_SPLUNK="${SINK_SPLUNK:-0}"; SPLUNK_HEC_URL="${SPLUNK_HEC_URL:-}"; SPLUNK_INDEX="${SPLUNK_INDEX:-}"; SPLUNK_SKIP_TLS_VERIFY="${SPLUNK_SKIP_TLS_VERIFY:-0}"
+flag_value SINK_S3; flag_value SINK_OPENSEARCH; flag_value SINK_PROMETHEUS; flag_value SINK_SPLUNK; flag_value SPLUNK_SKIP_TLS_VERIFY
 SINKS=""
 if [ -n "$SINK_S3" ]; then SINKS="iceberg"; fi
 if [ -n "$SINK_OPENSEARCH" ]; then SINKS="$SINKS${SINKS:+,}opensearch"; fi
 if [ -n "$SINK_PROMETHEUS" ]; then SINKS="$SINKS${SINKS:+,}prometheus"; fi
-[ -n "$SINKS" ] || die "SINK_S3 / SINK_OPENSEARCH / SINK_PROMETHEUS が全部 0。Spark のジョブは格納先が 1 つ以上要る。analytics ごと要らないなら SKIP_ANALYTICS=1。まだ何も作っていない"
+if [ -n "$SINK_SPLUNK" ]; then
+  SINKS="$SINKS${SINKS:+,}splunk"
+  case "$SPLUNK_HEC_URL" in
+    https://?*) ;;
+    "") die "SINK_SPLUNK=1 なのに SPLUNK_HEC_URL が無い。Splunk の HEC の URL（https://<host>:8088。VPC の中から届くもの）を deploy.env に書く。まだ何も作っていない" ;;
+    *) die "SPLUNK_HEC_URL は https:// で始める（HEC は TLS。いまは「${SPLUNK_HEC_URL}」）。まだ何も作っていない" ;;
+  esac
+fi
+[ -n "$SINKS" ] || die "SINK_S3 / SINK_OPENSEARCH / SINK_PROMETHEUS / SINK_SPLUNK が全部 0。Spark のジョブは格納先が 1 つ以上要る。analytics ごと要らないなら SKIP_ANALYTICS=1。まだ何も作っていない"
 SINKS_TF="\"$(printf '%s' "$SINKS" | sed 's/,/","/g')\""
 flag_value SKIP_LAB; flag_value SKIP_STREAM; flag_value SKIP_ANALYTICS; flag_value SKIP_GRAPH; flag_value NO_PORTFORWARD
 # どの機能を作るか（既定は土台 + AGENT）
@@ -298,7 +312,8 @@ echo "作るルート: $ROOTS"
 #   + s3tables のエンドポイント 2 本 3。証跡の anomaly_events / proposal_events があるので SINK_S3=0 でも作る。2026-09-24。テーブルは無料）
 #   + SINK_PROMETHEUS なら 3（aps-workspaces のエンドポイント 2 本。取り込みのサンプル課金は別）
 #   + SINK_OPENSEARCH なら 33（logs コレクションの OCU。KB のコレクションと共有されるか確認できていないので最大値で数える。
-#     共有されれば 0 に近づく）、
+#     共有されれば 0 に近づく）
+#   + SINK_SPLUNK は 0（AWS 側には何も作らない。ssm のエンドポイントは土台のもの。Splunk 側の取り込みのライセンスは別）、
 # workflow = 6（Fargate ARM 1 vCPU / 2 GB のタスク 1 つ + sqs エンドポイント 1 本。Gateway と Lambda と SQS と S3 Tables への追記は使った分だけ。単価は 2026-09-17 に確認）。
 # ここを変えたら README の「作るもの」と docs/deploy.md の金額も変える
 COST_CENTS=5
@@ -617,6 +632,20 @@ if [ -z "$SKIP_ANALYTICS" ]; then
   # 検知の device map（別名=機器名,...）も lab の定義から作る。trap には sysName が無いので、送り元の IP から機器名を引くのに要る
   DEVICE_MAP=$("${PY[@]}" lab/lab_topology.py lab --device-map) || die "lab/lab_topology.py が lab の定義から device map を作れなかった"
   ANALYTICS_VARS=(-var "sinks=[$SINKS_TF]" -var "device_map=$DEVICE_MAP")
+  if [ -n "$SINK_SPLUNK" ]; then
+    # HEC の token は SSM の SecureString に手で入れてもらう（deploy.env にも Terraform にも置かない）。ここでは有無と型だけ見る
+    # （describe-parameters は値を返さない）。Spark のジョブが起動時に実行ロールで読む
+    SPLUNK_TOKEN_PARAM="/$PREFIX/splunk/hec-token"
+    SPLUNK_TOKEN_TYPE=$(aws ssm describe-parameters --region "$REGION" --parameter-filters "Key=Name,Values=$SPLUNK_TOKEN_PARAM" \
+      --query 'Parameters[0].Type' --output text 2>/dev/null || echo "")
+    [ "$SPLUNK_TOKEN_TYPE" != None ] || SPLUNK_TOKEN_TYPE=""   # 無いときの --output text は None
+    if [ "$SPLUNK_TOKEN_TYPE" != SecureString ]; then
+      die "SINK_SPLUNK=1: SSM に HEC の token が無い（${SPLUNK_TOKEN_PARAM}。いまは「${SPLUNK_TOKEN_TYPE:-無し}」）。Splunk の HEC の token を SecureString で入れてから打ち直す:
+  aws ssm put-parameter --region $REGION --name $SPLUNK_TOKEN_PARAM --type SecureString --value '<HEC の token>'
+analytics の手前まではできている（stream / graph は残っている。消すなら ops/down.sh）"
+    fi
+    ANALYTICS_VARS+=(-var "splunk_hec_url=$SPLUNK_HEC_URL" -var "splunk_index=$SPLUNK_INDEX" -var "splunk_skip_tls_verify=$([ -n "$SPLUNK_SKIP_TLS_VERIFY" ] && echo true || echo false)")
+  fi
   tf_apply pipeline/analytics "${ANALYTICS_VARS[@]}"
   APP_ID=$(tf pipeline/analytics output -raw application_id); echo "APP_ID=$APP_ID"
   log "7-5. Spark のストリーミングジョブ（Kafka → ${SINKS}）を起こす（同じスクリプトと引数で動いていれば何もしない）"

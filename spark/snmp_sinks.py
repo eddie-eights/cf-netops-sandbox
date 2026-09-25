@@ -1,13 +1,17 @@
-"""Kafka（MSK、IAM 認証）のトピックを読み、選んだ格納先に流し続け、異常を検知して EventBridge に出す Spark Structured Streaming のジョブ（Kafka の 4 分岐のうち Spark の 3 本 + 検知）。
+"""Kafka（MSK、IAM 認証）のトピックを読み、選んだ格納先に流し続け、異常を検知して EventBridge に出す Spark Structured Streaming のジョブ（Kafka の 4 分岐 + 検知）。
 
 EMR Serverless の上で動く（terraform/pipeline/analytics）。起動は ops/up.sh の a-3（start-job-run）で、引数は terraform/pipeline/analytics の
 output job_driver_json が組み立てる（--bootstrap / --checkpoint / --sinks と、格納先ごとの --iceberg-table などの値）。
 Kafka と S3 Tables の jar、カタログの設定は spark-submit の --conf で渡す。
 
-格納先は 3 つ（--sinks にカンマ区切り。4 つ目の Splunk は Kafka の sink（MSK Connect）にする予定で後回し）:
+格納先は 4 つ（--sinks にカンマ区切り）:
   iceberg     全トピック → S3 Tables（Iceberg）のテーブルに append（履歴の正本）
   opensearch  ログのトピックだけ → OpenSearch Serverless（TIMESERIES 型のコレクション）の _bulk に SigV4 で POST
   prometheus  メトリクスのトピックだけ → Amazon Managed Service for Prometheus の remote write に SigV4 で POST（数値の field だけ）
+  splunk      全トピック → Splunk の HTTP Event Collector（HEC）に 1 行 1 イベントで POST（Authorization: Splunk <token>。
+              token は SSM の SecureString（--splunk-token-parameter）から起動時に読む。Splunk は AWS の外にあり、この VPC には NAT も IGW も無いので、
+              HEC の URL は VPC の中から届くもの（DX / VPN の先の社内の Splunk Enterprise、同じ VPC の Splunk、PrivateLink）に限る。
+              2026-09-26 まで MSK Connect の Splunk Connect for Kafka にする予定だったが、Spark から直接書くことにした）
 どのトピックがメトリクスでどれがログかは --metric-topics / --log-topics（既定は Telegraf の metrics と traps,logs。
 logs は FRR のログ。lab の EC2 の rsyslog が Telegraf の EC2 へ送る）。格納先ごとに別のストリーミングクエリ（別の Kafka の購読と checkpoint）に
 する。1 つが止まったらジョブを 1 で終わらせ、EMR Serverless に起こし直させる（どのクエリも checkpoint の続きから読む）。
@@ -44,13 +48,15 @@ import urllib.request
 
 METRIC_TOPICS = "metrics"   # Telegraf の inputs.snmp（telegraf/telegraf.conf.in。Telegraf の EC2 で動く）
 LOG_TOPICS = "traps,logs"   # traps = Telegraf の inputs.snmp_trap、logs = inputs.socket_listener（FRR のログ。measurement は frr_log）
-SINKS = ("iceberg", "opensearch", "prometheus")
+SINKS = ("iceberg", "opensearch", "prometheus", "splunk")
 TRIGGER = "60 seconds"
 HTTP_TIMEOUT = 30
 HTTP_RETRIES = 3        # 5xx と接続エラーだけ打ち直す。4xx は捨ててログに出す（古すぎるサンプルなどは何度打っても通らない）
 BULK_SIZE = 500         # 1 回の POST に載せる行数
 OPENSEARCH_INDEX = "snmp-logs"
 METRIC_PREFIX = "snmp"
+SPLUNK_HEC_PATH = "/services/collector/event"   # HEC の JSON イベントの入口（--splunk-hec-url に無ければ足す）
+SPLUNK_SOURCETYPE_PREFIX = "netops"             # sourcetype は netops:<トピック>（netops:metrics / netops:traps / netops:logs）
 
 
 # ---------------------------------------------------------------- 引数
@@ -58,7 +64,7 @@ def parse_args(argv):
     p = argparse.ArgumentParser(prog="snmp_sinks.py", description=__doc__.split("\n")[0])
     p.add_argument("--bootstrap", required=True, help="MSK の bootstrap servers（SASL/IAM、9098）")
     p.add_argument("--checkpoint", required=True, help="checkpoint の親（s3://<バケット>/analytics/checkpoint/。格納先ごとに下にディレクトリを切る）")
-    p.add_argument("--sinks", required=True, help="格納先（カンマ区切り。iceberg / opensearch / prometheus）")
+    p.add_argument("--sinks", required=True, help="格納先（カンマ区切り。iceberg / opensearch / prometheus / splunk）")
     p.add_argument("--region", default="ap-northeast-1", help="SigV4 のリージョン")
     p.add_argument("--metric-topics", default=METRIC_TOPICS, help="メトリクスのトピック（カンマ区切り。iceberg と prometheus が読む）")
     p.add_argument("--log-topics", default=LOG_TOPICS, help="ログのトピック（カンマ区切り。iceberg と opensearch が読む）")
@@ -66,6 +72,10 @@ def parse_args(argv):
     p.add_argument("--opensearch-endpoint", default="", help="opensearch: コレクションのエンドポイント（https://…）")
     p.add_argument("--opensearch-index", default=OPENSEARCH_INDEX, help="opensearch: インデックス名")
     p.add_argument("--prometheus-url", default="", help="prometheus: remote write の URL（…/api/v1/remote_write）")
+    p.add_argument("--splunk-hec-url", default="", help="splunk: HEC の URL（https://<host>:8088。/services/collector/event が無ければ足す）")
+    p.add_argument("--splunk-token-parameter", default="", help="splunk: HEC の token を入れた SSM の SecureString の名前（/<接頭辞>/splunk/hec-token。値は起動時に読み、ログに出さない）")
+    p.add_argument("--splunk-index", default="", help="splunk: イベントを入れる index（空なら token の既定の index）")
+    p.add_argument("--splunk-skip-verify", action="store_true", help="splunk: HEC の TLS 証明書を検証しない（自己署名の Splunk Enterprise の検証用。既定は検証する）")
     p.add_argument("--neptune-endpoint", default="", help="detect: 異常の「いま」を書く Neptune（host:port。terraform/pipeline/graph。空なら検知しない）")
     p.add_argument("--anomaly-events-table", default="", help="detect: 異常の開閉の履歴を追記する Iceberg のテーブル（catalog.namespace.table。--neptune-endpoint があるなら要る）")
     p.add_argument("--device-map", default="", help="detect: IP や別名から機器名を引く表（別名=機器名,... 。ops/up.sh が lab/lab_topology.py --device-map で作る。sysName タグがあればそちら）")
@@ -78,7 +88,8 @@ def parse_args(argv):
     bad = [s for s in args.sinks if s not in SINKS]
     if bad or not args.sinks:
         p.error(f"--sinks は {', '.join(SINKS)} のどれか（カンマ区切り）: {args.sinks}")
-    need = {"iceberg": ["iceberg_table"], "opensearch": ["opensearch_endpoint"], "prometheus": ["prometheus_url"]}
+    need = {"iceberg": ["iceberg_table"], "opensearch": ["opensearch_endpoint"], "prometheus": ["prometheus_url"],
+            "splunk": ["splunk_hec_url", "splunk_token_parameter"]}
     for s in args.sinks:
         for k in need[s]:
             if not getattr(args, k):
@@ -96,8 +107,8 @@ def parse_args(argv):
 
 
 def sink_topics(sink, metric_topics, log_topics):
-    """格納先が購読する Kafka のトピック（カンマ区切り）。iceberg と detect は全部、prometheus はメトリクス、opensearch はログ"""
-    if sink in ("iceberg", "detect"):
+    """格納先が購読する Kafka のトピック（カンマ区切り）。iceberg / splunk / detect は全部、prometheus はメトリクス、opensearch はログ"""
+    if sink in ("iceberg", "splunk", "detect"):
         return ",".join(dict.fromkeys(metric_topics.split(",") + log_topics.split(",")))
     if sink == "prometheus":
         return metric_topics
@@ -194,13 +205,14 @@ def _number(v):
 
 
 # ---------------------------------------------------------------- HTTP（共通）
-def http_post(url, body, headers):
-    """POST して (status, body) を返す。5xx と接続エラーは HTTP_RETRIES 回まで打ち直す。4xx はそのまま返す（呼ぶ側が捨てる）"""
+def http_post(url, body, headers, context=None):
+    """POST して (status, body) を返す。5xx と接続エラーは HTTP_RETRIES 回まで打ち直す。4xx はそのまま返す（呼ぶ側が捨てる）。
+    context は TLS の設定（splunk の --splunk-skip-verify だけが渡す。無ければ既定の検証）"""
     last = None
     for attempt in range(1, HTTP_RETRIES + 1):
         req = urllib.request.Request(url, data=body, headers=headers, method="POST")
         try:
-            with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as r:
+            with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT, context=context) as r:
                 return r.status, r.read()
         except urllib.error.HTTPError as e:
             text = e.read()
@@ -272,6 +284,81 @@ def make_opensearch_sender(endpoint, index, region):
             if res.get("errors"):
                 failed = [it["index"] for it in res.get("items", []) if it.get("index", {}).get("error")]
                 log(f"opensearch: {len(failed)} 件が入らなかった（最初の 1 件: {json.dumps(failed[0], ensure_ascii=False)[:200] if failed else ''}）")
+    return send
+
+
+# ---------------------------------------------------------------- splunk（HTTP Event Collector）
+def splunk_hec_url(url):
+    """--splunk-hec-url を HEC のイベントの入口に揃える。https://host:8088 → …/services/collector/event、…/services/collector → …/event"""
+    u = url.rstrip("/")
+    if u.endswith(SPLUNK_HEC_PATH):
+        return u
+    if u.endswith("/services/collector"):
+        return u + "/event"
+    return u + SPLUNK_HEC_PATH
+
+
+def _splunk_value(v):
+    """field の値。数値の文字列（Telegraf は SNMP の Counter などを文字列で出す）は数値にし、bool / 数値 / それ以外の文字列はそのまま"""
+    if isinstance(v, str):
+        try:
+            return int(v)
+        except ValueError:
+            try:
+                return float(v)
+            except ValueError:
+                return v
+    return v
+
+
+def splunk_events(records, index=""):
+    """HEC の JSON イベント（1 行 1 イベント。HEC は本文に並べた複数のイベントを 1 回で受ける）。
+    time は epoch 秒、host は機器（無ければ Telegraf の agent_host）、sourcetype は netops:<トピック>、event に measurement / tags / fields。
+    fields の数値の文字列は数値にする（Splunk が検索で数として扱えるように）"""
+    lines = []
+    for r in records:
+        ev = {
+            "time": r["ts"],
+            "host": r.get("host") or r.get("agent_host") or "unknown",
+            "source": f"telegraf:{r['measurement'] or 'unknown'}",
+            "sourcetype": f"{SPLUNK_SOURCETYPE_PREFIX}:{r['topic']}",
+            "event": {
+                "topic": r["topic"],
+                "measurement": r["measurement"],
+                "agent_host": r.get("agent_host"),
+                "tags": r["tags"],
+                "fields": {k: _splunk_value(v) for k, v in r["fields"].items()},
+            },
+        }
+        if index:
+            ev["index"] = index
+        lines.append(json.dumps(ev, separators=(",", ":"), ensure_ascii=False))
+    return lines
+
+
+def read_ssm_parameter(name, region):
+    """SSM の SecureString を復号して読む（HEC の token。EMR Serverless の実行ロールに ssm:GetParameter。値はログに出さない）"""
+    import boto3
+    return boto3.client("ssm", region_name=region).get_parameter(Name=name, WithDecryption=True)["Parameter"]["Value"]
+
+
+def make_splunk_sender(url, token, index="", skip_verify=False):
+    url = splunk_hec_url(url)
+    headers = {"Authorization": f"Splunk {token}", "Content-Type": "application/json"}
+    context = None
+    if skip_verify:
+        import ssl
+        context = ssl._create_unverified_context()  # noqa: S323 - 自己署名の Splunk Enterprise の検証用。既定は検証する
+
+    def send(records):
+        lines = splunk_events(records, index)
+        for i in range(0, len(lines), BULK_SIZE):
+            body = "\n".join(lines[i:i + BULK_SIZE]).encode("utf-8")
+            status, text = http_post(url, body, headers, context)
+            if status >= 400:
+                # 400 は本文の形（time や event が無い）、401 / 403 は token（無効・無効化・index の許可が無い）。打ち直しても通らないので捨てる。
+                # token の値は出さない（Splunk の応答にも入っていない）
+                log(f"splunk: HEC が {status} を返した。{len(lines[i:i + BULK_SIZE])} 件を捨てる: {text[:200]!r}")
     return send
 
 
@@ -814,6 +901,10 @@ def build(spark, args):
             queries.append(http_query(rows, s, args.checkpoint, make_opensearch_sender(args.opensearch_endpoint, args.opensearch_index, args.region)))
         elif s == "prometheus":
             queries.append(http_query(rows, s, args.checkpoint, make_prometheus_sender(args.prometheus_url, args.region)))
+        elif s == "splunk":
+            # token は起動時に 1 回だけ読む（driver の中に置く。ログにも引数にも出ない）。読めなければジョブが起動で落ち、原因が stderr に出る
+            token = read_ssm_parameter(args.splunk_token_parameter, args.region)
+            queries.append(http_query(rows, s, args.checkpoint, make_splunk_sender(args.splunk_hec_url, token, args.splunk_index, args.splunk_skip_verify)))
     if args.neptune_endpoint:
         rows = read_rows(spark, args.bootstrap, sink_topics("detect", args.metric_topics, args.log_topics))
         sender = make_detect_sender(NeptuneAnomalies(args.neptune_endpoint, args.region), make_history_writer(spark, args.anomaly_events_table),

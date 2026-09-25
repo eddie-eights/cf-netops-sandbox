@@ -8,3 +8,10 @@
 # emr_release_label = "emr-7.13.0"
 # namespace         = "netops"
 # table_name        = "snmp_metrics"
+
+# 4 本目の格納先 splunk（AWS の外の Splunk の HTTP Event Collector。ops/up.sh は SINK_SPLUNK=1 と SPLUNK_HEC_URL から渡す）。
+# token は SSM の SecureString /<owner>-nwc-poc/splunk/hec-token に手で入れる（Terraform は値を読まない）
+# sinks                  = ["iceberg", "opensearch", "prometheus", "splunk"]
+# splunk_hec_url         = "https://splunk.example.internal:8088"
+# splunk_index           = ""
+# splunk_skip_tls_verify = false

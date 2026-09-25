@@ -1,6 +1,7 @@
 # ---------------------------------------------------------------- security group of the Spark workers
 # EMR Serverless は inbound に 0.0.0.0/0 が開いた SG を拒否する（AWS ドキュメント「Configuring VPC access」、2026-09-17 確認）。
-# ここは inbound を自分自身からだけにし、outbound は 443（S3 ゲートウェイ・S3 Tables / logs / events のエンドポイント）と 9098（MSK）と 8182（Neptune）だけ
+# ここは inbound を自分自身からだけにし、outbound は 443（S3 ゲートウェイ・S3 Tables / logs / events / ssm のエンドポイント）と 9098（MSK）と 8182（Neptune）だけ
+# （splunk の格納先を選び、HEC のポートが 443 以外なら、そのポートも。下の emr_splunk）
 resource "aws_security_group" "emr" {
   name        = "${local.name_prefix}-emr"
   description = "EMR Serverless workers - Kafka IAM (9098) to MSK, HTTPS to the S3 gateway and the VPC endpoints"
@@ -17,7 +18,24 @@ resource "aws_security_group" "emr" {
       condition     = local.neptune_host != "" && local.neptune_sg_id != "" && local.neptune_resource_id != ""
       error_message = "terraform/pipeline/graph の state（terraform/pipeline/graph/terraform.tfstate）から cluster_endpoint / neptune_security_group_id / cluster_resource_id が読めない。検知は異常の「いま」を Neptune に書くので、terraform/pipeline/graph を先に apply する（2026-09-24 から）。"
     }
+    precondition {
+      condition     = !local.sink_splunk || var.splunk_hec_url != ""
+      error_message = "sinks に splunk があるのに splunk_hec_url が空。HEC の URL（https://<host>:8088）を渡す（ops/up.sh なら deploy.env の SPLUNK_HEC_URL）。"
+    }
   }
+}
+
+# splunk の HEC は 8088 が既定で、上の 443 の egress では届かない。URL のポートが 443 以外ならそのポートを開ける。
+# VPC に NAT も IGW も無いので、開けても届く先は VPC の中と DX / VPN の先と PrivateLink だけ（var.splunk_hec_url の description）
+resource "aws_vpc_security_group_egress_rule" "emr_splunk" {
+  count = local.sink_splunk && local.splunk_hec_port != 443 ? 1 : 0
+
+  security_group_id = aws_security_group.emr.id
+  description       = "Splunk HTTP Event Collector (splunk sink)"
+  ip_protocol       = "tcp"
+  from_port         = local.splunk_hec_port
+  to_port           = local.splunk_hec_port
+  cidr_ipv4         = "0.0.0.0/0"
 }
 
 resource "aws_vpc_security_group_ingress_rule" "emr_self" {

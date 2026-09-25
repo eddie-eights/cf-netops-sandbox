@@ -15,6 +15,7 @@ flowchart LR
   SPARK -->|"SINK_S3"| ICE["S3 Tables<br/>snmp_metrics"]
   SPARK -->|"SINK_OPENSEARCH"| OS["OpenSearch<br/>snmp-logs"]
   SPARK -->|"SINK_PROMETHEUS"| PROM["Prometheus"]
+  SPARK -->|"SINK_SPLUNK（既定 0）"| SPL["Splunk HEC<br/>（AWS の外）"]
   SPARK -->|"開いた / 閉じた（証跡）"| AEV["S3 Tables<br/>anomaly_events"]
   SPARK -->|"異常の open / resolved"| NEP["Neptune（graph）<br/>トポロジ・状態・異常"]
   SPARK -->|"AnomalyOpened / Resolved"| EB["EventBridge"]
@@ -27,6 +28,10 @@ flowchart LR
 - 履歴の正本は S3 Tables。異常の「いま」は Neptune の頂点 `anomaly` で、Web の「異常一覧」とエージェントの `list_anomalies` はそれを読む。開いた・閉じたの履歴は `anomaly_events` に残る（[data-stores.md](data-stores.md)）。
 - 検知が Neptune に書くので、analytics は graph が要る。`SKIP_GRAPH=1` にするなら `SKIP_ANALYTICS=1` も書く（トポロジは `agent/data/` の静的データになり、異常一覧は出ない）。
 - テーブルバケットは `SINK_S3=0` でも作る（証跡の置き場）。`ops/down.sh` はバケットごと消すので、証跡も消える。
+- Splunk（`SINK_SPLUNK=1`）は Spark の driver が全トピックを HTTP Event Collector（HEC）に POST する（2026-09-26 に MSK Connect の Splunk Connect for Kafka をやめて、ほかの格納先と同じ形にした）。Splunk 自体は作らない。
+  - token は `deploy.env` に書かず、`ops/up.sh` を打つ前に SSM の SecureString `/<接頭辞>/splunk/hec-token` に手で入れる（`aws ssm put-parameter --type SecureString`）。`ops/up.sh` は手順 7-4 で有無だけ確かめ、ジョブが起動時に 1 回読む。Terraform も引数もログも値を持たない。
+  - **VPC には NAT も IGW も無い**ので、VPC の中から届く Splunk に限る（DX / VPN の先の社内の Splunk Enterprise、同じ VPC の Splunk、PrivateLink）。Splunk Cloud の公開 HEC には届かない。HEC のポートが 443 でなければ Spark の SG にそのポートのエグレスが足される。
+  - HEC が 4xx を返したまとまり（最大 500 件）は捨ててログに出し、ジョブは止めない。5xx は再送する。
 
 ## lab に入る
 
@@ -121,7 +126,7 @@ LOG_GROUP=$(terraform -chdir=terraform/pipeline/analytics output -raw log_group_
 
 - `FAILED` なら、ロググループ `/aws/emr-serverless/<prefix>` のドライバーの stderr を見る。
 - ジョブは同時に 1 本だけにする（同じチェックポイントを 2 本で書くと壊れる）。`ops/up.sh` の手順 7-5 は、スクリプトと引数のハッシュをジョブのタグ `SpecHash` に付けて起こし、動いているジョブのタグが今のハッシュと同じなら何もせず、違えば止めて（最大 3 分待つ）起こし直す。
-- 4 本のクエリ（iceberg / opensearch / prometheus / detect）のどれかが止まると、ジョブを終わらせ（exit 1）、STREAMING モードに起こし直させる。チェックポイントの続きから読むので、取りこぼしも二重も無い。起こし直しは既定で 1 時間に 5 回まで（超えると `FAILED`）。
+- 格納先ごとのクエリ（iceberg / opensearch / prometheus / splunk）と detect のどれかが止まると、ジョブを終わらせ（exit 1）、STREAMING モードに起こし直させる。チェックポイントの続きから読むので、取りこぼしも二重も無い。起こし直しは既定で 1 時間に 5 回まで（超えると `FAILED`）。
 - チェックポイントは MSK クラスタごとのパス（`checkpoints/<クラスタの uuid>/`）。MSK を作り直すと、前のクラスタのオフセットを読まずに新しいパスから始まる。
 - analytics を消すと S3 Tables の履歴も消える。
 

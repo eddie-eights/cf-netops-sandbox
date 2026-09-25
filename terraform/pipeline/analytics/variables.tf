@@ -80,14 +80,49 @@ variable "cloudwatch_logging" {
 }
 
 variable "sinks" {
-  description = "Where the Spark job stores the Telegraf messages: iceberg (all topics to S3 Tables, tables.tf), opensearch (log topics to an OpenSearch Serverless TIMESERIES collection made here), prometheus (metric topics to an Amazon Managed Service for Prometheus workspace made here). One streaming query per entry. Splunk is not a Spark sink (it will be an MSK Connect connector in terraform/pipeline/stream, not built yet)"
+  description = "Where the Spark job stores the Telegraf messages: iceberg (all topics to S3 Tables, tables.tf), opensearch (log topics to an OpenSearch Serverless TIMESERIES collection made here), prometheus (metric topics to an Amazon Managed Service for Prometheus workspace made here), splunk (all topics to the HTTP Event Collector of a Splunk outside this Terraform - splunk_hec_url and the token in SSM; nothing is created here). One streaming query per entry. splunk is not in the default because it needs a Splunk that the VPC can reach"
   type        = list(string)
   default     = ["iceberg", "opensearch", "prometheus"]
 
   validation {
-    condition     = length(var.sinks) > 0 && length(setsubtract(var.sinks, ["iceberg", "opensearch", "prometheus"])) == 0
-    error_message = "sinks は iceberg / opensearch / prometheus のリスト（1 つ以上）。"
+    condition     = length(var.sinks) > 0 && length(setsubtract(var.sinks, ["iceberg", "opensearch", "prometheus", "splunk"])) == 0
+    error_message = "sinks は iceberg / opensearch / prometheus / splunk のリスト（1 つ以上）。"
   }
+}
+
+# ---------------------------------------------------------------- splunk (only when sinks has splunk)
+variable "splunk_hec_url" {
+  description = "HTTP Event Collector of the Splunk the splunk sink posts to (https://<host>:8088, /services/collector/event is appended when missing). The VPC has no NAT or internet gateway, so the host must be reachable from the runtime subnets: Splunk Enterprise behind Direct Connect / VPN (client_cidr of terraform/base/core), a Splunk in this VPC, or a PrivateLink endpoint. Splunk Cloud's public HEC is not reachable. Required when sinks has splunk"
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.splunk_hec_url == "" || can(regex("^https://[^/\\s]+", var.splunk_hec_url))
+    error_message = "splunk_hec_url は https://<host>[:port][/path] の形（HEC は TLS。空なら splunk の格納先は使えない）。"
+  }
+}
+
+variable "splunk_hec_token_parameter" {
+  description = "Name of the SSM SecureString parameter that holds the HEC token. The job reads it at start with the runtime role (ssm:GetParameter through the ssm endpoint of terraform/base/core); Terraform never reads the value. Empty = /<prefix>/splunk/hec-token. Create it by hand before ops/up.sh: aws ssm put-parameter --name /<prefix>/splunk/hec-token --type SecureString --value <token>"
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.splunk_hec_token_parameter == "" || can(regex("^/[A-Za-z0-9_.\\-/]+$", var.splunk_hec_token_parameter))
+    error_message = "splunk_hec_token_parameter は / で始まる SSM のパラメータ名（英数字と _ . - /）。"
+  }
+}
+
+variable "splunk_index" {
+  description = "Splunk index the events go to. Empty = the default index of the HEC token"
+  type        = string
+  default     = ""
+}
+
+variable "splunk_skip_tls_verify" {
+  description = "true = the job does not verify the TLS certificate of the HEC (self-signed Splunk Enterprise in a trial). Keep false when the Splunk has a certificate the EMR image trusts"
+  type        = bool
+  default     = false
 }
 
 # ---------------------------------------------------------------- detection (Spark -> Neptune + S3 Tables anomaly_events -> EventBridge)

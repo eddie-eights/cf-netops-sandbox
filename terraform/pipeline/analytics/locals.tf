@@ -1,6 +1,7 @@
 # netops-poc - PIPELINE analytics root module. A Spark streaming job on EMR Serverless reads the Telegraf messages
 # (topics metrics / traps) from MSK (terraform/pipeline/stream) and stores them in S3 Tables (Iceberg, all topics), OpenSearch Serverless
-# (log topics) and Amazon Managed Service for Prometheus (metric topics) - see var.sinks. The same job detects link_down / trap anomalies,
+# (log topics), Amazon Managed Service for Prometheus (metric topics) and, when asked, the HTTP Event Collector of a Splunk outside AWS
+# (all topics, var.splunk_hec_url) - see var.sinks. The same job detects link_down / trap anomalies,
 # keeps the current ones as anomaly vertices in Neptune (terraform/pipeline/graph), appends every open / resolve to the S3 Tables anomaly_events
 # (audit trail) and puts AnomalyOpened / AnomalyResolved on the default EventBridge bus (terraform/workflow and terraform/pipeline/graph listen).
 # The table bucket is the long-term record of the pipeline (raw messages, anomaly_events, and proposal_events written by terraform/workflow).
@@ -88,6 +89,13 @@ locals {
   sink_iceberg    = contains(var.sinks, "iceberg")
   sink_opensearch = contains(var.sinks, "opensearch")
   sink_prometheus = contains(var.sinks, "prometheus")
+  sink_splunk     = contains(var.sinks, "splunk")
+
+  # splunk: HEC の token を入れた SSM の SecureString（値は Terraform も state も持たない。ジョブが起動時に ssm:GetParameter で読む）と、
+  # HEC のポート（URL に無ければ 443。network.tf で 443 以外なら egress を開ける。Splunk は AWS の外にあり、ここでは何も作らない）
+  splunk_token_parameter     = var.splunk_hec_token_parameter != "" ? var.splunk_hec_token_parameter : "/${local.name_prefix}/splunk/hec-token"
+  splunk_token_parameter_arn = "arn:${local.partition}:ssm:${var.region}:${local.account_id}:parameter${local.splunk_token_parameter}"
+  splunk_hec_port            = try(tonumber(regex("^https://[^/:]+:([0-9]+)", var.splunk_hec_url)[0]), 443)
 
   # put_events の Source（spark/snmp_sinks.py の --event-source）。terraform/workflow と terraform/pipeline/graph の
   # ルールが同じ式で待ち受ける。バスは既定の 1 本を共有するので、ここを接頭辞ごとに変えないと他の人の異常が自分のルールに当たる
