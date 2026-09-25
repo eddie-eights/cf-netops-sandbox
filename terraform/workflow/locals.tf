@@ -5,7 +5,7 @@
 # writes a proposal to Neptune (label proposal) and one audit row per step to S3 Tables (proposal_events), waits for a human decision (web tab "承認"), applies the fix on the lab EC2 (terraform/pipeline/lab)
 # through SSM Run Command and checks that the anomaly resolved. Temporal runs on ECS now (EKS later - 2026-09-17 user decision).
 # The AgentCore Gateway (MCP) exposes the agent tools through a Lambda in the VPC so the runtime can read Neptune, the logs
-# collection and the metrics workspace over MCP. Costs about 0.06 USD per hour while it exists (Fargate + endpoints) - destroy it the same day.
+# collection and the metrics workspace over MCP. Costs about 0.05 USD per hour while it exists (Fargate) - destroy it the same day.
 
 # リソース名の接頭辞であり Project タグの値。デプロイする人の名前（var.owner）から作るので、
 # 1 つの AWS アカウントを何人かで使っても、自分の名前で自分のリソースを探せる
@@ -72,9 +72,8 @@ locals {
   partition  = data.aws_partition.current.partition
 
   vpc_id         = data.terraform_remote_state.main.outputs.vpc_id
-  subnet_id      = data.terraform_remote_state.main.outputs.instance_subnet_id # サブネット a（ssm / bedrock-agentcore のエンドポイントがある方）
-  endpoint_sg_id = data.terraform_remote_state.main.outputs.endpoint_security_group_id
-  web_sg_id      = data.terraform_remote_state.main.outputs.instance_security_group_id # Temporal UI の踏み台（ecs.tf の 8233）
+  subnet_id      = data.terraform_remote_state.main.outputs.instance_subnet_id # サブネット a（Web の EC2 と同じ）
+  internal_sg_id = data.terraform_remote_state.main.outputs.internal_security_group_id
   # agent が無いとワークフローが原因を聞く先が無い。下の precondition で「agent を先に」と出す
   runtime_arn = try(data.terraform_remote_state.agent.outputs.agent_runtime_arn, "")
 
@@ -86,7 +85,6 @@ locals {
   lab_instance_id = try(data.terraform_remote_state.lab.outputs.lab_instance_id, "")
 
   # Neptune（異常と修復案の「いま」）。graph が無ければ空で、ecs.tf の precondition が「graph を先に」と出す
-  neptune_sg_id       = try(data.terraform_remote_state.graph.outputs.neptune_security_group_id, "")
   neptune_resource_id = try(data.terraform_remote_state.graph.outputs.cluster_resource_id, "")
   neptune_host        = try(data.terraform_remote_state.graph.outputs.cluster_endpoint, "")
   neptune_endpoint    = local.neptune_host == "" ? "" : "${local.neptune_host}:8182"

@@ -1,7 +1,7 @@
 # キャリアの閉域網を模した多拠点 L3 ネットワーク（すべて架空のアドレス）
 #
 # これはテンプレート。__FRR_IMAGE__ などは lab.sh render が ECR の URI に置き換えて wanlab.clab.yml を作る。
-# EC2 は閉域で quay.io / ghcr.io に届かないため、イメージは ECR から取る（terraform/base/ecr）。
+# イメージは ECR から取る（terraform/base/ecr）。2026-09-26 までは EC2 が閉域で quay.io / ghcr.io に届かなかったための配置で、NAT Gateway になった今もそのまま。
 # __LOG_DIR__/<機器名> は FRR のログ（frr.conf の log file）の置き場。lab.sh render が EC2 の上に作り、rsyslog が Telegraf の EC2 へ送る（lab.sh forward）。
 #
 #   hq-ce-01 ─ 主回線 ─ carrier-pe-01 ┐

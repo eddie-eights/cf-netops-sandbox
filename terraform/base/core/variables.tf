@@ -19,7 +19,7 @@ variable "owner" {
 
 # ---------------------------------------------------------------- network
 variable "vpc_cidr" {
-  description = "CIDR of the VPC this root module creates (/16 to /24). Two /(n+8) private subnets are cut from it. No internet gateway, no NAT."
+  description = "CIDR of the VPC this root module creates (/16 to /24). Two /(n+8) private subnets and one /(n+8) public subnet (NAT Gateway only) are cut from it."
   type        = string
   default     = "10.0.0.0/16"
 
@@ -30,7 +30,7 @@ variable "vpc_cidr" {
 }
 
 variable "az_id_a" {
-  description = "AZ ID of subnet A (chat web EC2, endpoints, Runtime). AZ IDs supported by AgentCore Runtime in Tokyo."
+  description = "AZ ID of subnet A (chat web EC2, lab, Runtime) and of the public subnet (NAT Gateway). AZ IDs supported by AgentCore Runtime in Tokyo."
   type        = string
   default     = "apne1-az1"
 
@@ -48,17 +48,6 @@ variable "az_id_b" {
   validation {
     condition     = contains(["apne1-az1", "apne1-az2", "apne1-az4"], var.az_id_b) && var.az_id_b != var.az_id_a
     error_message = "az_id_b must be apne1-az1, apne1-az2 or apne1-az4 and differ from az_id_a."
-  }
-}
-
-variable "client_cidr" {
-  description = "Optional. Corporate CIDR whose PCs call the ssm / ssmmessages endpoints of this root module over DX or VPN. Leave empty if PCs reach AWS APIs another way."
-  type        = string
-  default     = ""
-
-  validation {
-    condition     = can(regex("^$|^([0-9]{1,3}\\.){3}[0-9]{1,3}/[0-9]{1,2}$", var.client_cidr))
-    error_message = "client_cidr must be empty or an IPv4 CIDR."
   }
 }
 
@@ -81,20 +70,8 @@ variable "ami_ssm_parameter" {
 }
 
 # ---------------------------------------------------------------- existing VPC endpoints
-variable "create_ssm_endpoints" {
-  description = "Create ssm / ssmmessages interface endpoints. Set false if the VPC already has them."
-  type        = bool
-  default     = true
-}
-
 variable "create_s3_gateway_endpoint" {
-  description = "Create the S3 gateway endpoint (free) for ECR layer download. Set false if the route tables already have one."
-  type        = bool
-  default     = true
-}
-
-variable "create_shared_endpoints" {
-  description = "Create ecr.api / ecr.dkr / logs interface endpoints (2 AZ). The runtime, the lab EC2, the workflow worker and the Spark job use them. ops/up.sh passes false when only the base (or only graph) is deployed. Set false if the VPC already has them."
+  description = "Create the S3 gateway endpoint (free; keeps S3 / S3 Tables / ECR layer traffic off the NAT Gateway). Set false if the route tables already have one."
   type        = bool
   default     = true
 }

@@ -42,7 +42,7 @@ Web のログは Web の EC2 で `sudo journalctl -u <prefix>-web -n 100`、起�
 | ブラウザが「接続できない」 | Web が落ちている。上のログを見る。`web/ is not in s3://` なら Web の部品が S3 に無いので `ops/up.sh` を打ち直す |
 | `ModuleNotFoundError: No module named 'toolkit'` など | 同じ。`ops/up.sh` を打ち直す |
 | `KeyError: 'MODEL_ID'` / 404 / `bedrock:InvokeModel` の `AccessDenied`（主体が Web のロール） | EC2 に `agent/app.py` が置かれている（[architecture.md](architecture.md)）。`ops/up.sh` を打ち直す。Web のロールに権限を足して直さない |
-| 「エージェントの呼び出しに失敗しました」 | journald の `invoke failed:` の行。`AccessDenied` は Runtime の ARN とインスタンスロール、`Could not connect` は bedrock-agentcore のエンドポイントと SG |
+| 「エージェントの呼び出しに失敗しました」 | journald の `invoke failed:` の行。`AccessDenied` は Runtime の ARN とインスタンスロール、`Could not connect` は NAT Gateway の経路（プライベートのルートテーブルの `0.0.0.0/0`） |
 | 150 秒で失敗する | Runtime が返らなかった。初回は起動が遅いので再送する |
 | Runtime のログの `InvokeModel` が `ap-northeast-3` で `AccessDeniedException` | `jp.` のモデルは大阪にも振り分けられる。SCP / Permissions boundary が大阪を止めている |
 | 機器の質問に「資料に見当たらない」 | ツールを呼んでいない（Runtime のログに `tools=0`）。機器名をそのまま書いて聞き直す |

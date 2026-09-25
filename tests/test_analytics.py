@@ -44,40 +44,43 @@ check("main の state をローカルから読む", re.search(r'data "terraform_
       and '"${path.module}/../../base/core/terraform.tfstate"' in tf)
 check("stream の state をローカルから読む", re.search(r'data "terraform_remote_state" "stream"[\s\S]*?backend\s*=\s*"local"', tf, re.S) is not None
       and '"${path.module}/../stream/terraform.tfstate"' in tf)
-for out in ("vpc_id", "runtime_subnet_ids", "endpoint_security_group_id", "kb_bucket_name"):
+for out in ("vpc_id", "runtime_subnet_ids", "internal_security_group_id", "endpoint_security_group_id", "kb_bucket_name"):
     check(f"main の output {out} を使う", f"data.terraform_remote_state.main.outputs.{out}" in tf)
-for out in ("msk_cluster_arn", "msk_security_group_id", "bootstrap_brokers"):
+for out in ("msk_cluster_arn", "bootstrap_brokers"):
     check(f"stream の output {out} を try で読む（無ければ precondition で止める）",
           re.search(r'try\(data\.terraform_remote_state\.stream\.outputs\.' + out + r',\s*""\)', tf) is not None)
-check("graph の state をローカルから読み、Neptune の endpoint / SG / resource id を try で読む（検知が Neptune に書く。2026-09-24）",
+check("graph の state をローカルから読み、Neptune の endpoint / resource id を try で読む（検知が Neptune に書く。2026-09-24。SG は 2026-09-26 に土台の internal 1 つになった）",
       re.search(r'data "terraform_remote_state" "graph"[\s\S]*?backend\s*=\s*"local"', tf, re.S) is not None
       and '"${path.module}/../graph/terraform.tfstate"' in tf
-      and all(re.search(r'try\(data\.terraform_remote_state\.graph\.outputs\.' + o + r',\s*""\)', tf) for o in ("cluster_endpoint", "neptune_security_group_id", "cluster_resource_id")))
+      and all(re.search(r'try\(data\.terraform_remote_state\.graph\.outputs\.' + o + r',\s*""\)', tf) for o in ("cluster_endpoint", "cluster_resource_id")))
 check("graph が無いときは「terraform/pipeline/graph を先に apply する」と出る",
       re.search(r'precondition\s*\{[\s\S]*?neptune_host\s*!=\s*""[\s\S]*?terraform/pipeline/graph を先に apply する', tf, re.S) is not None)
 check("stream が無いときは「terraform/pipeline/stream を先に apply する」と出る",
       re.search(r'precondition\s*\{[\s\S]*?msk_cluster_arn\s*!=\s*""[\s\S]*?terraform/pipeline/stream を先に apply する', tf, re.S) is not None)
 # main / stream の outputs.tf に本当にその output があるか
-for root, outs in (("base/core", ("vpc_id", "runtime_subnet_ids", "endpoint_security_group_id", "kb_bucket_name")),
-                   ("pipeline/stream", ("msk_cluster_arn", "msk_security_group_id", "bootstrap_brokers")),
-                   ("pipeline/graph", ("cluster_endpoint", "neptune_security_group_id", "cluster_resource_id"))):
+for root, outs in (("base/core", ("vpc_id", "runtime_subnet_ids", "internal_security_group_id", "endpoint_security_group_id", "kb_bucket_name")),
+                   ("pipeline/stream", ("msk_cluster_arn", "bootstrap_brokers")),
+                   ("pipeline/graph", ("cluster_endpoint", "cluster_resource_id"))):
     with open(os.path.join(ROOT, "terraform", root, "outputs.tf"), encoding="utf-8") as f:
         other = f.read()
     for out in outs:
         check(f"terraform/{root} に output {out} がある", re.search(r'^output "' + out + r'"', other, re.M) is not None)
 
-# ---- ネットワーク（NAT が無いので S3 Tables の API はエンドポイント。EMR Serverless は inbound 0.0.0.0/0 の SG を拒否する）
-check("s3tables の interface エンドポイントを 2 AZ に置く",
-      re.search(r'resource "aws_vpc_endpoint" "s3tables"[\s\S]*?service_name\s*=\s*"com\.amazonaws\.\$\{var\.region\}\.s3tables"[\s\S]*?vpc_endpoint_type\s*=\s*"Interface"[\s\S]*?slice\(local\.subnet_ids, 0, 2\)', tf, re.S) is not None)
-check("s3tables エンドポイントは private DNS", re.search(r'resource "aws_vpc_endpoint" "s3tables".*?private_dns_enabled\s*=\s*true', tf, re.S) is not None)
-check("EMR の SG に cidr の inbound が無い（自分自身からだけ）",
-      re.search(r'aws_vpc_security_group_ingress_rule" "emr_self"[\s\S]*?referenced_security_group_id\s*=\s*aws_security_group\.emr\.id', tf, re.S) is not None
-      and not any("cidr_ipv" in b for b in re.findall(r'resource "aws_vpc_security_group_ingress_rule" "[a-z_]+" \{(.*?)\n\}', tf, re.S)
-                  if re.search(r'^\s*security_group_id\s*=\s*aws_security_group\.emr\.id', b, re.M)))
-check("MSK の SG に EMR からの 9098 を開ける",
-      re.search(r'"msk_from_emr"[\s\S]*?security_group_id\s*=\s*local\.msk_sg_id[\s\S]*?from_port\s*=\s*9098[\s\S]*?referenced_security_group_id\s*=\s*aws_security_group\.emr\.id', tf, re.S) is not None)
-check("main のエンドポイント SG に EMR からの 443 を開ける",
-      re.search(r'"endpoints_from_emr"[\s\S]*?security_group_id\s*=\s*local\.endpoint_sg_id[\s\S]*?from_port\s*=\s*443', tf, re.S) is not None)
+# ---- ネットワーク（2026-09-26 に PrivateLink から NAT Gateway に替え、SG は土台の internal 1 つを全部で共有。戻すときは 7c42b0f）
+_core = "".join(open(os.path.join(ROOT, "terraform", "base", "core", n), encoding="utf-8").read() for n in sorted(os.listdir(os.path.join(ROOT, "terraform", "base", "core"))) if n.endswith(".tf"))
+check("analytics は SG もインターフェース型エンドポイントも作らない（S3 Tables / events / aps の API は NAT Gateway 経由）",
+      'resource "aws_security_group"' not in tf and 'resource "aws_vpc_endpoint"' not in tf and "aws_vpc_security_group_" not in tf
+      and not any(k in tf for k in ("msk_sg_id", "neptune_sg_id", "emr_self", "msk_from_emr", "endpoints_from_emr")))
+check("EMR のアプリケーションは土台の internal SG を使う",
+      re.search(r'network_configuration\s*\{[\s\S]*?security_group_ids\s*=\s*\[local\.internal_sg_id\]', tf, re.S) is not None
+      and re.search(r'internal_sg_id\s*=\s*data\.terraform_remote_state\.main\.outputs\.internal_security_group_id', tf) is not None)
+check("土台の internal SG は VPC の CIDR から全部受け（EMR Serverless は 0.0.0.0/0 の inbound を拒否する）、外へは全部出す",
+      re.search(r'resource "aws_vpc_security_group_ingress_rule" "internal_from_vpc"[\s\S]*?security_group_id\s*=\s*aws_security_group\.internal\.id[\s\S]*?ip_protocol\s*=\s*"-1"[\s\S]*?cidr_ipv4\s*=\s*var\.vpc_cidr', _core, re.S) is not None
+      and re.search(r'resource "aws_vpc_security_group_egress_rule" "internal_all"[\s\S]*?ip_protocol\s*=\s*"-1"[\s\S]*?cidr_ipv4\s*=\s*"0\.0\.0\.0/0"', _core, re.S) is not None
+      and "0.0.0.0/0" not in re.search(r'resource "aws_vpc_security_group_ingress_rule" "internal_from_vpc" \{(.*?)\n\}', _core, re.S).group(1))
+check("土台の endpoints SG は internal からの 443 だけ受け、外へ出さない（OpenSearch Serverless の VPC エンドポイント用）",
+      re.search(r'"endpoints_from_internal"[\s\S]*?security_group_id\s*=\s*aws_security_group\.endpoints\.id[\s\S]*?from_port\s*=\s*443[\s\S]*?referenced_security_group_id\s*=\s*aws_security_group\.internal\.id', _core, re.S) is not None
+      and _core.count('resource "aws_security_group"') == 2)
 
 # ---- S3 Tables のテーブル（列はスクリプトと同じでなければ append が落ちる）
 TABLE_COLUMNS = ["ts", "topic", "measurement", "agent_host", "host", "tags_json", "fields_json", "ingested_at"]
@@ -113,8 +116,7 @@ check("variable sinks は list、既定 3 つ（iceberg / opensearch / prometheu
 check("variable metric_topics / log_topics（既定 metrics / traps + logs、空を拒否）",
       re.search(r'variable "metric_topics"[\s\S]*?default\s*=\s*\["metrics"\][\s\S]*?validation', tf, re.S) is not None
       and re.search(r'variable "log_topics"[\s\S]*?default\s*=\s*\["traps",\s*"logs"\][\s\S]*?validation', tf, re.S) is not None)
-check("splunk は Terraform が何も作らない（Splunk は AWS の外。変数と IAM とエグレスと引数だけ）",
-      re.search(r'resource "[^"]*splunk', tf, re.I) is None or re.findall(r'resource "([^"]+)" "[^"]*splunk', tf) == ["aws_vpc_security_group_egress_rule"])
+check("splunk は Terraform が何も作らない（Splunk は AWS の外。変数と IAM と引数だけ）", re.search(r'resource "[^"]*splunk', tf, re.I) is None)
 check("variable splunk_hec_url（既定は空。空か https:// で始まる）/ splunk_hec_token_parameter（既定は空。/ で始まる）/ splunk_index / splunk_skip_tls_verify（bool、既定 false）",
       re.search(r'variable "splunk_hec_url"[\s\S]*?default\s*=\s*""[\s\S]*?validation[\s\S]*?https://', tf, re.S) is not None
       and re.search(r'variable "splunk_hec_token_parameter"[\s\S]*?default\s*=\s*""[\s\S]*?validation', tf, re.S) is not None
@@ -127,23 +129,22 @@ check("HEC の token は SSM の SecureString /<prefix>/splunk/hec-token（変�
       and re.search(r'splunk_token_parameter_arn\s*=\s*"arn:\$\{local\.partition\}:ssm:\$\{var\.region\}:\$\{local\.account_id\}:parameter\$\{local\.splunk_token_parameter\}"', tf) is not None
       and re.search(r'Sid\s*=\s*"SplunkHecToken"[\s\S]*?"ssm:GetParameter"[\s\S]*?local\.splunk_token_parameter_arn[\s\S]*?if local\.sink_splunk', tf, re.S) is not None)
 check("Terraform は token の値を読まない（data aws_ssm_parameter が無い）", 'data "aws_ssm_parameter"' not in tf)
-check("HEC のポートが 443 でなければ EMR の SG にそのポートのエグレスを足す（VPC に NAT も IGW も無いので、届くかは経路の話）",
-      re.search(r'splunk_hec_port\s*=\s*try\(tonumber\(regex\("\^https://\[\^/:\]\+:\(\[0-9\]\+\)", var\.splunk_hec_url\)\[0\]\), 443\)', tf) is not None
-      and re.search(r'resource "aws_vpc_security_group_egress_rule" "emr_splunk"[\s\S]*?count\s*=\s*local\.sink_splunk && local\.splunk_hec_port != 443 \? 1 : 0[\s\S]*?from_port\s*=\s*local\.splunk_hec_port', tf, re.S) is not None)
+check("HEC のポートごとのエグレスは無い（internal SG は全部出せて、NAT Gateway で Splunk Cloud にも届く。2026-09-26）",
+      "splunk_hec_port" not in tf and "emr_splunk" not in tf)
 check("splunk なのに splunk_hec_url が空なら precondition で止まる", re.search(r'condition\s*=\s*!local\.sink_splunk \|\| var\.splunk_hec_url != ""', tf) is not None)
 check("OpenSearch Serverless は TIMESERIES のコレクション <prefix>-logs（count で作る）",
       re.search(r'resource "aws_opensearchserverless_collection" "logs"[\s\S]*?count\s*=\s*local\.sink_opensearch \? 1 : 0[\s\S]*?type\s*=\s*"TIMESERIES"', tf, re.S) is not None
       and re.search(r'logs_collection\s*=\s*"\$\{local\.name_prefix\}-logs"', tf) is not None)
-check("OpenSearch のコレクションは公開せず VPC エンドポイントからだけ",
-      re.search(r'resource "aws_opensearchserverless_vpc_endpoint" "logs"', tf) is not None
+check("OpenSearch のコレクションは公開せず VPC エンドポイントからだけ（エンドポイントの SG は土台の endpoints）",
+      re.search(r'resource "aws_opensearchserverless_vpc_endpoint" "logs"[\s\S]*?security_group_ids\s*=\s*\[local\.endpoint_sg_id\]', tf, re.S) is not None
       and re.search(r'"logs_network"[\s\S]*?AllowFromPublic\s*=\s*false[\s\S]*?SourceVPCEs\s*=\s*\[aws_opensearchserverless_vpc_endpoint\.logs\[0\]\.id\]', tf, re.S) is not None)
 check("OpenSearch のデータアクセスは EMR の実行ロールだけ、snmp-logs のインデックスに WriteDocument / CreateIndex",
       re.search(r'resource "aws_opensearchserverless_access_policy" "logs"[\s\S]*?"aoss:CreateIndex"[\s\S]*?"aoss:WriteDocument"[\s\S]*?Principal\s*=\s*\[aws_iam_role\.emr\.arn\]', tf, re.S) is not None
       and re.search(r'opensearch_index\s*=\s*"snmp-logs"', tf) is not None)
-check("Prometheus はワークスペース <prefix>-metrics と aps-workspaces の interface エンドポイント（2 AZ）",
+check("Prometheus はワークスペース <prefix>-metrics（remote write は NAT Gateway 経由。aps のエンドポイントは無い）",
       re.search(r'resource "aws_prometheus_workspace" "metrics"[\s\S]*?count\s*=\s*local\.sink_prometheus \? 1 : 0[\s\S]*?alias\s*=\s*local\.metrics_workspace', tf, re.S) is not None
       and re.search(r'metrics_workspace\s*=\s*"\$\{local\.name_prefix\}-metrics"', tf) is not None
-      and re.search(r'resource "aws_vpc_endpoint" "aps"[\s\S]*?count\s*=\s*local\.sink_prometheus \? 1 : 0[\s\S]*?"com\.amazonaws\.\$\{var\.region\}\.aps-workspaces"[\s\S]*?slice\(local\.subnet_ids, 0, 2\)', tf, re.S) is not None)
+      and 'resource "aws_vpc_endpoint" "aps"' not in tf)
 check("runtime role に aoss:APIAccessAll と aps:RemoteWrite（格納先を選んだときだけ。for-if で count 0 のときの index を避ける）",
       re.search(r'"aoss:APIAccessAll"[\s\S]*?local\.sink_opensearch \? aws_opensearchserverless_collection\.logs\[0\]\.arn : ""[\s\S]*?\] : s if local\.sink_opensearch\]', tf, re.S) is not None
       and re.search(r'"aps:RemoteWrite"[\s\S]*?local\.sink_prometheus \? aws_prometheus_workspace\.metrics\[0\]\.arn : ""[\s\S]*?\] : s if local\.sink_prometheus\]', tf, re.S) is not None)
@@ -154,7 +155,7 @@ check("remote write の URL は prometheus_endpoint + api/v1/remote_write",
 for out in ("application_id", "runtime_role_arn", "table_identifier", "job_driver_json", "configuration_overrides_json", "list_job_runs_command", "list_tables_command",
             "sinks", "opensearch_collection_endpoint", "prometheus_workspace_id", "prometheus_remote_write_url", "prometheus_query_url",
             "table_bucket_arn", "table_namespace", "anomaly_events_table", "proposal_events_table_name", "proposal_events_table_arn", "neptune_endpoint",
-            "opensearch_collection_name", "opensearch_collection_arn", "opensearch_index", "prometheus_workspace_arn", "events_endpoint_id",
+            "opensearch_collection_name", "opensearch_collection_arn", "opensearch_index", "prometheus_workspace_arn",
             "splunk_hec_url", "splunk_token_parameter"):
     check(f"output {out} がある", re.search(r'^output "' + out + r'"', tf, re.M) is not None)
 check("job_driver は S3 Tables のカタログを spark-submit の --conf で渡す",
@@ -198,9 +199,7 @@ check("DynamoDB を使わない（異常の「いま」は Neptune、履歴は S
 check("runtime role は Neptune の Gremlin の読み書きと、既定のバスに events:PutEvents",
       re.search(r'Sid\s*=\s*"NeptuneAnomalies"[\s\S]*?"neptune-db:ReadDataViaQuery", "neptune-db:WriteDataViaQuery"[\s\S]*?neptune-db:\$\{var\.region\}:\$\{local\.account_id\}:\$\{local\.neptune_resource_id\}/\*', tf) is not None
       and re.search(r'"events:PutEvents"[\s\S]*?Resource = local\.event_bus_arn', tf) is not None)
-check("EMR の SG から Neptune の SG へ 8182 を開ける（送信と受信の両方）",
-      re.search(r'resource "aws_vpc_security_group_egress_rule" "emr_neptune"[\s\S]*?from_port\s*=\s*8182[\s\S]*?referenced_security_group_id = local\.neptune_sg_id', tf) is not None
-      and re.search(r'resource "aws_vpc_security_group_ingress_rule" "neptune_from_emr"[\s\S]*?security_group_id\s*=\s*local\.neptune_sg_id[\s\S]*?from_port\s*=\s*8182', tf) is not None)
+check("EMR と Neptune の間に SG のルールは無い（同じ internal SG。2026-09-26）", "emr_neptune" not in tf and "neptune_from_emr" not in tf)
 _aec = next(ast.literal_eval(n.value) for n in tree.body if isinstance(n, ast.Assign) and getattr(n.targets[0], "id", "") == "ANOMALY_EVENT_COLUMNS")
 _rules_tree = ast.parse(open(os.path.join(ROOT, "workflow", "rules.py"), encoding="utf-8").read())
 _pec = next(ast.literal_eval(n.value) for n in _rules_tree.body if isinstance(n, ast.Assign) and getattr(n.targets[0], "id", "") == "PROPOSAL_EVENT_COLUMNS")
@@ -210,8 +209,7 @@ for _t, _cols, _src in (("anomaly_events", _aec, "spark/snmp_sinks.py の ANOMAL
           _blk is not None and "count" not in _blk.group(1) and "required = true" not in _blk.group(1).replace(" ", "").replace("required=true", "required = true"))
     check(f"{_t} の列と順は {_src} と同じ",
           re.findall(r'name\s*=\s*"(\w+)"\s*\n\s*type\s*=\s*"(\w+)"', _blk.group(1)) == [tuple(c) for c in _cols])
-check("events のエンドポイント（Interface、2 AZ、private DNS）を持つ",
-      re.search(r'resource "aws_vpc_endpoint" "events"[\s\S]*?"com\.amazonaws\.\$\{var\.region\}\.events"[\s\S]*?vpc_endpoint_type\s*=\s*"Interface"[\s\S]*?slice\(local\.subnet_ids, 0, 2\)[\s\S]*?private_dns_enabled\s*=\s*true', tf, re.S) is not None)
+check("events のエンドポイントは無い（EventBridge へは NAT Gateway 経由。2026-09-26）", 'resource "aws_vpc_endpoint" "events"' not in tf and "events_endpoint_id" not in tf)
 check("build の引数は spark / args（格納先ごとに Kafka を読む）", [a.arg for a in funcs["build"].args.args] == ["spark", "args"])
 check("pyspark はモジュールの先頭で import しない（テストと引数の検査を pyspark 無しで動かすため）",
       not any(isinstance(n, (ast.Import, ast.ImportFrom)) and "pyspark" in ast.dump(n) for n in tree.body))
@@ -446,17 +444,22 @@ check("up.sh は SINK_S3 / SINK_OPENSEARCH / SINK_PROMETHEUS（既定 1）を te
 check("up.sh は検知の device map を lab の定義から作って渡し（lab/lab_topology.py --device-map）、graph の投入は Spark のジョブより先",
       'DEVICE_MAP=$("${PY[@]}" lab/lab_topology.py lab --device-map)' in up
       and up.index("7-3b. Neptune が空なら") < up.index("tf_apply pipeline/analytics") < up.index('log "7-5. Spark'))
-check("up.sh は AGENT=0 でも CloudWatch へのログを切らない（logs のエンドポイントは土台の共用のもの。2026-09-18）",
+check("up.sh は AGENT=0 でも CloudWatch へのログを切らない（CloudWatch Logs へは NAT Gateway で届く）",
       "cloudwatch_logging=false" not in up and re.search(r'variable "cloudwatch_logging" \{[^}]*default\s*=\s*true', tf) is not None)
-_core = "".join(open(os.path.join(ROOT, "terraform", "base", "core", n), encoding="utf-8").read() for n in sorted(os.listdir(os.path.join(ROOT, "terraform", "base", "core"))) if n.endswith(".tf"))
-check("土台が ecr.api / ecr.dkr / logs のエンドポイントを持ち、create_shared_endpoints で切れる",
-      re.search(r'resource "aws_vpc_endpoint" "shared"[\s\S]*?"ecr-api"\s*=\s*"ecr\.api"[\s\S]*?"ecr-dkr"\s*=\s*"ecr\.dkr"[\s\S]*?"logs"\s*=\s*"logs"', _core) is not None
-      and re.search(r'variable "create_shared_endpoints" \{[^}]*default\s*=\s*true', _core) is not None)
-check("up.sh は AGENT か lab か analytics を作るときだけ共用のエンドポイントを作る",
-      'if [ -n "$AGENT" ] || [ -z "$SKIP_LAB" ] || [ -z "$SKIP_ANALYTICS" ]; then SHARED_ENDPOINTS=1; fi' in up
-      and "MAIN_VARS+=(-var create_shared_endpoints=true)" in up and "MAIN_VARS+=(-var create_shared_endpoints=false)" in up)
-check("up.sh は前の配置（agent に ecr-api）が残っていたら土台の apply の前に止まる",
-      up.index('aws_vpc_endpoint.runtime["ecr-api"]') < up.index("tf_apply base/core "))
+# 2026-09-26 に PrivateLink（インターフェース型エンドポイント 12 本）から NAT Gateway に替えた。戻すときは 7c42b0f（docs/setup.md）
+check("土台のエンドポイントは S3 の Gateway 型 1 本だけで、ポリシーは付けない（2026-09-15 / 17 の障害）",
+      _core.count('resource "aws_vpc_endpoint"') == 1
+      and re.search(r'resource "aws_vpc_endpoint" "s3" \{(.*?)\n\}', _core, re.S) is not None
+      and 'vpc_endpoint_type = "Gateway"' in re.search(r'resource "aws_vpc_endpoint" "s3" \{(.*?)\n\}', _core, re.S).group(1)
+      and "policy" not in re.search(r'resource "aws_vpc_endpoint" "s3" \{(.*?)\n\}', _core, re.S).group(1)
+      and not any(k in _core for k in ("create_shared_endpoints", "create_ssm_endpoints", "client_cidr")))
+check("土台は NAT Gateway 1 つ（パブリックサブネット + IGW + EIP）とプライベートの既定ルートを持つ",
+      all(r in _core for r in ('resource "aws_nat_gateway" "this"', 'resource "aws_internet_gateway" "this"', 'resource "aws_eip" "nat"', 'resource "aws_subnet" "public"'))
+      and re.search(r'resource "aws_route" "private_default"[\s\S]*?destination_cidr_block\s*=\s*"0\.0\.0\.0/0"[\s\S]*?nat_gateway_id\s*=\s*aws_nat_gateway\.this\.id', _core, re.S) is not None
+      and re.search(r'resource "aws_subnet" "public"[\s\S]*?map_public_ip_on_launch\s*=\s*false', _core, re.S) is not None)
+check("up.sh / deploy-env.sh に共用のエンドポイントと CLIENT_CIDR の扱いは無い",
+      not any(k in up for k in ("SHARED_ENDPOINTS", "create_shared_endpoints", 'aws_vpc_endpoint.runtime["ecr-api"]', "CLIENT_CIDR"))
+      and "CLIENT_CIDR" not in open(os.path.join(ROOT, "ops", "deploy-env.sh"), encoding="utf-8").read())
 # SINK_* の判定ブロックを up.sh から切り出して、bash で実際に動かす（die と flag_value は up.sh / deploy-env.sh と同じ意味の最小版）
 import subprocess
 _blk = up[up.index('SINK_S3="${SINK_S3:-1}"'):up.index('SINKS_TF="\\"$(printf')]
@@ -492,8 +495,9 @@ check("MSK Connect の Splunk は書いていない（2026-09-26 に Spark か�
       "MSK Connect で後回し" not in tf and "MSK Connect で後回し" not in src and "MSK Connect で後回し" not in up)
 check("up.sh は analytics を stream の後に apply し、job を STREAMING で起こす（名前は snmp-sinks）",
       up.index("tf_apply pipeline/stream") < up.index("tf_apply pipeline/analytics") < up.index("--name snmp-sinks --mode STREAMING"))
-check("up.sh は s3tables のエンドポイントを常に（証跡のテーブルがある）、prometheus のエンドポイントと opensearch の OCU を SINK_* ごとに費用に足し、opensearch は analytics を作るときだけ OCU の注意を出す",
-      re.search(r'COST_CENTS=\$\(\(COST_CENTS \+ 20\)\)\n\s*if \[ -n "\$SINK_PROMETHEUS" \]; then COST_CENTS=\$\(\(COST_CENTS \+ 3\)\); fi\n\s*if \[ -n "\$SINK_OPENSEARCH" \]; then COST_CENTS=\$\(\(COST_CENTS \+ 33\)\); fi', up) is not None
+check("up.sh は analytics に 14 セント（EMR だけ。エンドポイントは無い）と opensearch の OCU を足し、prometheus は足さず、opensearch は analytics を作るときだけ OCU の注意を出す",
+      re.search(r'COST_CENTS=\$\(\(COST_CENTS \+ 14\)\)\n\s*if \[ -n "\$SINK_OPENSEARCH" \]; then COST_CENTS=\$\(\(COST_CENTS \+ 33\)\); fi', up) is not None
+      and '"$SINK_PROMETHEUS" ]; then COST_CENTS' not in up and "COST_CENTS=8\n" in up
       and re.search(r'\*,opensearch,\*\) if \[ -z "\$SKIP_ANALYTICS" \]; then printf', up) is not None)
 check("up.sh は同じ SpecHash のジョブが動いていれば起こさない", "--states SUBMITTED PENDING SCHEDULED RUNNING" in up
       and "jobRun.tags.SpecHash" in up and 'if [ "$spec" != "$JOB_SPEC" ]; then STALE=' in up)
@@ -516,14 +520,14 @@ check("up.sh は PIPELINE=0 なら lab / stream / analytics / graph を全部飛
 check("deploy.env.example に SINK_S3 / SINK_OPENSEARCH / SINK_PROMETHEUS の行がある（既定 1）。カンマ区切りの SINKS は使わない",
       all(re.search(rf'^#{k}=1$', env_example, re.M) is not None for k in ("SINK_S3", "SINK_OPENSEARCH", "SINK_PROMETHEUS"))
       and re.search(r'^#?\s*SINKS=', env_example, re.M) is None)
-# iceberg を外しても、証跡があるのでテーブルバケット・namespace・s3tables のエンドポイント・カタログはいつも作る。生データの snmp_metrics だけ外す
+# iceberg を外しても、証跡があるのでテーブルバケット・namespace・カタログはいつも作る。生データの snmp_metrics だけ外す
 check('resource "aws_s3tables_table" "snmp_metrics" は sink_iceberg の count',
       re.search(r'resource "aws_s3tables_table" "snmp_metrics" \{\n  count = local\.sink_iceberg \? 1 : 0\n', tf) is not None)
-for _res in ('resource "aws_s3tables_table_bucket" "tables"', 'resource "aws_s3tables_namespace" "netops"', 'resource "aws_vpc_endpoint" "s3tables"'):
+for _res in ('resource "aws_s3tables_table_bucket" "tables"', 'resource "aws_s3tables_namespace" "netops"'):
     check(f"{_res} はいつも作る（count 無し）", re.search(re.escape(_res) + r' \{\n  count', tf) is None and _res in tf)
-check("count を外したバケット・namespace・エンドポイントは moved で state の [0] を引き継ぐ（作り直さない）",
+check("count を外したバケット・namespace は moved で state の [0] を引き継ぐ（作り直さない）",
       all(re.search(r'moved \{\n\s*from = ' + re.escape(r) + r'\[0\]\n\s*to\s*= ' + re.escape(r) + r'\n', tf) for r in
-          ("aws_s3tables_table_bucket.tables", "aws_s3tables_namespace.netops", "aws_vpc_endpoint.s3tables")))
+          ("aws_s3tables_table_bucket.tables", "aws_s3tables_namespace.netops")))
 check("実行ロールの S3TablesCatalog と Spark のカタログの設定はいつも入る",
       re.search(r'Sid\s*=\s*"S3TablesCatalog"', tf) is not None and "if local.sink_iceberg]" not in tf.split('Sid    = "S3TablesCatalog"')[1].split("OpenSearchCollection")[0]
       and "warehouse=${local.table_bucket_arn}" in tf and "c if local.sink_iceberg" not in tf)

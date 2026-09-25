@@ -120,7 +120,7 @@ resource "aws_iam_role_policy" "emr" {
         Resource = local.sink_prometheus ? aws_prometheus_workspace.metrics[0].arn : ""
       }] : s if local.sink_prometheus],
       [for s in [{
-        # HEC の token（SSM の SecureString）を起動時に読む。ssm のエンドポイントは terraform/base/core（create_ssm_endpoints）。
+        # HEC の token（SSM の SecureString）を起動時に読む（ssm の API へは NAT Gateway から出る）。
         # 復号は SSM の AWS 管理キー aws/ssm のキーポリシーが ssm 経由の呼び出しに許しているので kms:Decrypt は要らない
         # （自分の KMS キーで暗号化したパラメータなら、そのキーに kms:Decrypt を足す）
         Sid      = "SplunkHecToken"

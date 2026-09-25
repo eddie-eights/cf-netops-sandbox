@@ -1,8 +1,8 @@
-# netops-poc — 閉域 VPC の NetOps PoC（Terraform）
+# netops-poc — NetOps PoC（Terraform）
 
 ブラウザのチャットから AgentCore Runtime のエージェントに聞くと、Amazon Nova 2 Lite がトポロジのツール（と任意の手順書の検索）を使って答える。
 lab の機器の SNMP とログを Kafka → Spark に流して異常を見つけ、Temporal のワークフローで原因を調べて修復案を出し、人が承認したら直す、までを試せる。
-全部を**インターネットに出口の無い VPC** に作る。PC からは SSM のポートフォワーディングで入り、EC2 に受信ルールは無い。
+全部を**プライベートサブネット**に作る。外へは NAT Gateway で出るが、外から入る経路は無い（IGW にはパブリックサブネットの NAT Gateway しかいない）。PC からは SSM のポートフォワーディングで入り、インターネットからの受信ルールは無い。
 
 ```mermaid
 flowchart LR
@@ -26,12 +26,12 @@ flowchart LR
 
 | 機能 | できること | 待機の時間課金（東京） |
 |---|---|---|
-| 土台（必ず） | VPC、Web の EC2、S3、ECR | 約 $0.05/h |
-| `AGENT=1`（既定） | チャット（Runtime + ガードレール）。`CREATE_KB=1` で手順書の検索も | 約 $0.13/h（KB は +$0.36/h） |
-| `PIPELINE=1` | lab → MSK → Spark → S3 Tables / OpenSearch / Prometheus（`SINK_SPLUNK=1` で外の Splunk にも）、異常検知、Neptune のトポロジ | 約 $1.37/h |
-| `WORKFLOW=1` | Temporal で調査 → 承認 → 修復。AGENT と PIPELINE が要る | 約 $0.06/h |
+| 土台（必ず） | VPC、NAT Gateway、Web の EC2、S3、ECR | 約 $0.08/h（+ NAT Gateway を通したデータ $0.062/GB） |
+| `AGENT=1`（既定） | チャット（Runtime + ガードレール）。`CREATE_KB=1` で手順書の検索も | 0（質問ごとのモデル料金だけ。KB は +$0.33/h） |
+| `PIPELINE=1` | lab → MSK → Spark → S3 Tables / OpenSearch / Prometheus（`SINK_SPLUNK=1` で外の Splunk にも）、異常検知、Neptune のトポロジ | 約 $1.28/h |
+| `WORKFLOW=1` | Temporal で調査 → 承認 → 修復。AGENT と PIPELINE が要る | 約 $0.05/h |
 
-全部で約 $1.61/h。**1 か月置くと約 $1,180（約 17 万円）になるので、使い終わったら当日中に消す。**
+全部で約 $1.41/h。**1 か月置くと約 $1,030（約 15 万円）になるので、使い終わったら当日中に消す。**
 
 ## 手順
 

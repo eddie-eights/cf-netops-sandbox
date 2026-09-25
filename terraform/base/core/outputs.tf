@@ -20,12 +20,12 @@ output "vpc_id" {
 }
 
 output "runtime_subnet_ids" {
-  description = "Read by terraform/agent (runtime ENIs and endpoints), terraform/pipeline/stream (MSK brokers) and terraform/pipeline/graph (Neptune subnet group)"
+  description = "Read by terraform/agent (runtime ENIs), terraform/pipeline/stream (MSK brokers), terraform/pipeline/graph (Neptune subnet group), terraform/pipeline/analytics (EMR, OpenSearch Serverless endpoint) and terraform/workflow (Fargate, Lambda)"
   value       = [aws_subnet.a.id, aws_subnet.b.id]
 }
 
 output "instance_subnet_id" {
-  description = "Read by terraform/pipeline/lab (the lab EC2 sits next to the chat web) and terraform/agent (bedrock-agentcore endpoint)"
+  description = "Read by terraform/pipeline/lab (the lab and Telegraf EC2 sit next to the chat web)"
   value       = aws_subnet.a.id
 }
 
@@ -34,18 +34,18 @@ output "route_table_ids" {
   value       = [aws_route_table.private.id]
 }
 
-output "instance_security_group_id" {
-  description = "Allow 443 from this SG on existing ssm / ssmmessages / bedrock-agentcore endpoints"
-  value       = aws_security_group.web.id
+output "vpc_cidr" {
+  description = "CIDR of the VPC (read by terraform/pipeline/analytics for the OpenSearch Serverless network policy comment and by anyone who needs an inside-the-VPC rule)"
+  value       = aws_vpc.this.cidr_block
 }
 
-output "runtime_security_group_id" {
-  description = "Read by terraform/agent (the runtime ENIs). Allow 443 from this SG on existing ecr / logs / bedrock-runtime / bedrock-agent-runtime endpoints"
-  value       = aws_security_group.runtime.id
+output "internal_security_group_id" {
+  description = "The one SG every workload wears (inbound from the VPC, outbound free). Read by terraform/agent (runtime ENIs), terraform/pipeline/lab (lab / Telegraf EC2), terraform/pipeline/stream (MSK brokers), terraform/pipeline/graph (Neptune, status Lambda), terraform/pipeline/analytics (EMR) and terraform/workflow (Fargate, tools Lambda)"
+  value       = aws_security_group.internal.id
 }
 
 output "endpoint_security_group_id" {
-  description = "Read by terraform/agent (its interface endpoints use this SG) and terraform/pipeline/lab / terraform/pipeline/analytics, which add 443 ingress rules so the lab EC2 and the EMR workers can reach the endpoints"
+  description = "SG of the VPC endpoints (HTTPS from internal_security_group_id). Read by terraform/pipeline/analytics (OpenSearch Serverless VPC endpoint)"
   value       = aws_security_group.endpoints.id
 }
 

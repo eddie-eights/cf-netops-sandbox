@@ -115,59 +115,8 @@ data "aws_iam_policy_document" "tools" {
 }
 
 # ---------------------------------------------------------------- tools Lambda network (subnet a of terraform/base/core)
-resource "aws_security_group" "tools" {
-  count = var.create_gateway ? 1 : 0
-
-  name        = "${local.name_prefix}-tools"
-  description = "Tools Lambda - HTTPS to the VPC endpoints (SSM, aoss, aps, logs) and 8182 to Neptune"
-  vpc_id      = local.vpc_id
-
-  tags = { Name = "${local.name_prefix}-tools" }
-}
-
-resource "aws_vpc_security_group_egress_rule" "tools_https" {
-  count = var.create_gateway ? 1 : 0
-
-  security_group_id = aws_security_group.tools[0].id
-  description       = "SSM / aoss / aps / logs endpoints"
-  ip_protocol       = "tcp"
-  from_port         = 443
-  to_port           = 443
-  cidr_ipv4         = "0.0.0.0/0"
-}
-
-resource "aws_vpc_security_group_egress_rule" "tools_neptune" {
-  count = var.create_gateway && local.neptune_sg_id != "" ? 1 : 0
-
-  security_group_id            = aws_security_group.tools[0].id
-  description                  = "Gremlin to Neptune (terraform/pipeline/graph)"
-  ip_protocol                  = "tcp"
-  from_port                    = 8182
-  to_port                      = 8182
-  referenced_security_group_id = local.neptune_sg_id
-}
-
-resource "aws_vpc_security_group_ingress_rule" "neptune_from_tools" {
-  count = var.create_gateway && local.neptune_sg_id != "" ? 1 : 0
-
-  security_group_id            = local.neptune_sg_id
-  description                  = "Tools Lambda of terraform/workflow"
-  ip_protocol                  = "tcp"
-  from_port                    = 8182
-  to_port                      = 8182
-  referenced_security_group_id = aws_security_group.tools[0].id
-}
-
-resource "aws_vpc_security_group_ingress_rule" "endpoints_from_tools" {
-  count = var.create_gateway ? 1 : 0
-
-  security_group_id            = local.endpoint_sg_id
-  description                  = "Tools Lambda through the endpoints of terraform/base/core and terraform/pipeline/analytics (aoss, aps)"
-  ip_protocol                  = "tcp"
-  from_port                    = 443
-  to_port                      = 443
-  referenced_security_group_id = aws_security_group.tools[0].id
-}
+# Lambda の SG は terraform/base/core の internal。Neptune と aoss の VPC エンドポイントは同じ SG の中、SSM / aps / logs へは NAT Gateway から出る。
+# 2026-09-26 まではここに tools の SG と 4 本のルールがあった（7c42b0f）
 
 # 検索だけ。terraform/pipeline/analytics の data access policy は Spark の実行ロール（書く側）だけなので、読む側はここで足す
 resource "aws_opensearchserverless_access_policy" "tools" {
@@ -222,10 +171,10 @@ resource "aws_lambda_function" "tools" {
   timeout          = 60
   memory_size      = 256
 
-  # VPC の中（サブネット a）。Neptune / aoss / aps / ssm のエンドポイントは全部このサブネットから届く。NAT が無いので外には出ない
+  # VPC の中（サブネット a）。SG は terraform/base/core の internal
   vpc_config {
     subnet_ids         = [local.subnet_id]
-    security_group_ids = [aws_security_group.tools[0].id]
+    security_group_ids = [local.internal_sg_id]
   }
 
   environment {

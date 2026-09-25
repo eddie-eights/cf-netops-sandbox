@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # deploy.env の PIPELINE / AGENT / WORKFLOW で選んだ機能を 1 本で起こす。機能は互いに独立で、要るものだけ作る（費用を抑えるため）。
-#   土台（必ず作る）  base/ecr + base/core（VPC / Web の EC2 / バケット / ロール）。約 $0.05/h。
-#                     AGENT か lab か analytics を作るなら、共用のエンドポイント（ecr.api / ecr.dkr / logs）も土台に作る（+ 約 $0.08/h）
-#   AGENT（既定 1）   agent での分析。terraform/agent（AgentCore Runtime + ガードレール + bedrock のエンドポイント。CREATE_KB=1 なら Knowledge Base も）。
+#   土台（必ず作る）  base/ecr + base/core（VPC / NAT Gateway / Web の EC2 / バケット / ロール）。約 $0.08/h + NAT Gateway を通したデータ $0.062/GB。
+#   AGENT（既定 1）   agent での分析。terraform/agent（AgentCore Runtime + ガードレール。CREATE_KB=1 なら Knowledge Base も）。
 #                     Web の「チャット」タブが使える
 #   PIPELINE          データパイプライン。lab（containerlab。stream を作るなら Telegraf の EC2 も）→ stream（MSK）→ analytics（Spark on EMR Serverless → S3 Tables / OpenSearch / Prometheus、
 #                     異常検知 → Neptune + S3 Tables の証跡 + EventBridge）と graph（Neptune のトポロジと投入）。Web の「トポロジ」「異常一覧」タブが動く
@@ -40,14 +39,13 @@
 #                           SINK_S3 = 全トピック → S3 Tables（Iceberg）、SINK_OPENSEARCH = traps と logs（FRR のログ）→ OpenSearch Serverless、
 #                           SINK_PROMETHEUS = metrics → Amazon Managed Service for Prometheus。terraform/pipeline/analytics の var.sinks（iceberg / opensearch / prometheus / splunk）に組んで渡す。
 #   SINK_SPLUNK=1           4 本目の格納先: 全トピック → AWS の外にある Splunk の HTTP Event Collector（既定 0。Splunk 自体は作らない）。
-#                           SPLUNK_HEC_URL（https://<host>:8088。VPC の中から届くもの。VPC に NAT も IGW も無い）が要り、HEC の token は
+#                           SPLUNK_HEC_URL（https://<host>:8088。NAT Gateway で外に出るので Splunk Cloud でもよい）が要り、HEC の token は
 #                           SSM の SecureString /<接頭辞>/splunk/hec-token に手で入れておく（deploy.env には書かない。手順 7-4 で有無だけ確かめる）。
 #                           SPLUNK_INDEX（既定は空 = token の既定の index）、SPLUNK_SKIP_TLS_VERIFY=1（自己署名の Splunk の検証用）は任意
 #   SKIP_GRAPH=1            PIPELINE=1 で graph（Neptune）を作らない。analytics の検知が異常を Neptune に書くので、SKIP_ANALYTICS=1（か SKIP_STREAM=1）も要る
 #   IMAGE_TAG               エージェント（WORKFLOW=1 ではワーカーも）のイメージのタグ。既定 v1。ECR にそのタグが無いときだけ PC の docker buildx でビルドして push する（タグは上書きできない）
 #   ADMIN_ARN               terraform/agent の kb_admin_principal_arn（CREATE_KB=1 のとき）。既定は空（Terraform が今の認証情報から決める）
 #   VPC_CIDR                terraform/base/core の vpc_cidr（社内と重なるとき）
-#   CLIENT_CIDR             terraform/base/core の client_cidr（DX / VPN 経由のとき）
 #   OPENSEARCH_CACERT_FILE  terraform/agent の opensearch_cacert_file（社内の SSL 検査の CA の PEM）。既定は AWS_CA_BUNDLE と同じ
 #   LOCAL_PORT              PC 側のポート。既定 8080
 #   NO_PORTFORWARD=1        ポートフォワーディングを開かずに終わる
@@ -285,10 +283,6 @@ case "$CALLER_ARN" in
 esac
 tf_use_cli_credentials
 CACERT="${OPENSEARCH_CACERT_FILE:-${AWS_CA_BUNDLE:-}}"
-# 共用のエンドポイント（ecr.api / ecr.dkr / logs）は Runtime・lab の EC2（docker pull）・Spark（ドライバーのログ）・workflow の Fargate が使う。
-# 2026-09-17 までは terraform/agent にあり、AGENT=0 PIPELINE=1 だと lab がイメージを取れず Spark のジョブも落ちた。使う機能が 1 つも無いときだけ作らない
-SHARED_ENDPOINTS=""
-if [ -n "$AGENT" ] || [ -z "$SKIP_LAB" ] || [ -z "$SKIP_ANALYTICS" ]; then SHARED_ENDPOINTS=1; fi
 ROOTS="base/ecr base/core"
 if [ -n "$AGENT" ]; then ROOTS="$ROOTS agent"; fi
 if [ -z "$SKIP_LAB" ]; then ROOTS="$ROOTS pipeline/lab"; fi
@@ -302,26 +296,23 @@ echo "IMAGE_TAG=$IMAGE_TAG"
 echo "AGENT=${AGENT:-0} PIPELINE=${PIPELINE:-0} WORKFLOW=${WORKFLOW:-0} CREATE_KB=${CREATE_KB:-0}"
 echo "作るルート: $ROOTS"
 # 待機時の 1 時間あたりの目安（セント。東京リージョンの税抜。単価は 2026-09-14〜15 に Price List API で確認。README の「作るもの」と docs/deploy.md の金額はここから出している）。
-# 土台 = 5（ssm / ssmmessages のエンドポイント 2 本 + Web の EC2）
-#   + 共用のエンドポイント 8（ecr.api / ecr.dkr / logs の 3 本 × 2 AZ。AGENT か lab か analytics を作るときだけ。2026-09-18 に agent から土台へ移した）、
-# agent = 5（bedrock-runtime × 2 AZ + bedrock-agentcore 1 本）
-#   + CREATE_KB なら 36（OpenSearch Serverless の OCU 33 + bedrock-agent-runtime のエンドポイント 3）、
+# 土台 = 8（NAT Gateway 1 つ 6.2 + Web の EC2 の t4g.small 2.2。NAT Gateway は通したデータに別に $0.062/GB かかる。
+#   2026-09-26 までは ssm / ssmmessages / ecr.api / ecr.dkr / logs のインターフェース型エンドポイント（1 本 1.4 × AZ）で、土台 5 + 共用 8 だった。
+#   NAT Gateway に替えてエンドポイントは S3 の Gateway 型だけになった。戻すときは 7c42b0f（docs/setup.md））、
+# agent = 0（Runtime は使った分だけ。bedrock のエンドポイント 3 本は NAT Gateway に替えて無くなった）
+#   + CREATE_KB なら 33（OpenSearch Serverless の OCU）、
 # lab = 9、graph = 14、stream = 57 + Telegraf の EC2 1（terraform/pipeline/lab が作る t4g.micro。
 #   公表単価 $0.0108/h からで、Price List API では確かめていない）、
-# analytics = 20（ストリーミングのジョブが動いている間の EMR Serverless の 2 vCPU + 異常検知の events エンドポイント 2 本 17。単価は 2026-09-17 に確認。
-#   + s3tables のエンドポイント 2 本 3。証跡の anomaly_events / proposal_events があるので SINK_S3=0 でも作る。2026-09-24。テーブルは無料）
-#   + SINK_PROMETHEUS なら 3（aps-workspaces のエンドポイント 2 本。取り込みのサンプル課金は別）
+# analytics = 14（ストリーミングのジョブが動いている間の EMR Serverless の 2 vCPU。単価は 2026-09-17 に確認。
+#   s3tables / events / aps のエンドポイントは NAT Gateway に替えて無くなった。S3 Tables のテーブルは無料）
+#   + SINK_PROMETHEUS は 0（取り込みのサンプル課金は別）
 #   + SINK_OPENSEARCH なら 33（logs コレクションの OCU。KB のコレクションと共有されるか確認できていないので最大値で数える。
 #     共有されれば 0 に近づく）
-#   + SINK_SPLUNK は 0（AWS 側には何も作らない。ssm のエンドポイントは土台のもの。Splunk 側の取り込みのライセンスは別）、
-# workflow = 6（Fargate ARM 1 vCPU / 2 GB のタスク 1 つ + sqs エンドポイント 1 本。Gateway と Lambda と SQS と S3 Tables への追記は使った分だけ。単価は 2026-09-17 に確認）。
+#   + SINK_SPLUNK は 0（AWS 側には何も作らない。Splunk 側の取り込みのライセンスは別）、
+# workflow = 5（Fargate ARM 1 vCPU / 2 GB のタスク 1 つ。sqs のエンドポイントは NAT Gateway に替えて無くなった。Gateway と Lambda と SQS と S3 Tables への追記は使った分だけ。単価は 2026-09-17 に確認）。
 # ここを変えたら README の「作るもの」と docs/deploy.md の金額も変える
-COST_CENTS=5
-if [ -n "$SHARED_ENDPOINTS" ]; then COST_CENTS=$((COST_CENTS + 8)); fi
-if [ -n "$AGENT" ]; then
-  COST_CENTS=$((COST_CENTS + 5))
-  if [ -n "$CREATE_KB" ]; then COST_CENTS=$((COST_CENTS + 36)); fi
-fi
+COST_CENTS=8
+if [ -n "$AGENT" ] && [ -n "$CREATE_KB" ]; then COST_CENTS=$((COST_CENTS + 33)); fi
 if [ -z "$SKIP_LAB" ]; then COST_CENTS=$((COST_CENTS + 9)); fi
 if [ -z "$SKIP_GRAPH" ]; then COST_CENTS=$((COST_CENTS + 14)); fi
 if [ -z "$SKIP_STREAM" ]; then
@@ -330,11 +321,10 @@ if [ -z "$SKIP_STREAM" ]; then
   COST_CENTS=$((COST_CENTS + 1))   # Telegraf の EC2
 fi
 if [ -z "$SKIP_ANALYTICS" ]; then
-  COST_CENTS=$((COST_CENTS + 20))
-  if [ -n "$SINK_PROMETHEUS" ]; then COST_CENTS=$((COST_CENTS + 3)); fi
+  COST_CENTS=$((COST_CENTS + 14))
   if [ -n "$SINK_OPENSEARCH" ]; then COST_CENTS=$((COST_CENTS + 33)); fi
 fi
-if [ -n "$WORKFLOW" ]; then COST_CENTS=$((COST_CENTS + 6)); fi
+if [ -n "$WORKFLOW" ]; then COST_CENTS=$((COST_CENTS + 5)); fi
 COST_NOTE=$(printf '待機だけで約 $%d.%02d/h（約 %d 円/h。チャットの分は別）の時間課金。使い終わったら当日中に ops/down.sh を打つ' \
   $((COST_CENTS / 100)) $((COST_CENTS % 100)) $(((COST_CENTS * 150 + 50) / 100)))
 printf '\033[1;33m%s\033[0m\n' "$COST_NOTE"
@@ -405,16 +395,8 @@ fi
 log "3. 土台（terraform/base/core。VPC / Web の EC2 / バケット / ロール。初回は 3〜5 分）"
 MAIN_VARS=()
 if [ -n "${VPC_CIDR:-}" ];    then MAIN_VARS+=(-var "vpc_cidr=$VPC_CIDR"); fi
-if [ -n "${CLIENT_CIDR:-}" ]; then MAIN_VARS+=(-var "client_cidr=$CLIENT_CIDR"); fi
-if [ -n "$SHARED_ENDPOINTS" ]; then MAIN_VARS+=(-var create_shared_endpoints=true); else MAIN_VARS+=(-var create_shared_endpoints=false); fi
-# 2026-09-17 までの配置（ecr / logs のエンドポイントが terraform/agent にある）が残っていると、同じサービスのエンドポイントを
-# 同じ VPC に 2 本は作れない（private DNS がぶつかる）ので base/core の apply が落ちる。作る前に止める
-if [ -n "$SHARED_ENDPOINTS" ] && [ -f terraform/agent/terraform.tfstate ]; then
-  tf_init agent
-  if tf agent state list 2>/dev/null | grep -qF 'aws_vpc_endpoint.runtime["ecr-api"]'; then
-    die "terraform/agent に前の配置のエンドポイント（ecr.api / ecr.dkr / logs）が残っている。いまは土台（terraform/base/core）が作るので、ops/down.sh で一度消してから ops/up.sh を打ち直す（KEEP_ECR=1 ならイメージは残る）。まだ何も変えていない"
-  fi
-fi
+# 2026-09-26 までの配置（インターフェース型エンドポイント 12 本と SG 12 個）の state が残っていると、apply がエンドポイントと SG を消して
+# NAT Gateway に置き替える（Runtime の ENI が古い SG を掴んでいると SG の削除で 20 分待って落ちる）。一度 ops/down.sh で消してから打つ方が確実
 tf_apply base/core ${MAIN_VARS[@]+"${MAIN_VARS[@]}"}
 INSTANCE_ID=$(tf base/core output -raw web_instance_id)
 KB_BUCKET=$(tf base/core output -raw kb_bucket_name)
@@ -628,7 +610,7 @@ fi
 # ---- 7-4. analytics ------------------------------------------------------------------
 if [ -z "$SKIP_ANALYTICS" ]; then
   log "7-4. analytics（terraform/pipeline/analytics。EMR Serverless と格納先: ${SINKS}。数分）"
-  # ドライバーのログは CloudWatch Logs へ出す（logs のエンドポイントは土台の共用のもの。analytics を作るなら必ずある）
+  # ドライバーのログは CloudWatch Logs へ出す（NAT Gateway で届く）
   # 検知の device map（別名=機器名,...）も lab の定義から作る。trap には sysName が無いので、送り元の IP から機器名を引くのに要る
   DEVICE_MAP=$("${PY[@]}" lab/lab_topology.py lab --device-map) || die "lab/lab_topology.py が lab の定義から device map を作れなかった"
   ANALYTICS_VARS=(-var "sinks=[$SINKS_TF]" -var "device_map=$DEVICE_MAP")

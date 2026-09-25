@@ -9,8 +9,8 @@ Kafka と S3 Tables の jar、カタログの設定は spark-submit の --conf �
   opensearch  ログのトピックだけ → OpenSearch Serverless（TIMESERIES 型のコレクション）の _bulk に SigV4 で POST
   prometheus  メトリクスのトピックだけ → Amazon Managed Service for Prometheus の remote write に SigV4 で POST（数値の field だけ）
   splunk      全トピック → Splunk の HTTP Event Collector（HEC）に 1 行 1 イベントで POST（Authorization: Splunk <token>。
-              token は SSM の SecureString（--splunk-token-parameter）から起動時に読む。Splunk は AWS の外にあり、この VPC には NAT も IGW も無いので、
-              HEC の URL は VPC の中から届くもの（DX / VPN の先の社内の Splunk Enterprise、同じ VPC の Splunk、PrivateLink）に限る。
+              token は SSM の SecureString（--splunk-token-parameter）から起動時に読む。Splunk は AWS の外にあり、VPC の NAT Gateway を通して届く
+              （Splunk Cloud の公開 HEC でも、DX / VPN の先の社内の Splunk Enterprise でもよい）。
               2026-09-26 まで MSK Connect の Splunk Connect for Kafka にする予定だったが、Spark から直接書くことにした）
 どのトピックがメトリクスでどれがログかは --metric-topics / --log-topics（既定は Telegraf の metrics と traps,logs。
 logs は FRR のログ。lab の EC2 の rsyslog が Telegraf の EC2 へ送る）。格納先ごとに別のストリーミングクエリ（別の Kafka の購読と checkpoint）に

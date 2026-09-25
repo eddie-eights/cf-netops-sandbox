@@ -88,12 +88,6 @@ variable "verify_attempts" {
   default     = 6
 }
 
-variable "create_sqs_endpoint" {
-  description = "sqs interface endpoint (1 AZ, the task subnet) so the worker can receive the AnomalyOpened messages without a NAT. Set false if the VPC already has one."
-  type        = bool
-  default     = true
-}
-
 # ---------------------------------------------------------------- gateway (MCP)
 variable "create_gateway" {
   description = "Create the AgentCore Gateway (MCP) with the tools Lambda (in the VPC: Neptune, OpenSearch Serverless, Prometheus). false keeps the workflow only; the chat runtime then uses its built-in tools."

@@ -9,115 +9,16 @@
 # Telegraf のアドレスは ENI を先に作って固定し、SSM の /<接頭辞>/telegraf-address に書く（lab.sh forward が読む）。
 # Telegraf の EC2 を作り直しても（AMI の更新など）アドレスは変わらないので、lab の側は作り直さなくてよい。
 
-resource "aws_security_group" "telegraf" {
+# SG は terraform/base/core の internal（VPC の中からは何でも受ける）。lab と Telegraf のあいだの SNMP / trap / FRR ログも、
+# Telegraf から MSK の 9098 も、これで通る。trap だけは送り元が機器の管理 IP（local.mgmt_cidr）のままなので、VPC の CIDR の受信ルールに当たらない。
+# その受信ルールを internal に足す（Telegraf があるときだけ。lab を destroy すると消える）
+resource "aws_vpc_security_group_ingress_rule" "internal_from_lab_mgmt" {
   count = var.create_telegraf ? 1 : 0
 
-  name        = "${local.name_prefix}-telegraf"
-  description = "Telegraf EC2 - SNMP to the lab mgmt network, traps and FRR logs from the lab, Kafka IAM to MSK, HTTPS to endpoints"
-  vpc_id      = local.vpc_id
-
-  tags = { Name = "${local.name_prefix}-telegraf" }
-}
-
-resource "aws_vpc_security_group_egress_rule" "telegraf_https" {
-  count = var.create_telegraf ? 1 : 0
-
-  security_group_id = aws_security_group.telegraf[0].id
-  description       = "HTTPS to VPC endpoints (ssm, ssmmessages) and S3 gateway endpoint"
-  ip_protocol       = "tcp"
-  from_port         = 443
-  to_port           = 443
-  cidr_ipv4         = "0.0.0.0/0"
-}
-
-resource "aws_vpc_security_group_egress_rule" "telegraf_kafka" {
-  count = var.create_telegraf ? 1 : 0
-
-  security_group_id = aws_security_group.telegraf[0].id
-  description       = "Kafka with IAM auth to the MSK brokers of terraform/pipeline/stream (private IPs in this VPC, no NAT)"
-  ip_protocol       = "tcp"
-  from_port         = 9098
-  to_port           = 9098
-  cidr_ipv4         = "0.0.0.0/0"
-}
-
-resource "aws_vpc_security_group_egress_rule" "telegraf_snmp" {
-  count = var.create_telegraf ? 1 : 0
-
-  security_group_id = aws_security_group.telegraf[0].id
-  description       = "SNMP polling of the CE routers on the lab mgmt network (routed to the lab EC2)"
-  ip_protocol       = "udp"
-  from_port         = 161
-  to_port           = 161
+  security_group_id = local.internal_sg_id
+  description       = "SNMP traps from the CE routers on the lab mgmt network (DNAT on the lab EC2, source is the router mgmt IP)"
+  ip_protocol       = "-1"
   cidr_ipv4         = local.mgmt_cidr
-}
-
-# trap は lab の EC2 が DNAT するだけで送り元は機器の管理 IP のまま。SG の参照（lab の ENI のアドレス）には当たらないので CIDR で許す
-resource "aws_vpc_security_group_ingress_rule" "telegraf_trap" {
-  count = var.create_telegraf ? 1 : 0
-
-  security_group_id = aws_security_group.telegraf[0].id
-  description       = "SNMP traps from the CE routers (DNAT on the lab EC2, source is the router mgmt IP)"
-  ip_protocol       = "udp"
-  from_port         = 162
-  to_port           = 162
-  cidr_ipv4         = local.mgmt_cidr
-}
-
-resource "aws_vpc_security_group_ingress_rule" "telegraf_logs" {
-  count = var.create_telegraf ? 1 : 0
-
-  security_group_id            = aws_security_group.telegraf[0].id
-  description                  = "FRR log lines from rsyslog on the lab EC2"
-  ip_protocol                  = "tcp"
-  from_port                    = local.log_port
-  to_port                      = local.log_port
-  referenced_security_group_id = aws_security_group.lab.id
-}
-
-resource "aws_vpc_security_group_ingress_rule" "endpoints_from_telegraf" {
-  count = var.create_telegraf ? 1 : 0
-
-  security_group_id            = local.endpoint_sg_id
-  description                  = "HTTPS from Telegraf EC2 (ssm, ssmmessages of terraform/base/core)"
-  ip_protocol                  = "tcp"
-  from_port                    = 443
-  to_port                      = 443
-  referenced_security_group_id = aws_security_group.telegraf[0].id
-}
-
-# ---- lab の SG に足す穴（Telegraf があるときだけ）
-resource "aws_vpc_security_group_ingress_rule" "lab_snmp_from_telegraf" {
-  count = var.create_telegraf ? 1 : 0
-
-  security_group_id            = aws_security_group.lab.id
-  description                  = "SNMP polling from Telegraf EC2, forwarded to the CE routers on the mgmt network"
-  ip_protocol                  = "udp"
-  from_port                    = 161
-  to_port                      = 161
-  referenced_security_group_id = aws_security_group.telegraf[0].id
-}
-
-resource "aws_vpc_security_group_egress_rule" "lab_trap_to_telegraf" {
-  count = var.create_telegraf ? 1 : 0
-
-  security_group_id            = aws_security_group.lab.id
-  description                  = "SNMP traps of the CE routers, DNATed to Telegraf EC2"
-  ip_protocol                  = "udp"
-  from_port                    = 162
-  to_port                      = 162
-  referenced_security_group_id = aws_security_group.telegraf[0].id
-}
-
-resource "aws_vpc_security_group_egress_rule" "lab_logs_to_telegraf" {
-  count = var.create_telegraf ? 1 : 0
-
-  security_group_id            = aws_security_group.lab.id
-  description                  = "FRR log lines (rsyslog) to Telegraf EC2"
-  ip_protocol                  = "tcp"
-  from_port                    = local.log_port
-  to_port                      = local.log_port
-  referenced_security_group_id = aws_security_group.telegraf[0].id
 }
 
 # 管理ネットワーク宛てを lab の EC2 へ。lab の EC2 は source_dest_check を切る（instance.tf）。
@@ -196,7 +97,7 @@ resource "aws_network_interface" "telegraf" {
   count = var.create_telegraf ? 1 : 0
 
   subnet_id       = local.subnet_id
-  security_groups = [aws_security_group.telegraf[0].id]
+  security_groups = [local.internal_sg_id]
   description     = "${local.name_prefix} Telegraf - fixed address for the trap DNAT and rsyslog on the lab EC2"
 
   tags = { Name = "${local.name_prefix}-telegraf" }
@@ -254,7 +155,6 @@ resource "aws_instance" "telegraf" {
   depends_on = [
     aws_iam_role_policy_attachment.telegraf_ssm,
     aws_iam_role_policy.telegraf_assets,
-    aws_vpc_security_group_egress_rule.telegraf_https,
-    aws_vpc_security_group_ingress_rule.endpoints_from_telegraf,
+    aws_vpc_security_group_ingress_rule.internal_from_lab_mgmt,
   ]
 }

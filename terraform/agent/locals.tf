@@ -1,6 +1,6 @@
 # netops-poc - agent root module (feature "agent"). The AgentCore Runtime (VPC mode) that answers the chat, its
-# execution policy, the guardrail, the interface endpoints the runtime needs (ecr / logs / bedrock-runtime, 2 AZ) and the
-# bedrock-agentcore endpoint the chat web invokes it through. Optionally (create_knowledge_base = true) a Bedrock
+# execution policy and the guardrail (the runtime reaches Bedrock / ECR / CloudWatch Logs through the NAT Gateway of
+# terraform/base/core; the interface endpoints were removed on 2026-09-26). Optionally (create_knowledge_base = true) a Bedrock
 # Knowledge Base on OpenSearch Serverless for RAG - off by default because the collection costs about 0.33 USD per hour.
 # The VPC, the security groups, the S3 bucket, the chat web EC2 and the runtime IAM role come from terraform/base/core
 # (read through terraform_remote_state), so this root can be created and destroyed on its own while the base stays.
@@ -44,9 +44,7 @@ locals {
 
   vpc_id            = data.terraform_remote_state.main.outputs.vpc_id
   subnet_ids        = data.terraform_remote_state.main.outputs.runtime_subnet_ids
-  instance_subnet   = data.terraform_remote_state.main.outputs.instance_subnet_id
-  endpoint_sg_id    = data.terraform_remote_state.main.outputs.endpoint_security_group_id
-  runtime_sg_id     = data.terraform_remote_state.main.outputs.runtime_security_group_id
+  runtime_sg_id     = data.terraform_remote_state.main.outputs.internal_security_group_id
   runtime_role_name = data.terraform_remote_state.main.outputs.runtime_role_name
   runtime_role_arn  = data.terraform_remote_state.main.outputs.runtime_role_arn
   web_role_name     = data.terraform_remote_state.main.outputs.web_role_name

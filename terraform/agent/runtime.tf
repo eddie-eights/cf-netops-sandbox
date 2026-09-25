@@ -148,12 +148,8 @@ resource "aws_bedrockagentcore_agent_runtime" "agent" {
 
   tags = { Name = "${local.name_prefix}-agent" }
 
-  # VPC endpoints ができてから Runtime を作らせる（イメージ取得とログ出力がエンドポイント経由。ecr / logs は terraform/base/core が先に作ってある）
-  depends_on = [
-    aws_iam_role_policy.runtime,
-    aws_vpc_endpoint.runtime,
-    aws_vpc_endpoint.bedrock_agent_runtime,
-  ]
+  # イメージ取得とログ出力は terraform/base/core の NAT Gateway と S3 gateway エンドポイントを通る（base が先にできている）
+  depends_on = [aws_iam_role_policy.runtime]
 }
 
 # ---------------------------------------------------------------- hand the runtime ARN to the chat web

@@ -30,7 +30,7 @@ flowchart LR
 - テーブルバケットは `SINK_S3=0` でも作る（証跡の置き場）。`ops/down.sh` はバケットごと消すので、証跡も消える。
 - Splunk（`SINK_SPLUNK=1`）は Spark の driver が全トピックを HTTP Event Collector（HEC）に POST する（2026-09-26 に MSK Connect の Splunk Connect for Kafka をやめて、ほかの格納先と同じ形にした）。Splunk 自体は作らない。
   - token は `deploy.env` に書かず、`ops/up.sh` を打つ前に SSM の SecureString `/<接頭辞>/splunk/hec-token` に手で入れる（`aws ssm put-parameter --type SecureString`）。`ops/up.sh` は手順 7-4 で有無だけ確かめ、ジョブが起動時に 1 回読む。Terraform も引数もログも値を持たない。
-  - **VPC には NAT も IGW も無い**ので、VPC の中から届く Splunk に限る（DX / VPN の先の社内の Splunk Enterprise、同じ VPC の Splunk、PrivateLink）。Splunk Cloud の公開 HEC には届かない。HEC のポートが 443 でなければ Spark の SG にそのポートのエグレスが足される。
+  - Spark は NAT Gateway で外に出るので、Splunk Cloud の公開 HEC にも、DX / VPN の先の社内の Splunk Enterprise にも届く（SG は全部出せるので HEC のポートは何番でもよい）。2026-09-26 までは VPC に NAT も IGW も無く、VPC の中から届く Splunk に限っていた。
   - HEC が 4xx を返したまとまり（最大 500 件）は捨ててログに出し、ジョブは止めない。5xx は再送する。
 
 ## lab に入る
@@ -85,7 +85,7 @@ sudo tail -n 50 /var/log/cloud-init-output.log
 sudo systemctl restart <prefix>-lab
 ```
 
-- ECR からイメージを取れない（`docker pull` がタイムアウトする）: `terraform/base/core` の `create_shared_endpoints` が `true` か、エンドポイントの SG に lab からの 443 があるかを見る。
+- ECR からイメージを取れない（`docker pull` がタイムアウトする）: プライベートのルートテーブルに `0.0.0.0/0 → NAT Gateway` があるか（`terraform/base/core` の `aws_route.private_default`）、NAT Gateway が `available` かを見る。
 - snmpd のビルドで `apk add` が証明書で落ちる: 社内のルート証明書を `lab/snmpd/certs/` に置いて打ち直す。
 
 ### 止める・起動する

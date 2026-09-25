@@ -35,10 +35,10 @@ locals {
 
   vpc_id            = data.terraform_remote_state.main.outputs.vpc_id
   subnet_ids        = data.terraform_remote_state.main.outputs.runtime_subnet_ids
+  internal_sg_id    = data.terraform_remote_state.main.outputs.internal_security_group_id
   reader_role_names = toset([data.terraform_remote_state.main.outputs.runtime_role_name, data.terraform_remote_state.main.outputs.web_role_name])
 
-  # Telegraf の EC2（terraform/pipeline/lab の create_telegraf）が無いと送信元が無い。network.tf の precondition で「lab を先に」と出す
-  telegraf_sg_id     = try(data.terraform_remote_state.lab.outputs.telegraf_security_group_id, "")
+  # Telegraf の EC2（terraform/pipeline/lab の create_telegraf）が無いと送信元が無い。msk.tf の precondition で「lab を先に」と出す
   telegraf_role_name = try(data.terraform_remote_state.lab.outputs.telegraf_role_name, "")
 
   # ブローカー 2 台 = サブネット 2 つ（terraform/base/core の Runtime サブネット）

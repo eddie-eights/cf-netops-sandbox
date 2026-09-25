@@ -74,13 +74,13 @@ variable "log_retention_days" {
 }
 
 variable "cloudwatch_logging" {
-  description = "Send the driver stdout / stderr to CloudWatch Logs. Needs the logs interface endpoint of the base root (create_shared_endpoints, default true). false keeps the logs only in the asset bucket"
+  description = "Send the driver stdout / stderr to CloudWatch Logs (through the NAT Gateway of the base root). false keeps the logs only in the asset bucket"
   type        = bool
   default     = true
 }
 
 variable "sinks" {
-  description = "Where the Spark job stores the Telegraf messages: iceberg (all topics to S3 Tables, tables.tf), opensearch (log topics to an OpenSearch Serverless TIMESERIES collection made here), prometheus (metric topics to an Amazon Managed Service for Prometheus workspace made here), splunk (all topics to the HTTP Event Collector of a Splunk outside this Terraform - splunk_hec_url and the token in SSM; nothing is created here). One streaming query per entry. splunk is not in the default because it needs a Splunk that the VPC can reach"
+  description = "Where the Spark job stores the Telegraf messages: iceberg (all topics to S3 Tables, tables.tf), opensearch (log topics to an OpenSearch Serverless TIMESERIES collection made here), prometheus (metric topics to an Amazon Managed Service for Prometheus workspace made here), splunk (all topics to the HTTP Event Collector of a Splunk outside this Terraform - splunk_hec_url and the token in SSM; nothing is created here). One streaming query per entry. splunk is not in the default because it needs a Splunk (splunk_hec_url and the token in SSM)"
   type        = list(string)
   default     = ["iceberg", "opensearch", "prometheus"]
 
@@ -92,7 +92,7 @@ variable "sinks" {
 
 # ---------------------------------------------------------------- splunk (only when sinks has splunk)
 variable "splunk_hec_url" {
-  description = "HTTP Event Collector of the Splunk the splunk sink posts to (https://<host>:8088, /services/collector/event is appended when missing). The VPC has no NAT or internet gateway, so the host must be reachable from the runtime subnets: Splunk Enterprise behind Direct Connect / VPN (client_cidr of terraform/base/core), a Splunk in this VPC, or a PrivateLink endpoint. Splunk Cloud's public HEC is not reachable. Required when sinks has splunk"
+  description = "HTTP Event Collector of the Splunk the splunk sink posts to (https://<host>:8088, /services/collector/event is appended when missing). The workers go out through the NAT Gateway of terraform/base/core, so Splunk Cloud's public HEC, a Splunk Enterprise behind Direct Connect / VPN or a Splunk in this VPC all work. Required when sinks has splunk"
   type        = string
   default     = ""
 

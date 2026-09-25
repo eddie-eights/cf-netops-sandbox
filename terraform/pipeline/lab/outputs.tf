@@ -44,11 +44,6 @@ output "upload_telegraf_command" {
   value       = "aws s3 sync telegraf/ s3://${local.bucket}/telegraf/ && python3 lab/lab_topology.py lab --snmp-agents | aws s3 cp - s3://${local.bucket}/telegraf/snmp_agents.txt && aws s3 cp telegraf-${var.telegraf_version}-1.aarch64.rpm s3://${local.bucket}/telegraf/"
 }
 
-output "telegraf_security_group_id" {
-  description = "Read by terraform/pipeline/stream (Kafka 9098 from the Telegraf EC2). Empty without create_telegraf."
-  value       = try(aws_security_group.telegraf[0].id, "")
-}
-
 output "telegraf_role_name" {
   description = "Read by terraform/pipeline/stream (kafka-cluster write permissions are attached to this role). Empty without create_telegraf."
   value       = try(aws_iam_role.telegraf[0].name, "")

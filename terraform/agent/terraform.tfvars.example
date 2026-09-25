@@ -22,7 +22,3 @@
 # rerank_model_id            = "amazon.rerank-v1:0"
 # number_of_reranked_results = 5
 # opensearch_cacert_file     = ""  # PEM of the corporate CA when HTTPS is inspected on this PC
-#
-# create_runtime_endpoints  = true
-# create_kb_endpoint        = true
-# create_agentcore_endpoint = true

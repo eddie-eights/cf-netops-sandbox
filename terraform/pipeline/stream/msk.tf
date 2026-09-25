@@ -26,7 +26,7 @@ resource "aws_msk_cluster" "stream" {
   broker_node_group_info {
     instance_type   = var.broker_instance_type
     client_subnets  = local.broker_subnet_ids
-    security_groups = [aws_security_group.msk.id]
+    security_groups = [local.internal_sg_id]
 
     storage_info {
       ebs_storage_info {
@@ -66,10 +66,12 @@ resource "aws_msk_cluster" "stream" {
 
   tags = { Name = "${local.name_prefix}-stream" }
 
-  depends_on = [
-    aws_vpc_security_group_egress_rule.msk_kafka,
-    aws_vpc_security_group_ingress_rule.msk_self,
-  ]
+  lifecycle {
+    precondition {
+      condition     = local.telegraf_role_name != ""
+      error_message = "terraform/pipeline/lab の state（terraform/pipeline/lab/terraform.tfstate）から telegraf_role_name が読めない。terraform/pipeline/lab を -var create_telegraf=true で先に apply する（ops/up.sh はそうする）。"
+    }
+  }
 }
 
 # ブローカーのアドレスはクラスタ作成後にしか分からない。Telegraf の EC2（terraform/pipeline/lab）が起動時にここから読む

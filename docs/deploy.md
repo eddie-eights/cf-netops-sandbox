@@ -14,17 +14,17 @@
 | `AGENT` | チャット（Runtime + ガードレール）。既定 `1` |
 | `PIPELINE` | lab / stream / analytics / graph。既定 `0` |
 | `WORKFLOW` | Temporal での調査と修復。`AGENT=1` と `PIPELINE=1` が要り、`SKIP_LAB` / `SKIP_STREAM` / `SKIP_ANALYTICS` とは一緒に書けない |
-| `CREATE_KB` | ナレッジベース（+$0.36/h）。`AGENT=1` のとき |
+| `CREATE_KB` | ナレッジベース（+$0.33/h）。`AGENT=1` のとき |
 | `SKIP_LAB` | lab を作らない（-$0.09/h）。`SKIP_STREAM=1` も要る |
-| `SKIP_STREAM` | stream と Telegraf の EC2 を作らない（-$1.14/h）。analytics も外れる |
-| `SKIP_ANALYTICS` | analytics を作らない（-$0.56/h）。異常一覧は使えない |
+| `SKIP_STREAM` | stream と Telegraf の EC2 を作らない（-$1.05/h）。analytics も外れる |
+| `SKIP_ANALYTICS` | analytics を作らない（-$0.47/h）。異常一覧は使えない |
 | `SKIP_GRAPH` | Neptune を作らない（-$0.14/h）。トポロジは静的データになる |
 | `SINK_S3` / `SINK_OPENSEARCH` / `SINK_PROMETHEUS` | Spark の格納先。既定は 3 つとも `1`。`0` にするとリソースごと作らない。`SINK_SPLUNK` と合わせて全部 `0` は止まる |
-| `SINK_SPLUNK` | 4 本目の格納先。`1` で Spark が全トピックを AWS の外の Splunk の HTTP Event Collector（HEC）に送る。既定 `0`。`SPLUNK_HEC_URL`（`https://…:8088`）が要り、token は先に SSM の SecureString `/<接頭辞>/splunk/hec-token` に手で入れる。VPC に NAT も IGW も無いので、VPC の中から届く Splunk（DX / VPN の先、同じ VPC、PrivateLink）に限る。`SPLUNK_INDEX`（空なら token の既定）と `SPLUNK_SKIP_TLS_VERIFY`（自己署名のとき `1`）も読む。AWS 側の費用は 0 |
+| `SINK_SPLUNK` | 4 本目の格納先。`1` で Spark が全トピックを AWS の外の Splunk の HTTP Event Collector（HEC）に送る。既定 `0`。`SPLUNK_HEC_URL`（`https://…:8088`）が要り、token は先に SSM の SecureString `/<接頭辞>/splunk/hec-token` に手で入れる。Spark は NAT Gateway で外に出るので、Splunk Cloud の公開 HEC にも社内の Splunk Enterprise にも届く。`SPLUNK_INDEX`（空なら token の既定）と `SPLUNK_SKIP_TLS_VERIFY`（自己署名のとき `1`）も読む。AWS 側の費用は 0 |
 | `IMAGE_TAG` | エージェントとワーカーのイメージのタグ。既定 `v1` |
 | `KEEP_ECR` | `1` で `ops/down.sh` が ECR を残す（保管料は月数円） |
 | `AWS_PROFILE` / `LOCAL_PORT` / `NO_PORTFORWARD` | プロファイル / PC 側のポート（既定 8080）/ ポートフォワーディングを開かない |
-| `VPC_CIDR` / `CLIENT_CIDR` | VPC の CIDR / DX・VPN から入るときの社内の CIDR（[setup.md](setup.md)） |
+| `VPC_CIDR` | VPC の CIDR（[setup.md](setup.md)） |
 | `AWS_CA_BUNDLE` / `OPENSEARCH_CACERT_FILE` | 社内 PC の CA（[setup.md](setup.md)） |
 | `ADMIN_ARN` | OpenSearch のデータアクセスポリシーに入れる、apply する人の ARN。自動で取れないときだけ書く |
 | `TF_VERBOSE` | `1` で terraform の出力を全部出す。既定は要点だけで、全文は `ops/logs/tf-<ルート>-apply.log` |

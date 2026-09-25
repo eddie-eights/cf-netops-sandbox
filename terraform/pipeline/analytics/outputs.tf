@@ -78,8 +78,8 @@ output "configuration_overrides_json" {
     monitoringConfiguration = {
       s3MonitoringConfiguration                 = { logUri = "s3://${local.bucket}/${local.logs_prefix}/" }
       managedPersistenceMonitoringConfiguration = { enabled = false }
-      # logs のインターフェイスエンドポイントは terraform/agent が作る。無い VPC で有効にすると、ジョブが
-      # 「Unable to push logs ... Connect timeout on endpoint URL: https://logs...」で FAILED になる（2026-09-17 に AGENT=0 で実測）
+      # CloudWatch Logs へは NAT Gateway から出る（2026-09-26 まではエンドポイント経由で、無い VPC で有効にするとジョブが
+      # 「Unable to push logs ... Connect timeout on endpoint URL: https://logs...」で FAILED になった）
       cloudWatchLoggingConfiguration = {
         enabled      = var.cloudwatch_logging
         logGroupName = aws_cloudwatch_log_group.emr.name
@@ -177,11 +177,6 @@ output "opensearch_index" {
 output "prometheus_workspace_arn" {
   description = "ARN of the Prometheus workspace (aps:QueryMetrics for the tools Lambda). Empty unless sinks has prometheus"
   value       = local.sink_prometheus ? aws_prometheus_workspace.metrics[0].arn : ""
-}
-
-output "events_endpoint_id" {
-  description = "events interface endpoint the driver puts AnomalyOpened / AnomalyResolved through"
-  value       = aws_vpc_endpoint.events.id
 }
 
 output "prometheus_query_url" {

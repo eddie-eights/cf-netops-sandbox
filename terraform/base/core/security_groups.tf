@@ -1,101 +1,55 @@
 # ---------------------------------------------------------------- security groups
-# 受信ルールは置かない。ブラウザは SSM のポートフォワーディングで来る（SSM Agent が内側から ssmmessages へつなぎに行く）。
-# Temporal UI への 8233 の送信ルールは terraform/workflow の ecs.tf が足す（相手のタスクの SG がそちらにあるため）
-resource "aws_security_group" "web" {
-  name        = "${local.name_prefix}-web"
-  description = "Chat web EC2 - no inbound, outbound HTTPS only"
+# SG は 2 つだけ。
+#   internal   VPC の中のワークロード全部（web EC2 / lab / Telegraf / Runtime / MSK / Neptune / EMR / Fargate / Lambda）に付ける。
+#              受信は VPC の中から（var.vpc_cidr）だけ、送信は自由（NAT から外へ出る。相手ごとの絞り込みは IAM で行う:
+#              MSK / Neptune は IAM 認証、S3 / ECR / Bedrock はロールのポリシー）。
+#              lab の管理ネットワーク（203.0.113.0/24。trap の送り元）からの受信は terraform/pipeline/lab が足す。
+#              EMR Serverless は 0.0.0.0/0 の受信ルールがある SG を拒むので、受信は VPC の CIDR で書く
+#   endpoints  VPC の中に残すエンドポイント（OpenSearch Serverless の VPC エンドポイント。terraform/pipeline/analytics）に付ける。
+#              受信は internal からの 443 だけ、送信は無し。PrivateLink に戻すときはインターフェース型エンドポイントにもこれを付ける
+# インターネットからの受信は SG 以前に経路が無い（vpc.tf: private subnet は IGW に向かない）。
+# 2026-09-26 まではワークロードごとの SG（12 個）と相互参照のルール（46 本）だった。戻すときは 7c42b0f を見る
+resource "aws_security_group" "internal" {
+  name        = "${local.name_prefix}-internal"
+  description = "Every workload in the VPC - inbound from the VPC only, outbound free (NAT)"
   vpc_id      = aws_vpc.this.id
 
-  tags = { Name = "${local.name_prefix}-web" }
+  tags = { Name = "${local.name_prefix}-internal" }
 }
 
-resource "aws_vpc_security_group_egress_rule" "web_https" {
-  security_group_id = aws_security_group.web.id
-  description       = "HTTPS to VPC endpoints"
-  ip_protocol       = "tcp"
-  from_port         = 443
-  to_port           = 443
+resource "aws_vpc_security_group_ingress_rule" "internal_from_vpc" {
+  security_group_id = aws_security_group.internal.id
+  description       = "Everything from inside the VPC"
+  ip_protocol       = "-1"
+  cidr_ipv4         = var.vpc_cidr
+}
+
+resource "aws_vpc_security_group_egress_rule" "internal_all" {
+  security_group_id = aws_security_group.internal.id
+  description       = "Everything (S3 gateway endpoint, NAT Gateway, the VPC)"
+  ip_protocol       = "-1"
   cidr_ipv4         = "0.0.0.0/0"
 }
 
-resource "aws_security_group" "runtime" {
-  name        = "${local.name_prefix}-runtime"
-  description = "AgentCore Runtime ENIs - outbound HTTPS only"
-  vpc_id      = aws_vpc.this.id
-
-  tags = { Name = "${local.name_prefix}-runtime" }
-}
-
-# VPC endpoints と S3 gateway（S3 のパブリック IP 帯）へ出る。NAT が無いのでインターネットには出られない
-resource "aws_vpc_security_group_egress_rule" "runtime_https" {
-  security_group_id = aws_security_group.runtime.id
-  description       = "HTTPS to VPC endpoints and S3 gateway endpoint"
-  ip_protocol       = "tcp"
-  from_port         = 443
-  to_port           = 443
-  cidr_ipv4         = "0.0.0.0/0"
-}
-
-# 条件を付けない。terraform/pipeline/lab / terraform/pipeline/stream が remote state で受け取り、443 の受信ルールを足すため（出力は常に要る）
 resource "aws_security_group" "endpoints" {
   name        = "${local.name_prefix}-endpoints"
-  description = "Interface endpoints created by terraform/base/core - HTTPS from the chat web and the runtime"
+  description = "VPC endpoints - HTTPS from the internal SG, no outbound"
   vpc_id      = aws_vpc.this.id
 
   tags = { Name = "${local.name_prefix}-endpoints" }
 }
 
-resource "aws_vpc_security_group_ingress_rule" "endpoints_from_web" {
+resource "aws_vpc_security_group_ingress_rule" "endpoints_from_internal" {
   security_group_id            = aws_security_group.endpoints.id
-  description                  = "HTTPS from chat web EC2"
+  description                  = "HTTPS from the workloads"
   ip_protocol                  = "tcp"
   from_port                    = 443
   to_port                      = 443
-  referenced_security_group_id = aws_security_group.web.id
-}
-
-resource "aws_vpc_security_group_ingress_rule" "endpoints_from_runtime" {
-  security_group_id            = aws_security_group.endpoints.id
-  description                  = "HTTPS from AgentCore Runtime ENIs"
-  ip_protocol                  = "tcp"
-  from_port                    = 443
-  to_port                      = 443
-  referenced_security_group_id = aws_security_group.runtime.id
+  referenced_security_group_id = aws_security_group.internal.id
 }
 
 resource "aws_vpc_security_group_egress_rule" "endpoints_none" {
   security_group_id = aws_security_group.endpoints.id
-  description       = "No outbound"
-  ip_protocol       = "-1"
-  cidr_ipv4         = "127.0.0.1/32"
-}
-
-# 付けるのは ssm / ssmmessages だけ。利用者の PC から bedrock-agentcore や ecr のエンドポイントは見せない
-resource "aws_security_group" "client" {
-  count = var.create_ssm_endpoints && var.client_cidr != "" ? 1 : 0
-
-  name        = "${local.name_prefix}-client"
-  description = "ssm and ssmmessages endpoints - HTTPS from corporate PCs"
-  vpc_id      = aws_vpc.this.id
-
-  tags = { Name = "${local.name_prefix}-client" }
-}
-
-resource "aws_vpc_security_group_ingress_rule" "client_https" {
-  count = length(aws_security_group.client)
-
-  security_group_id = aws_security_group.client[0].id
-  description       = "HTTPS from corporate PCs running aws ssm start-session"
-  ip_protocol       = "tcp"
-  from_port         = 443
-  to_port           = 443
-  cidr_ipv4         = var.client_cidr
-}
-
-resource "aws_vpc_security_group_egress_rule" "client_none" {
-  count = length(aws_security_group.client)
-
-  security_group_id = aws_security_group.client[0].id
   description       = "No outbound"
   ip_protocol       = "-1"
   cidr_ipv4         = "127.0.0.1/32"

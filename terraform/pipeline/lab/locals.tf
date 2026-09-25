@@ -17,7 +17,7 @@ data "aws_ssm_parameter" "al2023" {
   name = var.ami_ssm_parameter
 }
 
-# VPC / subnet / endpoint SG / bucket は terraform/base/core の state から読む
+# VPC / subnet / SG / bucket は terraform/base/core の state から読む
 data "terraform_remote_state" "main" {
   backend = "local"
 
@@ -32,7 +32,7 @@ locals {
 
   vpc_id         = data.terraform_remote_state.main.outputs.vpc_id
   subnet_id      = data.terraform_remote_state.main.outputs.instance_subnet_id
-  endpoint_sg_id = data.terraform_remote_state.main.outputs.endpoint_security_group_id
+  internal_sg_id = data.terraform_remote_state.main.outputs.internal_security_group_id
   bucket         = data.terraform_remote_state.main.outputs.kb_bucket_name
   # 1 本（terraform/base/core の private）。Telegraf の EC2 から lab の管理ネットワークへの経路を足す
   route_table_ids = data.terraform_remote_state.main.outputs.route_table_ids

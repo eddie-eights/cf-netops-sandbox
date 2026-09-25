@@ -200,7 +200,8 @@ destroy_root agent ${AGENT_VARS[@]+"${AGENT_VARS[@]}"}
 
 log "3-2. 土台（terraform/base/core。VPC / Web の EC2 / バケット（中身ごと消える）/ ロール）"
 # Runtime の ENI（種類 agentic_ai。AWS 側の所有で、自分では外せない）は Runtime を消したあとも最大 8 時間残り、その間はサブネットと
-# Runtime の SG が DependencyViolation で消えない（terraform は 20 分待ってから落ちる）。残っているあいだは、それ以外だけを消して先へ進む。
+# internal の SG（全ワークロード共用。2026-09-26 に 1 つにまとめた）が DependencyViolation で消えない（terraform は 20 分待ってから落ちる）。
+# 残っているあいだは、それ以外だけを消して先へ進む。NAT Gateway・EIP・IGW は時間課金があるのでこのとき消す。
 # 残る VPC・サブネット・SG に時間課金は無く、次の ops/up.sh はそのまま使い回す
 MAIN_LEFT=0
 if has_resources base/core; then
@@ -220,11 +221,11 @@ if has_resources base/core; then
   if [ -n "$AGENT_ENIS" ] && [ "$AGENT_ENIS" != None ]; then
     MAIN_LEFT=1
     echo "Runtime の ENI が残っている: $AGENT_ENIS"
-    echo "VPC・サブネット・Runtime の SG は残し、それ以外を消す"
+    echo "VPC・サブネット・internal の SG は残し、それ以外（NAT Gateway も）を消す"
     MAIN_TARGETS=()
     while IFS= read -r addr; do
       case "$addr" in
-        ""|data.*|aws_vpc.this|aws_subnet.*|aws_security_group.runtime) ;;
+        ""|data.*|aws_vpc.this|aws_subnet.*|aws_security_group.internal) ;;
         *) MAIN_TARGETS+=("-target=$addr") ;;
       esac
     done < <(tf base/core state list 2>/dev/null)
@@ -234,7 +235,7 @@ if has_resources base/core; then
         echo "NG: terraform/base/core の ENI に関わらない部分が消えなかった（上のエラー）。先へ進んで、残りを消す"
       }
     else
-      echo "terraform/base/core: 残っているのは VPC・サブネット・Runtime の SG だけ"
+      echo "terraform/base/core: 残っているのは VPC・サブネット・internal の SG だけ"
     fi
   else
     destroy_root base/core
@@ -268,7 +269,7 @@ aws resourcegroupstaggingapi get-resources --region "$REGION" --tag-filters "Key
   --query 'ResourceTagMappingList[].ResourceARN' --output text | tr '\t' '\n' | sed '/^$/d' || true
 echo "（何も出なければ全部消えている。ecr を残したときはリポジトリが出る。消した直後の数分は消えたものが出ることがある）"
 if [ "$MAIN_LEFT" = 1 ]; then
-  echo "terraform/base/core の VPC・サブネット・Runtime の SG は残した（Runtime の ENI 待ち。時間課金は無い）。"
+  echo "terraform/base/core の VPC・サブネット・internal の SG は残した（Runtime の ENI 待ち。時間課金は無い）。"
   echo "すぐ使うなら ops/up.sh がそのまま使い回す。消し切るなら数時間おいて ops/down.sh を打ち直す"
 fi
 if [ -n "$FAILED_ROOTS" ]; then

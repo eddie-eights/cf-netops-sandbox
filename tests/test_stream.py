@@ -466,7 +466,7 @@ check("rsyslog は lab.sh と同じ置き場を読み、パスから機器名を
 check("lab.sh forward は rsyslog の設定の __*__ を全部埋める",
       all(k in labsh for k in ('"s#__LOG_DIR__#$LOG_DIR#g"', '"s#__TELEGRAF__#$t#"', '"s#__LOG_PORT__#$LOG_PORT#"', "rsyslog-frr.conf.in"))
       and set(re.findall(r"__[A-Z_]+__", rsys)) == {"__LOG_DIR__", "__TELEGRAF__", "__LOG_PORT__"})
-# ログのポートは 4 か所で同じ（lab.sh / telegraf.sh / telegraf.conf.in / lab の SG）
+# ログのポートは 4 か所で同じ（lab.sh / telegraf.sh / telegraf.conf.in / lab の locals）
 log_port = re.search(r"^LOG_PORT=(\d+)$", labsh, re.M).group(1)
 check("FRR のログのポートが lab.sh・telegraf.sh・telegraf.conf.in・lab の locals で同じ",
       re.search(rf"^LOG_PORT={log_port}$", tgsh, re.M) is not None and f'service_address = "tcp://:{log_port}"' in tele

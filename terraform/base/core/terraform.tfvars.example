@@ -1,5 +1,5 @@
 # Copy to terraform.tfvars only when the defaults are not right. Every value except owner has a default in variables.tf.
-# ops/up.sh passes owner (and vpc_cidr / client_cidr when set) with -var. The agent settings moved to terraform/agent.
+# ops/up.sh passes owner (and vpc_cidr when set) with -var. The agent settings moved to terraform/agent.
 # owner is the name of the person who deploys this copy and is REQUIRED: it has no default, so terraform asks for it
 # unless you uncomment the line below (with your own name), export TF_VAR_owner or pass -var owner=<name>.
 # Resource names and the Project tag become <owner>-nwc-poc (up to 14 lowercase letters, digits and single hyphens),
@@ -11,11 +11,8 @@
 # vpc_cidr    = "10.0.0.0/16"
 # az_id_a     = "apne1-az1"
 # az_id_b     = "apne1-az4"
-# client_cidr = ""                 # corporate CIDR that reaches the ssm / ssmmessages endpoints over DX or VPN
 #
 # instance_type     = "t4g.small"
 # ami_ssm_parameter = "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64"
 #
-# create_ssm_endpoints       = true
 # create_s3_gateway_endpoint = true
-# create_shared_endpoints    = true  # ecr.api / ecr.dkr / logs (2 AZ)

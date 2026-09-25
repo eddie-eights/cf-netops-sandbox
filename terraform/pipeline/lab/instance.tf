@@ -6,7 +6,7 @@ resource "aws_instance" "lab" {
   instance_type               = var.instance_type
   iam_instance_profile        = aws_iam_instance_profile.lab.name
   subnet_id                   = local.subnet_id
-  vpc_security_group_ids      = [aws_security_group.lab.id]
+  vpc_security_group_ids      = [local.internal_sg_id]
   associate_public_ip_address = false
   # Telegraf の EC2 とのあいだで、送り元・宛先が管理ネットワーク（203.0.113.x）の IP のパケットを通す（telegraf.tf の aws_route）
   source_dest_check = !var.create_telegraf
@@ -49,8 +49,6 @@ resource "aws_instance" "lab" {
   depends_on = [
     aws_iam_role_policy_attachment.lab_ssm,
     aws_iam_role_policy.lab_assets,
-    aws_vpc_security_group_egress_rule.lab_https,
-    aws_vpc_security_group_ingress_rule.endpoints_from_lab,
     # 最初の起動の lab.sh up（forward）が Telegraf のアドレスを読めるように
     aws_ssm_parameter.telegraf_address,
   ]

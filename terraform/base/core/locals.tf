@@ -1,6 +1,6 @@
-# netops-poc - base root module shared by the three features (pipeline / agent / workflow). VPC without NAT, EIP,
-# public IP or load balancer (2 private subnets, S3 gateway endpoint, ssm / ssmmessages endpoints), the security groups,
-# the chat web EC2 (Gradio: chat + topology figure + device table, 127.0.0.1 only, reached through SSM Session Manager
+# netops-poc - base root module shared by the three features (pipeline / agent / workflow). VPC with 2 private subnets,
+# a NAT Gateway in 1 AZ for egress (no inbound path from the internet), the S3 gateway endpoint, the two security groups
+# (internal / endpoints), the chat web EC2 (Gradio: chat + topology figure + device table, 127.0.0.1 only, reached through SSM Session Manager
 # port forwarding), the shared S3 bucket and the IAM roles the features attach policies to.
 # The AgentCore Runtime, guardrail and optional knowledge base are terraform/agent; the lab / stream / analytics / graph
 # roots are the pipeline; Temporal on ECS is terraform/workflow. Each of them reads this state (terraform_remote_state).

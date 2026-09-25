@@ -3,7 +3,7 @@
 # This rule sends both to a small Lambda in the VPC (graph/status_handler.py + agent/graph.py) that sets the property "status"
 # (DOWN / UP, ALARM for other traps) on the link edge or the device vertex. The web draws DOWN in red and the chat tools return it.
 # The static topology itself comes from lab/ (ops/up.sh 7-3b and ops/sync-graph.sh seed it through the web EC2) - not from here.
-# Cost: the rule is free, the Lambda is a few invocations per anomaly (free tier), no NAT and no new interface endpoint
+# Cost: the rule is free, the Lambda is a few invocations per anomaly (free tier), nothing else
 # (Neptune is in the VPC; the Lambda service writes its logs without going through the VPC).
 
 data "archive_file" "status" {
@@ -74,33 +74,6 @@ resource "aws_iam_role_policy" "status" {
   policy = data.aws_iam_policy_document.status.json
 }
 
-# 送信は Neptune の 8182 だけ（SSM は引かない。エンドポイントは環境変数で渡す）
-resource "aws_security_group" "status" {
-  name        = "${local.name_prefix}-graph-status"
-  description = "${local.name_prefix} status Lambda - 8182 to Neptune"
-  vpc_id      = local.vpc_id
-
-  tags = { Name = "${local.name_prefix}-graph-status" }
-}
-
-resource "aws_vpc_security_group_egress_rule" "status_to_neptune" {
-  security_group_id            = aws_security_group.status.id
-  description                  = "Gremlin to Neptune"
-  ip_protocol                  = "tcp"
-  from_port                    = 8182
-  to_port                      = 8182
-  referenced_security_group_id = aws_security_group.neptune.id
-}
-
-resource "aws_vpc_security_group_ingress_rule" "neptune_from_status" {
-  security_group_id            = aws_security_group.neptune.id
-  description                  = "status Lambda"
-  ip_protocol                  = "tcp"
-  from_port                    = 8182
-  to_port                      = 8182
-  referenced_security_group_id = aws_security_group.status.id
-}
-
 resource "aws_cloudwatch_log_group" "status" {
   name              = "/aws/lambda/${local.name_prefix}-graph-status"
   retention_in_days = var.log_retention_days
@@ -117,10 +90,10 @@ resource "aws_lambda_function" "status" {
   timeout          = 30
   memory_size      = 128
 
-  # Neptune と同じサブネット。NAT が無いので外には出ない（出る必要も無い）
+  # Neptune と同じサブネット、SG は terraform/base/core の internal（SSM は引かない。エンドポイントは環境変数で渡す）
   vpc_config {
     subnet_ids         = local.subnet_ids
-    security_group_ids = [aws_security_group.status.id]
+    security_group_ids = [local.internal_sg_id]
   }
 
   environment {

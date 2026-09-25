@@ -7,8 +7,3 @@ output "bootstrap_brokers" {
   description = "SASL/IAM bootstrap brokers (also in SSM /<prefix>/msk-bootstrap)"
   value       = aws_msk_cluster.stream.bootstrap_brokers_sasl_iam
 }
-
-output "msk_security_group_id" {
-  description = "Security group of the brokers (terraform/pipeline/analytics opens 9098 from the EMR workers on it)"
-  value       = aws_security_group.msk.id
-}

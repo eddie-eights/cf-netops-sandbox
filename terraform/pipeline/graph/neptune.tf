@@ -9,7 +9,7 @@ resource "aws_neptune_cluster" "graph" {
   backup_retention_period             = 1
   deletion_protection                 = var.deletion_protection
   neptune_subnet_group_name           = aws_neptune_subnet_group.graph.name
-  vpc_security_group_ids              = [aws_security_group.neptune.id]
+  vpc_security_group_ids              = [local.internal_sg_id]
 
   # その日に消す使い捨て。最終スナップショットは取らない
   skip_final_snapshot = true

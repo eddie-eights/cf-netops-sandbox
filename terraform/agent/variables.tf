@@ -121,21 +121,3 @@ variable "opensearch_cacert_file" {
   default     = ""
 }
 
-# ---------------------------------------------------------------- existing VPC endpoints
-variable "create_runtime_endpoints" {
-  description = "Create the bedrock-runtime interface endpoint (2 AZ). ecr.api / ecr.dkr / logs are created by terraform/base/core (create_shared_endpoints). Set false if the VPC already has it."
-  type        = bool
-  default     = true
-}
-
-variable "create_kb_endpoint" {
-  description = "Create the bedrock-agent-runtime interface endpoint (the runtime calls Retrieve through it). Only with create_knowledge_base = true. Set false if the VPC already has it."
-  type        = bool
-  default     = true
-}
-
-variable "create_agentcore_endpoint" {
-  description = "Create the bedrock-agentcore interface endpoint (the chat web and the workflow worker invoke the runtime through it). Set false if the VPC already has it."
-  type        = bool
-  default     = true
-}

@@ -72,7 +72,7 @@ WORKFLOW の流れは [workflow.md](workflow.md)、データの置き場は [dat
 terraform/
 ├── base/
 │   ├── ecr/         ECR リポジトリ
-│   └── core/        VPC / SG / エンドポイント / バケット / ロール / Web の EC2
+│   └── core/        VPC / NAT Gateway / SG（internal と endpoints）/ バケット / ロール / Web の EC2
 ├── agent/         AGENT=1     Runtime / ガードレール / KB
 ├── pipeline/      PIPELINE=1
 │   ├── lab/         containerlab の EC2 と Telegraf の EC2（stream を作るとき）

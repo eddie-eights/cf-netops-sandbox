@@ -92,16 +92,4 @@ resource "aws_sqs_queue_policy" "anomalies_dlq" {
   policy    = data.aws_iam_policy_document.anomalies_dlq.json
 }
 
-# worker は VPC の中（NAT 無し）なので SQS へは interface endpoint で届く（1 AZ、タスクのサブネット。$0.014/h）
-resource "aws_vpc_endpoint" "sqs" {
-  count = var.create_sqs_endpoint ? 1 : 0
-
-  vpc_id              = local.vpc_id
-  service_name        = "com.amazonaws.${var.region}.sqs"
-  vpc_endpoint_type   = "Interface"
-  subnet_ids          = [local.subnet_id]
-  security_group_ids  = [local.endpoint_sg_id]
-  private_dns_enabled = true
-
-  tags = { Name = "${local.name_prefix}-sqs" }
-}
+# worker から SQS へは terraform/base/core の NAT Gateway から出る（2026-09-26 までは sqs の interface endpoint。7c42b0f）

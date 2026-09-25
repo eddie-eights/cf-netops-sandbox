@@ -68,7 +68,7 @@ resource "aws_instance" "web" {
   instance_type               = var.instance_type
   iam_instance_profile        = aws_iam_instance_profile.web.name
   subnet_id                   = aws_subnet.a.id
-  vpc_security_group_ids      = [aws_security_group.web.id]
+  vpc_security_group_ids      = [aws_security_group.internal.id]
   associate_public_ip_address = false
 
   user_data = templatefile("${path.module}/templates/web_user_data.sh.tftpl", {
@@ -99,13 +99,12 @@ resource "aws_instance" "web" {
 
   tags = { Name = "${local.name_prefix}-web" }
 
-  # 起動スクリプトが S3 gateway と ssm エンドポイントを使うので、先に作らせる
+  # 起動スクリプトが S3 gateway（web/ と dnf）と NAT（SSM Agent の登録）を使うので、先に作らせる
   depends_on = [
     aws_iam_role_policy_attachment.web_ssm,
     aws_iam_role_policy.web_assets,
     aws_vpc_endpoint.s3,
-    aws_vpc_endpoint.ssm,
-    aws_vpc_security_group_egress_rule.web_https,
-    aws_vpc_security_group_ingress_rule.endpoints_from_web,
+    aws_route.private_default,
+    aws_vpc_security_group_egress_rule.internal_all,
   ]
 }

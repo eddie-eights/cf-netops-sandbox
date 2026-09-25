@@ -47,19 +47,18 @@ locals {
 
   vpc_id         = data.terraform_remote_state.main.outputs.vpc_id
   subnet_ids     = data.terraform_remote_state.main.outputs.runtime_subnet_ids
+  internal_sg_id = data.terraform_remote_state.main.outputs.internal_security_group_id
   endpoint_sg_id = data.terraform_remote_state.main.outputs.endpoint_security_group_id
   bucket         = data.terraform_remote_state.main.outputs.kb_bucket_name
   bucket_arn     = "arn:${local.partition}:s3:::${local.bucket}"
 
-  # stream が無いと読む Kafka が無い。下の precondition で「stream を先に」と出す
+  # stream が無いと読む Kafka が無い。emr.tf の precondition で「stream を先に」と出す
   msk_cluster_arn = try(data.terraform_remote_state.stream.outputs.msk_cluster_arn, "")
-  msk_sg_id       = try(data.terraform_remote_state.stream.outputs.msk_security_group_id, "")
   bootstrap       = try(data.terraform_remote_state.stream.outputs.bootstrap_brokers, "")
 
-  # 検知は異常の「いま」を Neptune に書く。graph が無いと検知できないので、network.tf の precondition で「graph を先に」と出す
+  # 検知は異常の「いま」を Neptune に書く。graph が無いと検知できないので、emr.tf の precondition で「graph を先に」と出す
   neptune_host        = try(data.terraform_remote_state.graph.outputs.cluster_endpoint, "")
   neptune_endpoint    = "${local.neptune_host}:8182"
-  neptune_sg_id       = try(data.terraform_remote_state.graph.outputs.neptune_security_group_id, "")
   neptune_resource_id = try(data.terraform_remote_state.graph.outputs.cluster_resource_id, "")
   event_bus_arn       = "arn:${local.partition}:events:${var.region}:${local.account_id}:event-bus/${var.event_bus}"
 
@@ -81,7 +80,7 @@ locals {
   log_group        = "/aws/emr-serverless/${local.name_prefix}"
   table_bucket     = "${local.name_prefix}-tables"
   iceberg_table    = "${local.catalog_name}.${var.namespace}.${var.table_name}"
-  # 証跡（tables.tf）。テーブルバケットと s3tables のエンドポイントは iceberg を選ばなくても作る
+  # 証跡（tables.tf）。テーブルバケットは iceberg を選ばなくても作る
   anomaly_events_table = "${local.catalog_name}.${var.namespace}.${aws_s3tables_table.anomaly_events.name}"
   table_bucket_arn     = aws_s3tables_table_bucket.tables.arn
 
@@ -91,11 +90,10 @@ locals {
   sink_prometheus = contains(var.sinks, "prometheus")
   sink_splunk     = contains(var.sinks, "splunk")
 
-  # splunk: HEC の token を入れた SSM の SecureString（値は Terraform も state も持たない。ジョブが起動時に ssm:GetParameter で読む）と、
-  # HEC のポート（URL に無ければ 443。network.tf で 443 以外なら egress を開ける。Splunk は AWS の外にあり、ここでは何も作らない）
+  # splunk: HEC の token を入れた SSM の SecureString（値は Terraform も state も持たない。ジョブが起動時に ssm:GetParameter で読む）。
+  # Splunk は AWS の外にあり、ここでは何も作らない（HEC へは NAT Gateway から出る。ポートは何番でもよい）
   splunk_token_parameter     = var.splunk_hec_token_parameter != "" ? var.splunk_hec_token_parameter : "/${local.name_prefix}/splunk/hec-token"
   splunk_token_parameter_arn = "arn:${local.partition}:ssm:${var.region}:${local.account_id}:parameter${local.splunk_token_parameter}"
-  splunk_hec_port            = try(tonumber(regex("^https://[^/:]+:([0-9]+)", var.splunk_hec_url)[0]), 443)
 
   # put_events の Source（spark/snmp_sinks.py の --event-source）。terraform/workflow と terraform/pipeline/graph の
   # ルールが同じ式で待ち受ける。バスは既定の 1 本を共有するので、ここを接頭辞ごとに変えないと他の人の異常が自分のルールに当たる

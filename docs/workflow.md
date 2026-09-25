@@ -55,7 +55,7 @@ stateDiagram-v2
 ## Temporal UI を開く
 
 UI（8233）はプライベートサブネットのタスクにあるので、Web の EC2 を踏み台にしてポートフォワーディングする。`ops/up.sh` の手順 8-5 が同じコマンドを表示する。
-通すための SG のルールは `terraform/workflow` の `ecs.tf` にある（Web の SG から出る 8233 と、タスクの SG に入る 8233。どちらも相手の SG に限る）。
+SG は土台の `internal` 1 つを Web の EC2 もタスクも使い、VPC の中は全部通るので、8233 のためのルールは無い（2026-09-26 まではポートごとの SG ルールだった）。
 
 ```bash
 INSTANCE_ID=$(terraform -chdir=terraform/base/core output -raw web_instance_id); echo "$INSTANCE_ID"
@@ -66,7 +66,7 @@ WF_TASK_IP=$(aws ecs describe-tasks --region ap-northeast-1 --cluster "$WF_CLUST
 aws ssm start-session --region ap-northeast-1 --target "$INSTANCE_ID" --document-name AWS-StartPortForwardingSessionToRemoteHost --parameters "{\"host\":[\"$WF_TASK_IP\"],\"portNumber\":[\"8233\"],\"localPortNumber\":[\"8233\"]}"
 ```
 
-このあと http://localhost:8233/ を開く。UI に認証は無い（SG で届くのは Web の EC2 からだけ）。
+このあと http://localhost:8233/ を開く。UI に認証は無い（VPC の外からは届かない）。
 
 ## うまくいかないとき
 
@@ -84,4 +84,4 @@ terraform -chdir=terraform/workflow output -raw worker_logs_command; echo
 | 修復案が出ない | Spark のジョブが古いまま動いている（[troubleshooting.md](troubleshooting.md) の「パイプラインと WORKFLOW」） |
 | trap の異常に修復案が出ない | 仕様。ワークフローを起こすのは `link_down` だけ（`workflow/rules.py` の `START_KINDS`） |
 | 承認したのに `obsolete` になった | 承認までに異常が閉じた（または開き直して別の発生になった）。古い処置は打たない。開き直した発生には別の修復案が出る |
-| ポートフォワーディングはつながるが Temporal UI が開かない | 8233 の SG ルール（`terraform/workflow` の `ecs.tf`）が無い。`terraform/workflow` を apply し直す |
+| ポートフォワーディングはつながるが Temporal UI が開かない | タスクが RUNNING か（`aws ecs describe-services`）と、ポートフォワーディングの先の IP がそのタスクか。2026-09-26 までは 8233 の SG ルールの抜けが原因になったが、いまは SG が 1 つで VPC の中は全部通る |

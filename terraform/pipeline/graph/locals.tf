@@ -26,7 +26,6 @@ locals {
 
   vpc_id          = data.terraform_remote_state.main.outputs.vpc_id
   subnet_ids      = data.terraform_remote_state.main.outputs.runtime_subnet_ids
-  runtime_sg_id   = data.terraform_remote_state.main.outputs.runtime_security_group_id
-  web_sg_id       = data.terraform_remote_state.main.outputs.instance_security_group_id
+  internal_sg_id  = data.terraform_remote_state.main.outputs.internal_security_group_id
   reader_role_ids = toset([data.terraform_remote_state.main.outputs.runtime_role_name, data.terraform_remote_state.main.outputs.web_role_name])
 }

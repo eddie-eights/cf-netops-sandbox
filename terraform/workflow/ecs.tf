@@ -1,73 +1,8 @@
 # ---------------------------------------------------------------- network
-resource "aws_security_group" "task" {
-  name        = "${local.name_prefix}-workflow"
-  description = "Workflow task - HTTPS to the VPC endpoints (ECR, logs, S3 gateway, s3tables, SSM, AgentCore, SQS) and 8182 to Neptune"
-  vpc_id      = local.vpc_id
-
-  tags = { Name = "${local.name_prefix}-workflow" }
-}
-
-resource "aws_vpc_security_group_egress_rule" "task_https" {
-  security_group_id = aws_security_group.task.id
-  description       = "ECR / logs / S3 gateway / s3tables / SSM / bedrock-agentcore / sqs endpoints"
-  ip_protocol       = "tcp"
-  from_port         = 443
-  to_port           = 443
-  cidr_ipv4         = "0.0.0.0/0"
-}
-
-resource "aws_vpc_security_group_ingress_rule" "endpoints_from_task" {
-  security_group_id            = local.endpoint_sg_id
-  description                  = "Workflow task through the endpoints of terraform/base/core"
-  ip_protocol                  = "tcp"
-  from_port                    = 443
-  to_port                      = 443
-  referenced_security_group_id = aws_security_group.task.id
-}
-
-# 異常と修復案の「いま」を Neptune（terraform/pipeline/graph）に読み書きする。Neptune の SG はあちらのルートのものだが、相手のタスクの SG がこのルートにあるので、ここで足す
-resource "aws_vpc_security_group_egress_rule" "task_neptune" {
-  count = local.neptune_sg_id != "" ? 1 : 0
-
-  security_group_id            = aws_security_group.task.id
-  description                  = "Gremlin to Neptune (terraform/pipeline/graph)"
-  ip_protocol                  = "tcp"
-  from_port                    = 8182
-  to_port                      = 8182
-  referenced_security_group_id = local.neptune_sg_id
-}
-
-resource "aws_vpc_security_group_ingress_rule" "neptune_from_task" {
-  count = local.neptune_sg_id != "" ? 1 : 0
-
-  security_group_id            = local.neptune_sg_id
-  description                  = "Workflow task of terraform/workflow"
-  ip_protocol                  = "tcp"
-  from_port                    = 8182
-  to_port                      = 8182
-  referenced_security_group_id = aws_security_group.task.id
-}
-
-# Temporal UI（8233）は Web の EC2 を踏み台にした SSM のポートフォワーディングで開く（docs/workflow.md「Temporal UI を開く」）。
-# 踏み台の Web の SG から出て、タスクの SG に入る 2 本だけ開ける（どちらも相手の SG に限る。無いとセッションはつながっても UI が開かない）。
-# Web の SG は terraform/base/core のものだが、相手のタスクの SG がこのルートにあるので、ここで足す（gateway.tf の neptune_from_tools と同じ形）
-resource "aws_vpc_security_group_ingress_rule" "task_ui_from_web" {
-  security_group_id            = aws_security_group.task.id
-  description                  = "Temporal UI from the chat web EC2 (SSM port forwarding)"
-  ip_protocol                  = "tcp"
-  from_port                    = 8233
-  to_port                      = 8233
-  referenced_security_group_id = local.web_sg_id
-}
-
-resource "aws_vpc_security_group_egress_rule" "web_to_task_ui" {
-  security_group_id            = local.web_sg_id
-  description                  = "Temporal UI of the workflow task (SSM port forwarding)"
-  ip_protocol                  = "tcp"
-  from_port                    = 8233
-  to_port                      = 8233
-  referenced_security_group_id = aws_security_group.task.id
-}
+# タスクの SG は terraform/base/core の internal（VPC の中からは何でも受ける、送信は自由）。Neptune の 8182 も Temporal UI の 8233
+# （Web の EC2 を踏み台にした SSM のポートフォワーディング。docs/workflow.md「Temporal UI を開く」）も同じ SG の中なので穴は要らない。
+# ECR / logs / SSM / AgentCore / SQS / s3tables へは NAT Gateway から出る。
+# 2026-09-26 まではここにタスクの SG と 7 本のルールがあった（7c42b0f）
 
 # ---------------------------------------------------------------- cluster / logs
 resource "aws_ecs_cluster" "workflow" {
@@ -160,8 +95,8 @@ resource "aws_ecs_task_definition" "workflow" {
       error_message = "terraform/agent の state から agent_runtime_arn が読めない。terraform/agent を先に apply する（deploy.env の AGENT=1）。"
     }
     precondition {
-      condition     = local.neptune_endpoint != "" && local.neptune_data_arn != "" && local.neptune_sg_id != ""
-      error_message = "terraform/pipeline/graph の state から cluster_endpoint / cluster_resource_id / neptune_security_group_id が読めない。異常と修復案の「いま」は Neptune にあるので、terraform/pipeline/graph を先に apply する（2026-09-24 から）。"
+      condition     = local.neptune_endpoint != "" && local.neptune_data_arn != ""
+      error_message = "terraform/pipeline/graph の state から cluster_endpoint / cluster_resource_id が読めない。異常と修復案の「いま」は Neptune にあるので、terraform/pipeline/graph を先に apply する（2026-09-24 から）。"
     }
     precondition {
       condition     = local.audit_bucket_arn != "" && local.audit_namespace != "" && local.proposal_events_table_name != ""
@@ -186,7 +121,7 @@ resource "aws_ecs_service" "workflow" {
 
   network_configuration {
     subnets          = [local.subnet_id]
-    security_groups  = [aws_security_group.task.id]
+    security_groups  = [local.internal_sg_id]
     assign_public_ip = false
   }
 
