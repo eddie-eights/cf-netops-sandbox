@@ -11,13 +11,15 @@
 
 # SG は terraform/base/core の internal（VPC の中からは何でも受ける）。lab と Telegraf のあいだの SNMP / trap / FRR ログも、
 # Telegraf から MSK の 9098 も、これで通る。trap だけは送り元が機器の管理 IP（local.mgmt_cidr）のままなので、VPC の CIDR の受信ルールに当たらない。
-# その受信ルールを internal に足す（Telegraf があるときだけ。lab を destroy すると消える）
+# その受信ルール（udp 162 だけ。SNMP の応答は Telegraf の送信の戻りなので SG の追跡で通る）を internal に足す（Telegraf があるときだけ。lab を destroy すると消える）
 resource "aws_vpc_security_group_ingress_rule" "internal_from_lab_mgmt" {
   count = var.create_telegraf ? 1 : 0
 
   security_group_id = local.internal_sg_id
   description       = "SNMP traps from the CE routers on the lab mgmt network (DNAT on the lab EC2, source is the router mgmt IP)"
-  ip_protocol       = "-1"
+  ip_protocol       = "udp"
+  from_port         = 162
+  to_port           = 162
   cidr_ipv4         = local.mgmt_cidr
 }
 
