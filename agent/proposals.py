@@ -96,7 +96,7 @@ TOOL_SPECS = [
         "inputSchema": {"json": {"type": "object", "properties": {
             "status": {"type": "string", "description": "all（全部、既定）か pending / approved / rejected / applied / verified / failed / expired / obsolete のどれか"},
             "limit": {"type": "integer", "description": "件数の上限（既定 20、最大 100）"},
-            "device_id": {"type": "string", "description": "機器名（例 hq-ce-01）で絞る。空なら全機器"},
+            "device_id": {"type": "string", "description": "機器名（例 dc1-leaf-01）で絞る。空なら全機器"},
         }}},
     }},
 ]

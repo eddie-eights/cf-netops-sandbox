@@ -139,9 +139,9 @@ variable "event_bus" {
 }
 
 variable "metric_topics" {
-  description = "Kafka topics that carry metrics (Telegraf inputs.snmp). Read by the iceberg and prometheus sinks"
+  description = "Kafka topics that carry metrics (Telegraf inputs.snmp -> metrics, inputs.gnmi -> gnmi). Read by the iceberg and prometheus sinks; detect reads them for bgp_down / isis_down"
   type        = list(string)
-  default     = ["metrics"]
+  default     = ["metrics", "gnmi"]
 
   validation {
     condition     = length(var.metric_topics) > 0
@@ -150,7 +150,7 @@ variable "metric_topics" {
 }
 
 variable "log_topics" {
-  description = "Kafka topics that carry logs (traps = Telegraf inputs.snmp_trap, logs = the FRR log files that rsyslog on the lab EC2 sends to the Telegraf EC2). Read by the iceberg and opensearch sinks"
+  description = "Kafka topics that carry logs (traps = Telegraf inputs.snmp_trap, logs = syslog of the SR Linux routers, DNATed by the lab EC2 to the Telegraf EC2). Read by the iceberg and opensearch sinks"
   type        = list(string)
   default     = ["traps", "logs"]
 

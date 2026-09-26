@@ -13,7 +13,7 @@ Kafka と S3 Tables の jar、カタログの設定は spark-submit の --conf �
               （Splunk Cloud の公開 HEC でも、DX / VPN の先の社内の Splunk Enterprise でもよい）。
               2026-09-26 まで MSK Connect の Splunk Connect for Kafka にする予定だったが、Spark から直接書くことにした）
 どのトピックがメトリクスでどれがログかは --metric-topics / --log-topics（既定は Telegraf の metrics と traps,logs。
-logs は FRR のログ。lab の EC2 の rsyslog が Telegraf の EC2 へ送る）。格納先ごとに別のストリーミングクエリ（別の Kafka の購読と checkpoint）に
+logs は機器の syslog。SR Linux が lab の EC2 へ送り、lab の EC2 が Telegraf の EC2 へ DNAT する）。格納先ごとに別のストリーミングクエリ（別の Kafka の購読と checkpoint）に
 する。1 つが止まったらジョブを 1 で終わらせ、EMR Serverless に起こし直させる（どのクエリも checkpoint の続きから読む）。
 
 Telegraf の JSON 出力（outputs.kafka の data_format = "json"、json_timestamp_units = "1s"）は
@@ -23,12 +23,14 @@ Telegraf の JSON 出力（outputs.kafka の data_format = "json"、json_timesta
 
 異常の検知（detect）は格納先とは別に常に動く 4 本目のクエリ（検知したら EventBridge にイベントを出す）:
   metrics の interface で ifOperStatus が down のインタフェース（ポーリング）と、traps の linkDown（即時）を open にし、up に戻ったポーリングと
-  linkUp で resolved にする。異常の「いま」は Neptune（terraform/pipeline/graph）の頂点 label=anomaly（id は <機器>#<種別>#<インタフェース>）、
+  linkUp で resolved にする。gnmi の bgp_neighbor（session_state が established でない → bgp_down。target は相手の IP）と
+  isis_adjacency（adjacency_state が up でない → isis_down。target はサブインタフェース）も同じ仕組みで開閉する（Telegraf の inputs.gnmi。on_change）。異常の「いま」は Neptune（terraform/pipeline/graph）の頂点 label=anomaly（id は <機器>#<種別>#<インタフェース>）、
   開いた・閉じたの履歴は S3 Tables の anomaly_events（--anomaly-events-table）に追記する（証跡。2026-09-24 に DynamoDB をやめた）。
   新しく open になったときだけ EventBridge の既定のバスに Source <接頭辞>.spark（--event-source）/ DetailType AnomalyOpened を put_events する
   （terraform/workflow の events.tf がルールで SQS に流し、Temporal の worker が調査ワークフローを起こす）。resolved にしたときは AnomalyResolved。
   イベントが届いたかは頂点の notified に残し、届かなかったものは次のバッチで出し直す。link 以外の trap は TRAP_TTL 秒 次の trap が来なければ
-  resolved にする（「直った」の trap が無いので）。coldStart / warmStart と snmpd の停止・再起動の知らせ（IGNORED_TRAPS）は異常にしない。
+  resolved にする（「直った」の trap が無いので）。coldStart / warmStart（IGNORED_TRAPS）は異常にしない。SR Linux の ifTable にある未使用の物理ポート（ifAdminStatus が down）と
+  サブインタフェース（ethernet-1/1.0）は見ない。
   機器名は sysName タグ（小文字・ドメイン無しに揃える）> --device-map（別名=機器名,...。ops/up.sh が lab の定義から作る）の順で引く。以前 terraform/pipeline/stream の detector Lambda がしていたことをここに寄せた。
 
 HTTP の送信は driver でまとめて行う（マイクロバッチを collect する。PoC の量（機器数台、10 秒間隔）なら 1 分に数百行）。
@@ -46,8 +48,8 @@ import time
 import urllib.error
 import urllib.request
 
-METRIC_TOPICS = "metrics"   # Telegraf の inputs.snmp（telegraf/telegraf.conf.in。Telegraf の EC2 で動く）
-LOG_TOPICS = "traps,logs"   # traps = Telegraf の inputs.snmp_trap、logs = inputs.socket_listener（FRR のログ。measurement は frr_log）
+METRIC_TOPICS = "metrics,gnmi"   # metrics = Telegraf の inputs.snmp、gnmi = inputs.gnmi（telegraf/telegraf.conf.in。Telegraf の EC2 で動く）
+LOG_TOPICS = "traps,logs"   # traps = Telegraf の inputs.snmp_trap、logs = inputs.syslog（機器の syslog。measurement は device_log）
 SINKS = ("iceberg", "opensearch", "prometheus", "splunk")
 TRIGGER = "60 seconds"
 HTTP_TIMEOUT = 30
@@ -485,13 +487,14 @@ def make_prometheus_sender(url, region):
 
 # ---------------------------------------------------------------- detect（異常 → S3 Tables の履歴 + Neptune + EventBridge）
 LINK_DOWN, LINK_UP = ".1.3.6.1.6.3.1.1.5.3", ".1.3.6.1.6.3.1.1.5.4"   # IF-MIB linkDown / linkUp の trap OID
-# snmpd が起きた・止まった知らせで、異常ではない（lab の up や snmpd の再起動のたびに来る）。異常にしない。
+# 機器が起きた知らせで、異常ではない（lab の up のたびに来る）。異常にしない。
 # 知らない trap は異常として開く（許可リストにすると、知らない本物の異常を黙って捨てる）ので、ここは「捨てる」側の一覧
+# （net-snmp の snmpd の停止・再起動の知らせ 1.3.6.1.4.1.8072.4.0.2 / .3 も、FRR + snmpd だった 2026-09-26 までの名残として残す）
 IGNORED_TRAPS = {
     ".1.3.6.1.6.3.1.1.5.1",       # SNMPv2-MIB coldStart
     ".1.3.6.1.6.3.1.1.5.2",       # SNMPv2-MIB warmStart
-    ".1.3.6.1.4.1.8072.4.0.2",    # NET-SNMP-AGENT-MIB nsNotifyShutdown（snmpd が止まる）
-    ".1.3.6.1.4.1.8072.4.0.3",    # NET-SNMP-AGENT-MIB nsNotifyRestart（snmpd が設定を読み直した）
+    ".1.3.6.1.4.1.8072.4.0.2",    # NET-SNMP-AGENT-MIB nsNotifyShutdown
+    ".1.3.6.1.4.1.8072.4.0.3",    # NET-SNMP-AGENT-MIB nsNotifyRestart
 }
 # link 以外の trap には「直った」の知らせが無い。最後の trap から TRAP_TTL 秒たったら resolved にする（見回りは TRAP_SWEEP 秒に 1 回）。
 # 以前は一度開くと閉じず、graph の status Lambda が機器を ALARM のままにしていた
@@ -512,7 +515,7 @@ ANOMALY_EVENT_COLUMNS = (
 
 
 def parse_device_map(text):
-    """"203.0.113.11=hq-ce-01,hq-ce-01.example.net=hq-ce-01" → {別名（小文字）: 機器名}。= の無い要素は捨てる。
+    """"203.0.113.31=dc1-leaf-01,dc1-leaf-01.example.net=dc1-leaf-01" → {別名（小文字）: 機器名}。= の無い要素は捨てる。
     ops/up.sh が lab/lab_topology.py --device-map（lab の定義の全機器の管理 IP・全インタフェースと lo のアドレス・hostname）から作って渡す"""
     out = {}
     for p in (text or "").split(","):
@@ -547,16 +550,50 @@ def _oid(v):
     return v
 
 
+def _gnmi_field(f, leaf):
+    """Telegraf の inputs.gnmi の field。購読したパスより下は "a/b/leaf" のように / でつながるので、末尾の名前で引く（- は _ に直してある）"""
+    for k, v in f.items():
+        if str(k).replace("-", "_").rsplit("/", 1)[-1] == leaf:
+            return v
+    return None
+
+
+def _gnmi_tag(t, key):
+    """Telegraf の inputs.gnmi のタグ。パスの鍵（neighbor[peer-address=x]）は peer_address か neighbor_peer_address の名前で付く（版で違う）ので末尾で引く"""
+    v = t.get(key)
+    if v is None:
+        for k, val in t.items():
+            if str(k).replace("-", "_").endswith(key):
+                v = val
+                break
+    return str(v or "").strip()
+
+
+GNMI_KINDS = {"bgp_neighbor": ("bgp_down", "session_state", "peer_address", "established"),
+              "isis_adjacency": ("isis_down", "adjacency_state", "interface_name", "up")}   # measurement → (種別, 状態の field, 対象のタグ, 正常な値)
+
+
 def events(m, devmap):
-    """1 メトリクス（Telegraf の JSON）から (機器, 種別, インタフェース, 開く/閉じる, 元) の列を出す。関係ない行は []"""
+    """1 メトリクス（Telegraf の JSON）から (機器, 種別, 対象（IF / 相手の IP）, 開く/閉じる, 元) の列を出す。関係ない行は []"""
     if not isinstance(m, dict):
         return []
     name, f, t = m.get("name"), m.get("fields") or {}, m.get("tags") or {}
+    if name in GNMI_KINDS:
+        kind, leaf, key, good = GNMI_KINDS[name]
+        state, target = _gnmi_field(f, leaf), _gnmi_tag(t, key)
+        if state is None or not target:
+            return []
+        return [(device(m, devmap), kind, target, str(state).strip().lower() != good, "gnmi")]
     if name == "interface" and "ifOperStatus" in f:
-        ifn = str(t.get("ifDescr") or t.get("ifIndex") or "?")
-        if ifn.startswith("lo"):
+        # IF の鍵は ifName（SR Linux の ifDescr は「名前 + description」で、トポロジの IF 名と合わない）。
+        # 見ないもの: ループバック、管理ポート（mgmt0）、サブインタフェース（ethernet-1/1.0 など "." 付き。親と同じ上げ下げ）、
+        # admin-state が disable のポート（SR Linux の ifTable は未使用の物理ポートも全部出す。oper は down だが異常ではない）
+        ifn = str(t.get("ifName") or t.get("ifDescr") or t.get("ifIndex") or "?")
+        if ifn.startswith(("lo", "mgmt")) or "." in ifn:
             return []
         try:
+            if int(float(f.get("ifAdminStatus", 1))) == 2:
+                return []
             down = int(float(f["ifOperStatus"])) == 2
         except (TypeError, ValueError):
             return []
@@ -564,12 +601,12 @@ def events(m, devmap):
     if name == "snmp_trap":
         oid = _oid(t.get("oid", ""))
         if oid in (LINK_DOWN, LINK_UP):
-            # MIB が無いと varbind の名前は数値 OID（末尾に ifIndex が付く）。ifDescr を優先し、無ければ ifIndex。
+            # MIB が無いと varbind の名前は数値 OID（末尾に ifIndex が付く）。ifName（SR Linux の linkDown の varbind）> ifDescr > ifIndex の順。
             # lab の Telegraf 1.40 は数値 OID を "iso.3.6.1.2.1.2.2.1.2.38" と書く（先頭が ".1." でなく "iso."。2026-09-18 実機）ので
-            # 先頭を揃えてから見る。揃えないと target が "?" になり、ポーリングの eth1 と別の異常として二重に開いていた
+            # 先頭を揃えてから見る。揃えないと target が "?" になり、ポーリングの ethernet-1/1 と別の異常として二重に開いていた
             fields = {(".1." + k[4:] if k.startswith("iso.") else k): v for k, v in f.items()}
             ifn = "?"
-            for pre in ("ifDescr", ".1.3.6.1.2.1.2.2.1.2", "ifIndex", ".1.3.6.1.2.1.2.2.1.1"):
+            for pre in ("ifName", ".1.3.6.1.2.1.31.1.1.1.1", "ifDescr", ".1.3.6.1.2.1.2.2.1.2", "ifIndex", ".1.3.6.1.2.1.2.2.1.1"):
                 v = [v for k, v in fields.items() if k == pre or k.startswith(pre + ".")]
                 if v:
                     ifn = str(v[0])
@@ -586,7 +623,13 @@ def anomaly_key(dev, kind, ifn):
 
 
 def anomaly_detail(kind, ifn, src):
-    return f"{ifn} is down ({src})" if kind == "link_down" else f"trap {ifn}"
+    if kind == "link_down":
+        return f"{ifn} is down ({src})"
+    if kind == "bgp_down":
+        return f"bgp session to {ifn} is not established ({src})"
+    if kind == "isis_down":
+        return f"isis adjacency on {ifn} is down ({src})"
+    return f"trap {ifn}"
 
 
 # ---------------------------------------------------------------- Neptune（異常の「いま」）

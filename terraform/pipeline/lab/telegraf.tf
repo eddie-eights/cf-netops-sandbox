@@ -1,25 +1,36 @@
 # ---------------------------------------------------------------- Telegraf EC2 (create_telegraf)
 # Telegraf を lab の EC2 から分けた小さな EC2。トポロジ（containerlab）と別に止める・作り直す・ログを見ることができる。
 # lab の管理ネットワーク（local.mgmt_cidr）は lab の EC2 の中の docker network で VPC からは見えないので、次の 3 つで届ける:
-#   ポーリング  Telegraf → CE の snmpd（203.0.113.11〜14:161/udp）。下の aws_route でこの宛先を lab の EC2 へ向け、
+#   ポーリング  Telegraf → 機器の SNMP（203.0.113.11〜32:161/udp）と gNMI（57400/tcp。BGP / IS-IS / EVPN の状態）。下の aws_route でこの宛先を lab の EC2 へ向け、
 #               lab の EC2 の上で lab.sh forward が Docker の DOCKER-USER に通す穴を開ける
-#   trap        snmpd → 203.0.113.1:162/udp（lab の EC2）。lab.sh forward が Telegraf へ DNAT する。送り元（機器の管理 IP）は
+#   trap        機器 → 203.0.113.1:162/udp（lab の EC2）。lab.sh forward が Telegraf へ DNAT する。送り元（機器の管理 IP）は
 #               Docker の MASQUERADE にかけない（Spark とエージェントは送り元の IP で機器を引く）
-#   FRR のログ  lab の EC2 の rsyslog（imfile）が 1 行ずつ「機器名 FRR の行」にして Telegraf の local.log_port/tcp へ送る
+#   syslog      機器 → 203.0.113.1:local.log_port/udp（lab の EC2）。trap と同じ仕組みで Telegraf へ DNAT する
 # Telegraf のアドレスは ENI を先に作って固定し、SSM の /<接頭辞>/telegraf-address に書く（lab.sh forward が読む）。
 # Telegraf の EC2 を作り直しても（AMI の更新など）アドレスは変わらないので、lab の側は作り直さなくてよい。
 
-# SG は terraform/base/core の internal（VPC の中からは何でも受ける）。lab と Telegraf のあいだの SNMP / trap / FRR ログも、
-# Telegraf から MSK の 9098 も、これで通る。trap だけは送り元が機器の管理 IP（local.mgmt_cidr）のままなので、VPC の CIDR の受信ルールに当たらない。
-# その受信ルール（udp 162 だけ。SNMP の応答は Telegraf の送信の戻りなので SG の追跡で通る）を internal に足す（Telegraf があるときだけ。lab を destroy すると消える）
+# SG は terraform/base/core の internal（VPC の中からは何でも受ける）。lab と Telegraf のあいだの SNMP も、
+# Telegraf から MSK の 9098 も、これで通る。trap と syslog は送り元が機器の管理 IP（local.mgmt_cidr）のままなので、VPC の CIDR の受信ルールに当たらない。
+# その受信ルール（udp 162 と local.log_port だけ。SNMP の応答は Telegraf の送信の戻りなので SG の追跡で通る）を internal に足す（Telegraf があるときだけ。lab を destroy すると消える）
 resource "aws_vpc_security_group_ingress_rule" "internal_from_lab_mgmt" {
   count = var.create_telegraf ? 1 : 0
 
   security_group_id = local.internal_sg_id
-  description       = "SNMP traps from the CE routers on the lab mgmt network (DNAT on the lab EC2, source is the router mgmt IP)"
+  description       = "SNMP traps from the switches on the lab mgmt network (DNAT on the lab EC2, source is the router mgmt IP)"
   ip_protocol       = "udp"
   from_port         = 162
   to_port           = 162
+  cidr_ipv4         = local.mgmt_cidr
+}
+
+resource "aws_vpc_security_group_ingress_rule" "internal_from_lab_mgmt_syslog" {
+  count = var.create_telegraf ? 1 : 0
+
+  security_group_id = local.internal_sg_id
+  description       = "syslog from the routers on the lab mgmt network (DNAT on the lab EC2, source is the router mgmt IP)"
+  ip_protocol       = "udp"
+  from_port         = local.log_port
+  to_port           = local.log_port
   cidr_ipv4         = local.mgmt_cidr
 }
 
@@ -100,7 +111,7 @@ resource "aws_network_interface" "telegraf" {
 
   subnet_id       = local.subnet_id
   security_groups = [local.internal_sg_id]
-  description     = "${local.name_prefix} Telegraf - fixed address for the trap DNAT and rsyslog on the lab EC2"
+  description     = "${local.name_prefix} Telegraf - fixed address for the trap / syslog DNAT on the lab EC2"
 
   tags = { Name = "${local.name_prefix}-telegraf" }
 }
@@ -111,7 +122,7 @@ resource "aws_ssm_parameter" "telegraf_address" {
   name        = "/${local.name_prefix}/telegraf-address"
   type        = "String"
   value       = aws_network_interface.telegraf[0].private_ip
-  description = "Private IP of the Telegraf EC2. Read by lab.sh forward on the lab EC2 (trap DNAT and the rsyslog target)."
+  description = "Private IP of the Telegraf EC2. Read by lab.sh forward on the lab EC2 (trap / syslog DNAT target)."
 }
 
 # 起動のたびに流す（cloud-config の always）。S3 の telegraf/ を置き直して再起動すれば設定も更新される

@@ -36,7 +36,7 @@
 #   SKIP_ANALYTICS=1        PIPELINE=1 で analytics（Spark → S3 Tables / OpenSearch / Prometheus と異常検知）を作らない。「異常一覧」は使えない
 #   SINK_S3=0 / SINK_OPENSEARCH=0 / SINK_PROMETHEUS=0
 #                           analytics の Spark の格納先を 1 つずつ外す（既定は 3 つとも 1。0 にするとリソースごと作らない。1 つ以上は要る）。
-#                           SINK_S3 = 全トピック → S3 Tables（Iceberg）、SINK_OPENSEARCH = traps と logs（FRR のログ）→ OpenSearch Serverless、
+#                           SINK_S3 = 全トピック → S3 Tables（Iceberg）、SINK_OPENSEARCH = traps と logs（機器の syslog）→ OpenSearch Serverless、
 #                           SINK_PROMETHEUS = metrics → Amazon Managed Service for Prometheus。terraform/pipeline/analytics の var.sinks（iceberg / opensearch / prometheus / splunk）に組んで渡す。
 #   SINK_SPLUNK=1           4 本目の格納先: 全トピック → AWS の外にある Splunk の HTTP Event Collector（既定 0。Splunk 自体は作らない）。
 #                           SPLUNK_HEC_URL（https://<host>:8088。NAT Gateway で外に出るので Splunk Cloud でもよい）が要り、HEC の token は
@@ -61,9 +61,8 @@ REGION=ap-northeast-1
 # load_deploy_env のあと（手順 0 の resolve_name_prefix。必須なので、無ければそこで止まる。形の検査も ops/deploy-env.sh）
 # 下の 5 つは Terraform の変数の既定値に合わせてある（terraform/pipeline/lab の *_image_tag / containerlab_version / telegraf_version）。
 # 変えるときは両方を変える
-FRR_TAG=10.2.1
+SRLINUX_TAG=26.7.2   # terraform/pipeline/lab の srlinux_image_tag の既定値。変えるときは両方を変える（ghcr.io/nokia/srlinux はマルチアーキ。arm64 を引く）
 MULTITOOL_TAG=v0.10.0
-SNMPD_TAG=v2
 CONTAINERLAB_VERSION=0.79.0
 TELEGRAF_VERSION=1.40.0
 CONTAINERLAB_RPM="containerlab_${CONTAINERLAB_VERSION}_linux_arm64.rpm"
@@ -341,44 +340,41 @@ TEMPORAL_TAG=1.9.1   # terraform/workflow の temporal_image_tag の既定値。
 
 # ---- 2. イメージ ----------------------------------------------------------------
 log "2. イメージ（ECR に無いタグだけ作る）"
-NEED_AGENT=""; NEED_FRR=""; NEED_MULTITOOL=""; NEED_SNMPD=""; NEED_WORKER=""; NEED_TEMPORAL=""
+NEED_AGENT=""; NEED_SRLINUX=""; NEED_MULTITOOL=""; NEED_WORKER=""; NEED_TEMPORAL=""
 if [ -n "$AGENT" ]; then
   if ecr_has "$PREFIX-agent" "$IMAGE_TAG"; then echo "agent:$IMAGE_TAG はある（作り直すなら IMAGE_TAG を変える）"; else NEED_AGENT=1; fi
 fi
 if [ -z "$SKIP_LAB" ]; then
-  if ecr_has "$PREFIX-lab-frr" "$FRR_TAG"; then echo "lab-frr:$FRR_TAG はある"; else NEED_FRR=1; fi
+  if ecr_has "$PREFIX-lab-srlinux" "$SRLINUX_TAG"; then echo "lab-srlinux:$SRLINUX_TAG はある"; else NEED_SRLINUX=1; fi
   if ecr_has "$PREFIX-lab-multitool" "$MULTITOOL_TAG"; then echo "lab-multitool:$MULTITOOL_TAG はある"; else NEED_MULTITOOL=1; fi
-  if ecr_has "$PREFIX-lab-snmpd" "$SNMPD_TAG"; then echo "lab-snmpd:$SNMPD_TAG はある"; else NEED_SNMPD=1; fi
 fi
 if [ -n "$WORKFLOW" ]; then
   if ecr_has "$PREFIX-worker" "$IMAGE_TAG"; then echo "worker:$IMAGE_TAG はある"; else NEED_WORKER=1; fi
   if ecr_has "$PREFIX-temporal" "$TEMPORAL_TAG"; then echo "temporal:$TEMPORAL_TAG はある"; else NEED_TEMPORAL=1; fi
 fi
-NEED_LAB="$NEED_FRR$NEED_MULTITOOL$NEED_SNMPD"
+NEED_LAB="$NEED_SRLINUX$NEED_MULTITOOL"
 if [ -z "$NEED_AGENT$NEED_LAB$NEED_WORKER$NEED_TEMPORAL" ]; then
   echo "作るイメージは無い"
 else
   docker info >/dev/null 2>&1 || die "dockerd に接続できない（WSL なら sudo service docker start。docs/setup.md「Terraform を打つ PC 側」）"
-  # agent と snmpd は RUN があるので、x86_64 の PC では QEMU（binfmt）が要る
-  if [ -n "$NEED_AGENT$NEED_SNMPD$NEED_WORKER" ] && ! docker buildx ls | grep -q 'linux/arm64'; then
+  # agent と worker は RUN があるので、x86_64 の PC では QEMU（binfmt）が要る（lab のイメージは上流の arm64 をミラーするだけ）
+  if [ -n "$NEED_AGENT$NEED_WORKER" ] && ! docker buildx ls | grep -q 'linux/arm64'; then
     die "docker buildx ls の Platforms に linux/arm64 が無い（docs/setup.md「WSL2（Ubuntu）」の binfmt の行）"
   fi
   aws ecr get-login-password --region "$REGION" | docker login --username AWS --password-stdin "$REG"
   if [ -n "$NEED_AGENT" ]; then
     docker buildx build --platform linux/arm64 -t "$REPO:$IMAGE_TAG" --push agent/
   fi
-  if [ -n "$NEED_FRR" ]; then
-    docker pull --platform linux/arm64 "quay.io/frrouting/frr:$FRR_TAG"
-    docker tag "quay.io/frrouting/frr:$FRR_TAG" "$REG/$PREFIX-lab-frr:$FRR_TAG"
-    docker push "$REG/$PREFIX-lab-frr:$FRR_TAG"
+  if [ -n "$NEED_SRLINUX" ]; then
+    # Nokia SR Linux（公開イメージ。約 1 GB）。ECR にミラーして lab の EC2 が VPC の中から引けるようにする
+    docker pull --platform linux/arm64 "ghcr.io/nokia/srlinux:$SRLINUX_TAG"
+    docker tag "ghcr.io/nokia/srlinux:$SRLINUX_TAG" "$REG/$PREFIX-lab-srlinux:$SRLINUX_TAG"
+    docker push "$REG/$PREFIX-lab-srlinux:$SRLINUX_TAG"
   fi
   if [ -n "$NEED_MULTITOOL" ]; then
     docker pull --platform linux/arm64 "ghcr.io/srl-labs/network-multitool:$MULTITOOL_TAG"
     docker tag "ghcr.io/srl-labs/network-multitool:$MULTITOOL_TAG" "$REG/$PREFIX-lab-multitool:$MULTITOOL_TAG"
     docker push "$REG/$PREFIX-lab-multitool:$MULTITOOL_TAG"
-  fi
-  if [ -n "$NEED_SNMPD" ]; then
-    docker buildx build --platform linux/arm64 -t "$REG/$PREFIX-lab-snmpd:$SNMPD_TAG" --push lab/snmpd/
   fi
   if [ -n "$NEED_WORKER" ]; then
     docker buildx build --platform linux/arm64 -t "$REG/$PREFIX-worker:$IMAGE_TAG" --push workflow/
@@ -514,7 +510,7 @@ if [ -z "$SKIP_LAB" ]; then
   log "5-1. lab の材料（containerlab の rpm とトポロジ）を s3://$KB_BUCKET/lab/ に置く"
   fetch "https://github.com/srl-labs/containerlab/releases/download/v$CONTAINERLAB_VERSION/$CONTAINERLAB_RPM" "$CONTAINERLAB_RPM" \
     || die "containerlab の rpm が取れない（社内 PC なら docs/setup.md「社内 PC の CA」）"
-  aws s3 sync --only-show-errors lab/ "s3://$KB_BUCKET/lab/" --exclude "wanlab.clab.yml" --exclude "snmpd/certs/*"
+  aws s3 sync --only-show-errors lab/ "s3://$KB_BUCKET/lab/" --exclude "splab.clab.yml" --exclude "__pycache__/*"
   aws s3 cp --only-show-errors "$CONTAINERLAB_RPM" "s3://$KB_BUCKET/lab/"
   if [ "${LAB_VARS[1]}" = create_telegraf=true ]; then
     log "5-1b. Telegraf の材料（telegraf/ と Telegraf の rpm）を s3://$KB_BUCKET/telegraf/ に置く"
@@ -524,6 +520,10 @@ if [ -z "$SKIP_LAB" ]; then
     SNMP_AGENTS=$("${PY[@]}" lab/lab_topology.py lab --snmp-agents) || die "lab/lab_topology.py が lab の定義からポーリング先を作れなかった"
     printf '%s\n' "$SNMP_AGENTS" | aws s3 cp --only-show-errors - "s3://$KB_BUCKET/telegraf/snmp_agents.txt"
     echo "Telegraf のポーリング先: $SNMP_AGENTS"
+    # gNMI の購読先（BGP / IS-IS / EVPN の状態。telegraf.conf.in の __GNMI_TARGETS__）も同じく lab の定義から
+    GNMI_TARGETS=$("${PY[@]}" lab/lab_topology.py lab --gnmi-targets) || die "lab/lab_topology.py が lab の定義から gNMI の購読先を作れなかった"
+    printf '%s\n' "$GNMI_TARGETS" | aws s3 cp --only-show-errors - "s3://$KB_BUCKET/telegraf/gnmi_targets.txt"
+    echo "Telegraf の gNMI の購読先: $GNMI_TARGETS"
     aws s3 cp --only-show-errors "$TELEGRAF_RPM" "s3://$KB_BUCKET/telegraf/"
   fi
 fi
@@ -540,9 +540,9 @@ fi
 
 # ---- 6. lab ---------------------------------------------------------------------
 LAB_INSTANCE_ID=""; TELEGRAF_INSTANCE_ID=""; LAB_WARN=""
-LAB_NODES=$(grep -c '^ *kind: linux' lab/wanlab.clab.yml.in)   # containerlab のノードの数（14）
+LAB_NODES=$(grep -cE '^ *kind: (nokia_srlinux|linux)$' lab/splab.clab.yml.in)   # containerlab のノードの数（8。SR Linux 6 + VM 2）
 if [ -z "$SKIP_LAB" ]; then
-  log "6. lab（terraform/pipeline/lab。EC2 の中でトポロジが上がるまで 5 分ほど。${LAB_VARS[1]}）"
+  log "6. lab（terraform/pipeline/lab。EC2 の中でトポロジが上がるまで 10 分ほど（SR Linux 6 台の起動）。${LAB_VARS[1]}）"
   tf_apply pipeline/lab "${LAB_VARS[@]}"
   LAB_INSTANCE_ID=$(tf pipeline/lab output -raw lab_instance_id); echo "LAB_INSTANCE_ID=$LAB_INSTANCE_ID"
   TELEGRAF_INSTANCE_ID=$(tf pipeline/lab output -raw telegraf_instance_id); echo "TELEGRAF_INSTANCE_ID=${TELEGRAF_INSTANCE_ID:-（作っていない）}"
@@ -570,7 +570,7 @@ if [ -n "$LAB_INSTANCE_ID" ]; then
   if [ -n "$TELEGRAF_INSTANCE_ID" ]; then
     # Telegraf の EC2 を lab の EC2 より後に作ったとき（lab の EC2 は作り直さない）は、lab の起動時の forward が Telegraf のアドレスを
     # 読めていない。何度打っても同じ規則になるので毎回打つ（トポロジが上がっていなければ lab.sh の up がまた打つ）
-    log "7-2b. lab の EC2 から Telegraf の EC2 へ SNMP / trap / FRR のログを通す（lab forward）"
+    log "7-2b. lab の EC2 から Telegraf の EC2 へ SNMP / gNMI / trap / syslog を通す（lab forward）"
     ssm_run "$LAB_INSTANCE_ID" "[ ! -x /usr/local/bin/lab ] || /usr/local/bin/lab forward" \
       || printf '\033[1;33m%s\033[0m\n' "lab forward が失敗した。lab の EC2 で sudo lab forward-status を見る（docs/pipeline.md）"
     log "7-2c. Telegraf の EC2 を確かめる"
@@ -601,7 +601,7 @@ if [ -n "$GRAPH_PID" ]; then
   fi
   tail -n 3 "$GRAPH_LOG"
   log "7-3b. Neptune が空なら lab の定義からトポロジを入れる（初期ロード。入っていれば何もしない。入れ直すのは ops/sync-graph.sh --replace）"
-  # lab/lab_topology.py が lab/wanlab.clab.yml.in と lab/frr/*.conf から機器と回線を作り（手元で打つ）、ops/seed_graph.py を Web の EC2 の上で
+  # lab/lab_topology.py が lab/splab.clab.yml.in と lab/srlinux/*.cli から機器と回線（と IP 層 / EVPN・BGP 層）を作り（手元で打つ）、ops/seed_graph.py を Web の EC2 の上で
   # Web と同じ環境変数と依存で動かして Neptune に入れる。コマンドに記号を入れないよう、スクリプトもトポロジも base64 で渡す
   LAB_TOPOLOGY_B64=$("${PY[@]}" lab/lab_topology.py lab | base64 | tr -d '\n') || die "lab/lab_topology.py が lab の定義を読めなかった"
   run_on_instance "$INSTANCE_ID" "echo $(base64 < ops/seed_graph.py | tr -d '\n') | base64 -d | NAME_PREFIX=$PREFIX LAB_TOPOLOGY_B64=$LAB_TOPOLOGY_B64 /usr/bin/python3.13 -"

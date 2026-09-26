@@ -7,7 +7,14 @@
   頂点 label=device, id=device_id。property: hostname, site, role, asn, mgmt_ip, enabled, status
   頂点 label=interface, id=<device_id>#<IF 名>。property: device_id, name, address, status（機器とは辺でなく device_id でつなぐ）
   辺   label=link, a → b（a < b）。property: a_if, b_if, kind, role, bandwidth_mbps, status
-インタフェースは lab/lab_topology.py が lab の定義から作る全部（管理の eth0 やリンクに出ない IF も）。agent/data の静的データには無い。
+インタフェースは lab/lab_topology.py が lab の定義から作る全部（管理の mgmt0 やリンクに出ない IF も）。agent/data の静的データには無い。
+
+物理層より上（IP 層 / EVPN・BGP 層。data/layers.json、lab/lab_topology.py の layers）は、機器やインタフェースとは別の頂点で、
+下の層の頂点の id を property に持つ（interface_id / ip_interface_id。層をまたぐ紐づけの鍵）:
+  頂点 label=ip_interface（id <機器>#<IF>.<n>）、isis_adjacency（<機器>#isis#<IF>.<n>）、bgp_session（<機器>#bgp#<相手の IP>）、
+       evpn_instance（<機器>#evi#<EVI>）、ethernet_segment（<機器>#es#<名前>）。property は lab_topology.py の docstring の通り + status + layer（ip / evpn）
+  辺   over（上の層 → 下の層の頂点）、peer（IS-IS の隣接 / BGP のセッションの両端）、tunnel（同じ EVI 同士）、attach（EVI → LAG の IF）、segment（同じ ESI 同士）
+status は物理層と同じ動的な状態で、gNMI の検知（bgp_down / isis_down）を受けた graph/status_handler.py が set_layer_status() で書く。
 
 status（UP / DOWN / ALARM）は動的な状態で、Spark の検知（AnomalyOpened / AnomalyResolved）を受けた graph/status_handler.py（terraform/pipeline/graph の Lambda）が
 set_status() で書く。無ければ UP。seed() で入れ直すと消える（静的な構成だけを入れる）。
@@ -89,9 +96,12 @@ def _props(d: dict, keys) -> str:
 
 
 DEVICE_KEYS = ("hostname", "site", "role", "asn", "mgmt_ip", "enabled", "status")
-IF_KEYS = ("device_id", "name", "address", "status")
+IF_KEYS = ("device_id", "name", "address", "lag", "status")
 LINK_KEYS = ("a_if", "b_if", "kind", "role", "bandwidth_mbps", "status")
 STATUSES = ("UP", "DOWN", "ALARM")
+LAYER_LABELS = ("ip_interface", "isis_adjacency", "bgp_session", "evpn_instance", "ethernet_segment")
+LAYER_EDGES = ("over", "peer", "tunnel", "attach", "segment")
+LAYER_KIND = {"bgp": "bgp_session", "isis": "isis_adjacency"}   # set_layer_status の kind（id の真ん中）→ label
 
 
 def _if_id(device_id: str, if_name: str) -> str:
@@ -112,8 +122,8 @@ def load_topology() -> tuple[list[dict], list[dict]]:
     for m in query("g.V().hasLabel('interface').elementMap()"):
         d = devices.get(m.get("device_id"))
         if d is not None:
-            d["interfaces"].append({"name": m.get("name"), "address": m.get("address"), "status": m.get("status"),
-                                    "registered": m.get("registered") is not False})
+            d["interfaces"].append({"name": m.get("name"), "address": m.get("address"), "lag": m.get("lag") or "",
+                                    "status": m.get("status"), "registered": m.get("registered") is not False})
     links = []
     for m in query("g.E().hasLabel('link').elementMap()"):
         l = {k: m.get(k) for k in LINK_KEYS}
@@ -125,24 +135,45 @@ def load_topology() -> tuple[list[dict], list[dict]]:
     return sorted(devices.values(), key=lambda d: d["device_id"]), links
 
 
+def _labels(labels) -> str:
+    return ",".join(_q(x) for x in labels)
+
+
 def count() -> dict:
-    """登録済みの機器・インタフェース・回線の数と、未登録の頂点の数（ops/seed_graph.py は devices が 0 なら空とみなす）"""
+    """登録済みの機器・インタフェース・回線の数、上の層の頂点と辺の数、未登録の頂点の数（ops/seed_graph.py は devices が 0 なら空とみなす）"""
     return {"devices": query("g.V().hasLabel('device').hasNot('registered').count()")[0],
             "interfaces": query("g.V().hasLabel('interface').hasNot('registered').count()")[0],
             "links": query("g.E().hasLabel('link').count()")[0],
+            "layers": query(f"g.V().hasLabel({_labels(LAYER_LABELS)}).hasNot('registered').count()")[0],
+            "layer_edges": query(f"g.E().hasLabel({_labels(LAYER_EDGES)}).count()")[0],
             "unregistered": query("g.V().has('registered',false).count()")[0]}
+
+
+def load_layers() -> dict:
+    """上の層の頂点と辺（lab_topology.py の layers と同じ形。頂点には status と registered が付く）"""
+    vertices = []
+    for m in query(f"g.V().hasLabel({_labels(LAYER_LABELS)}).elementMap()"):
+        v = {k: x for k, x in m.items() if k != "registered"}
+        v["registered"] = m.get("registered") is not False
+        vertices.append(v)
+    edges = [{"label": m.get("label"), "from": m.get("OUT", {}).get("id"), "to": m.get("IN", {}).get("id")}
+             for m in query(f"g.E().hasLabel({_labels(LAYER_EDGES)}).elementMap()")]
+    vertices.sort(key=lambda v: str(v.get("id")))
+    edges.sort(key=lambda e: (e["label"], str(e["from"]), str(e["to"])))
+    return {"vertices": vertices, "edges": edges}
 
 
 def _add_interfaces(device_id: str, interfaces) -> None:
     for i in interfaces or []:
         if i.get("name"):
-            v = {"device_id": device_id, "name": i["name"], "address": i.get("address")}
+            v = {"device_id": device_id, "name": i["name"], "address": i.get("address"), "lag": i.get("lag") or ""}
             query(f"g.addV('interface').property(id,{_q(_if_id(device_id, i['name']))}){_props(v, IF_KEYS[:-1])}")
 
 
-def seed(devices: list[dict], links: list[dict]) -> dict:
+def seed(devices: list[dict], links: list[dict], layers: dict | None = None) -> dict:
     """静的データで置き換える（登録済みを全部消してから入れる）。devices は lab/lab_topology.py が lab の定義から作ったもの
-    （interfaces 付き）、または devices.yaml の行に topology.json の asn を足したもの（interfaces 無し）。
+    （interfaces 付き）、または devices.yaml の行に topology.json の asn を足したもの（interfaces 無し）。layers は同じく lab_topology.py の
+    layers（または data/layers.json）で、None なら上の層は触らない。
     status は入れない（入れ直したら全部 UP に戻る）。ただし未登録の頂点のうち今回登録されるものは置き換え、UP でない status を引き継ぐ。
     登録されないままの未登録の頂点は残す（登録漏れの印を入れ直しで消さない）"""
     dev_ids = {d["device_id"] for d in devices}
@@ -167,7 +198,44 @@ def seed(devices: list[dict], links: list[dict]) -> dict:
     for dev, ifn, st in carry:
         if st and st != "UP":
             set_status(dev, ifn, st)
-    return count()
+    out = count()
+    if layers is not None:
+        out.update(seed_layers(layers, if_ids))
+    return out
+
+
+def seed_layers(layers: dict, known_ids: set | None = None) -> dict:
+    """上の層（ip_interface / isis_adjacency / bgp_session / evpn_instance / ethernet_segment と、その辺）を置き換える。
+    seed() と同じく、未登録の頂点のうち今回登録されるものは UP でない status を引き継ぐ。辺は両端の頂点があるときだけ張り、
+    無いものは skipped_edges に数える（known_ids は物理層の頂点の id。None なら Neptune のインタフェースの id を読む）"""
+    vertices, edges = layers.get("vertices") or [], layers.get("edges") or []
+    ids = {v["id"] for v in vertices if v.get("id")}
+    if known_ids is None:
+        known_ids = set(query("g.V().hasLabel('interface').id()"))
+    carry = {}
+    for m in query(f"g.V().hasLabel({_labels(LAYER_LABELS)}).has('registered',false).elementMap()"):
+        if m.get("id") in ids:
+            carry[m["id"]] = m.get("status")
+            query(f"g.V({_q(m['id'])}).drop()")
+    query(f"g.V().hasLabel({_labels(LAYER_LABELS)}).hasNot('registered').drop()")
+    for v in vertices:
+        if not v.get("id") or v.get("label") not in LAYER_LABELS:
+            continue
+        keys = [k for k in v if k not in ("id", "label", "status", "registered")]
+        query(f"g.addV({_q(v['label'])}).property(id,{_q(v['id'])}){_props(v, keys)}")
+    skipped = 0
+    for e in edges:
+        if e.get("label") not in LAYER_EDGES or not ({e.get("from"), e.get("to")} <= (ids | known_ids)):
+            skipped += 1
+            continue
+        query(f"g.addE({_q(e['label'])}).from(__.V({_q(e['from'])})).to(__.V({_q(e['to'])}))")
+    for vid, st in carry.items():
+        if st and st != "UP":
+            query(f"g.V({_q(vid)}).property(single,'status',{_q(st)})")
+    out = {k: v for k, v in count().items() if k in ("layers", "layer_edges", "unregistered")}
+    if skipped:
+        out["skipped_edges"] = skipped
+    return out
 
 
 def _registered(vid: str) -> list:
@@ -259,6 +327,30 @@ def set_status(device_id: str, if_name: str = "", status: str = "DOWN", only_if:
     if not reg and status != "UP" and not only_if:
         _upsert_unregistered(device_id, "device", {"hostname": device_id, "site": "?", "role": "unknown", "enabled": False})
         query(f"g.V({dev}).property(single,'status',{st})")
+        out["unregistered"] = True
+    elif any(r is False for r in reg):
+        out["unregistered"] = True
+    return out
+
+
+def set_layer_status(device_id: str, kind: str, target: str, status: str = "DOWN") -> dict:
+    """上の層の動的な状態を書く。kind は bgp（target = 相手の IP）か isis（target = サブインタフェース ethernet-1/1.0）で、
+    頂点の id は <機器>#<kind>#<target>。無ければ（トポロジに無いセッション）未登録の頂点を作って unregistered: True を返す
+    （UP に戻すだけのときは作らない）。set_status と同じく property は single で書く"""
+    status = str(status).upper()
+    if status not in STATUSES:
+        return {"error": f"status は {' / '.join(STATUSES)} のどれか"}
+    label = LAYER_KIND.get(str(kind))
+    if not label:
+        return {"error": f"kind は {' / '.join(LAYER_KIND)} のどれか"}
+    vid = f"{device_id}#{kind}#{target}"
+    reg = query(f"g.V({_q(vid)}).hasLabel({_q(label)}).property(single,'status',{_q(status)}).coalesce(values('registered'),constant(true))")
+    out = {"device_id": device_id, "kind": kind, "target": target, "status": status, "updated": len(reg)}
+    if not reg and status != "UP":
+        props = {"device_id": device_id, "layer": "evpn" if kind == "bgp" else "ip",
+                 ("peer_address" if kind == "bgp" else "name"): target}
+        _upsert_unregistered(vid, label, props)
+        query(f"g.V({_q(vid)}).property(single,'status',{_q(status)})")
         out["unregistered"] = True
     elif any(r is False for r in reg):
         out["unregistered"] = True

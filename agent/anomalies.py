@@ -2,7 +2,7 @@
 
 2026-09-24 までは DynamoDB の表（terraform/pipeline/stream）だった。いまは Neptune（terraform/pipeline/graph）の頂点で、読み方は agent/graph.py の list_records。
 Neptune の接続先が無ければ（graph.configured() が False）「まだ配備されていない」を返して、PIPELINE を作っていない構成でも落ちない。
-頂点: id = anomaly_id（<機器>#<種別>#<対象>）, device_id, kind（link_down / trap）, target, status（open / resolved）,
+頂点: id = anomaly_id（<機器>#<種別>#<対象>）, device_id, kind（link_down / bgp_down / isis_down / trap）, target, status（open / resolved）,
 first_seen / last_seen / resolved_at（epoch 秒）, source（poll / trap）, detail, notified。
 開いた・閉じたの履歴は S3 Tables の anomaly_events（Athena で読む。docs/data-stores.md）。ここが見せるのは発生ごとの「いま」だけ。
 """
@@ -38,13 +38,13 @@ def list_anomalies(status: str = "open", limit: int = 20, device_id: str = "") -
 TOOL_SPECS = [
     {"toolSpec": {
         "name": "list_anomalies",
-        "description": "監視で見つかった異常の一覧（機器、種別 link_down / trap、対象インタフェース、発生時刻、最後に確認した時刻、解消時刻、poll か trap か）。"
+        "description": "監視で見つかった異常の一覧（機器、種別 link_down / bgp_down / isis_down / trap、対象（インタフェース。bgp_down は相手の IP）、発生時刻、最後に確認した時刻、解消時刻、poll / trap / gnmi のどれで見つけたか）。"
                        "「今の異常は」「どこが落ちている」と聞かれたら status=open で呼ぶ。"
                        "「これまでの異常は」「過去に何があった」「履歴」と聞かれたら status=all（解消済みも含む）で呼ぶ。解消済みだけなら status=resolved。",
         "inputSchema": {"json": {"type": "object", "properties": {
             "status": {"type": "string", "description": "open（未解消、既定）／ resolved（解消済み）／ all（両方を新しい順に）"},
             "limit": {"type": "integer", "description": "件数の上限（既定 20、最大 100）"},
-            "device_id": {"type": "string", "description": "機器名（例 hq-ce-01）で絞る。空なら全機器"},
+            "device_id": {"type": "string", "description": "機器名（例 dc1-leaf-01）で絞る。空なら全機器"},
         }}},
     }},
 ]

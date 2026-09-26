@@ -17,7 +17,7 @@
 | `Error acquiring the state lock` | 同じルートを別のターミナルで打っている。終わるのを待つ |
 | `opensearch_index` の作成が 403 | 権限の反映待ちなら時間をおいて打ち直す。続くなら `deploy.env` に `ADMIN_ARN` を書く。destroy で出るなら apply した人と別の人で打っている |
 | `opensearch_index` の作成が `x509` / `dial tcp` / `i/o timeout` | 社内 CA（`OPENSEARCH_CACERT_FILE`）か、`*.ap-northeast-1.aoss.amazonaws.com:443` に届かない（[setup.md](setup.md)） |
-| ビルドの `pip install` が `CERTIFICATE_VERIFY_FAILED` / snmpd の `apk add` が証明書で落ちる | 社内 CA の差し替え。snmpd は `lab/snmpd/certs/` に社内のルート証明書を置く。`ReadTimeoutError` は QEMU が遅いだけなので打ち直す |
+| ビルドの `pip install` が `CERTIFICATE_VERIFY_FAILED` | 社内 CA の差し替え。`ReadTimeoutError` は QEMU が遅いだけなので打ち直す |
 
 ## 画面に入れない
 

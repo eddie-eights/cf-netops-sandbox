@@ -32,29 +32,30 @@ with gr.Blocks(title=f"{TITLE} チャット") as demo:
         box.submit(chat.respond, [box, chatbot, session], [box, chatbot, session])
         send.click(chat.respond, [box, chatbot, session], [box, chatbot, session])
         reset.click(chat.new_session, [chatbot, session], [chatbot, session])
-        gr.Markdown("機器の一覧・接続・停止時の影響は、エージェントがトポロジのツールで調べて答えます（例: `hq-ce-01 の接続先は` / `carrier-pe-02 が落ちたら`）。")
+        gr.Markdown("機器の一覧・接続・停止時の影響は、エージェントがトポロジのツールで調べて答えます（例: `dc1-leaf-01 の接続先は` / `dc1-spine-02 が落ちたら` / `dc1-leaf-01 の BGP のセッションは`）。")
     with gr.Tab("トポロジ"):
         topo_html = gr.HTML(tv.topology_svg())
         topo_table = gr.Dataframe(tv.device_table(), interactive=False, label="機器")
+        layer_table = gr.Dataframe(tv.layer_table(), interactive=False, label="IP 層と EVPN・BGP 層（IS-IS の隣接 / iBGP EVPN のセッション / EVI / Ethernet Segment。下の層の ID で物理層とつながる。gNMI の検知で DOWN になる）")
         topo_refresh = gr.Button("再読み込み")
         with gr.Accordion("Neptune で編集（terraform/pipeline/graph がある間だけ）", open=False):
             edit_msg = gr.Markdown("" if tv.can_edit() else "Neptune は未配備。terraform/pipeline/graph を apply して Web を再起動すると使えます。")
-            gr.Markdown("**静的データを投入** = Neptune の中身をいったん全部消して、`agent/data/` の 10 台・10 本に戻す（初回と、編集をやり直したいとき）。"
+            gr.Markdown("**静的データを投入** = Neptune の中身をいったん全部消して、`agent/data/` の 8 台・12 本（と IP 層・EVPN 層）に戻す（初回と、編集をやり直したいとき）。"
                         "機器の追加・削除はこの画面にはないので `agent/data/` を直して投入し直す。リンクは下で 1 本ずつ足す・消す。"
                         "変えた内容はエージェントの次の質問から効く。")
             with gr.Row():
-                seed_btn = gr.Button("静的データを投入（Neptune を消して 10 台・10 本に戻す）", interactive=tv.can_edit())
+                seed_btn = gr.Button("静的データを投入（Neptune を消して 8 台・12 本に戻す）", interactive=tv.can_edit())
             gr.Markdown("#### リンクを追加")
             with gr.Row():
                 la = gr.Dropdown(tv.device_choices(), value=None, label="機器 A", scale=2)
                 lai = gr.Dropdown([], value=None, label="A のインタフェース", allow_custom_value=True, scale=2,
-                                  info="機器 A を選ぶと使用中の名前が出る。新しい名前（eth3 など）も打てる")
+                                  info="機器 A を選ぶと使用中の名前が出る。新しい名前（ethernet-1/3 など）も打てる")
                 lb = gr.Dropdown(tv.device_choices(), value=None, label="機器 B", scale=2)
                 lbi = gr.Dropdown([], value=None, label="B のインタフェース", allow_custom_value=True, scale=2,
                                   info="機器 B を選ぶと使用中の名前が出る。新しい名前も打てる")
             with gr.Row():
-                lkind = gr.Dropdown([("ebgp（拠点 - キャリア）", "ebgp"), ("ibgp（キャリア内）", "ibgp"), ("l2（拠点 LAN）", "l2"), ("mgmt（管理）", "mgmt")],
-                                    value="l2", label="種別")
+                lkind = gr.Dropdown([("fabric（Spine - Leaf）", "fabric"), ("lag（VM - Leaf の LACP）", "lag"), ("l2", "l2"), ("mgmt（管理）", "mgmt")],
+                                    value="fabric", label="種別")
                 lrole = gr.Dropdown([("なし", ""), ("primary（主回線。図は実線）", "primary"), ("secondary（副回線。図は破線）", "secondary")],
                                     value="", label="役割")
                 lbw = gr.Number(label="帯域 Mbps", precision=0, info="空でもよい。1000 以上は図で太線")
@@ -64,13 +65,13 @@ with gr.Blocks(title=f"{TITLE} チャット") as demo:
                 del_sel = gr.Dropdown(tv.link_choices(), value=None, label="削除するリンク", scale=4,
                                       info="「機器 A の IF - 機器 B の IF [種別 役割]」。追加・削除・再読み込みのたびに更新")
                 del_btn = gr.Button("選んだリンクを削除", variant="stop", interactive=tv.can_edit())
-            edit_out = [edit_msg, topo_html, topo_table, la, lb, del_sel]
+            edit_out = [edit_msg, topo_html, topo_table, layer_table, la, lb, del_sel]
             la.change(tv.interface_choices, [la], [lai])
             lb.change(tv.interface_choices, [lb], [lbi])
             seed_btn.click(tv.seed_graph, [la, lb], edit_out)
             add_btn.click(tv.add_link, [la, lai, lb, lbi, lkind, lrole, lbw], edit_out)
             del_btn.click(tv.remove_link, [del_sel, la, lb], edit_out)
-        topo_refresh.click(tv.refresh_topology, [la, lb], [topo_html, topo_table, la, lb, del_sel])
+        topo_refresh.click(tv.refresh_topology, [la, lb], [topo_html, topo_table, layer_table, la, lb, del_sel])
     with gr.Tab("異常一覧"):
         with gr.Row():
             an_status = gr.Radio(iv.status_choices(iv.ANOMALY_STATUS_JA), value="open", label="状態", scale=3)
@@ -115,7 +116,7 @@ with gr.Blocks(title=f"{TITLE} チャット") as demo:
         # 30 秒ごとに描き直す（Spark の検知が 1 分、ワーカーの確認が 30 秒おきなので、ボタンを押さなくても追える。
         # 読むのは Neptune のクエリ 3 回（トポロジ・異常・修復案）で、開いているブラウザの数だけ）。proposal_id の選択はそのまま残す
         ticker = gr.Timer(30)
-        ticker.tick(tv.redraw_topology, None, [topo_html, topo_table])
+        ticker.tick(tv.redraw_topology, None, [topo_html, topo_table, layer_table])
         ticker.tick(iv.anomaly_table, [an_status], [an_msg, an_table])
         ticker.tick(lambda st: iv.proposal_table(st)[:2], [pr_status], [pr_msg, pr_table])
         pr_approve.click(lambda i, s, w, ok: iv.decide_proposal(i, "approved", s, w, ok), [pr_id, pr_status, pr_who, pr_ok],

@@ -9,14 +9,10 @@ __pycache__/
 deploy.env
 # pip download の置き場（ops/up.sh の手順 4）
 wheels/
-lab/wanlab.clab.yml
+lab/splab.clab.yml
 *.rpm
 # uv の仮想環境
 .venv/
-
-# 社内の証明書（docs/pipeline.md の「動かないとき」）
-lab/snmpd/certs/*.crt
-lab/snmpd/certs/*.pem
 
 # Terraform（state はローカル。消すと Terraform が作ったものを見失うので、このリポジトリのフォルダごと残す）
 .terraform/

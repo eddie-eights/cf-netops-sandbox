@@ -17,7 +17,7 @@ import graph  # config が sys.path を通したあとで読む（agent/graph.py
 import topology
 
 ROLE_ORDER = topology.ROLE_ORDER
-ROLE_LABEL = {"pe": "キャリア PE", "ce": "拠点 CE", "host": "LAN 端末", "unknown": "未登録"}
+ROLE_LABEL = {"upstream": "上流 VM", "leafsw": "Leaf-SW（上流側）", "spine": "Spine", "leaf": "Leaf（アクセス側）", "host": "VM（アクセス側）", "unknown": "未登録"}
 DOWN_COLOR = "#c62828"
 
 
@@ -56,6 +56,39 @@ def device_table() -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+LAYER_LABEL = {"ip_interface": "IP", "isis_adjacency": "IS-IS 隣接", "bgp_session": "BGP セッション", "evpn_instance": "EVPN インスタンス", "ethernet_segment": "Ethernet Segment"}
+
+
+def _layer_detail(v: dict) -> str:
+    """層の頂点 1 つの要点（lab/lab_topology.py の layers が付ける属性から）"""
+    lb = v.get("label")
+    if lb == "ip_interface":
+        return f'{v.get("name", "")} {v.get("address", "")}/{v.get("prefix_length", "")}'
+    if lb == "isis_adjacency":
+        return f'instance {v.get("instance", "")}'
+    if lb == "bgp_session":
+        return f'{v.get("local_address", "")} -> {v.get("peer_address", "")} AS {v.get("peer_as", "")} {v.get("afi", "")} ({v.get("role", "")})'
+    if lb == "evpn_instance":
+        return f'EVI {v.get("evi", "")} VNI {v.get("vni", "")} RT {v.get("route_target", "")} VTEP {v.get("vtep", "")}'
+    if lb == "ethernet_segment":
+        return f'{v.get("name", "")} ESI {v.get("esi", "")} {v.get("mode", "")} on {v.get("interface", "")}'
+    return ""
+
+
+def layer_table() -> pd.DataFrame:
+    """物理層より上（IP 層と EVPN・BGP 層）の頂点。gNMI の検知（bgp_down / isis_down）で DOWN になったものを見る"""
+    topology.reload()
+    rows = []
+    for v in topology.layers().get("vertices") or []:
+        rows.append({
+            "層": v.get("layer") or "", "種類": LAYER_LABEL.get(v.get("label"), v.get("label") or ""), "ID": v.get("id") or "",
+            "機器": v.get("device_id") or "", "内容": _layer_detail(v), "相手": v.get("peer_device") or "",
+            "下の層の ID": v.get("ip_interface_id") or v.get("interface_id") or "", "状態": v.get("status") or "UP",
+        })
+    rows.sort(key=lambda r: (r["層"], r["種類"], r["機器"], r["ID"]))
+    return pd.DataFrame(rows, columns=["層", "種類", "ID", "機器", "内容", "相手", "下の層の ID", "状態"])
+
+
 def topology_svg() -> str:
     """段ごとに横へ並べた素朴な図。位置は device_id の順で決まるので、再読み込みしても動かない"""
     topology.reload()
@@ -71,7 +104,7 @@ def topology_svg() -> str:
         for j, dev in enumerate(ids):
             pos[dev] = (left + step * (j + 0.5), top + row_h * i + 30)
     height = top + row_h * len(roles)
-    color = {"ebgp": "#1f5fbf", "ibgp": "#7a4bd6", "l2": "#8a949e", "mgmt": "#c0c8d0"}
+    color = {"fabric": "#1f5fbf", "lag": "#7a4bd6", "l2": "#8a949e", "mgmt": "#c0c8d0"}
     out = [f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" '
            f'style="width:100%;max-width:{width}px;font-family:system-ui,sans-serif;font-size:12px">']
     for i, role in enumerate(roles):
@@ -94,7 +127,7 @@ def topology_svg() -> str:
                    f'{html.escape((l.get("a_if") or "") + "/" + (l.get("b_if") or ""))}</text>')
     for dev, (x, y) in pos.items():
         n = topology.NODES[dev]
-        fill = {"pe": "#e8f0fe", "ce": "#e6f4ea", "host": "#f3f4f6", "unknown": "#fff4e5"}.get(n["role"], "#fff")
+        fill = {"spine": "#e8f0fe", "leafsw": "#e6f4ea", "leaf": "#e6f4ea", "upstream": "#f3f4f6", "host": "#f3f4f6", "unknown": "#fff4e5"}.get(n["role"], "#fff")
         asn = f'AS {n["asn"]}' if n.get("asn") else n["site"]
         st = n.get("status") or "UP"
         border = f'stroke="{DOWN_COLOR}" stroke-width="2.5"' if st != "UP" else 'stroke="#374151" stroke-width="1.2"'
@@ -108,10 +141,10 @@ def topology_svg() -> str:
     src = {"neptune": "Neptune（terraform/pipeline/graph）", "neptune-empty": "Neptune は空。静的データを表示中（下の「静的データを投入」で入る）"}.get(
         topology.SOURCE, "静的データ（data/。terraform/pipeline/graph を apply すると Neptune に切り替わる）")
     legend = ('<p style="font-size:12px;color:#6b7480;margin:4px 0 0">'
-              '実線 = 主回線 / 破線 = 副回線 / 太線 = 1 Gbps 以上。青 = eBGP、紫 = iBGP、灰 = 拠点 LAN。'
+              '実線 = 主回線 / 破線 = 副回線 / 太線 = 1 Gbps 以上。青 = fabric（Spine - Leaf。IS-IS + iBGP EVPN）、紫 = lag（VM - Leaf の LACP）、灰 = l2。'
               '<span style="color:#c62828">赤</span> = 落ちている（Spark の検知が Neptune の status に反映したもの。復旧すると戻る）。'
               '橙の点線の枠 = 未登録（トポロジに無い機器から検知だけが来た。lab に足したなら ops/sync-graph.sh --replace で登録する）。'
-              f'アドレスと帯域はすべて架空（lab と同じ）。元データ: {html.escape(src)}</p>')
+              f'アドレスと帯域はすべて架空（lab と同じ）。IP 層（IS-IS）と EVPN・BGP 層は下の表。元データ: {html.escape(src)}</p>')
     return "".join(out) + legend
 
 
@@ -125,7 +158,7 @@ def _choices(a="", b=""):
 
 def refresh_topology(a="", b=""):
     topology.reload(force=True)
-    return topology_svg(), device_table(), *_choices(a, b)
+    return topology_svg(), device_table(), layer_table(), layer_table(), *_choices(a, b)
 
 
 def redraw_topology():
@@ -154,7 +187,7 @@ def _graph_call(fn, *args, a="", b=""):
 
 
 def seed_graph(a, b):
-    return _graph_call(lambda: graph.seed(*topology.load_static()), a=a, b=b)
+    return _graph_call(lambda: graph.seed(*topology.load_static(), topology.load_static_layers()), a=a, b=b)
 
 
 def add_link(a, a_if, b, b_if, kind, role, bw):
@@ -164,7 +197,7 @@ def add_link(a, a_if, b, b_if, kind, role, bw):
     if a == b:
         return "機器 A と機器 B が同じです", *refresh_topology(a, b)
     if not (a_if and b_if):
-        return "両端のインタフェース名を選ぶか入力してください（例 eth3）", *refresh_topology(a, b)
+        return "両端のインタフェース名を選ぶか入力してください（例 ethernet-1/3）", *refresh_topology(a, b)
     return _graph_call(graph.add_link, a, a_if, b, b_if, kind, role or "", int(bw) if bw else None, a=a, b=b)
 
 

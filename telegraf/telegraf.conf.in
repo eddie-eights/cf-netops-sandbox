@@ -2,21 +2,24 @@
 # __KAFKA_BROKERS__ / __AWS_REGION__ を埋めて /etc/telegraf/telegraf.conf に書く。ブローカーは SSM パラメータ /<接頭辞>/msk-bootstrap
 # （terraform/pipeline/stream が書く）から取る。
 #
-# ポーリング先（inputs.snmp の agents）は __SNMP_AGENTS__ で、telegraf.sh render が同じディレクトリの snmp_agents.txt で埋める。
-# snmp_agents.txt は ops/up.sh の 5-1b が lab の定義から作って s3://<バケット>/telegraf/ に置く（lab/lab_topology.py --snmp-agents。
-# 機器の一覧を lab の定義 1 か所にするため、ここに IP を書かない）。
+# ポーリング先（inputs.snmp の agents）は __SNMP_AGENTS__、gNMI の購読先（inputs.gnmi の addresses）は __GNMI_TARGETS__ で、telegraf.sh render が
+# 同じディレクトリの snmp_agents.txt / gnmi_targets.txt で埋める。どちらも ops/up.sh の 5-1b が lab の定義から作って s3://<バケット>/telegraf/ に置く
+#（lab/lab_topology.py --snmp-agents / --gnmi-targets。機器の一覧を lab の定義 1 か所にするため、ここに IP を書かない）。
 #
-# 流れ: CE の snmpd を 10 秒ごとにポーリング（ifTable）+ snmpd からの trap を udp 162 で受ける + FRR のログを tcp 5140 で受ける
-#       → MSK（IAM 認証、TLS）
-#   metrics トピック: interface（ifDescr / ifOperStatus / ifInErrors ...）と system（sysName / sysUpTime）
+# 流れ: Spine-Leaf の SR Linux 6 台の SNMP を 10 秒ごとにポーリング（ifTable）+ gNMI で BGP / IS-IS / EVPN の状態を購読
+#       + 機器からの trap を udp 162 で受ける + 機器の syslog を udp 5140 で受ける → MSK（IAM 認証、TLS）
+#   metrics トピック: interface（ifName / ifOperStatus / ifInErrors ...）と system（sysName / sysUpTime）
+#   gnmi    トピック: bgp_neighbor（session_state。on_change）/ isis_adjacency（adjacency_state。on_change）/ evpn_es / mac_table（30 秒ごと）
 #   traps   トピック: snmp_trap（linkDown / linkUp）
-#   logs    トピック: frr_log（FRR のログ。BGP の隣接の up / down など）
+#   logs    トピック: device_log（機器の syslog。BGP の隣接の up / down など。lab/srlinux/*.cli の remote-server）
 # 機器は lab の EC2 の中の docker network（203.0.113.0/24）にいる。この EC2 からは次の経路で届く（lab の EC2 で sudo lab forward-status）:
-#   ポーリング  VPC のルートで lab の EC2 へ行き、lab の EC2 が管理ネットワークへ転送する
-#   trap        snmpd は lab の EC2（203.0.113.1:162）へ送り、lab の EC2 がここへ DNAT する。送り元は機器の管理 IP のまま
-#   FRR のログ  lab の EC2 の rsyslog がファイルを読み、「機器名 行」にしてここの 5140/tcp へ送る（lab/rsyslog-frr.conf.in）
+#   ポーリング  SNMP（161/udp）も gNMI（57400/tcp）も VPC のルートで lab の EC2 へ行き、lab の EC2 が管理ネットワークへ転送する
+#   trap        機器は lab の EC2（203.0.113.1:162）へ送り、lab の EC2 がここへ DNAT する。送り元は機器の管理 IP のまま
+#   syslog      機器は lab の EC2（203.0.113.1:5140/udp）へ送り、lab の EC2 がここへ DNAT する（trap と同じ仕組み。rsyslog は使わない）
 # MIB は入れないので OID は数値で書き、名前を明示する（translator が無くても動く）。trap の varbind 名は数値 OID のまま
-# Kafka に載る（detector 側で ifDescr の OID を引く）。
+# Kafka に載る（detector 側で ifName の OID を引く）。
+# SR Linux の ifTable は物理ポート全部（未使用の admin-down も）とサブインタフェース（ethernet-1/1.0）を行に出す。落とすのは Spark 側
+#（spark/snmp_sinks.py。ifAdminStatus が down の行と "." を含む名前）。ifDescr は「名前 + description」になるので IF の鍵は ifName にする。
 
 [agent]
   interval = "10s"
@@ -27,7 +30,7 @@
   omit_hostname = true
   snmp_translator = "gosmi"
 
-# ---- ポーリング。agents は監視対象（snmpd のサイドカーが付く CE）の管理 IP（snmpd は CE の netns に相乗り）。lab の EC2 を経由する（上の注記）
+# ---- ポーリング。agents は監視対象（CE）の管理 IP（SR Linux の mgmt0。SNMP v2c の community public は containerlab が全ノードに入れる）。lab の EC2 を経由する（上の注記）
 [[inputs.snmp]]
   agents = [__SNMP_AGENTS__]
   version = 2
@@ -48,9 +51,12 @@
     name = "interface"
     inherit_tags = ["sysName"]
     [[inputs.snmp.table.field]]
+      name = "ifName"
+      oid = ".1.3.6.1.2.1.31.1.1.1.1"
+      is_tag = true
+    [[inputs.snmp.table.field]]
       name = "ifDescr"
       oid = ".1.3.6.1.2.1.2.2.1.2"
-      is_tag = true
     [[inputs.snmp.table.field]]
       name = "ifAdminStatus"
       oid = ".1.3.6.1.2.1.2.2.1.7"
@@ -70,26 +76,63 @@
       name = "ifOutErrors"
       oid = ".1.3.6.1.2.1.2.2.1.20"
 
+# ---- gNMI（SR Linux の状態を購読。SNMP には無い BGP / IS-IS / EVPN の層）。containerlab が全ノードで 57400（TLS、自己署名）を開け、
+# ユーザーは containerlab が入れる既定（admin / NokiaSrl1!。lab だけの公開既定値で、実機の値ではない。実機なら SSM から埋める）。
+# source タグは購読先のアドレス（機器の管理 IP。Spark はこれと device map で機器名を引く）。パスの鍵（peer-address など）はタグになる。
+# on_change は購読の直後に今の状態を全部送り、その後は変わったときだけ送る。sample は sample_interval ごと。
+# Spark（spark/snmp_sinks.py の events）は bgp_neighbor の session_state != established を bgp_down、isis_adjacency の
+# adjacency_state != up を isis_down として Neptune の bgp_session / isis_adjacency の頂点を DOWN にする（graph/status_handler.py）。
+# 隣接が消えたとき（gNMI の delete）は Telegraf が載せないので、down を経ずに消える隣接は残ることがある（実機で確かめる）
+[[inputs.gnmi]]
+  addresses = [__GNMI_TARGETS__]
+  username = "admin"
+  password = "NokiaSrl1!"
+  encoding = "json_ietf"
+  redial = "10s"
+  enable_tls = true
+  insecure_skip_verify = true
+
+  [[inputs.gnmi.subscription]]
+    name = "bgp_neighbor"
+    path = "/network-instance[name=default]/protocols/bgp/neighbor[peer-address=*]/session-state"
+    subscription_mode = "on_change"
+  [[inputs.gnmi.subscription]]
+    name = "isis_adjacency"
+    path = "/network-instance[name=default]/protocols/isis/instance[name=main]/interface[interface-name=*]/adjacency"
+    subscription_mode = "on_change"
+  [[inputs.gnmi.subscription]]
+    name = "evpn_es"
+    path = "/system/network-instance/protocols/evpn/ethernet-segments/bgp-instance[id=1]/ethernet-segment[name=*]/oper-state"
+    subscription_mode = "sample"
+    sample_interval = "30s"
+  [[inputs.gnmi.subscription]]
+    name = "mac_table"
+    path = "/network-instance[name=*]/bridge-table/mac-table/mac[address=*]"
+    subscription_mode = "sample"
+    sample_interval = "30s"
+
 # ---- trap 受信。162 は特権ポートなので unit は root で動かす（setcap でもよい）。source タグは機器の管理 IP（lab の EC2 が送り元を変えない）
 [[inputs.snmp_trap]]
   service_address = "udp://:162"
   version = "2c"
   timeout = "5s"
 
-# ---- 機器のログ。FRR のコンテナに syslogd は無いので、frr.conf の log file を lab の EC2 のディレクトリに bind し（wanlab.clab.yml.in）、
-# lab の EC2 の rsyslog が 1 行ずつ「機器名 FRR の行」にして送ってくる（lab/rsyslog-frr.conf.in）。ポートは lab.sh の LOG_PORT と
-# terraform/pipeline/lab の local.log_port と同じ。
-# 1 行は「hq-ce-01 2026/09/18 10:00:00 BGP: [XXXXX-XXXXX] %ADJCHANGE: neighbor 172.16.1.1 ... Down ...」の形。時刻は受けた時刻を使う
-# （コンテナの TZ に tzdata が効いているか確かめていないので、行の中の時刻は文字列のまま log_time に入れる）。形に合わない行（折り返しの続き）は捨てる。
-# 機器名は metrics / traps と同じタグ名（sysName）にして、OpenSearch で機器ごとに引けるようにする
-[[inputs.socket_listener]]
-  service_address = "tcp://:5140"
-  name_override = "frr_log"
-  data_format = "grok"
-  grok_custom_patterns = "FRR_TS %{YEAR}/%{MONTHNUM}/%{MONTHDAY} %{TIME}"
-  grok_patterns = ["%{NOTSPACE:sysName:tag} %{FRR_TS:log_time} %{WORD:daemon:tag}: %{GREEDYDATA:message}"]
+# ---- 機器のログ。SR Linux の system logging remote-server（RFC 5424、udp）を受ける。ポートは lab.sh の LOG_PORT と
+# terraform/pipeline/lab の local.log_port と同じ。lab の EC2 が 203.0.113.1:5140 宛てをここへ DNAT するので、送り元は機器の管理 IP のまま。
+# RFC 5424 の HOSTNAME は SR Linux の host-name（= sysName）なので、metrics / traps と同じタグ名 sysName に付け替える（下の processors.rename）。
+# best_effort は形の崩れた行（構造化データ無しなど）も捨てずに載せるため
+[[inputs.syslog]]
+  service_address = "udp://:5140"
+  name_override = "device_log"
+  best_effort = true
 
-# ---- MSK へ。トピックは metric 名で分ける（snmp_trap → traps、frr_log → logs、それ以外 → metrics）
+[[processors.rename]]
+  namepass = ["device_log"]
+  [[processors.rename.replace]]
+    tag = "hostname"
+    dest = "sysName"
+
+# ---- MSK へ。トピックは metric 名で分ける（snmp_trap → traps、device_log → logs、gNMI の 4 つ → gnmi、SNMP のポーリング → metrics）
 # sasl_aws_msk_iam_profile: Telegraf 1.40.0 は profile か role + session のどちらかを書かないと
 # 「both role and session must be set」で落ち、インスタンスプロファイルだけでは起動しない（2026-09-18 に実機で確認。plugins/common/kafka/sasl_aws_iam_msk.go）。
 # telegraf.sh render が region だけの [default] を /etc/telegraf/aws_config に書き、鍵が無いので SDK が IMDS（EC2 のロール）に落ちる
@@ -105,6 +148,19 @@
   required_acks = 1
   max_retry = 3
   namepass = ["system", "interface"]
+
+[[outputs.kafka]]
+  brokers = [__KAFKA_BROKERS__]
+  topic = "gnmi"
+  enable_tls = true
+  sasl_mechanism = "AWS-MSK-IAM"
+  sasl_aws_msk_iam_region = "__AWS_REGION__"
+  sasl_aws_msk_iam_profile = "default"
+  data_format = "json"
+  json_timestamp_units = "1s"
+  required_acks = 1
+  max_retry = 3
+  namepass = ["bgp_neighbor", "isis_adjacency", "evpn_es", "mac_table"]
 
 [[outputs.kafka]]
   brokers = [__KAFKA_BROKERS__]
@@ -130,4 +186,4 @@
   json_timestamp_units = "1s"
   required_acks = 1
   max_retry = 3
-  namepass = ["frr_log"]
+  namepass = ["device_log"]

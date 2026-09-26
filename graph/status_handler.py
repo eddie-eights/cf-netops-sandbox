@@ -2,6 +2,8 @@
 Neptune の機器と回線の動的な状態（property status）を書く。設計の「動的なステータス反映（トラップ / ログ → Lambda → Neptune の属性を UP → DOWN）」。
 
   AnomalyOpened   kind=link_down → 機器 device_id のインタフェース target が付く回線（辺）を DOWN
+                  kind=bgp_down  → 機器 device_id の BGP のセッション（頂点 bgp_session。target = 相手の IP）を DOWN（gNMI の session-state）
+                  kind=isis_down → 機器 device_id の IS-IS の隣接（頂点 isis_adjacency。target = サブインタフェース）を DOWN（gNMI の adjacency）
                   それ以外（trap）  → 機器（頂点）を ALARM（トラップは機器が落ちた印ではないので DOWN にしない）
   AnomalyResolved 同じ要素を UP に戻す（trap の解消は、機器が ALARM のときだけ UP。IF の分からない linkDown の DOWN は上書きしない）
 
@@ -19,6 +21,7 @@ log = logging.getLogger()
 log.setLevel(logging.INFO)
 
 STATUS_OF = {"AnomalyOpened": "DOWN", "AnomalyResolved": "UP"}
+LAYER_KIND = {"bgp_down": "bgp", "isis_down": "isis"}   # 検知の kind → graph.set_layer_status の kind（頂点の id の真ん中）
 
 
 def apply(detail_type: str, detail: dict) -> dict:
@@ -30,6 +33,10 @@ def apply(detail_type: str, detail: dict) -> dict:
     if not device_id or device_id == "?":
         return {"ignored": "device_id が無い"}
     kind, target = detail.get("kind"), str(detail.get("target") or "")
+    if kind in LAYER_KIND:
+        if not target or target == "?":
+            return {"ignored": f"{kind} の target が無い"}
+        return graph.set_layer_status(device_id, LAYER_KIND[kind], target, status)
     if kind == "link_down" and target and target != "?":
         return graph.set_status(device_id, target, status)
     if kind == "link_down":

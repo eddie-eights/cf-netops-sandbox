@@ -19,13 +19,13 @@ variable "owner" {
 
 # ---------------------------------------------------------------- lab EC2
 variable "instance_type" {
-  description = "14 containers (FRR x6, snmpd x4, hosts x4). t4g.large (2 vCPU / 8 GB) is comfortable; t4g.medium (4 GB) works but leaves little room."
+  description = "8 containers (Nokia SR Linux x6, VMs x2). Each SR Linux node takes about 1.5-2.5 GB of RAM at boot, so t4g.xlarge (4 vCPU / 16 GB) is the default; t4g.large (8 GB) is too small for six nodes."
   type        = string
-  default     = "t4g.large"
+  default     = "t4g.xlarge"
 
   validation {
-    condition     = contains(["t4g.medium", "t4g.large", "t4g.xlarge"], var.instance_type)
-    error_message = "instance_type must be t4g.medium, t4g.large or t4g.xlarge (arm64)."
+    condition     = contains(["t4g.large", "t4g.xlarge", "t4g.2xlarge"], var.instance_type)
+    error_message = "instance_type must be t4g.large, t4g.xlarge or t4g.2xlarge (arm64)."
   }
 }
 
@@ -36,9 +36,9 @@ variable "ami_ssm_parameter" {
 }
 
 variable "volume_size" {
-  description = "Root volume in GB (Docker images are about 400 MB)."
+  description = "Root volume in GB (the SR Linux image is about 1 GB; each node writes its own logs and checkpoints)."
   type        = number
-  default     = 16
+  default     = 24
 
   validation {
     condition     = var.volume_size >= 8 && var.volume_size <= 64
@@ -54,13 +54,13 @@ variable "auto_start_lab" {
 
 # ---------------------------------------------------------------- Telegraf EC2 (telegraf.tf)
 variable "create_telegraf" {
-  description = "Create the Telegraf EC2 that sends SNMP polls, traps and FRR logs of the lab to MSK (terraform/pipeline/stream). ops/up.sh sets true when it makes the stream root. terraform/pipeline/stream needs it."
+  description = "Create the Telegraf EC2 that sends SNMP polls, traps and syslog of the lab to MSK (terraform/pipeline/stream). ops/up.sh sets true when it makes the stream root. terraform/pipeline/stream needs it."
   type        = bool
   default     = false
 }
 
 variable "telegraf_instance_type" {
-  description = "Telegraf only (no containers). t4g.micro (1 GB) is enough for 4 SNMP agents, traps and the FRR logs."
+  description = "Telegraf only (no containers). t4g.micro (1 GB) is enough for 4 SNMP agents, traps and syslog."
   type        = string
   default     = "t4g.micro"
 
@@ -93,16 +93,10 @@ variable "telegraf_version" {
   }
 }
 
-variable "frr_image_tag" {
-  description = "Tag pushed to <prefix>-lab-frr"
+variable "srlinux_image_tag" {
+  description = "Tag pushed to <prefix>-lab-srlinux (ghcr.io/nokia/srlinux:<tag>, multi-arch; ops/up.sh pulls the arm64 image)."
   type        = string
-  default     = "10.2.1"
-}
-
-variable "snmpd_image_tag" {
-  description = "Tag pushed to <prefix>-lab-snmpd"
-  type        = string
-  default     = "v2"
+  default     = "26.7.2"
 }
 
 variable "multitool_image_tag" {

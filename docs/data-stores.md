@@ -12,12 +12,13 @@
 
 | データ | 置き場 | 書く | 読む |
 |---|---|---|---|
-| 生データの履歴（metrics / traps / logs の全部） | S3 Tables（Iceberg）`snmp_metrics` | Spark の `iceberg` | まだ読む側が無い（エージェントの `query_history` は Athena 未配備のため案内だけ返す） |
-| 異常の「いま」（open / resolved） | Neptune の頂点 `anomaly`（id は `<機器>#<種類>#<IF>`） | Spark の `detect` | Web の異常一覧、エージェントの `list_anomalies`、worker |
+| 生データの履歴（metrics / gnmi / traps / logs の全部） | S3 Tables（Iceberg）`snmp_metrics` | Spark の `iceberg` | まだ読む側が無い（エージェントの `query_history` は Athena 未配備のため案内だけ返す） |
+| 異常の「いま」（open / resolved） | Neptune の頂点 `anomaly`（id は `<機器>#<種類>#<対象>`。対象は IF、`bgp_down` は相手の IP） | Spark の `detect` | Web の異常一覧、エージェントの `list_anomalies`、worker |
 | 異常の履歴（開いた・閉じた） | S3 Tables `anomaly_events` | Spark の `detect` | まだ読む側が無い（証跡） |
 | 修復案の「いま」（pending → approved …） | Neptune の頂点 `proposal`（id は `<anomaly_id>#<first_seen>`） | worker、Web の承認タブ | worker、Web の承認タブ、エージェントの `list_proposals` |
 | 修復案の証跡（作成・承認・却下・適用・確認） | S3 Tables `proposal_events` | worker（PyIceberg） | まだ読む側が無い（証跡） |
-| トポロジと、機器・回線の状態 | Neptune の頂点 `device` / `interface` | 投入スクリプト、Lambda `graph-status` | エージェントの `neighbors` / `blast_radius` / `topology_graph` |
+| トポロジと、機器・回線の状態（物理層） | Neptune の頂点 `device` / `interface`、辺 `link` | 投入スクリプト、Lambda `graph-status` | エージェントの `neighbors` / `blast_radius` / `topology_graph` |
+| IP 層・EVPN/BGP 層と、その状態 | Neptune の頂点 `ip_interface` / `isis_adjacency` / `bgp_session` / `evpn_instance` / `ethernet_segment`（[Neptune の層](#neptune-の層)） | 投入スクリプト、Lambda `graph-status`（`bgp_down` / `isis_down`） | エージェントの `layers`、Web の「トポロジ」タブの層の表 |
 
 ほかに、検索用のログ（OpenSearch `snmp-logs`）とグラフ用のメトリクス（Prometheus）がある。この 2 つは見るための写しで、正本ではない。`SINK_SPLUNK=1` なら全トピックを AWS の外の Splunk（HTTP Event Collector）にも送る。これも写しで、Splunk 自体はこのリポジトリの外（docs/pipeline.md）。
 
@@ -37,15 +38,15 @@ flowchart LR
 
 ### 2. 1 回の障害で何が書かれるか
 
-`sudo lab fail-main` で本社の主回線を落としたときの流れ。
+`sudo lab fail-main` でアクセス側 Leaf の fabric（`dc1-leaf-01 ethernet-1/1`）を落としたときの流れ。
 
 1. **ポーリング（10 秒ごと）:** Telegraf が `ifOperStatus=down` を拾い、MSK の `metrics` に出す。
 2. **Spark `iceberg`:** 行をそのまま `snmp_metrics` に追記する。ここは up か down かを判断しない。
 3. **Spark `detect`:** 順番は「履歴 → Neptune → イベント」。
    - `anomaly_events` に `opened` の行を足す（`event_id` = `<anomaly_id>#<first_seen>#opened`）。
-   - Neptune の `hq-ce-01#link_down#eth1` を開く。すでに open なら `last_seen` だけ進め、無いか resolved なら `first_seen` を今にして開き直す。
+   - Neptune の `dc1-leaf-01#link_down#ethernet-1/1` を開く。すでに open なら `last_seen` だけ進め、無いか resolved なら `first_seen` を今にして開き直す。
    - `AnomalyOpened` を出し、届いたら頂点に `notified=true` を付ける。届かなかったものは次のバッチで出し直す。
-4. **Lambda `graph-status`:** Neptune の IF の頂点の `status` を `DOWN` にする。
+4. **Lambda `graph-status`:** Neptune の IF の頂点の `status` を `DOWN` にする。同じ回線の IS-IS の隣接は gNMI の `isis_down`（トピック `gnmi`）で数秒後に来て、頂点 `dc1-leaf-01#isis#ethernet-1/1.0` が `DOWN` になる。
 5. **worker:** SQS から受け取り、発生ごとに Temporal のワークフローを起こす。発生の id は `<anomaly_id>#<first_seen>`。
 6. **修復案:** worker が Neptune に `proposal` の頂点を `pending` で置き、`proposal_events` に `created` を足す。
    Web で承認すると頂点が `approved` になり、worker がそれを拾って `approved` の行を足す。`heal-main` を打つと `applied`、resolved になると `verified` の行が続く。
@@ -116,13 +117,12 @@ ECR に置く 6 つのイメージが「どこで・何をして」いるかの�
 | イメージ（`<prefix>-…`） | 元 | 動く場所 | 役目 |
 |---|---|---|---|
 | `agent` | [agent/](../agent/)（自前ビルド） | AgentCore Runtime | チャットの本体。Bedrock のモデルを呼び、Neptune のトポロジと異常、OpenSearch / Prometheus の証拠を集めて答え、承認待ちの修復案を作る |
-| `lab-frr` | `quay.io/frrouting/frr`（ミラー） | lab の EC2（containerlab） | ルーター。`lab/wanlab.clab.yml.in` の機器がこれで立ち、`lab/frr/<機器>.conf` で BGP と IF が入る。監視される「機器」そのもの |
-| `lab-snmpd` | [lab/snmpd/](../lab/snmpd/)（自前ビルド） | lab の EC2（containerlab） | net-snmp の snmpd だけの Alpine。FRR に SNMP エージェントが無いので、監視したい機器に `network-mode: container:<機器>` で相乗りさせ、Telegraf のポーリングに答える。**これが付いた機器だけが監視対象** |
-| `lab-multitool` | `ghcr.io/srl-labs/network-multitool`（ミラー） | lab の EC2（containerlab） | ping / traceroute / tcpdump 入りの端末役（`hq-host-01` など）。疎通確認と障害の再現に使う |
+| `lab-srlinux` | `ghcr.io/nokia/srlinux`（ミラー。約 1 GB） | lab の EC2（containerlab） | スイッチ（Nokia SR Linux、`ixr-d2l`）。`lab/splab.clab.yml.in` の 6 台（Leaf-SW 2 / Spine 2 / Leaf 2）がこれで立ち、`lab/srlinux/<機器>.cli` で IS-IS・iBGP EVPN・VXLAN・LAG・SNMP の trap・syslog が入る。SNMP エージェントと gNMI は機器に内蔵（containerlab が v2c の `public` と `57400/tcp` を入れる）。監視される「機器」そのもので、**trap の宛先（`system snmp trap-group`）を書いた機器が監視対象**（いまは 6 台全部） |
+| `lab-multitool` | `ghcr.io/srl-labs/network-multitool`（ミラー） | lab の EC2（containerlab） | ping / traceroute / tcpdump 入りの VM 役（`wan-upstream-01` / `dc1-host-01`）。Leaf の組へ bond0（LACP）で 2 本つなぎ、疎通確認と障害の再現に使う |
 | `temporal` | `temporalio/temporal`（ミラー） | ECS Fargate（WORKFLOW=1） | Temporal のサーバー。`server start-dev` で 1 コンテナで動く。Fargate はプライベート網から Docker Hub を引けないので ECR にミラーする |
 | `worker` | [workflow/](../workflow/)（自前ビルド） | ECS Fargate（WORKFLOW=1） | Temporal のワーカー。SQS の異常を拾い、Runtime に修復案を作らせ、Neptune と S3 Tables に記録し、承認後に SSM で lab の機器へ流して検証する。同じタスクの `temporal` に `localhost:7233` でつなぐ |
 
-分けて見ると、監視される側が `lab-frr` / `lab-snmpd` / `lab-multitool`、考える側が `agent`、実行する側が `temporal` / `worker`。
+分けて見ると、監視される側が `lab-srlinux` / `lab-multitool`、考える側が `agent`、実行する側が `temporal` / `worker`。
 
 ### 8. 全部 arm64
 
@@ -134,7 +134,7 @@ ECR に置く 6 つのイメージが「どこで・何をして」いるかの�
 ### 9. タグ
 
 - ECR のリポジトリは `IMMUTABLE`（[terraform/base/ecr/main.tf](../terraform/base/ecr/main.tf)）。同じタグへの上書きはできないので、コードを変えたらタグを進める。
-- 自前ビルドの `agent` / `worker` は `IMAGE_TAG`（既定 `v1`）、`lab-snmpd` は `ops/up.sh` の `SNMPD_TAG`。ミラーは上流の版そのまま（`ops/up.sh` の `FRR_TAG` / `MULTITOOL_TAG` / `TEMPORAL_TAG`）。
+- 自前ビルドの `agent` / `worker` は `IMAGE_TAG`（既定 `v1`）。ミラーは上流の版そのまま（`ops/up.sh` の `SRLINUX_TAG` / `MULTITOOL_TAG` / `TEMPORAL_TAG`）。
 - `ops/up.sh` は ECR にそのタグが無いときだけビルドして push する（手順 2）。
 
 ### 10. コードの入口
@@ -143,9 +143,26 @@ ECR に置く 6 つのイメージが「どこで・何をして」いるかの�
 |---|---|
 | ビルドと push、タグの定数 | [ops/up.sh](../ops/up.sh) の手順 2 |
 | リポジトリの定義 | [terraform/base/ecr/main.tf](../terraform/base/ecr/main.tf) |
-| lab のどの機器がどのイメージか | [lab/wanlab.clab.yml.in](../lab/wanlab.clab.yml.in) |
+| lab のどの機器がどのイメージか | [lab/splab.clab.yml.in](../lab/splab.clab.yml.in)（[lab/gen_lab.py](../lab/gen_lab.py) が作る） |
 | Runtime がどのイメージを指すか | [terraform/agent/variables.tf](../terraform/agent/variables.tf) の `agent_image_tag` |
 | Fargate のタスク定義（temporal と worker の 2 コンテナ） | [terraform/workflow/ecs.tf](../terraform/workflow/ecs.tf) |
+
+## Neptune の層
+
+設計の「物理層・IP 層・EVPN/BGP 層のそれぞれの接続情報と、各層を紐づける ID」を Neptune でどう持つか。2026-09-26 に lab を Spine-Leaf（EVPN-VXLAN）にしたときに入れた。元データは `lab/lab_topology.py` が `lab/srlinux/*.cli` から作る（`agent/data/layers.json` はその写し）。
+
+| 層 | 頂点（label） | id | 下の層を指す property | 同じ層の辺 |
+|---|---|---|---|---|
+| 物理 | `device` / `interface` | `dc1-leaf-01` / `dc1-leaf-01#ethernet-1/1` | — | `link`（機器 ⇄ 機器。`a_if` / `b_if`、kind は fabric / lag / l2 / mgmt） |
+| IP | `ip_interface` | `dc1-leaf-01#ethernet-1/1.0` | `interface_id` → `interface`（辺 `over`。ループバック `system0.0` は物理層に無いので空） | — |
+| IP | `isis_adjacency` | `dc1-leaf-01#isis#ethernet-1/1.0` | `ip_interface_id` / `interface_id`（辺 `over`） | `peer`（両端の隣接） |
+| EVPN・BGP | `bgp_session` | `dc1-leaf-01#bgp#10.255.0.1` | `ip_interface_id` → ループバック `system0.0`（辺 `over`） | `peer`（Leaf ⇄ Spine の RR） |
+| EVPN・BGP | `evpn_instance` | `dc1-leaf-01#evi#100` | `ip_interface_id` → VTEP のループバック（辺 `over`）、`interfaces`（`lag1.0`。辺 `attach` → `ip_interface`） | `tunnel`（同じ EVI の VTEP 同士） |
+| EVPN・BGP | `ethernet_segment` | `dc1-leaf-01#es#ES-2` | `interface_id` → `lag1`（辺 `over`） | `segment`（同じ ESI の 2 台） |
+
+- 頂点はどれも `layer`（`ip` / `evpn`）と `device_id` を持ち、動的な `status`（`UP` / `DOWN`。無ければ UP）は Lambda `graph-status` が gNMI の `bgp_down` / `isis_down` から書く。エージェントの `layers` ツールと Web の層の表は、id と `interface_id` / `ip_interface_id` で下の層へ追える。
+- 未登録の扱いは物理層と同じ。トポロジに無い BGP のセッションが落ちたら `registered=false` の頂点を作って残し、`ops/sync-graph.sh --replace` で置き換わる。
+- 実機に替えても形は変わらない。SR-MPLS にするときは `bgp_session` の `afi` と `evpn_instance` の `vtep`（VXLAN）を SR のラベルに読み替えるだけで、id と辺はそのまま。
 
 ## Neptune の基礎
 
@@ -180,7 +197,7 @@ AWS が運用を持つグラフデータベース。データを頂点と辺で�
 ### 13. グラフはいくつ作れるか
 
 - **Neptune Database は 1 クラスター = 1 グラフ。** 1 つのクラスターの中に名前付きの別のグラフを並べる機能は無い（RDF の名前付きグラフは別）。分けたいときは、同じグラフの中でラベルで分けるか、クラスターを分ける（クラスターごとにインスタンス代がかかる）。
-- **この PoC はラベルで分けている:** `device` / `interface` / `anomaly` / `proposal` は同じグラフの中にある。ラベルはいくつ増やしてもよく、同じグラフにあるから辺でつなげる。
+- **この PoC はラベルで分けている:** `device` / `interface` と上の層の `ip_interface` / `bgp_session` など、`anomaly` / `proposal` は同じグラフの中にある。ラベルはいくつ増やしてもよく、同じグラフにあるから辺でつなげる。
 - **頂点と辺の数に上限は無く、上限はストレージの大きさ:** 1 クラスター最大 128 TiB。増えて効いてくるのは、全件を引く問い合わせ（`g.V().hasLabel('anomaly')` など）の遅さと、ストレージ・I/O の料金。
 - Neptune Analytics は「グラフ 1 つ = リソース 1 つ」で、グラフごとに課金される。アカウントあたりの数の上限は Service Quotas で確かめる。
 
@@ -194,26 +211,26 @@ AWS が運用を持つグラフデータベース。データを頂点と辺で�
 ```mermaid
 flowchart LR
   subgraph now["いま"]
-    D1["device hq-ce-01<br/>status=ALARM"] --- I1["interface hq-ce-01#eth1<br/>status=DOWN"]
-    A1["anomaly hq-ce-01#link_down#eth1<br/>（辺なし）"]
+    D1["device dc1-leaf-01<br/>status=ALARM"] --- I1["interface dc1-leaf-01#ethernet-1/1<br/>status=DOWN"]
+    A1["anomaly dc1-leaf-01#link_down#ethernet-1/1<br/>（辺なし）"]
     P1["proposal …#first_seen<br/>（辺なし）"]
   end
   subgraph idea["辺を張るなら（案）"]
-    I2["interface hq-ce-01#eth1"] -- "occurred_on" --- X2["incident（発生 1 回ごと）"]
+    I2["interface dc1-leaf-01#ethernet-1/1"] -- "occurred_on" --- X2["incident（発生 1 回ごと）"]
     X2 -- "handled_by" --> P2["proposal"]
   end
 ```
 
 **辺でつなぐと楽に答えられる問い:**
 
-- **根本原因の絞り込み:** 同じ時刻に CE 3 台で回線断が出たとき、共通の上流（同じ PE、同じ回線）を探す。表なら段数分の JOIN、グラフなら「共通の隣」を探すだけ。
+- **根本原因の絞り込み:** 同じ時刻に Leaf 3 台で回線断が出たとき、共通の上流（同じ Spine、同じ回線）を探す。表なら段数分の JOIN、グラフなら「共通の隣」を探すだけ。
 - **影響範囲とのひも付け:** 障害の頂点から下流へたどって、止まる拠点を出す（いまの `blast_radius` を障害から起こせる）。
-- **再発のパターン:** 「この PE につながる回線で過去 30 日に何回落ちたか、毎回同じ修復案で直ったか」。
+- **再発のパターン:** 「この Spine につながる回線で過去 30 日に何回落ちたか、毎回同じ修復案で直ったか」。
 - **エージェントへの材料集め:** 障害から、つながる機器・同時刻の別の障害・過去に効いた修復案をたどって渡す（GraphRAG と同じ考え方）。
 
 **グラフにしても得をしない問い:** 月の件数、機器ごとのランキング、時系列（表と Athena が向く）。障害 1 件の長いログ（S3 に置き、頂点には場所だけ持たせる）。似た障害のベクトル検索は Neptune Database ではできない（Neptune Analytics か Knowledge Bases が要る）。
 
-**この PoC では:** 十数台のラボで単発の回線断が中心なので、効いているのは影響範囲だけ。複数機器の同時障害（PE 障害で配下の CE がまとめて落ちる）を扱うか、エージェントに原因の推定までさせるなら、辺を張る価値が出る。そのときは「Neptune はいま、S3 Tables は履歴」（3）の分け方も見直すことになる。
+**この PoC では:** 8 台のラボで単発の回線断が中心なので、効いているのは影響範囲だけ。複数機器の同時障害（Spine 障害で配下の Leaf がまとめて落ちる）を扱うか、エージェントに原因の推定までさせるなら、辺を張る価値が出る。そのときは「Neptune はいま、S3 Tables は履歴」（3）の分け方も見直すことになる。
 
 ## MSK とクライアントのつなぎ
 

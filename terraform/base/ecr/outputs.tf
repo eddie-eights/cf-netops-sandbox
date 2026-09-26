@@ -3,14 +3,9 @@ output "agent_repository_url" {
   value       = aws_ecr_repository.agent.repository_url
 }
 
-output "frr_repository_url" {
-  description = "Push quay.io/frrouting/frr:10.2.1 here with tag 10.2.1 (step 2 of ops/up.sh). Empty when create_lab_repositories is false."
-  value       = try(aws_ecr_repository.lab["frr"].repository_url, "")
-}
-
-output "snmpd_repository_url" {
-  description = "Build lab/snmpd and push it here with tag v2 (step 2 of ops/up.sh)."
-  value       = try(aws_ecr_repository.lab["snmpd"].repository_url, "")
+output "srlinux_repository_url" {
+  description = "Push ghcr.io/nokia/srlinux:26.7.2 (arm64) here with tag 26.7.2 (step 2 of ops/up.sh). Empty when create_lab_repositories is false."
+  value       = try(aws_ecr_repository.lab["srlinux"].repository_url, "")
 }
 
 output "multitool_repository_url" {

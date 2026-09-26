@@ -12,19 +12,19 @@ flowchart LR
   WEB -->|"invoke_agent_runtime"| RT["AgentCore Runtime<br/>agent/app.py"]
   RT -->|"Retrieve（HYBRID + Rerank、20 件 → 5 件）"| KB["ナレッジベース<br/>CREATE_KB=1 のときだけ"]
   RT -->|"Converse + Guardrail"| LLM["Nova 2 Lite（jp.）"]
-  RT -->|"ツール（最大 5 往復）"| TOOLS["list_devices / neighbors / blast_radius / topology_graph<br/>list_anomalies / search_logs / query_metrics / query_history"]
+  RT -->|"ツール（最大 5 往復）"| TOOLS["list_devices / neighbors / blast_radius / topology_graph / layers<br/>list_anomalies / search_logs / query_metrics / query_history"]
   RT -.->|"WORKFLOW=1"| GW["Gateway（MCP）→ tools Lambda"]
 ```
 
 - EC2 にパブリック IP も受信ルールも無い。SSM Agent が内側から ssmmessages へつなぐ。
 - Runtime を呼ぶのは EC2 のインスタンスロール。ブラウザに AWS の認証情報は置かない。
-- ツールは Neptune（トポロジ・異常・修復案。無ければトポロジは `agent/data/` の静的な 10 台）、OpenSearch Serverless、Prometheus を読む。
+- ツールは Neptune（トポロジ 3 層・異常・修復案。無ければトポロジは `agent/data/` の静的な 8 台と層）、OpenSearch Serverless、Prometheus を読む。
 
 ## パイプラインと WORKFLOW
 
 ```mermaid
 flowchart LR
-  LAB["lab の EC2<br/>containerlab + FRR"] -->|"SNMP ポーリング 10 秒 / trap / FRR のログ"| TG["Telegraf の EC2"] --> MSK["MSK<br/>metrics / traps / logs"]
+  LAB["lab の EC2<br/>containerlab + Nokia SR Linux（Spine-Leaf）"] -->|"SNMP ポーリング 10 秒 / gNMI / trap / syslog"| TG["Telegraf の EC2"] --> MSK["MSK<br/>metrics / gnmi / traps / logs"]
   MSK --> SPARK["Spark（EMR Serverless）"]
   SPARK -->|"全トピック（正本）"| ICE["S3 Tables<br/>snmp_metrics"]
   SPARK -->|"traps / logs"| OS["OpenSearch<br/>snmp-logs"]
@@ -61,7 +61,7 @@ WORKFLOW の流れは [workflow.md](workflow.md)、データの置き場は [dat
 | `workflow/` | Temporal のワークフローとワーカー |
 | `tools/` | Gateway（MCP）の tools Lambda |
 | `spark/` | Spark のジョブ（`snmp_sinks.py`） |
-| `lab/` | containerlab の構成、FRR、snmpd、Telegraf の EC2 への転送（`lab forward`） |
+| `lab/` | containerlab の構成、SR Linux の設定（`srlinux/*.cli`）、Telegraf の EC2 への転送（`lab forward`） |
 | `telegraf/` | Telegraf の設定と `tg`（Telegraf の EC2 で動く） |
 | `graph/` | Neptune の `status` を書く Lambda |
 | `kb-docs/` | ナレッジベースに入れる手順書 |

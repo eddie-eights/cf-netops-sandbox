@@ -71,7 +71,7 @@ def search_logs(device_id: str = "", minutes: int = 60, limit: int = 20) -> dict
 
 
 def query_metrics(query: str, minutes: int = 15) -> dict:
-    """PromQL の range query（step 60 秒）。例: interface_ifOperStatus{sysName="hq-ce-01"}"""
+    """PromQL の range query（step 60 秒）。例: interface_ifOperStatus{sysName="dc1-leaf-01"}"""
     if not PROMETHEUS_QUERY_URL:
         return {"error": "メトリクスの検索はまだ配備されていない（terraform/pipeline/analytics を sinks に prometheus を入れて apply すると使える）", "series": []}
     if not query:
@@ -105,14 +105,14 @@ TOOL_SPECS = [
         "name": "search_logs",
         "description": "監視ログ（SNMP trap など）を機器名で検索する。異常の原因を調べるとき、その機器で直前に何が起きたかを見るのに使う。",
         "inputSchema": {"json": {"type": "object", "properties": {
-            "device_id": {"type": "string", "description": "機器名（例 hq-ce-01）。空なら全機器"},
+            "device_id": {"type": "string", "description": "機器名（例 dc1-leaf-01）。空なら全機器"},
             "minutes": {"type": "integer", "description": "何分前まで見るか（既定 60、最大 1440）"},
             "limit": {"type": "integer", "description": "件数の上限（既定 20、最大 100）"},
         }}},
     }},
     {"toolSpec": {
         "name": "query_metrics",
-        "description": "監視メトリクス（Prometheus）に PromQL を投げる。インタフェースの状態やトラフィックの推移を見るのに使う。例: interface_ifOperStatus{sysName=\"hq-ce-01\"}",
+        "description": "監視メトリクス（Prometheus）に PromQL を投げる。インタフェースの状態やトラフィックの推移を見るのに使う。例: interface_ifOperStatus{sysName=\"dc1-leaf-01\"}",
         "inputSchema": {"json": {"type": "object", "required": ["query"], "properties": {
             "query": {"type": "string", "description": "PromQL（メトリクス名は <measurement>_<field>、ラベルは Telegraf のタグ）"},
             "minutes": {"type": "integer", "description": "何分前から見るか（既定 15、最大 1440）"},
@@ -122,7 +122,7 @@ TOOL_SPECS = [
         "name": "query_history",
         "description": "監視データの長期の履歴（S3 Tables）を機器名で引く。まだ配備されていないときは案内だけ返す。",
         "inputSchema": {"json": {"type": "object", "properties": {
-            "device_id": {"type": "string", "description": "機器名（例 hq-ce-01）。空なら全機器"},
+            "device_id": {"type": "string", "description": "機器名（例 dc1-leaf-01）。空なら全機器"},
             "hours": {"type": "integer", "description": "何時間前まで見るか（既定 24）"},
         }}},
     }},

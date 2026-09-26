@@ -114,7 +114,7 @@ check("variable sinks は list、既定 3 つ（iceberg / opensearch / prometheu
       re.search(r'variable "sinks"[\s\S]*?type\s*=\s*list\(string\)[\s\S]*?default\s*=\s*\["iceberg",\s*"opensearch",\s*"prometheus"\][\s\S]*?validation', tf, re.S) is not None
       and re.search(r'variable "sinks"[\s\S]*?validation[\s\S]*?\["iceberg",\s*"opensearch",\s*"prometheus",\s*"splunk"\]', tf, re.S) is not None)
 check("variable metric_topics / log_topics（既定 metrics / traps + logs、空を拒否）",
-      re.search(r'variable "metric_topics"[\s\S]*?default\s*=\s*\["metrics"\][\s\S]*?validation', tf, re.S) is not None
+      re.search(r'variable "metric_topics"[\s\S]*?default\s*=\s*\["metrics",\s*"gnmi"\][\s\S]*?validation', tf, re.S) is not None
       and re.search(r'variable "log_topics"[\s\S]*?default\s*=\s*\["traps",\s*"logs"\][\s\S]*?validation', tf, re.S) is not None)
 check("splunk は Terraform が何も作らない（Splunk は AWS の外。変数と IAM と引数だけ）", re.search(r'resource "[^"]*splunk', tf, re.I) is None)
 check("variable splunk_hec_url（既定は空。空か https:// で始まる）/ splunk_hec_token_parameter（既定は空。/ で始まる）/ splunk_index / splunk_skip_tls_verify（bool、既定 false）",
@@ -213,7 +213,7 @@ check("events のエンドポイントは無い（EventBridge へは NAT Gateway
 check("build の引数は spark / args（格納先ごとに Kafka を読む）", [a.arg for a in funcs["build"].args.args] == ["spark", "args"])
 check("pyspark はモジュールの先頭で import しない（テストと引数の検査を pyspark 無しで動かすため）",
       not any(isinstance(n, (ast.Import, ast.ImportFrom)) and "pyspark" in ast.dump(n) for n in tree.body))
-check("既定のトピックは metrics（メトリクス）と traps / logs（ログ。logs は FRR のログ）", re.search(r'^METRIC_TOPICS\s*=\s*"metrics"', src, re.M) is not None
+check("既定のトピックは metrics / gnmi（メトリクス。gnmi は Telegraf の inputs.gnmi）と traps / logs（ログ。logs は機器の syslog）", re.search(r'^METRIC_TOPICS\s*=\s*"metrics,gnmi"', src, re.M) is not None
       and re.search(r'^LOG_TOPICS\s*=\s*"traps,logs"', src, re.M) is not None)
 check("SINKS は iceberg / opensearch / prometheus / splunk（Terraform の validation と同じ）", re.search(r'^SINKS\s*=\s*\("iceberg", "opensearch", "prometheus", "splunk"\)', src, re.M) is not None)
 check("Kafka を readStream で読み、購読は引数（格納先ごと）", '.readStream.format("kafka")' in src and '.option("subscribe", topics)' in src)
@@ -258,7 +258,7 @@ def parse_error(argv):
 base = ["--bootstrap", "b:9098", "--checkpoint", "s3://bucket/analytics/checkpoint"]
 a = mod.parse_args(base + ["--sinks", "iceberg", "--iceberg-table", "s3tablesbucket.ns.t"])
 check("parse_args: 既定は metrics / traps,logs、checkpoint に / を足す、sinks はリスト",
-      a.metric_topics == "metrics" and a.log_topics == "traps,logs" and a.checkpoint == "s3://bucket/analytics/checkpoint/" and a.sinks == ["iceberg"])
+      a.metric_topics == "metrics,gnmi" and a.log_topics == "traps,logs" and a.checkpoint == "s3://bucket/analytics/checkpoint/" and a.sinks == ["iceberg"])
 a = mod.parse_args(base + ["--sinks", "iceberg, prometheus ,opensearch", "--iceberg-table", "t", "--prometheus-url", "https://p/api/v1/remote_write",
                            "--opensearch-endpoint", "https://o", "--metric-topics", " metrics , cpu ", "--log-topics", "traps,logs"])
 check("parse_args: 空白を除いて 3 つ、トピックも空白を除く", a.sinks == ["iceberg", "prometheus", "opensearch"] and a.metric_topics == "metrics,cpu" and a.log_topics == "traps,logs"

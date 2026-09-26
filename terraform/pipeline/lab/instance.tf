@@ -1,6 +1,6 @@
 # 起動のたびに流す（cloud-config の always）。S3 の lab/ を置き直して再起動すれば設定も更新される
-# Telegraf はここでは動かさない（telegraf.tf の別の EC2）。Telegraf があるとき、lab の EC2 は管理ネットワークへの転送・trap の DNAT・
-# FRR のログの送り出しを受け持つ（lab.sh forward）
+# Telegraf はここでは動かさない（telegraf.tf の別の EC2）。Telegraf があるとき、lab の EC2 は管理ネットワークへの転送と trap / syslog の DNAT を
+# 受け持つ（lab.sh forward）
 resource "aws_instance" "lab" {
   ami                         = data.aws_ssm_parameter.al2023.insecure_value
   instance_type               = var.instance_type
@@ -17,8 +17,7 @@ resource "aws_instance" "lab" {
     account_id           = local.account_id
     bucket               = local.bucket
     containerlab_version = var.containerlab_version
-    frr_image_tag        = var.frr_image_tag
-    snmpd_image_tag      = var.snmpd_image_tag
+    srlinux_image_tag    = var.srlinux_image_tag
     multitool_image_tag  = var.multitool_image_tag
     auto_start_lab       = var.auto_start_lab ? "true" : "false"
   })

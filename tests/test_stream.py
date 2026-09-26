@@ -225,15 +225,20 @@ def make(clock=None):
 sleeps = []
 
 
-def iface(host, ifn, status, sysname=None, ifindex=None, ts=None):
+def iface(host, ifn, status, sysname=None, ifindex=None, ts=None, ifname=None, admin=None):
     tags = {"agent_host": host}
     if ifn is not None:
         tags["ifDescr"] = ifn
+    if ifname is not None:
+        tags["ifName"] = ifname
     if ifindex is not None:
         tags["ifIndex"] = ifindex
     if sysname:
         tags["sysName"] = sysname
-    return {"measurement": "interface", "tags": tags, "fields": {"ifOperStatus": status}, "ts": ts}
+    fields = {"ifOperStatus": status}
+    if admin is not None:
+        fields["ifAdminStatus"] = admin
+    return {"measurement": "interface", "tags": tags, "fields": fields, "ts": ts}
 
 
 def trap(host, oid, fields):
@@ -305,6 +310,16 @@ check("履歴は Neptune より先に書く（落ちたら同じバッチを読�
       [o[0] for o in hist.order][:1] == ["history"] and len([o for o in hist.order if o[0] == "history"]) == 1)
 send, nep, ev, hist = make()
 check("ifDescr が無ければ ifIndex", send([iface("203.0.113.12", None, 2, ifindex="3")]) and "dc-ce-01#link_down#3" in nep.v)
+# SR Linux（2026-09-26〜）: IF の鍵は ifName。ifDescr は「名前 + description」なので使わない
+send, nep, ev, hist = make()
+send([iface("203.0.113.11", "ethernet-1/1 WAN primary to carrier-pe-01 1G", 2, ifname="ethernet-1/1", admin=1)])
+check("ifName があれば ifDescr より ifName（SR Linux の ifDescr は description 付き）", list(nep.v) == ["hq-ce-01#link_down#ethernet-1/1"])
+send, nep, ev, hist = make()
+check("admin-state が disable のポート（SR Linux の ifTable は未使用の物理ポートも出す）は異常にしない",
+      send([iface("203.0.113.11", None, 2, ifname="ethernet-1/4", admin=2)]) == [] and nep.v == {})
+check("サブインタフェース（ethernet-1/1.0）と mgmt0 と lo0 は見ない",
+      send([iface("203.0.113.11", None, 2, ifname="ethernet-1/1.0", admin=1), iface("203.0.113.11", None, 2, ifname="mgmt0", admin=1),
+            iface("203.0.113.11", None, 2, ifname="lo0", admin=1)]) == [] and nep.v == {})
 send, nep, ev, hist = make()
 check("sysName があれば device map より優先", send([iface("203.0.113.12", "eth0", "2", sysname="r2")]) and "r2#link_down#eth0" in nep.v)
 send, nep, ev, hist = make()
@@ -341,6 +356,11 @@ check("Telegraf 1.40 の \"iso.\" 始まりの数値 OID でも ifDescr を取�
       "hq-ce-01#link_down#eth1" in nep.v and nep.plain("hq-ce-01#link_down#eth1")["target"] == "eth1")
 send([trap("203.0.113.11", mod.LINK_DOWN, {"ifDescr": "eth4", "ifIndex": 4})])
 check("MIB がある varbind 名（ifDescr）でも取れる", "hq-ce-01#link_down#eth4" in nep.v)
+send, nep, ev, hist = make()
+send([trap("203.0.113.11", mod.LINK_DOWN, {"iso.3.6.1.2.1.31.1.1.1.1.49150": "ethernet-1/1", "iso.3.6.1.2.1.2.2.1.2.49150": "ethernet-1/1 WAN 1G",
+                                           "iso.3.6.1.2.1.2.2.1.1.49150": 49150})])
+check("SR Linux の linkDown（ifName の varbind あり）は ifDescr より ifName（ポーリングと同じ鍵になる）",
+      list(nep.v) == ["hq-ce-01#link_down#ethernet-1/1"])
 send, nep, ev, hist = make()
 send([trap("203.0.113.11", mod.LINK_DOWN, {"ifIndex.5": 5})])
 check("ifDescr が無い trap は ifIndex", "hq-ce-01#link_down#5" in nep.v)
@@ -440,36 +460,41 @@ _src = open(SRC, encoding="utf-8").read()
 check("detect は空のマイクロバッチでも sender を呼ぶ（TTL の見回りと出し直しを止めない）", 'if records or name == "detect":' in _src)
 
 
-# ---- ログの経路: FRR の log file → lab の EC2 の /var/log/netops-lab/<機器名> → rsyslog → Telegraf の EC2 の socket_listener → Kafka の logs → Spark（2026-09-19）
+# ---- ログの経路: SR Linux の system logging remote-server（udp）→ lab の EC2（203.0.113.1:5140 を DNAT）→ Telegraf の EC2 の inputs.syslog
+# → Kafka の logs → Spark（2026-09-26。FRR + rsyslog をやめた）
 def _read(*parts):
     with open(os.path.join(ROOT, *parts), encoding="utf-8") as f:
         return f.read()
-frr_nodes = sorted(n[:-5] for n in os.listdir(os.path.join(ROOT, "lab", "frr")) if n.endswith(".conf") and n != "vtysh.conf")
-check("FRR の 6 台とも log file と bgp log-neighbor-changes を持つ", len(frr_nodes) == 6 and all(
-      re.search(r"^log file /var/log/frr/frr\.log informational$", _read("lab", "frr", n + ".conf"), re.M)
-      and re.search(r"^\s*bgp log-neighbor-changes$", _read("lab", "frr", n + ".conf"), re.M) for n in frr_nodes))
-clab = _read("lab", "wanlab.clab.yml.in")
-check("containerlab は FRR の 6 台のログの置き場を bind する", all(f"- __LOG_DIR__/{n}:/var/log/frr" in clab for n in frr_nodes))
+srl_dir = os.path.join(ROOT, "lab", "srlinux")
+srl_nodes = sorted(n[:-4] for n in os.listdir(srl_dir) if n.endswith(".cli"))
+srl_cfg = {n: _read("lab", "srlinux", n + ".cli") for n in srl_nodes}
+clab = _read("lab", "splab.clab.yml.in")
 labsh = _read("lab", "lab.sh")
 tele = _read("telegraf", "telegraf.conf.in")
 tgsh = _read("telegraf", "telegraf.sh")
-rsys = _read("lab", "rsyslog-frr.conf.in")
 lab_locals = _read("terraform", "pipeline", "lab", "locals.tf")
-log_dir = re.search(r"^LOG_DIR=(\S+)$", labsh, re.M).group(1)
-check("lab.sh は render で __LOG_DIR__ を埋めて置き場を作り、logs で読める",
-      '-e "s#__LOG_DIR__#$LOG_DIR#"' in labsh and 'install -d -m 1777 "$LOG_DIR/$n"' in labsh and re.search(r"^\s*logs\)", labsh, re.M) is not None)
-check("置き場は src/ の外（user_data の s3 sync --delete に消されない）", log_dir.startswith("/var/log/"))
-check("rsyslog は lab.sh と同じ置き場を読み、パスから機器名を取って Telegraf へ送る",
-      'File="__LOG_DIR__/*/frr.log"' in rsys and 're_extract($!metadata!filename, "__LOG_DIR__/([^/]+)/frr[.]log"' in rsys
-      and 'addMetadata="on"' in rsys and 'target="__TELEGRAF__" port="__LOG_PORT__" protocol="tcp"' in rsys
-      and 'string="%$.dev% %msg%\\n"' in rsys)
-check("lab.sh forward は rsyslog の設定の __*__ を全部埋める",
-      all(k in labsh for k in ('"s#__LOG_DIR__#$LOG_DIR#g"', '"s#__TELEGRAF__#$t#"', '"s#__LOG_PORT__#$LOG_PORT#"', "rsyslog-frr.conf.in"))
-      and set(re.findall(r"__[A-Z_]+__", rsys)) == {"__LOG_DIR__", "__TELEGRAF__", "__LOG_PORT__"})
-# ログのポートは 4 か所で同じ（lab.sh / telegraf.sh / telegraf.conf.in / lab の locals）
+check("SR Linux の 6 台の設定は set / の行だけ（containerlab が候補に流し込んで commit する。enter candidate / commit を書くと二重になる）",
+      len(srl_nodes) == 6 and all(all(re.match(r"^(set / |#|\s*$)", l) for l in c.splitlines()) for c in srl_cfg.values()))
+check("containerlab は 6 台とも nokia_srlinux で srlinux/<機器名>.cli を startup-config にする",
+      len(re.findall(r"^\s*kind: nokia_srlinux$", clab, re.M)) == 6
+      and all(f"startup-config: srlinux/{n}.cli" in clab for n in srl_nodes) and "snmpd" not in clab and "binds:" not in clab)
+mgmt_gw = re.search(r"^MGMT_GW=(\S+)$", labsh, re.M).group(1)
 log_port = re.search(r"^LOG_PORT=(\d+)$", labsh, re.M).group(1)
-check("FRR のログのポートが lab.sh・telegraf.sh・telegraf.conf.in・lab の locals で同じ",
-      re.search(rf"^LOG_PORT={log_port}$", tgsh, re.M) is not None and f'service_address = "tcp://:{log_port}"' in tele
+check("6 台とも syslog を lab.sh の MGMT_GW:LOG_PORT/udp に送る（forward が Telegraf へ DNAT する）",
+      all(f"set / system logging remote-server {mgmt_gw} transport udp" in c and f"set / system logging remote-server {mgmt_gw} remote-port {log_port}" in c
+          and "set / system logging network-instance mgmt" in c for c in srl_cfg.values()))
+check("trap の宛先は 6 台とも lab.sh の MGMT_GW:162（Spine-Leaf の全部が監視対象）",
+      all(f"destination telegraf address {mgmt_gw}" in srl_cfg[n] and "trap-group telegraf admin-state enable" in srl_cfg[n] for n in srl_nodes))
+check("6 台とも IS-IS（instance main）と iBGP EVPN（AS 65100）を持ち、Spine だけ route-reflector",
+      all("protocols isis instance main" in c and "protocols bgp autonomous-system 65100" in c and "afi-safi evpn admin-state enable" in c for c in srl_cfg.values())
+      and all(("route-reflector client true" in srl_cfg[n]) == ("-spine-" in n) for n in srl_nodes))
+check("containerlab の VM 2 台は linux で、leaf の組へ 2 本（bond）", len(re.findall(r"^\s*kind: linux$", clab, re.M)) == 2 and "bond0" in clab)
+check("lab.sh forward は syslog の LOG_PORT も trap の 162 と同じ仕組みで DNAT する（rsyslog は無い）",
+      re.search(r'-p udp --dport "\$LOG_PORT" "\$\{c\[@\]\}" -j DNAT --to-destination "\$t:\$LOG_PORT"', labsh) is not None
+      and "rsyslog" not in labsh and "LOG_DIR" not in labsh and re.search(r"^\s*logs\)", labsh, re.M) is not None)
+# ログのポートは 4 か所で同じ（lab.sh / telegraf.sh / telegraf.conf.in / lab の locals）
+check("syslog のポートが lab.sh・telegraf.sh・telegraf.conf.in・lab の locals で同じ",
+      re.search(rf"^LOG_PORT={log_port}$", tgsh, re.M) is not None and f'service_address = "udp://:{log_port}"' in tele
       and re.search(rf"^\s*log_port\s*=\s*{log_port}$", lab_locals, re.M) is not None)
 # 管理ネットワークは 3 か所で同じ（containerlab の mgmt / lab.sh / lab の locals の VPC ルート）
 mgmt = re.search(r"^MGMT=(\S+)$", labsh, re.M).group(1)
@@ -479,40 +504,70 @@ check("管理ネットワークが containerlab・lab.sh・lab の locals で同
 # ポーリング先は lab の定義から作る（lab/lab_topology.py --snmp-agents → snmp_agents.txt → telegraf.sh render が埋める）
 _lt_spec = importlib.util.spec_from_file_location("lab_topology", os.path.join(ROOT, "lab", "lab_topology.py"))
 lt = importlib.util.module_from_spec(_lt_spec); _lt_spec.loader.exec_module(lt)
-_lab_devices, _ = lt.load(os.path.join(ROOT, "lab"))
+_lab_devices, _, _ = lt.load(os.path.join(ROOT, "lab"))
 _agents_line = lt.snmp_agents(_lab_devices)
 _agents = re.findall(r"udp://([\d.]+):161", _agents_line)
 check("Telegraf のポーリング先は lab の監視対象（enabled）の管理 IP で、全部管理ネットワークの中（VPC のルートで lab の EC2 へ行く）",
-      len(_agents) == 4 and sorted(_agents) == sorted(d["mgmt_ip"] for d in _lab_devices if d["enabled"])
+      len(_agents) == 6 and sorted(_agents) == sorted(d["mgmt_ip"] for d in _lab_devices if d["enabled"])
       and all(ipaddress.ip_address(a) in ipaddress.ip_network(mgmt) for a in _agents))
 check("telegraf.conf.in の agents は __SNMP_AGENTS__ を telegraf.sh render が snmp_agents.txt で埋める（形を確かめてから）",
       re.search(r"^\s*agents = \[__SNMP_AGENTS__\]$", tele, re.M) is not None and 's#__SNMP_AGENTS__#$agents#' in tgsh
       and re.search(r"^AGENTS_FILE=snmp_agents\.txt$", tgsh, re.M) is not None
       and re.fullmatch(r'"udp://[0-9.]+:[0-9]+"(, *"udp://[0-9.]+:[0-9]+")*', _agents_line) is not None)
+_gnmi_line = lt.gnmi_targets(_lab_devices)
+check("gNMI の購読先は同じ 6 台の管理 IP:57400 で、telegraf.conf.in の __GNMI_TARGETS__ を telegraf.sh render が gnmi_targets.txt で埋める",
+      re.findall(r"([\d.]+):57400", _gnmi_line) == _agents and re.search(r"^\s*addresses = \[__GNMI_TARGETS__\]$", tele, re.M) is not None
+      and 's#__GNMI_TARGETS__#$gnmi#' in tgsh and re.search(r"^GNMI_FILE=gnmi_targets\.txt$", tgsh, re.M) is not None
+      and re.fullmatch(r'"[0-9.]+:[0-9]+"(, *"[0-9.]+:[0-9]+")*', _gnmi_line) is not None)
+gnmi_blk = tele.split("[[inputs.gnmi]]", 1)[1].split("# ----", 1)[0]
+check("inputs.gnmi は TLS（自己署名）で bgp_neighbor / isis_adjacency を on_change、evpn_es / mac_table を 30 秒の sample で購読する",
+      'enable_tls = true' in gnmi_blk and 'insecure_skip_verify = true' in gnmi_blk and 'encoding = "json_ietf"' in gnmi_blk
+      and re.search(r'name = "bgp_neighbor"\s*\n\s*path = "/network-instance\[name=default\]/protocols/bgp/neighbor\[peer-address=\*\]/session-state"\s*\n\s*subscription_mode = "on_change"', gnmi_blk)
+      and re.search(r'name = "isis_adjacency"\s*\n\s*path = "/network-instance\[name=default\]/protocols/isis/instance\[name=main\]/interface\[interface-name=\*\]/adjacency"\s*\n\s*subscription_mode = "on_change"', gnmi_blk)
+      and gnmi_blk.count('subscription_mode = "sample"') == 2 and gnmi_blk.count('sample_interval = "30s"') == 2)
+check("gNMI の 4 つは gnmi トピックへ（metrics には混ざらない）",
+      re.search(r'topic = "gnmi"[\s\S]*?namepass = \["bgp_neighbor", "isis_adjacency", "evpn_es", "mac_table"\]', tele) is not None
+      and re.search(r'topic = "metrics"[\s\S]*?namepass = \["system", "interface"\]', tele) is not None)
+check("lab.sh forward は gNMI の GNMI_PORT/tcp も SNMP の 161/udp と同じく Telegraf から管理ネットワークへ通す",
+      re.search(r'-p tcp --dport "\$GNMI_PORT" "\$\{c\[@\]\}" -j ACCEPT', labsh) is not None and re.search(r"^GNMI_PORT=57400$", labsh, re.M) is not None)
 check("up.sh と lab の upload_telegraf_command は snmp_agents.txt を s3://<バケット>/telegraf/ に置く",
       'lab/lab_topology.py lab --snmp-agents' in _read("ops", "up.sh") and "/telegraf/snmp_agents.txt" in _read("ops", "up.sh")
       and "lab/lab_topology.py lab --snmp-agents" in _read("terraform", "pipeline", "lab", "outputs.tf"))
-mgmt_gw = re.search(r"^MGMT_GW=(\S+)$", labsh, re.M).group(1)
-_snmpd = [n for n in os.listdir(os.path.join(ROOT, "lab", "snmpd")) if n.endswith(".conf")]
-check("snmpd の trap の宛先は lab.sh の MGMT_GW:162（forward が Telegraf へ DNAT する）",
-      len(_snmpd) == 4 and all(re.search(rf"^trap2sink {re.escape(mgmt_gw)} \S+ 162$", _read("lab", "snmpd", n), re.M) for n in _snmpd))
 check("lab.sh up は毎回 forward を呼び、forward / forward-status がある",
       '"$SELF" forward' in labsh and re.search(r"^\s*forward\)", labsh, re.M) is not None and re.search(r"^\s*forward-status\)", labsh, re.M) is not None)
 check("forward の iptables の規則は全部目印付き（unforward で消せる）",
       all("${c[@]}" in l for l in labsh.splitlines() if re.match(r"\s*iptables .*-I ", l)))
-check("Telegraf は FRR のログを socket_listener で受け、frr_log として logs トピックに出す",
-      'name_override = "frr_log"' in tele and "[[inputs.tail]]" not in tele
-      and re.search(r'topic = "logs"[\s\S]*?namepass = \["frr_log"\]|namepass = \["frr_log"\][\s\S]*?topic = "logs"', tele) is not None)
-check("metrics / traps の出力に frr_log が混ざらない（namepass / namedrop）",
+check("Telegraf はポーリングの IF の鍵を ifName（タグ）にする（SR Linux の ifDescr は description 付き）",
+      re.search(r'name = "ifName"\s*\n\s*oid = "\.1\.3\.6\.1\.2\.1\.31\.1\.1\.1\.1"\s*\n\s*is_tag = true', tele) is not None)
+check("Telegraf は機器の syslog を inputs.syslog（udp）で受け、device_log として logs トピックに出す",
+      'name_override = "device_log"' in tele and "[[inputs.tail]]" not in tele and "[[inputs.socket_listener]]" not in tele
+      and re.search(r'topic = "logs"[\s\S]*?namepass = \["device_log"\]|namepass = \["device_log"\][\s\S]*?topic = "logs"', tele) is not None)
+check("metrics / traps の出力に device_log が混ざらない（namepass / namedrop）",
       all(re.search(r"name(pass|drop)", blk) for blk in tele.split("[[outputs.kafka]]")[1:]))
-check("行の先頭の機器名を sysName のタグにする（detect と同じ機器名のタグ）", "%{NOTSPACE:sysName:tag} " in tele)
-# grok と同じ形を Python の正規表現で確かめる（rsyslog が機器名を付けた FRR の log file の 1 行）
-_line = "hq-ce-01 2026/09/18 01:02:03 BGP: [M59KS-A3ZXZ] bgp_update_receive: rcvd End-of-RIB for IPv4 Unicast from 203.0.113.2 in vrf default"
-_m = re.match(r"^(?P<sysName>\S+) (?P<log_time>\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}) (?P<daemon>\w+): (?P<message>.*)$", _line)
-check("grok の形（機器名 日時 デーモン: 本文）が rsyslog の送る行に合う",
-      _m is not None and _m.group("sysName") == "hq-ce-01" and _m.group("daemon") == "BGP"
-      and "%{NOTSPACE:sysName:tag} %{FRR_TS:log_time} %{WORD:daemon:tag}: %{GREEDYDATA:message}" in tele)
-check("detect は frr_log を異常にしない", mod.events({"name": "frr_log", "tags": {"sysName": "hq-ce-01"}, "fields": {"message": "x"}}, {}) == [])
+check("syslog の hostname を sysName のタグに付け替える（detect / metrics / traps と同じ機器名のタグ）",
+      re.search(r'\[\[processors\.rename\]\]\s*\n\s*namepass = \["device_log"\]\s*\n\s*\[\[processors\.rename\.replace\]\]\s*\n\s*tag = "hostname"\s*\n\s*dest = "sysName"', tele) is not None)
+check("detect は device_log を異常にしない", mod.events({"name": "device_log", "tags": {"sysName": "hq-ce-01"}, "fields": {"message": "x"}}, {}) == [])
+# gNMI（inputs.gnmi）。タグの名前は Telegraf の版で peer_address / neighbor_peer_address と違うので末尾で引き、field はパスの下が / でつながる
+_dm = {"203.0.113.31": "dc1-leaf-01"}
+check("bgp_neighbor の session_state が established でなければ bgp_down（機器は source の IP を device map で引く。target = 相手の IP）",
+      mod.events({"name": "bgp_neighbor", "tags": {"source": "203.0.113.31", "neighbor_peer_address": "10.255.0.1", "path": "x"}, "fields": {"session_state": "active"}}, _dm)
+      == [("dc1-leaf-01", "bgp_down", "10.255.0.1", True, "gnmi")]
+      and mod.events({"name": "bgp_neighbor", "tags": {"source": "203.0.113.31", "peer_address": "10.255.0.1"}, "fields": {"session_state": "Established"}}, _dm)
+      == [("dc1-leaf-01", "bgp_down", "10.255.0.1", False, "gnmi")])
+check("isis_adjacency の adjacency_state が up でなければ isis_down（target = サブインタフェース。field は adjacency/adjacency-state でもよい）",
+      mod.events({"name": "isis_adjacency", "tags": {"source": "203.0.113.31", "interface_name": "ethernet-1/1.0"}, "fields": {"adjacency/adjacency-state": "down"}}, _dm)
+      == [("dc1-leaf-01", "isis_down", "ethernet-1/1.0", True, "gnmi")]
+      and mod.events({"name": "isis_adjacency", "tags": {"source": "203.0.113.31", "interface_name": "ethernet-1/1.0"}, "fields": {"adjacency_state": "up"}}, _dm)
+      == [("dc1-leaf-01", "isis_down", "ethernet-1/1.0", False, "gnmi")])
+check("状態の field や対象のタグが無い gNMI の行と、evpn_es / mac_table は異常にしない",
+      mod.events({"name": "bgp_neighbor", "tags": {"source": "203.0.113.31"}, "fields": {"session_state": "idle"}}, _dm) == []
+      and mod.events({"name": "isis_adjacency", "tags": {"source": "203.0.113.31", "interface_name": "ethernet-1/1.0"}, "fields": {"neighbor_system_id": "x"}}, _dm) == []
+      and mod.events({"name": "evpn_es", "tags": {"source": "203.0.113.31", "name": "ES-2"}, "fields": {"oper_state": "down"}}, _dm) == []
+      and mod.events({"name": "mac_table", "tags": {"source": "203.0.113.31"}, "fields": {"type": "evpn"}}, _dm) == [])
+check("anomaly_detail は bgp_down / isis_down の文を持つ", "not established" in mod.anomaly_detail("bgp_down", "10.255.0.1", "gnmi")
+      and "isis adjacency on ethernet-1/1.0" in mod.anomaly_detail("isis_down", "ethernet-1/1.0", "gnmi") and mod.anomaly_detail("link_down", "e1", "poll") == "e1 is down (poll)")
+check("Spark の既定は gnmi トピックも読む（iceberg / prometheus は metrics,gnmi、opensearch は traps,logs）", mod.METRIC_TOPICS == "metrics,gnmi"
+      and mod.sink_topics("iceberg", mod.METRIC_TOPICS, mod.LOG_TOPICS) == "metrics,gnmi,traps,logs" and mod.sink_topics("prometheus", mod.METRIC_TOPICS, mod.LOG_TOPICS) == "metrics,gnmi")
 _access = _read("terraform", "pipeline", "stream", "access.tf")
 _lab_tg = _read("terraform", "pipeline", "lab", "telegraf.tf")
 check("stream の stream_produce は Telegraf が lab の state に無くても role が空にならない（down.sh の destroy が検証で止まらない。2026-09-19）",

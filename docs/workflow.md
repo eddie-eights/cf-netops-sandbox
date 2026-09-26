@@ -48,7 +48,7 @@ stateDiagram-v2
 
 ## 試す
 
-1. lab に入り（[pipeline.md](pipeline.md) の「lab に入る」）、`sudo lab fail-main` で主回線を落とす。
+1. lab に入り（[pipeline.md](pipeline.md) の「lab に入る」）、`sudo lab fail-main` でアクセス側 Leaf の fabric（`dc1-leaf-01 ethernet-1/1`）を落とす。
 2. 60 秒ほどで Web の「異常一覧」に出て、数十秒で「承認」タブに修復案（原因・打つコマンド・理由）が `pending` で並ぶ。
 3. 下の詳細（原因・コマンド・理由）を読み、名前を入れて「詳細を読んだ」にチェックを入れてから「承認して直す」を押すと `approved` → `applied` → `verified` / `failed` と進む。名前は「決めた人」の列に `<名前> (web)` で残る（Web には認証が無いので、名乗ってもらう）。
 

@@ -4,7 +4,7 @@ Web と同じ環境変数（/etc/<prefix>-web.env）と依存（/opt/<prefix>-we
 Neptune は出来た直後だとつながらないことがあるので、30 秒おきに 10 回まで試す。
 
 環境変数:
-  LAB_TOPOLOGY_B64  lab/lab_topology.py の出力（{"devices": [...], "links": [...]}）を base64 にしたもの。無ければ agent/data の静的データ
+  LAB_TOPOLOGY_B64  lab/lab_topology.py の出力（{"devices": [...], "links": [...], "layers": {...}}）を base64 にしたもの。無ければ agent/data の静的データ
   GRAPH_REPLACE     1 なら Neptune に入っていても入れ直す（lab を変えたあとの同期。動的な status は消えて全部 UP に戻る）。
                     既定は空で、Neptune が空のときだけ入れる（初期ロード）
   NAME_PREFIX       **必須。**リソース名の接頭辞（<owner>-nwc-poc。呼ぶ側の ops/up.sh / ops/sync-graph.sh が渡す）。Web の置き場と設定ファイルの名前に入る
@@ -34,10 +34,10 @@ if not graph.configured():
 
 if os.environ.get("LAB_TOPOLOGY_B64"):
     lab = json.loads(base64.b64decode(os.environ["LAB_TOPOLOGY_B64"]))
-    devices, links, source = lab["devices"], lab["links"], "lab の定義（lab/lab_topology.py）"
+    devices, links, layers, source = lab["devices"], lab["links"], lab.get("layers"), "lab の定義（lab/lab_topology.py）"
 else:
     devices, links = topology.load_static()
-    source = "静的データ（agent/data）"
+    layers, source = topology.load_static_layers(), "静的データ（agent/data）"
 
 last = None
 for attempt in range(1, 11):
@@ -54,4 +54,5 @@ else:
 if counts["devices"] and os.environ.get("GRAPH_REPLACE") != "1":
     print(f"Neptune にはもう入っている。投入を飛ばす（入れ直すなら ops/sync-graph.sh --replace）: {counts}")
 else:
-    print(f"Neptune に {source} を入れた（{len(devices)} 台 / {len(links)} 本）: {graph.seed(devices, links)}")
+    n_layers = len((layers or {}).get("vertices") or [])
+    print(f"Neptune に {source} を入れた（{len(devices)} 台 / {len(links)} 本 / 上の層 {n_layers} 頂点）: {graph.seed(devices, links, layers)}")

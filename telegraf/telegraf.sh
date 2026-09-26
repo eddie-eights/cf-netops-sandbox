@@ -1,17 +1,19 @@
 #!/usr/bin/env bash
 # Telegraf の EC2（terraform/pipeline/lab の create_telegraf）の上で Telegraf を扱う。user_data が /usr/local/bin/tg に置くので、
 # SSM セッションから `sudo tg status` で使う。unit は /etc/systemd/system/<接頭辞>-telegraf.service（ExecStartPre が render）。
-#   tg render | status | test | logs | restart
+#   tg render | status | test | gnmi | logs | restart
 # 機器（lab の EC2 の中の containerlab）への経路は lab の EC2 側で `sudo lab forward-status` を見る。
 set -euo pipefail
 # /usr/local/bin/tg（シンボリックリンク）から呼ばれても、テンプレートのある src/ で動く
 SELF=$(readlink -f "$0")
 cd "$(dirname "$SELF")"
 CONF=/etc/telegraf/telegraf.conf
-# FRR のログを受ける TCP のポート（telegraf.conf.in の socket_listener と lab/lab.sh の LOG_PORT と同じ）
+# 機器の syslog を受ける UDP のポート（telegraf.conf.in の inputs.syslog と lab/lab.sh の LOG_PORT と同じ）
 LOG_PORT=5140
 # ポーリング先（"udp://<IP>:161", ...）。ops/up.sh が lab の定義から作って s3://<バケット>/telegraf/ に置き、user_data の s3 sync で src/ に来る
 AGENTS_FILE=snmp_agents.txt
+# gNMI の購読先（"<IP>:57400", ...）。同じく ops/up.sh が lab の定義から作る（lab/lab_topology.py --gnmi-targets）
+GNMI_FILE=gnmi_targets.txt
 # terraform/pipeline/lab の user_data が書く。AWS_REGION / PARAM_PREFIX
 ENV_FILE=$(ls /etc/*-telegraf.env 2>/dev/null | head -1 || true)
 [ -n "$ENV_FILE" ] && set -a && . "$ENV_FILE" && set +a
@@ -28,22 +30,25 @@ case "${1:-}" in
     if ! printf '%s' "$agents" | grep -Eq '^"udp://[0-9.]+:[0-9]+"(, *"udp://[0-9.]+:[0-9]+")*$'; then
       echo "$PWD/$AGENTS_FILE が無いか形が違う（ops/up.sh の 5-1b が lab の定義から作って s3://<バケット>/telegraf/ に置く。置いたら EC2 を再起動）" >&2; exit 1
     fi
+    gnmi=""
+    [ -f "$GNMI_FILE" ] && gnmi=$(tr -d '\n' < "$GNMI_FILE")
+    if ! printf '%s' "$gnmi" | grep -Eq '^"[0-9.]+:[0-9]+"(, *"[0-9.]+:[0-9]+")*$'; then
+      echo "$PWD/$GNMI_FILE が無いか形が違う（ops/up.sh の 5-1b が lab の定義から作って s3://<バケット>/telegraf/ に置く。置いたら EC2 を再起動）" >&2; exit 1
+    fi
     b=$(aws ssm get-parameter --region "$AWS_REGION" --name "$PARAM_PREFIX/msk-bootstrap" --query Parameter.Value --output text) || {
       echo "SSM $PARAM_PREFIX/msk-bootstrap が読めない。terraform/pipeline/stream はまだ？" >&2; exit 1; }
     q=$(printf '"%s"' "${b//,/\",\"}")
     install -d -m 0755 /etc/telegraf
     # Telegraf の MSK IAM 認証は profile の指定が要る（telegraf.conf.in の注記）。鍵を書かない [default] なので EC2 のロールが使われる
     printf '[default]\nregion = %s\n' "$AWS_REGION" > /etc/telegraf/aws_config
-    sed -e "s#__KAFKA_BROKERS__#$q#" -e "s#__AWS_REGION__#$AWS_REGION#" -e "s#__SNMP_AGENTS__#$agents#" telegraf.conf.in > "$CONF"
-    echo "$CONF を作った（brokers: ${b} / agents: ${agents}）"
+    sed -e "s#__KAFKA_BROKERS__#$q#" -e "s#__AWS_REGION__#$AWS_REGION#" -e "s#__SNMP_AGENTS__#$agents#" -e "s#__GNMI_TARGETS__#$gnmi#" telegraf.conf.in > "$CONF"
+    echo "$CONF を作った（brokers: ${b} / agents: ${agents} / gnmi: ${gnmi}）"
     ;;
   status)
     systemctl --no-pager status "$UNIT" || true
-    echo "== 受けているポート（trap 162/udp、FRR のログ $LOG_PORT/tcp）=="
+    echo "== 受けているポート（trap 162/udp、機器の syslog $LOG_PORT/udp）=="
     ss -lunp 'sport = :162' || true
-    ss -ltnp "sport = :$LOG_PORT" || true
-    echo "== FRR のログを送ってきている lab の EC2（rsyslog）=="
-    ss -tnp state established "sport = :$LOG_PORT" || true
+    ss -lunp "sport = :$LOG_PORT" || true
     echo "== 直近のログ =="
     journalctl -u "$UNIT" -n 20 --no-pager
     ;;
@@ -51,6 +56,11 @@ case "${1:-}" in
     # ポーリングだけ 1 回まわして標準出力に出す（MSK には送らない）。機器に届かないときは lab の EC2 の forward を疑う
     [ -f "$CONF" ] || "$SELF" render
     AWS_CONFIG_FILE=/etc/telegraf/aws_config telegraf --config "$CONF" --test --input-filter snmp
+    ;;
+  gnmi)
+    # gNMI の購読を 20 秒だけ回して標準出力に出す（MSK には送らない。on_change は最初に今の状態を全部送るので、BGP / IS-IS の一覧が見える）
+    [ -f "$CONF" ] || "$SELF" render
+    AWS_CONFIG_FILE=/etc/telegraf/aws_config timeout 20 telegraf --config "$CONF" --test --input-filter gnmi --test-wait 15 || true
     ;;
   logs) journalctl -u "$UNIT" -n "${LINES:-50}" --no-pager ;;
   restart) systemctl restart "$UNIT" && systemctl --no-pager status "$UNIT" ;;

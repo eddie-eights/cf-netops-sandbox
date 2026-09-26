@@ -1,7 +1,7 @@
 # netops-poc — NetOps PoC（Terraform）
 
 ブラウザのチャットから AgentCore Runtime のエージェントに聞くと、Amazon Nova 2 Lite がトポロジのツール（と任意の手順書の検索）を使って答える。
-lab の機器の SNMP とログを Kafka → Spark に流して異常を見つけ、Temporal のワークフローで原因を調べて修復案を出し、人が承認したら直す、までを試せる。
+lab（containerlab の Nokia SR Linux で組んだ Spine-Leaf）の機器の SNMP・gNMI・ログを Kafka → Spark に流して異常を見つけ、Temporal のワークフローで原因を調べて修復案を出し、人が承認したら直す、までを試せる。
 全部を**プライベートサブネット**に作る。外へは NAT Gateway で出るが、外から入る経路は無い（IGW にはパブリックサブネットの NAT Gateway しかいない）。PC からは SSM のポートフォワーディングで入り、インターネットからの受信ルールは無い。
 
 ```mermaid

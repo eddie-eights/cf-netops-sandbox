@@ -29,7 +29,7 @@ def build_prompt(anomaly: dict) -> str:
         f"異常: device_id={anomaly.get('device_id', '')} kind={anomaly.get('kind', '')} target={anomaly.get('target', '')} "
         f"detail={anomaly.get('detail', '')} first_seen_jst={anomaly.get('first_seen_jst', '')}\n"
         '返す形: {"cause": "原因（日本語 1〜2 文）", "action": "heal-main | check | none", "reason": "その処置を選んだ理由"}\n'
-        "action は、本社 hq-ce-01 の eth1 が落ちている（link_down）なら heal-main、状況を見るだけでよいなら check、"
+        "action は、アクセス側 Leaf dc1-leaf-01 の ethernet-1/1（dc1-spine-01 との fabric）が落ちている（link_down か、その上の isis_down）なら heal-main、状況を見るだけでよいなら check、"
         "人が別の手で直すべきなら none。"
     )
 

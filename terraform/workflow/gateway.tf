@@ -20,6 +20,7 @@ locals {
     "../../agent/evidence.py"        = "evidence.py"
     "../../agent/proposals.py"       = "proposals.py"
     "../../agent/data/topology.json" = "data/topology.json"
+    "../../agent/data/layers.json"   = "data/layers.json"
   }
 }
 

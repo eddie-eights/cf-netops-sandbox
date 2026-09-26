@@ -94,7 +94,7 @@ r = app.invoke({"prompt": "%BGP-5-ADJCHANGE が出た"})
 rk = state["calls"][0][1]; ck = state["calls"][1][1]
 check("RERANK_MODEL_ARN が無ければリランクなしで HYBRID と件数だけ渡す", rk["retrievalConfiguration"]["vectorSearchConfiguration"] == {"numberOfResults": 3, "overrideSearchType": "HYBRID"} and rk["knowledgeBaseId"] == "KB12345678")
 check("Converse に guardrailConfig", ck["guardrailConfig"] == {"guardrailIdentifier": "gr123", "guardrailVersion": "1"})
-check("Converse にトポロジの 4 ツール + 異常一覧 + 証拠の 3 ツール + 修復案の履歴", [t["toolSpec"]["name"] for t in ck["toolConfig"]["tools"]] == ["list_devices", "neighbors", "blast_radius", "topology_graph", "list_anomalies", "search_logs", "query_metrics", "query_history", "list_proposals"])
+check("Converse にトポロジの 5 ツール + 異常一覧 + 証拠の 3 ツール + 修復案の履歴", [t["toolSpec"]["name"] for t in ck["toolConfig"]["tools"]] == ["list_devices", "neighbors", "blast_radius", "topology_graph", "layers", "list_anomalies", "search_logs", "query_metrics", "query_history", "list_proposals"])
 last = ck["messages"][-1]
 check("質問は guardContent、資料は text", last["content"][1] == {"guardContent": {"text": {"text": "%BGP-5-ADJCHANGE が出た"}}} and "<documents>" in last["content"][0]["text"] and 'source="interface-errors.md"' in last["content"][0]["text"])
 check("初回は messages 1 件", len(ck["messages"]) == 1)
@@ -153,28 +153,38 @@ check("リランクありでも参照元の組み立ては同じ", r["sources"] 
 
 # ---- トポロジのツール
 t = app.topology
-check("機器は 10 台で community を出さない", t.list_devices()["count"] == 10 and "snmp_community" not in t.list_devices()["devices"][0])
-check("site で絞れる", [d["device_id"] for d in t.list_devices(site="hq")["devices"]] == ["hq-ce-01", "hq-host-01"])
-nb = t.neighbors("hq-ce-01")["neighbors"]
-check("hq-ce-01 の隣接は PE 2 台と LAN 端末", sorted(n["device_id"] for n in nb) == ["carrier-pe-01", "carrier-pe-02", "hq-host-01"])
-check("隣接に両端の IF と主副が付く", {(n["device_id"], n["local_if"], n["remote_if"], n["role"]) for n in nb} >= {("carrier-pe-01", "eth1", "eth1", "primary"), ("carrier-pe-02", "eth2", "eth1", "secondary")})
-br = t.blast_radius("carrier-pe-02", 1)
-check("PE-02 が落ちると 1 ホップで hq/dc/br2 の CE と PE-01", sorted(a["device_id"] for a in br["affected"]) == ["br2-ce-01", "carrier-pe-01", "dc-ce-01", "hq-ce-01"])
-check("2 ホップなら端末まで届く", any(a["device_id"] == "dc-host-01" and a["hops"] == 2 for a in t.blast_radius("carrier-pe-02")["affected"]))
-check("知らない機器は error と候補", "error" in t.neighbors("nope") and "hq-ce-01" in t.neighbors("nope")["known"])
-check("run_tool は余計な引数を捨てる", t.run_tool("list_devices", {"site": "dc", "x": 1})["count"] == 2)
-check("全体図はノード 10 リンク 10", len(t.topology_graph()["nodes"]) == 10 and len(t.topology_graph()["links"]) == 10)
+check("機器は 8 台で community を出さない", t.list_devices()["count"] == 8 and "snmp_community" not in t.list_devices()["devices"][0])
+check("site で絞れる", [d["device_id"] for d in t.list_devices(site="wan")["devices"]] == ["wan-upstream-01"] and t.list_devices(site="dc1")["count"] == 7)
+check("role で絞れる（leafsw / spine / leaf / upstream / host）", [d["device_id"] for d in t.list_devices(role="spine")["devices"]] == ["dc1-spine-01", "dc1-spine-02"] and t.list_devices(role="host")["count"] == 1)
+nb = t.neighbors("dc1-leaf-01")["neighbors"]
+check("dc1-leaf-01 の隣接は Spine 2 台とアクセス側の VM", sorted(n["device_id"] for n in nb) == ["dc1-host-01", "dc1-spine-01", "dc1-spine-02"])
+check("隣接に両端の IF と種別（fabric / lag）が付く", {(n["device_id"], n["local_if"], n["remote_if"], n["kind"]) for n in nb} >= {("dc1-spine-01", "ethernet-1/1", "ethernet-1/3", "fabric"), ("dc1-spine-02", "ethernet-1/2", "ethernet-1/3", "fabric"), ("dc1-host-01", "ethernet-1/3", "eth1", "lag")})
+br = t.blast_radius("dc1-spine-02", 1)
+check("Spine-02 が落ちると 1 ホップで Leaf-SW 2 台と Leaf 2 台（VM とは直接つながらない）", sorted(a["device_id"] for a in br["affected"]) == ["dc1-leaf-01", "dc1-leaf-02", "dc1-leafsw-01", "dc1-leafsw-02"])
+check("2 ホップなら VM まで届く", any(a["device_id"] == "dc1-host-01" and a["hops"] == 2 for a in t.blast_radius("dc1-spine-02")["affected"]))
+check("知らない機器は error と候補", "error" in t.neighbors("nope") and "dc1-leaf-01" in t.neighbors("nope")["known"])
+check("run_tool は余計な引数を捨てる", t.run_tool("list_devices", {"site": "wan", "x": 1})["count"] == 1)
+check("全体図はノード 8 リンク 12（物理層）", len(t.topology_graph()["nodes"]) == 8 and len(t.topology_graph()["links"]) == 12)
+ly = t.layers()
+check("layers は物理層より上の頂点（ip / evpn）を辺付きで返し、下の層を指す ID を持つ", ly["count"] == 62 and len(ly["edges"]) == 84
+      and {v["layer"] for v in ly["vertices"]} == {"ip", "evpn"} and all(v["status"] == "UP" for v in ly["vertices"])
+      and all(v.get("interface_id") or v.get("ip_interface_id") or v["name"] == "system0.0" for v in ly["vertices"]))
+check("layers は機器と層で絞れる（dc1-leaf-01 の evpn = BGP 2 + EVI 1 + ES 1）", t.layers("dc1-leaf-01", "evpn")["count"] == 4 and t.layers("dc1-leaf-01")["count"] == 9
+      and sorted(v["label"] for v in t.layers("dc1-leaf-01", "evpn")["vertices"]) == ["bgp_session", "bgp_session", "ethernet_segment", "evpn_instance"])
+check("layers の BGP のセッションは相手の機器と Spine の RR を持つ", any(v["id"] == "dc1-leaf-01#bgp#10.255.0.1" and v["peer_device"] == "dc1-spine-01" for v in ly["vertices"]))
+check("layers は知らない機器・層なら error", "error" in t.layers("nope") and "error" in t.layers("", "mpls") and "known" in t.layers("nope"))
 check("Neptune が無ければ元データは static", t.SOURCE == "static" and t.topology_graph()["source"] == "static" and not app.graph.configured())
 check("load_static は asn を機器に足す", any(d.get("asn") for d in t.load_static()[0]))
-check("interfaces は機器につながるリンクの自分側の IF 名", t.interfaces("hq-ce-01") == ["eth1", "eth2", "eth3"] and t.interfaces("carrier-pe-02") == ["eth1", "eth2", "eth3", "eth5"])
+check("interfaces は機器につながるリンクの自分側の IF 名", t.interfaces("dc1-leaf-01") == ["ethernet-1/1", "ethernet-1/2", "ethernet-1/3"] and t.interfaces("dc1-spine-02") == ["ethernet-1/1", "ethernet-1/2", "ethernet-1/3", "ethernet-1/4"])
 check("interfaces は知らない機器なら空", t.interfaces("nope") == [] and t.interfaces("") == [])
 lc = t.link_choices()
-check("link_choices は 10 本の (表示, a|a_if|b)", len(lc) == 10 and ("carrier-pe-01 eth1 - hq-ce-01 eth1  [ebgp primary]", "carrier-pe-01|eth1|hq-ce-01") in lc)
-check("役割の無いリンクは種別だけ", ("hq-ce-01 eth3 - hq-host-01 eth1  [l2]", "hq-ce-01|eth3|hq-host-01") in lc)
+check("link_choices は 12 本の (表示, a|a_if|b)", len(lc) == 12 and ("dc1-leaf-01 ethernet-1/1 - dc1-spine-01 ethernet-1/3  [fabric]", "dc1-leaf-01|ethernet-1/1|dc1-spine-01") in lc)
+check("VM との LACP は lag", ("dc1-host-01 eth1 - dc1-leaf-01 ethernet-1/3  [lag]", "dc1-host-01|eth1|dc1-leaf-01") in lc)
 check("link_choices の値は remove_link の引数に戻せる", all(v.count("|") == 2 and v.split("|")[0] < v.split("|")[2] for _, v in lc))
 a = app.anomalies
 check("異常一覧は Neptune 未設定なら error と空リスト", a.list_anomalies()["anomalies"] == [] and "terraform/pipeline/graph" in a.list_anomalies()["error"])
-check("app.run_tool は list_anomalies を anomalies に振る", "error" in app.run_tool("list_anomalies", {"status": "open"}) and app.run_tool("list_devices", {})["count"] == 10)
+check("app.run_tool は list_anomalies を anomalies に振る", "error" in app.run_tool("list_anomalies", {"status": "open"}) and app.run_tool("list_devices", {})["count"] == 8)
+check("app.run_tool は layers を topology に振る", app.run_tool("layers", {"device_id": "dc1-leaf-01", "layer": "ip"})["count"] == 5)
 check("anomalies.run_tool の未知ツール", "unknown" in a.run_tool("nope", {})["error"])
 check("app.run_tool は list_proposals を proposals に振る（Neptune 未設定なので案内）", "terraform/workflow" in app.run_tool("list_proposals", {})["error"])
 # 過去の異常・修復履歴・状態に答えられるようにした（2026-09-18）
@@ -184,14 +194,14 @@ check("system prompt は過去 → status=all、履歴 → list_proposals、承�
 
 # ---- ツールの往復
 app.history.clear()
-state.update(retrieve=RET, converse=[tool_converse("neighbors", {"device_id": "hq-ce-01"}), ok_converse("hq-ce-01 は PE 2 台につながる")], calls=[])
-r = app.invoke({"prompt": "hq-ce-01 の隣は"})
+state.update(retrieve=RET, converse=[tool_converse("neighbors", {"device_id": "dc1-leaf-01"}), ok_converse("dc1-leaf-01 は Spine 2 台につながる")], calls=[])
+r = app.invoke({"prompt": "dc1-leaf-01 の隣は"})
 convs = [c[1] for c in state["calls"] if c[0] == "converse"]
-check("tool_use なら結果を返して 2 回目を呼ぶ", len(convs) == 2 and r["response"].startswith("hq-ce-01 は PE 2 台につながる"))
+check("tool_use なら結果を返して 2 回目を呼ぶ", len(convs) == 2 and r["response"].startswith("dc1-leaf-01 は Spine 2 台につながる"))
 tr = convs[1]["messages"][-1]
 check("2 回目の末尾は toolResult（success、json）", tr["role"] == "user" and tr["content"][0]["toolResult"]["toolUseId"] == "tu1" and tr["content"][0]["toolResult"]["status"] == "success" and "neighbors" in tr["content"][0]["toolResult"]["content"][0]["json"])
 check("2 回目の直前は assistant の toolUse", convs[1]["messages"][-2]["content"][0]["toolUse"]["name"] == "neighbors")
-check("履歴には質問と最終回答だけ", app.history == [{"role": "user", "content": [{"text": "hq-ce-01 の隣は"}]}, {"role": "assistant", "content": [{"text": "hq-ce-01 は PE 2 台につながる"}]}])
+check("履歴には質問と最終回答だけ", app.history == [{"role": "user", "content": [{"text": "dc1-leaf-01 の隣は"}]}, {"role": "assistant", "content": [{"text": "dc1-leaf-01 は Spine 2 台につながる"}]}])
 
 state.update(converse=[tool_converse("neighbors", {"device_id": "zzz"}), ok_converse("そんな機器は無い")], calls=[])
 r = app.invoke({"prompt": "zzz の隣は"})
@@ -202,7 +212,7 @@ state.update(converse=[tool_converse("topology_graph", {}, f"tu{i}") for i in ra
 r = app.invoke({"prompt": "全体は"})
 check("ツールの往復は MAX_TOOL_ROUNDS(5) で打ち切る（Converse は 6 回）", len([c for c in state["calls"] if c[0] == "converse"]) == 6 and r["status"] == "success")
 
-state.update(converse=[tool_converse("neighbors", {"device_id": "hq-ce-01"}), BotoCoreError("x")], calls=[])
+state.update(converse=[tool_converse("neighbors", {"device_id": "dc1-leaf-01"}), BotoCoreError("x")], calls=[])
 n = len(app.history)
 r = app.invoke({"prompt": "q"})
 check("2 回目の Converse 失敗も error で履歴に残らない", r["status"] == "error" and len(app.history) == n)

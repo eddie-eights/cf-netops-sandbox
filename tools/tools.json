@@ -7,18 +7,18 @@
       "properties": {
         "site": {
           "type": "string",
-          "description": "拠点名で絞る（hq / dc / br1 / br2 / carrier）。空なら全部"
+          "description": "拠点名で絞る（dc1 / wan）。空なら全部"
         },
         "role": {
           "type": "string",
-          "description": "役割で絞る（pe / ce / host / unknown）。空なら全部"
+          "description": "役割で絞る（leafsw = 上流側の Leaf / spine / leaf = アクセス側の Leaf / upstream = 上流の VM / host = アクセス側の VM / unknown）。空なら全部"
         }
       }
     }
   },
   {
     "name": "neighbors",
-    "description": "機器の隣接（接続先の機器、両端のインタフェース名、回線の種別 ebgp/ibgp/l2、主副、帯域、回線のいまの状態 status = UP / DOWN）。",
+    "description": "機器の隣接（接続先の機器、両端のインタフェース名、回線の種別 fabric = Spine と Leaf のあいだ / lag = VM と Leaf の LACP / l2、主副、帯域、回線のいまの状態 status = UP / DOWN）。",
     "inputSchema": {
       "type": "object",
       "required": [
@@ -27,7 +27,7 @@
       "properties": {
         "device_id": {
           "type": "string",
-          "description": "機器名（例 hq-ce-01）"
+          "description": "機器名（例 dc1-leaf-01）"
         }
       }
     }
@@ -54,15 +54,32 @@
   },
   {
     "name": "topology_graph",
-    "description": "ネットワーク全体のノードとリンクの一覧。全体像を説明するときに使う。",
+    "description": "ネットワーク全体のノードとリンクの一覧（物理層）。全体像を説明するときに使う。",
     "inputSchema": {
       "type": "object",
       "properties": {}
     }
   },
   {
+    "name": "layers",
+    "description": "物理層より上の情報。IP 層（ip_interface = サブインタフェースのアドレス、isis_adjacency = IS-IS の隣接）と EVPN・BGP 層（bgp_session = iBGP EVPN のセッション（Spine がルートリフレクタ）、evpn_instance = EVI / VNI / VTEP、ethernet_segment = LACP の multihoming の ESI）。各頂点は interface_id / ip_interface_id で下の層の頂点を指し、辺 over / peer / tunnel / attach / segment でつながる。各頂点のいまの状態 status = UP / DOWN 付き。「BGP のセッションは」「IS-IS の隣接は」「EVPN は」と聞かれたら使う。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "device_id": {
+          "type": "string",
+          "description": "機器名（例 dc1-leaf-01）。空なら全機器"
+        },
+        "layer": {
+          "type": "string",
+          "description": "ip か evpn。空なら両方"
+        }
+      }
+    }
+  },
+  {
     "name": "list_anomalies",
-    "description": "監視で見つかった異常の一覧（機器、種別 link_down / trap、対象インタフェース、発生時刻、最後に確認した時刻、解消時刻、poll か trap か）。「今の異常は」「どこが落ちている」と聞かれたら status=open で呼ぶ。「これまでの異常は」「過去に何があった」「履歴」と聞かれたら status=all（解消済みも含む）で呼ぶ。解消済みだけなら status=resolved。",
+    "description": "監視で見つかった異常の一覧（機器、種別 link_down / bgp_down / isis_down / trap、対象（インタフェース。bgp_down は相手の IP）、発生時刻、最後に確認した時刻、解消時刻、poll / trap / gnmi のどれで見つけたか）。「今の異常は」「どこが落ちている」と聞かれたら status=open で呼ぶ。「これまでの異常は」「過去に何があった」「履歴」と聞かれたら status=all（解消済みも含む）で呼ぶ。解消済みだけなら status=resolved。",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -76,7 +93,7 @@
         },
         "device_id": {
           "type": "string",
-          "description": "機器名（例 hq-ce-01）で絞る。空なら全機器"
+          "description": "機器名（例 dc1-leaf-01）で絞る。空なら全機器"
         }
       }
     }
@@ -89,7 +106,7 @@
       "properties": {
         "device_id": {
           "type": "string",
-          "description": "機器名（例 hq-ce-01）。空なら全機器"
+          "description": "機器名（例 dc1-leaf-01）。空なら全機器"
         },
         "minutes": {
           "type": "integer",
@@ -104,7 +121,7 @@
   },
   {
     "name": "query_metrics",
-    "description": "監視メトリクス（Prometheus）に PromQL を投げる。インタフェースの状態やトラフィックの推移を見るのに使う。例: interface_ifOperStatus{sysName=\"hq-ce-01\"}",
+    "description": "監視メトリクス（Prometheus）に PromQL を投げる。インタフェースの状態やトラフィックの推移を見るのに使う。例: interface_ifOperStatus{sysName=\"dc1-leaf-01\"}",
     "inputSchema": {
       "type": "object",
       "required": [
@@ -130,7 +147,7 @@
       "properties": {
         "device_id": {
           "type": "string",
-          "description": "機器名（例 hq-ce-01）。空なら全機器"
+          "description": "機器名（例 dc1-leaf-01）。空なら全機器"
         },
         "hours": {
           "type": "integer",
@@ -155,7 +172,7 @@
         },
         "device_id": {
           "type": "string",
-          "description": "機器名（例 hq-ce-01）で絞る。空なら全機器"
+          "description": "機器名（例 dc1-leaf-01）で絞る。空なら全機器"
         }
       }
     }

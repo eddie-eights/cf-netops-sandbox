@@ -273,7 +273,7 @@ check("Gateway に無いツールの call はエラーの辞書", "error" in mcp
 # ---- tools.json と Python の TOOL_SPECS
 tools = json.loads(read("tools", "tools.json"))
 py_specs = {s["toolSpec"]["name"]: s["toolSpec"] for s in topology.TOOL_SPECS + anomalies.TOOL_SPECS + evidence.TOOL_SPECS + proposals.TOOL_SPECS}
-check("tools.json の 9 つは topology / anomalies / evidence / proposals の TOOL_SPECS と同じ名前", {t["name"] for t in tools} == set(py_specs) and len(tools) == 9)
+check("tools.json の 10 個は topology / anomalies / evidence / proposals の TOOL_SPECS と同じ名前", {t["name"] for t in tools} == set(py_specs) and len(tools) == 10)
 check("evidence のツールは search_logs / query_metrics / query_history", {s["toolSpec"]["name"] for s in evidence.TOOL_SPECS} == {"search_logs", "query_metrics", "query_history"})
 check("handler は topology / anomalies / evidence / proposals のツールを名前で振り分ける",
       "MODULES = (topology, anomalies, evidence, proposals)" in read("tools", "handler.py"))
@@ -289,7 +289,7 @@ check("tools.json の型は string / integer だけ（Gateway の inline schema 
 class Ctx:
     client_context = types.SimpleNamespace(custom={"bedrockAgentCoreToolName": "tools___list_devices"})
 check("Lambda は client_context のツール名から <target>___ を外す", handler.tool_name(Ctx()) == "list_devices")
-out = handler.handler({"site": "hq"}, Ctx())
+out = handler.handler({"site": "dc1"}, Ctx())
 check("list_devices を静的トポロジで答える（devices.json / yaml のどちらでも）", isinstance(out, dict) and out.get("count", 0) >= 1)
 check("知らないツールはエラーの辞書", "error" in handler.dispatch("nope", {}))
 
@@ -347,7 +347,7 @@ check("Gateway は AWS_IAM 認可の MCP で、2025-06-18 を話す", 'authorize
 check("Gateway のターゲットは tools.json から inline schema を作る", 'jsondecode(file("${path.module}/../../tools/tools.json"))' in tf and 'dynamic "inline_payload"' in tf)
 check("tools Lambda は python3.13 arm64 で、handler.py / toolkit / topology / anomalies / proposals / graph / data を zip にする",
       'runtime          = "python3.13"' in tf and 'architectures    = ["arm64"]' in tf
-      and all(f"../../{p}" in tf for p in ("tools/handler.py", "agent/toolkit.py", "agent/topology.py", "agent/anomalies.py", "agent/evidence.py", "agent/proposals.py", "agent/graph.py", "agent/data/topology.json", "agent/data/devices.yaml")))
+      and all(f"../../{p}" in tf for p in ("tools/handler.py", "agent/toolkit.py", "agent/topology.py", "agent/anomalies.py", "agent/evidence.py", "agent/proposals.py", "agent/graph.py", "agent/data/topology.json", "agent/data/devices.yaml", "agent/data/layers.json")))
 # 入れ忘れても apply も plan も通り、実行時に ModuleNotFoundError になる。だから「入っている」ではなく「足りていないものが無い」を見る:
 # zip に入れたモジュールが import する agent/ のモジュールが、全部 tools_files に並んでいるか
 zipped = set(re.findall(r'"\.\./\.\./agent/(\w+)\.py"', tf))

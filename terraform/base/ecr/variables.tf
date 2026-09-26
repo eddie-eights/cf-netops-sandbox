@@ -17,7 +17,7 @@ variable "owner" {
 }
 
 variable "create_lab_repositories" {
-  description = "Also create the three repositories of the lab images (frr / snmpd / multitool). false keeps only the agent repository."
+  description = "Also create the two repositories of the lab images (srlinux / multitool). false keeps only the agent repository."
   type        = bool
   default     = true
 }

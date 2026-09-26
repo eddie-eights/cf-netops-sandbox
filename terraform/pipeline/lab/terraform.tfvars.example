@@ -8,9 +8,9 @@
 # region      = "ap-northeast-1"
 # owner       = "efukuda"
 #
-# instance_type     = "t4g.large"
+# instance_type     = "t4g.xlarge"
 # ami_ssm_parameter = "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64"
-# volume_size       = 16
+# volume_size       = 24
 # auto_start_lab    = true
 #
 # create_telegraf        = false        # ops/up.sh passes true when it makes terraform/pipeline/stream
@@ -18,6 +18,5 @@
 #
 # containerlab_version = "0.79.0"
 # telegraf_version     = "1.40.0"
-# frr_image_tag        = "10.2.1"
-# snmpd_image_tag      = "v2"
+# srlinux_image_tag    = "26.7.2"
 # multitool_image_tag  = "v0.10.0"

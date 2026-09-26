@@ -66,7 +66,7 @@ os.environ.pop("NEPTUNE_ENDPOINT", None); os.environ["PARAM_PREFIX"] = "/x"; os.
 graph = load("graph")
 check("SSM に無ければ未配備", not graph.configured())
 topology = load("topology")
-check("未配備なら静的データ", topology.SOURCE == "static" and len(topology.DEVICES) == 10)
+check("未配備なら静的データ", topology.SOURCE == "static" and len(topology.DEVICES) == 8)
 
 # ---- GraphSON の読み替え
 check("_un は List / Map / Int を素の値に", graph._un(gs({"a": [1, 2], "b": "s"})) == {"a": [1, 2], "b": "s"})
@@ -76,18 +76,26 @@ check("_q は文字列を ' で囲み ' をエスケープ", graph._q("it's") ==
 os.environ["NEPTUNE_ENDPOINT"] = "db.example:8182"
 graph = load("graph")
 check("環境変数で配備あり", graph.configured() and graph._client().kw["endpoint_url"] == "https://db.example:8182")
-devs = [{"id": "a-ce-01", "label": "device", "hostname": "a-ce-01", "site": "a", "role": "ce", "asn": 65001, "mgmt_ip": "203.0.113.11", "enabled": True},
-        {"id": "b-ce-01", "label": "device", "hostname": "b-ce-01", "site": "b", "role": "ce", "asn": None, "mgmt_ip": "203.0.113.12", "enabled": False}]
+devs = [{"id": "a-ce-01", "label": "device", "hostname": "a-ce-01", "site": "a", "role": "leaf", "asn": 65001, "mgmt_ip": "203.0.113.11", "enabled": True},
+        {"id": "b-ce-01", "label": "device", "hostname": "b-ce-01", "site": "b", "role": "leaf", "asn": None, "mgmt_ip": "203.0.113.12", "enabled": False}]
 ifs = [{"id": "a-ce-01#eth0", "label": "interface", "device_id": "a-ce-01", "name": "eth0", "address": "203.0.113.11"},
        {"id": "a-ce-01#eth1", "label": "interface", "device_id": "a-ce-01", "name": "eth1", "address": "172.16.1.2", "status": "DOWN"},
        {"id": "gone#eth1", "label": "interface", "device_id": "gone", "name": "eth1"}]
 links = [{"id": "e1", "label": "link", "OUT": {"id": "a-ce-01"}, "IN": {"id": "b-ce-01"}, "a_if": "eth1", "b_if": "eth1", "kind": "l2", "role": "primary", "bandwidth_mbps": 1000}]
+lv = [{"id": "a-ce-01#eth1.0", "label": "ip_interface", "layer": "ip", "device_id": "a-ce-01", "interface_id": "a-ce-01#eth1", "name": "eth1.0", "address": "172.16.1.2"},
+      {"id": "a-ce-01#bgp#10.255.0.9", "label": "bgp_session", "layer": "evpn", "device_id": "a-ce-01", "peer_address": "10.255.0.9", "status": "DOWN", "registered": False}]
+le = [{"id": "le1", "label": "over", "OUT": {"id": "a-ce-01#eth1.0"}, "IN": {"id": "a-ce-01#eth1"}}]
 state.update(answer={"g.V().hasLabel('device').elementMap()": devs, "g.V().hasLabel('interface').elementMap()": ifs,
-                     "g.E().hasLabel('link').elementMap()": links}, queries=[])
+                     "g.E().hasLabel('link').elementMap()": links, "g.V().hasLabel('ip_interface','isis_adjacency','bgp_session','evpn_instance','ethernet_segment').elementMap()": lv,
+                     "g.E().hasLabel('over','peer','tunnel','attach','segment').elementMap()": le}, queries=[])
 d, l = graph.load_topology()
+y = graph.load_layers()
+check("load_layers は上の層の頂点（registered を付ける。未登録は False）と辺（from / to は両端の id）を id の順で返す",
+      [v["id"] for v in y["vertices"]] == ["a-ce-01#bgp#10.255.0.9", "a-ce-01#eth1.0"] and y["vertices"][0]["registered"] is False and y["vertices"][0]["status"] == "DOWN"
+      and y["vertices"][1]["registered"] is True and y["edges"] == [{"label": "over", "from": "a-ce-01#eth1.0", "to": "a-ce-01#eth1"}])
 check("load_topology はインタフェースの頂点を device_id で機器に付け、機器の無いものは捨てる",
-      d[0]["interfaces"] == [{"name": "eth0", "address": "203.0.113.11", "status": None, "registered": True},
-                             {"name": "eth1", "address": "172.16.1.2", "status": "DOWN", "registered": True}]
+      d[0]["interfaces"] == [{"name": "eth0", "address": "203.0.113.11", "lag": "", "status": None, "registered": True},
+                             {"name": "eth1", "address": "172.16.1.2", "lag": "", "status": "DOWN", "registered": True}]
       and d[1]["interfaces"] == [] and d[0]["registered"] is True)
 check("load_topology は device_id と a/b を組み立てる", d[0]["device_id"] == "a-ce-01" and d[0]["asn"] == 65001 and d[1]["enabled"] is False and l == [{"a_if": "eth1", "b_if": "eth1", "kind": "l2", "role": "primary", "bandwidth_mbps": 1000, "status": None, "a": "a-ce-01", "b": "b-ce-01"}])
 
@@ -98,16 +106,16 @@ check("topology_graph の source は neptune", topology.topology_graph()["source
 
 # ---- 読めなければ静的へ
 state["fail"] = True
-check("Neptune が落ちていれば静的データに戻る", topology.reload(force=True) == "static" and len(topology.DEVICES) == 10)
+check("Neptune が落ちていれば静的データに戻る", topology.reload(force=True) == "static" and len(topology.DEVICES) == 8)
 state["fail"] = False
 state.update(answer={"g.V().hasLabel('device').elementMap()": [], "g.V().hasLabel('interface').elementMap()": [], "g.E().hasLabel('link').elementMap()": []})
-check("Neptune が空なら静的データを見せて neptune-empty", topology.reload(force=True) == "neptune-empty" and len(topology.DEVICES) == 10)
+check("Neptune が空なら静的データを見せて neptune-empty", topology.reload(force=True) == "neptune-empty" and len(topology.DEVICES) == 8)
 
 # ---- 書き込みの Gremlin
 state.update(answer={"count()": [1]}, queries=[])
 check("add_link は同じ機器を拒む", "error" in graph.add_link("a", "e1", "a", "e2"))
 state.update(answer={"outE('link')": [0], "count()": [1]}, queries=[])
-r = graph.add_link("b-ce-01", "eth2", "a-ce-01", "eth3", "ebgp", "secondary", 100)
+r = graph.add_link("b-ce-01", "eth2", "a-ce-01", "eth3", "fabric", "secondary", 100)
 q = state["queries"][-1]
 check("add_link は a < b に正規化して addE", r.get("added") == "a-ce-01 eth3 - b-ce-01 eth2" and q.startswith("g.addE('link').from(__.V('a-ce-01')).to(__.V('b-ce-01'))") and ".property('bandwidth_mbps',100)" in q and ".property('role','secondary')" in q)
 state.update(answer={"count()": [0]}, queries=[])
@@ -128,59 +136,79 @@ check("add_device は未登録の頂点を置き換え、status を引き継ぐ"
       and state["queries"][2] == "g.V('zz-ce-09').drop()" and ".property('status','ALARM')" in state["queries"][3]
       and state["queries"][3].startswith("g.addV('device').property(id,'zz-ce-09')"))
 state.update(answer={"count()": [3]}, queries=[])
-check("count は登録済みの機器・IF・回線と未登録の頂点を数える", graph.count() == {"devices": 3, "interfaces": 3, "links": 3, "unregistered": 3}
-      and state["queries"][0] == "g.V().hasLabel('device').hasNot('registered').count()" and state["queries"][3] == "g.V().has('registered',false).count()")
+check("count は登録済みの機器・IF・回線、上の層の頂点と辺、未登録の頂点を数える", graph.count() == {"devices": 3, "interfaces": 3, "links": 3, "layers": 3, "layer_edges": 3, "unregistered": 3}
+      and state["queries"][0] == "g.V().hasLabel('device').hasNot('registered').count()" and state["queries"][5] == "g.V().has('registered',false).count()"
+      and state["queries"][3].startswith("g.V().hasLabel('ip_interface',") and "'bgp_session'" in state["queries"][3])
 # 判定は辞書の順（outE の count は 0 = リンク未登録、機器の count は 1 = 登録済み）
 spec = importlib.util.spec_from_file_location("lab_topology", os.path.join(AGENT, "..", "lab", "lab_topology.py"))
 lt = importlib.util.module_from_spec(spec); spec.loader.exec_module(lt)
-lab_devices, lab_links = lt.load(os.path.join(AGENT, "..", "lab"))
+lab_devices, lab_links, lab_layers = lt.load(os.path.join(AGENT, "..", "lab"))
 n_if = sum(len(x["interfaces"]) for x in lab_devices)
-placeholders = [{"id": "hq-ce-01", "label": "device", "registered": False, "role": "unknown", "status": "ALARM"},
-                {"id": "hq-ce-01#eth1", "label": "interface", "registered": False, "device_id": "hq-ce-01", "name": "eth1", "status": "DOWN"},
+placeholders = [{"id": "dc1-leaf-01", "label": "device", "registered": False, "role": "unknown", "status": "ALARM"},
+                {"id": "dc1-leaf-01#ethernet-1/1", "label": "interface", "registered": False, "device_id": "dc1-leaf-01", "name": "ethernet-1/1", "status": "DOWN"},
                 {"id": "zz-ce-09", "label": "device", "registered": False, "role": "unknown", "status": "ALARM"}]
 state.update(answer={"has('registered',false).elementMap()": placeholders, "outE('link')": [0], "inE('link')": [0], "drop()": [], "addV": [], "addE": [], "count()": [1]}, queries=[])
 r = graph.seed(lab_devices, lab_links)
 qs = state["queries"]
 check("seed は未登録の頂点を読み、登録済みを drop してから、今回登録される未登録の頂点だけ drop する",
       qs[0] == "g.V().has('registered',false).elementMap()" and qs[1] == "g.V().hasLabel('device','interface').hasNot('registered').drop()"
-      and qs[2:4] == ["g.V('hq-ce-01').drop()", "g.V('hq-ce-01#eth1').drop()"] and not any("'zz-ce-09'" in q for q in qs))
-check(f"seed は lab の 10 台と全インタフェース {n_if} 個を addV、10 本を addE", n_if > 20
-      and sum(q.startswith("g.addV('device')") for q in qs) == 10 and sum(q.startswith("g.addV('interface')") for q in qs) == n_if
-      and "g.addV('interface').property(id,'hq-ce-01#eth0').property('device_id','hq-ce-01').property('name','eth0').property('address','203.0.113.11')" in qs
-      and sum(q.startswith("g.addE") for q in qs) == 10)
+      and qs[2:4] == ["g.V('dc1-leaf-01').drop()", "g.V('dc1-leaf-01#ethernet-1/1').drop()"] and not any("'zz-ce-09'" in q for q in qs))
+check(f"seed は lab の 8 台と全インタフェース {n_if} 個を addV、12 本を addE", n_if > 20
+      and sum(q.startswith("g.addV('device')") for q in qs) == 8 and sum(q.startswith("g.addV('interface')") for q in qs) == n_if
+      and "g.addV('interface').property(id,'dc1-leaf-01#mgmt0').property('device_id','dc1-leaf-01').property('name','mgmt0').property('address','203.0.113.31')" in qs
+      and "g.addV('interface').property(id,'dc1-leaf-01#ethernet-1/3').property('device_id','dc1-leaf-01').property('name','ethernet-1/3').property('lag','lag1')" in qs
+      and sum(q.startswith("g.addE") for q in qs) == 12 and not any(q.startswith("g.addV('ip_interface')") for q in qs))
 check("seed は status を入れず、置き換えた未登録の頂点の UP でない status だけ引き継ぐ",
       [q for q in qs if "'status'" in q] == [
-          "g.V('hq-ce-01').property(single,'status','ALARM').coalesce(values('registered'),constant(true))",
-          "g.V('hq-ce-01').outE('link').has('a_if','eth1').property('status','DOWN').count()",
-          "g.V('hq-ce-01').inE('link').has('b_if','eth1').property('status','DOWN').count()",
-          "g.V('hq-ce-01#eth1').property(single,'status','DOWN').coalesce(values('registered'),constant(true))"])
+          "g.V('dc1-leaf-01').property(single,'status','ALARM').coalesce(values('registered'),constant(true))",
+          "g.V('dc1-leaf-01').outE('link').has('a_if','ethernet-1/1').property('status','DOWN').count()",
+          "g.V('dc1-leaf-01').inE('link').has('b_if','ethernet-1/1').property('status','DOWN').count()",
+          "g.V('dc1-leaf-01#ethernet-1/1').property(single,'status','DOWN').coalesce(values('registered'),constant(true))"])
 state.update(answer={"has('registered',false).elementMap()": [], "outE('link')": [0], "drop()": [], "addV": [], "addE": [], "count()": [1]}, queries=[])
 r = graph.seed(*topology.load_static())
-check("静的データ（インタフェースの一覧が無い）でも seed は 10 台と 10 本", sum(q.startswith("g.addV('device')") for q in state["queries"]) == 10
-      and not any(q.startswith("g.addV('interface')") for q in state["queries"]) and sum(q.startswith("g.addE") for q in state["queries"]) == 10
+check("静的データ（インタフェースの一覧が無い）でも seed は 8 台と 12 本", sum(q.startswith("g.addV('device')") for q in state["queries"]) == 8
+      and not any(q.startswith("g.addV('interface')") for q in state["queries"]) and sum(q.startswith("g.addE") for q in state["queries"]) == 12
       and not any("'status'" in q for q in state["queries"]))
+# 上の層（IP 層 / EVPN・BGP 層）は layers を渡したときだけ。辺は両端の頂点（物理層の interface も含む）があるものだけ張る
+layer_ph = [{"id": "dc1-leaf-01#bgp#10.255.0.1", "label": "bgp_session", "registered": False, "device_id": "dc1-leaf-01", "status": "DOWN"}]
+state.update(answer={"has('registered',false).elementMap()": layer_ph, "hasLabel('interface').id()": [], "outE('link')": [0], "drop()": [], "addV": [], "addE": [], "count()": [1]}, queries=[])
+r = graph.seed(lab_devices, lab_links, lab_layers)
+qs = state["queries"]
+n_lv, n_le = len(lab_layers["vertices"]), len(lab_layers["edges"])
+check(f"seed に layers を渡すと上の層の {n_lv} 頂点と {n_le} 辺も入れ、未登録の同じ id の頂点を drop して status を引き継ぐ",
+      n_lv == 62 and n_le == 84 and sum(q.startswith("g.addV('device')") for q in qs) == 8
+      and sum(any(q.startswith(f"g.addV('{lb}')") for lb in graph.LAYER_LABELS) for q in qs) == n_lv
+      and sum(q.startswith("g.addE") for q in qs) == 12 + n_le and "g.V('dc1-leaf-01#bgp#10.255.0.1').drop()" in qs
+      and qs.index("g.V('dc1-leaf-01#bgp#10.255.0.1').property(single,'status','DOWN')") > max(i for i, q in enumerate(qs) if q.startswith("g.add"))
+      and r.get("layers") == 1 and r.get("layer_edges") == 1 and "skipped_edges" not in r)
+check("上の層の頂点は属性を全部 property に、id と label は付けない",
+      "g.addV('bgp_session').property(id,'dc1-leaf-01#bgp#10.255.0.1').property('layer','evpn').property('device_id','dc1-leaf-01').property('peer_address','10.255.0.1')" in " ".join(qs)
+      and not any(".property('label'" in q or ".property('id'" in q for q in qs))
+state.update(answer={"has('registered',false).elementMap()": [], "hasLabel('interface').id()": [], "outE('link')": [0], "drop()": [], "addV": [], "addE": [], "count()": [1]}, queries=[])
+r = graph.seed_layers({"vertices": [{"id": "x#bgp#1", "label": "bgp_session", "device_id": "x"}], "edges": [{"label": "over", "from": "x#bgp#1", "to": "x#eth0.0"}]})
+check("seed_layers は片端の無い辺を張らずに skipped_edges に数える", r.get("skipped_edges") == 1 and not any(q.startswith("g.addE") for q in state["queries"]))
 
 # ---- 動的な状態（graph/status_handler.py が呼ぶ）
 state.update(answer={"outE('link')": [1], "inE('link')": [0], "coalesce(": [True]}, queries=[])
-r = graph.set_status("hq-ce-01", "eth1", "down")
+r = graph.set_status("dc1-leaf-01", "eth1", "down")
 check("set_status は IF 付きなら a 側の outE と b 側の inE の辺と、インタフェースの頂点（single）に書き、更新数を返す",
-      r == {"device_id": "hq-ce-01", "if_name": "eth1", "status": "DOWN", "updated": 2}
-      and state["queries"] == ["g.V('hq-ce-01').outE('link').has('a_if','eth1').property('status','DOWN').count()",
-                               "g.V('hq-ce-01').inE('link').has('b_if','eth1').property('status','DOWN').count()",
-                               "g.V('hq-ce-01#eth1').property(single,'status','DOWN').coalesce(values('registered'),constant(true))"])
+      r == {"device_id": "dc1-leaf-01", "if_name": "eth1", "status": "DOWN", "updated": 2}
+      and state["queries"] == ["g.V('dc1-leaf-01').outE('link').has('a_if','eth1').property('status','DOWN').count()",
+                               "g.V('dc1-leaf-01').inE('link').has('b_if','eth1').property('status','DOWN').count()",
+                               "g.V('dc1-leaf-01#eth1').property(single,'status','DOWN').coalesce(values('registered'),constant(true))"])
 state.update(answer={"coalesce(": [True]}, queries=[])
 check("set_status は IF 無しなら機器の頂点に single で書く（Neptune の既定の set だと値が積み重なる）",
-      graph.set_status("hq-ce-01", "", "ALARM") == {"device_id": "hq-ce-01", "status": "ALARM", "updated": 1}
-      and state["queries"] == ["g.V('hq-ce-01').property(single,'status','ALARM').coalesce(values('registered'),constant(true))"])
+      graph.set_status("dc1-leaf-01", "", "ALARM") == {"device_id": "dc1-leaf-01", "status": "ALARM", "updated": 1}
+      and state["queries"] == ["g.V('dc1-leaf-01').property(single,'status','ALARM').coalesce(values('registered'),constant(true))"])
 state.update(answer={"coalesce(": []}, queries=[])
 check("only_if を渡すと、今の status がそれのときだけ書き、合わなければ未登録の頂点も作らない",
-      graph.set_status("hq-ce-01", "", "UP", only_if="ALARM") == {"device_id": "hq-ce-01", "status": "UP", "updated": 0}
-      and state["queries"] == ["g.V('hq-ce-01').has('status','ALARM').property(single,'status','UP').coalesce(values('registered'),constant(true))"])
+      graph.set_status("dc1-leaf-01", "", "UP", only_if="ALARM") == {"device_id": "dc1-leaf-01", "status": "UP", "updated": 0}
+      and state["queries"] == ["g.V('dc1-leaf-01').has('status','ALARM').property(single,'status','UP').coalesce(values('registered'),constant(true))"])
 state.update(answer={"fold()": [], "coalesce(": []}, queries=[])
 check("only_if があれば UP 以外でも、合わなければ未登録の頂点を作らない",
       "unregistered" not in graph.set_status("zz-ce-09", "", "ALARM", only_if="DOWN") and not any("addV" in q for q in state["queries"]))
 state.update(answer={"coalesce(": [True]}, queries=["x"])
-check("set_status は UP / DOWN / ALARM 以外を拒む", "error" in graph.set_status("hq-ce-01", "", "broken") and len(state["queries"]) == 1)
+check("set_status は UP / DOWN / ALARM 以外を拒む", "error" in graph.set_status("dc1-leaf-01", "", "broken") and len(state["queries"]) == 1)
 state.update(answer={"fold()": [], "coalesce(": []}, queries=[])
 r = graph.set_status("zz-ce-09", "", "ALARM")
 check("トポロジに無い機器の異常は捨てず、未登録の頂点（role=unknown, registered=false）を coalesce で作って status を書く",
@@ -189,21 +217,40 @@ check("トポロジに無い機器の異常は捨てず、未登録の頂点（r
                                   ".property('site','?').property('role','unknown').property('enabled',false).property('registered',false))")
       and state["queries"][2] == "g.V('zz-ce-09').property(single,'status','ALARM')")
 state.update(answer={"outE('link')": [0], "inE('link')": [0], "fold()": [], "coalesce(": []}, queries=[])
-r = graph.set_status("hq-ce-01", "eth9", "DOWN")
+r = graph.set_status("dc1-leaf-01", "eth9", "DOWN")
 check("トポロジに無いインタフェースの異常は、機器（無ければ）とインタフェースの未登録の頂点を作る",
       r["unregistered"] is True and r["updated"] == 0
-      and "addV('interface').property(id,'hq-ce-01#eth9').property('device_id','hq-ce-01').property('name','eth9').property('registered',false)" in state["queries"][4]
-      and state["queries"][5] == "g.V('hq-ce-01#eth9').property(single,'status','DOWN')")
+      and "addV('interface').property(id,'dc1-leaf-01#eth9').property('device_id','dc1-leaf-01').property('name','eth9').property('registered',false)" in state["queries"][4]
+      and state["queries"][5] == "g.V('dc1-leaf-01#eth9').property(single,'status','DOWN')")
 state.update(answer={"outE('link')": [0], "inE('link')": [0], "coalesce(": []}, queries=[])
 r = graph.set_status("zz-ce-09", "eth1", "UP")
 check("UP に戻すだけのときは未登録の頂点を作らない", "unregistered" not in r and not any("addV" in q for q in state["queries"]))
+# 上の層の動的な状態（bgp_down / isis_down。graph/status_handler.py が set_layer_status を呼ぶ）
+state.update(answer={"coalesce(": [True]}, queries=[])
+check("set_layer_status は <機器>#bgp#<相手の IP> の bgp_session の頂点に single で書く",
+      graph.set_layer_status("dc1-leaf-01", "bgp", "10.255.0.1", "DOWN") == {"device_id": "dc1-leaf-01", "kind": "bgp", "target": "10.255.0.1", "status": "DOWN", "updated": 1}
+      and state["queries"] == ["g.V('dc1-leaf-01#bgp#10.255.0.1').hasLabel('bgp_session').property(single,'status','DOWN').coalesce(values('registered'),constant(true))"])
+state.update(answer={"coalesce(": [True]}, queries=[])
+check("isis は isis_adjacency の頂点（target = サブインタフェース）", graph.set_layer_status("dc1-leaf-01", "isis", "ethernet-1/1.0", "up")["updated"] == 1
+      and state["queries"][0].startswith("g.V('dc1-leaf-01#isis#ethernet-1/1.0').hasLabel('isis_adjacency').property(single,'status','UP')"))
+state.update(answer={"coalesce(": []}, queries=[])
+r = graph.set_layer_status("dc1-leaf-01", "bgp", "10.255.9.9", "DOWN")
+check("トポロジに無いセッションは未登録の頂点（layer と peer_address 付き）を作って status を書く", r["unregistered"] is True and r["updated"] == 0
+      and "addV('bgp_session').property(id,'dc1-leaf-01#bgp#10.255.9.9').property('device_id','dc1-leaf-01').property('layer','evpn').property('peer_address','10.255.9.9').property('registered',false)" in state["queries"][1]
+      and state["queries"][2] == "g.V('dc1-leaf-01#bgp#10.255.9.9').property(single,'status','DOWN')")
+state.update(answer={"coalesce(": []}, queries=[])
+check("UP に戻すだけなら未登録の頂点を作らない", "unregistered" not in graph.set_layer_status("dc1-leaf-01", "isis", "x", "UP") and len(state["queries"]) == 1)
+check("kind / status が違えば error", "error" in graph.set_layer_status("d", "ospf", "x") and "error" in graph.set_layer_status("d", "bgp", "x", "broken"))
 state.update(answer={"coalesce(": [False]}, queries=[])
 check("未登録の頂点に書いたときも unregistered", graph.set_status("zz-ce-09", "", "UP").get("unregistered") is True and len(state["queries"]) == 1)
 devs[0]["status"] = "DOWN"; links[0]["status"] = "DOWN"
 devs.append({"id": "zz-ce-09", "label": "device", "hostname": "zz-ce-09", "site": "?", "role": "unknown", "enabled": False, "registered": False, "status": "ALARM"})
 state.update(answer={"g.V().hasLabel('device').elementMap()": devs, "g.V().hasLabel('interface').elementMap()": ifs,
-                     "g.E().hasLabel('link').elementMap()": links}, queries=[])
+                     "g.E().hasLabel('link').elementMap()": links, "g.V().hasLabel('ip_interface','isis_adjacency','bgp_session','evpn_instance','ethernet_segment').elementMap()": lv,
+                     "g.E().hasLabel('over','peer','tunnel','attach','segment').elementMap()": le}, queries=[])
 topology.reload(force=True)
+check("Neptune の上の層は topology.layers に出て、未登録の頂点は registered False のまま", topology.layers()["count"] == 2
+      and next(v for v in topology.layers()["vertices"] if v["id"] == "a-ce-01#bgp#10.255.0.9")["registered"] is False)
 check("Neptune の status は機器一覧・隣接・影響範囲に出て、無ければ UP",
       topology.list_devices()["devices"][0]["status"] == "DOWN" and topology.list_devices()["devices"][1]["status"] == "UP"
       and topology.neighbors("b-ce-01")["neighbors"][0]["status"] == "DOWN"

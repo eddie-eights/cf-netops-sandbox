@@ -1,4 +1,4 @@
-# ECR repositories of netops-poc. The agent image, the three lab images
+# ECR repositories of netops-poc. The agent image, the two lab images (srlinux / multitool)
 # and the two workflow images (worker / temporal) go here. ops/up.sh pushes them in step 2.
 # force_delete = true so that `terraform destroy` removes the repositories together with their images (daily ops/down.sh).
 
@@ -9,7 +9,7 @@ locals {
 }
 
 locals {
-  lab_repositories      = var.create_lab_repositories ? toset(["frr", "snmpd", "multitool"]) : toset([])
+  lab_repositories      = var.create_lab_repositories ? toset(["srlinux", "multitool"]) : toset([])
   workflow_repositories = var.create_workflow_repositories ? toset(["worker", "temporal"]) : toset([])
 }
 
