@@ -105,7 +105,7 @@ check("release は emr-7.5 以上（S3 Tables の下限）", re.search(r'default
 check("ロググループに retention がある", re.search(r'aws_cloudwatch_log_group" "emr"[\s\S]*?retention_in_days', tf, re.S) is not None)
 check("runtime role は emr-serverless から assume（SourceAccount の条件付き）",
       re.search(r'"emr-serverless\.amazonaws\.com"', tf) is not None and '"aws:SourceAccount"' in tf)
-for act in ("s3tables:GetTableMetadataLocation", "s3tables:UpdateTableMetadataLocation", "s3tables:PutTableData", "kafka-cluster:ReadData", "kafka-cluster:Connect"):
+for act in ("s3tables:GetTableMetadataLocation", "s3tables:UpdateTableMetadataLocation", "s3tables:PutTableData", "kafka-cluster:ReadData", "kafka-cluster:Connect", "kafka-cluster:CreateTopic"):
     check(f"runtime role に {act}", f'"{act}"' in tf)
 check("Kafka のトピック ARN は cluster → topic の置き換え", 'replace(local.msk_cluster_arn, ":cluster/", ":topic/")' in tf)
 
@@ -304,6 +304,64 @@ check("prometheus_series: 数値の field だけ（文字列は落とす、bool 
       and sorted(dict(l)["__name__"] for l, _, _ in series) == ["snmp_interface_flag", "snmp_interface_ifInOctets", "snmp_interface_ifOperStatus"])
 check("prometheus_series: トピックでは絞らない（購読で絞っている）", len(mod.prometheus_series([dict(rec, topic="cpu")])) == 3)
 check("prometheus_series: labels は名前順のリスト（Prometheus はソート済みを要求する）", all(l == sorted(l) for l, _, _ in series))
+
+# ---- トピックを起動時に作る（無いトピックを購読すると offset 読みで落ちる。2026-09-27）
+check("all_topics: 格納先が読むトピックの和（重複なし、引数の順。detect は --neptune-endpoint があるときだけ）",
+      mod.all_topics(mod.parse_args(base + ["--sinks", "opensearch", "--opensearch-endpoint", "https://o"])) == ["traps", "logs"]
+      and mod.all_topics(mod.parse_args(base + ["--sinks", "prometheus,opensearch", "--prometheus-url", "https://p/api/v1/remote_write", "--opensearch-endpoint", "https://o",
+                                                 "--metric-topics", "metrics,gnmi", "--log-topics", "gnmi,traps,logs"])) == ["metrics", "gnmi", "traps", "logs"]
+      and mod.all_topics(mod.parse_args(base + ["--sinks", "prometheus", "--prometheus-url", "https://p/api/v1/remote_write", "--neptune-endpoint", "n:8182",
+                                                 "--anomaly-events-table", "c.n.t"])) == ["metrics", "gnmi", "traps", "logs"])
+
+
+class _Fut:
+    def __init__(self, v=None, err=None): self.v, self.err = v, err
+    def get(self):
+        if self.err: raise Exception(self.err)
+        return self.v
+
+
+class _Admin:
+    made = []
+    def __init__(self, have, err=None): self.have, self.err, self.closed = have, err, False
+    def listTopics(self): return type("R", (), {"names": lambda _s: _Fut(self.have)})()
+    def createTopics(self, lst):
+        _Admin.made.extend(t.name for t in lst)
+        return type("R", (), {"all": lambda _s: _Fut(None, self.err)})()
+    def close(self): self.closed = True
+
+
+class _JVM:
+    def __init__(self, admin):
+        self._admin = admin
+        j = self
+        class Props(dict):
+            def put(self, k, v): self[k] = v
+        class ArrayList(list):
+            def add(self, x): self.append(x)
+        class NewTopic:
+            def __init__(self, name, p, r): self.name = name
+        self.java = type("J", (), {"util": type("U", (), {"Properties": Props, "ArrayList": ArrayList, "Optional": type("O", (), {"empty": staticmethod(lambda: None)})})})()
+        self.org = type("O", (), {"apache": type("A", (), {"kafka": type("K", (), {"clients": type("C", (), {"admin": type("Ad", (), {
+            "AdminClient": type("AC", (), {"create": staticmethod(lambda props: (setattr(j, "props", props), admin)[1])}), "NewTopic": NewTopic})()})()})()})()})()
+
+
+_admin = _Admin({"metrics", "gnmi"})
+_spark = type("S", (), {"_jvm": _JVM(_admin)})()
+check("ensure_topics: 無いものだけ作って名前を返す。AdminClient は SASL_SSL / AWS_MSK_IAM で bootstrap に繋ぎ、終わったら close",
+      mod.ensure_topics(_spark, "b-1:9098", ["metrics", "gnmi", "traps", "logs"]) == ["traps", "logs"] and _Admin.made == ["traps", "logs"] and _admin.closed
+      and _spark._jvm.props["bootstrap.servers"] == "b-1:9098" and _spark._jvm.props["security.protocol"] == "SASL_SSL" and _spark._jvm.props["sasl.mechanism"] == "AWS_MSK_IAM")
+_Admin.made = []
+_admin2 = _Admin({"metrics", "gnmi", "traps", "logs"})
+check("ensure_topics: 全部あれば作らない（createTopics を呼ばない）",
+      mod.ensure_topics(type("S", (), {"_jvm": _JVM(_admin2)})(), "b", ["traps", "logs"]) == [] and _Admin.made == [] and _admin2.closed)
+_admin3 = _Admin(set(), err="org.apache.kafka.common.errors.TopicExistsException: Topic 'traps' already exists.")
+check("ensure_topics: 同時に作られて TopicExistsException になっても先へ進む", mod.ensure_topics(type("S", (), {"_jvm": _JVM(_admin3)})(), "b", ["traps"]) == ["traps"])
+_admin4 = _Admin(set(), err="org.apache.kafka.common.errors.TopicAuthorizationException: Not authorized")
+try:
+    mod.ensure_topics(type("S", (), {"_jvm": _JVM(_admin4)})(), "b", ["traps"]); _raised = False
+except Exception: _raised = True
+check("ensure_topics: TopicExists 以外の失敗は上げる（権限が無いのを黙って通さない）。close はする", _raised and _admin4.closed)
 
 # ---- Splunk HEC（Spark から直接。2026-09-26）
 check("splunk_hec_url: 末尾の / を除き、/services/collector/event を足す（すでに付いていればそのまま、/services/collector なら /event を足す）",

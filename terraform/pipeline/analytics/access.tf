@@ -45,9 +45,10 @@ resource "aws_iam_role_policy" "emr" {
         Resource = local.msk_cluster_arn
       },
       {
-        Sid      = "KafkaTopics"
-        Effect   = "Allow"
-        Action   = ["kafka-cluster:DescribeTopic", "kafka-cluster:ReadData"]
+        Sid    = "KafkaTopics"
+        Effect = "Allow"
+        # CreateTopic: Spark が起動時に無いトピックを作る（spark/snmp_sinks.py の ensure_topics。Telegraf が最初の trap / syslog を出すまで traps / logs が無い）
+        Action   = ["kafka-cluster:DescribeTopic", "kafka-cluster:ReadData", "kafka-cluster:CreateTopic"]
         Resource = local.topic_arns
       },
       {

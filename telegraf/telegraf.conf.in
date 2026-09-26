@@ -9,7 +9,7 @@
 # 流れ: Spine-Leaf の SR Linux 6 台の SNMP を 10 秒ごとにポーリング（ifTable）+ gNMI で BGP / IS-IS / EVPN の状態を購読
 #       + 機器からの trap を udp 162 で受ける + 機器の syslog を udp 5140 で受ける → MSK（IAM 認証、TLS）
 #   metrics トピック: interface（ifName / ifOperStatus / ifInErrors ...）と system（sysName / sysUpTime）
-#   gnmi    トピック: bgp_neighbor（session_state。on_change）/ isis_adjacency（adjacency_state。on_change）/ evpn_es / mac_table（30 秒ごと）
+#   gnmi    トピック: bgp_neighbor（session_state。on_change）/ isis_interface（oper_state。on_change）/ evpn_es / mac_table（30 秒ごと）
 #   traps   トピック: snmp_trap（linkDown / linkUp）
 #   logs    トピック: device_log（機器の syslog。BGP の隣接の up / down など。lab/srlinux/*.cli の remote-server）
 # 機器は lab の EC2 の中の docker network（203.0.113.0/24）にいる。この EC2 からは次の経路で届く（lab の EC2 で sudo lab forward-status）:
@@ -80,25 +80,30 @@
 # ユーザーは containerlab が入れる既定（admin / NokiaSrl1!。lab だけの公開既定値で、実機の値ではない。実機なら SSM から埋める）。
 # source タグは購読先のアドレス（機器の管理 IP。Spark はこれと device map で機器名を引く）。パスの鍵（peer-address など）はタグになる。
 # on_change は購読の直後に今の状態を全部送り、その後は変わったときだけ送る。sample は sample_interval ごと。
-# Spark（spark/snmp_sinks.py の events）は bgp_neighbor の session_state != established を bgp_down、isis_adjacency の
-# adjacency_state != up を isis_down として Neptune の bgp_session / isis_adjacency の頂点を DOWN にする（graph/status_handler.py）。
-# 隣接が消えたとき（gNMI の delete）は Telegraf が載せないので、down を経ずに消える隣接は残ることがある（実機で確かめる）
+# Spark（spark/snmp_sinks.py の events）は bgp_neighbor の session_state != established を bgp_down、isis_interface の
+# oper_state != up を isis_down として Neptune の bgp_session / isis_adjacency の頂点を DOWN にする（graph/status_handler.py）。
+# 実測（2026-09-27、SR Linux 26.7.2 / Telegraf 1.40）: bgp_neighbor はタグ peer_address、field session_state。isis_interface はタグ interface_name
+# （ethernet-1/1.0。サブインタフェース。system0.0 も来る）、field oper_state（up / down）
 [[inputs.gnmi]]
   addresses = [__GNMI_TARGETS__]
   username = "admin"
   password = "NokiaSrl1!"
   encoding = "json_ietf"
   redial = "10s"
-  enable_tls = true
+  # inputs.gnmi の TLS は tls_enable（enable_tls は 1.35 で消えた。1.40 は未知のキーで起動を拒む。2026-09-27 実測）。outputs.kafka は enable_tls のまま
+  tls_enable = true
   insecure_skip_verify = true
 
   [[inputs.gnmi.subscription]]
     name = "bgp_neighbor"
     path = "/network-instance[name=default]/protocols/bgp/neighbor[peer-address=*]/session-state"
     subscription_mode = "on_change"
+  # IS-IS は隣接（…/interface/adjacency）ではなく IF の oper-state（…/interface/oper-state）を取る。
+  # 隣接は落ちると state=down を経ずに消え（gNMI の delete）、Telegraf は delete を載せないので isis_down が出なかった（2026-09-27 に fail-main で実測）。
+  # oper-state は IF ごとに残る葉で up / down が on_change で届く。level/adjacency-number は gNMI の購読では "unknown element" で拒否される（SR Linux 26.7.2）
   [[inputs.gnmi.subscription]]
-    name = "isis_adjacency"
-    path = "/network-instance[name=default]/protocols/isis/instance[name=main]/interface[interface-name=*]/adjacency"
+    name = "isis_interface"
+    path = "/network-instance[name=default]/protocols/isis/instance[name=main]/interface[interface-name=*]/oper-state"
     subscription_mode = "on_change"
   [[inputs.gnmi.subscription]]
     name = "evpn_es"
@@ -122,7 +127,8 @@
 # RFC 5424 の HOSTNAME は SR Linux の host-name（= sysName）なので、metrics / traps と同じタグ名 sysName に付け替える（下の processors.rename）。
 # best_effort は形の崩れた行（構造化データ無しなど）も捨てずに載せるため
 [[inputs.syslog]]
-  service_address = "udp://:5140"
+  # inputs.syslog の受け口は server（service_address は 1.40 では未知のキーで起動を拒む。2026-09-27 実測。inputs.snmp_trap は service_address のまま）
+  server = "udp://:5140"
   name_override = "device_log"
   best_effort = true
 
@@ -160,7 +166,7 @@
   json_timestamp_units = "1s"
   required_acks = 1
   max_retry = 3
-  namepass = ["bgp_neighbor", "isis_adjacency", "evpn_es", "mac_table"]
+  namepass = ["bgp_neighbor", "isis_interface", "evpn_es", "mac_table"]
 
 [[outputs.kafka]]
   brokers = [__KAFKA_BROKERS__]

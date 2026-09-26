@@ -24,7 +24,7 @@ Telegraf の JSON 出力（outputs.kafka の data_format = "json"、json_timesta
 異常の検知（detect）は格納先とは別に常に動く 4 本目のクエリ（検知したら EventBridge にイベントを出す）:
   metrics の interface で ifOperStatus が down のインタフェース（ポーリング）と、traps の linkDown（即時）を open にし、up に戻ったポーリングと
   linkUp で resolved にする。gnmi の bgp_neighbor（session_state が established でない → bgp_down。target は相手の IP）と
-  isis_adjacency（adjacency_state が up でない → isis_down。target はサブインタフェース）も同じ仕組みで開閉する（Telegraf の inputs.gnmi。on_change）。異常の「いま」は Neptune（terraform/pipeline/graph）の頂点 label=anomaly（id は <機器>#<種別>#<インタフェース>）、
+  isis_interface（IS-IS の IF の oper_state が up でない → isis_down。target はサブインタフェース）も同じ仕組みで開閉する（Telegraf の inputs.gnmi。on_change）。異常の「いま」は Neptune（terraform/pipeline/graph）の頂点 label=anomaly（id は <機器>#<種別>#<インタフェース>）、
   開いた・閉じたの履歴は S3 Tables の anomaly_events（--anomaly-events-table）に追記する（証跡。2026-09-24 に DynamoDB をやめた）。
   新しく open になったときだけ EventBridge の既定のバスに Source <接頭辞>.spark（--event-source）/ DetailType AnomalyOpened を put_events する
   （terraform/workflow の events.tf がルールで SQS に流し、Temporal の worker が調査ワークフローを起こす）。resolved にしたときは AnomalyResolved。
@@ -551,10 +551,12 @@ def _oid(v):
 
 
 def _gnmi_field(f, leaf):
-    """Telegraf の inputs.gnmi の field。購読したパスより下は "a/b/leaf" のように / でつながるので、末尾の名前で引く（- は _ に直してある）"""
-    for k, v in f.items():
-        if str(k).replace("-", "_").rsplit("/", 1)[-1] == leaf:
-            return v
+    """Telegraf の inputs.gnmi の field。購読したパスより下は "a/b/leaf" のように / でつながるので、末尾の名前で引く（- は _ に直してある）。leaf は名前か名前の組"""
+    leaves = (leaf,) if isinstance(leaf, str) else tuple(leaf)
+    for want in leaves:
+        for k, v in f.items():
+            if str(k).replace("-", "_").rsplit("/", 1)[-1] == want:
+                return v
     return None
 
 
@@ -569,8 +571,13 @@ def _gnmi_tag(t, key):
     return str(v or "").strip()
 
 
+# measurement → (種別, 状態の field（複数なら先に見つかった方）, 対象のタグ, 正常な値（小文字で一致）)
 GNMI_KINDS = {"bgp_neighbor": ("bgp_down", "session_state", "peer_address", "established"),
-              "isis_adjacency": ("isis_down", "adjacency_state", "interface_name", "up")}   # measurement → (種別, 状態の field, 対象のタグ, 正常な値)
+              "isis_interface": ("isis_down", "oper_state", "interface_name", "up"),
+              "isis_adjacency": ("isis_down", ("state", "adjacency_state"), "interface_name", "up")}
+# isis_interface が本命（IS-IS の IF の oper-state。…/interface[interface-name=*]/oper-state を on_change。up / down が届く）。
+# isis_adjacency（…/interface/adjacency の state）は残してあるが、実機（SR Linux 26.7.2 / Telegraf 1.40。2026-09-27 に fail-main で実測）では
+# 隣接は down を経ずに消え（gNMI の delete）、Telegraf は delete を載せないので isis_down が出ない。state=down の行が来たときだけ効く
 
 
 def events(m, devmap):
@@ -933,6 +940,51 @@ def iceberg_query(rows, table, checkpoint):
     )
 
 
+KAFKA_IAM_PROPS = {"security.protocol": "SASL_SSL", "sasl.mechanism": "AWS_MSK_IAM",
+                   "sasl.jaas.config": "software.amazon.msk.auth.iam.IAMLoginModule required;",
+                   "sasl.client.callback.handler.class": "software.amazon.msk.auth.iam.IAMClientCallbackHandler"}
+
+
+def all_topics(args):
+    """引数の格納先が読むトピックの和（重複なし、引数の順）"""
+    seen = []
+    for s in list(args.sinks) + (["detect"] if args.neptune_endpoint else []):
+        for t in sink_topics(s, args.metric_topics, args.log_topics).split(","):
+            if t and t not in seen:
+                seen.append(t)
+    return seen
+
+
+def ensure_topics(spark, bootstrap, topics):
+    """無いトピックを作って、作った名前を返す（あるものは触らない）。
+    MSK は auto.create.topics.enable=true だが、それは produce のとき。Telegraf が最初の trap / syslog を出すまで traps / logs は無く、
+    Spark の offset 読み（AdminClient）は無いトピックで UnknownTopicOrPartitionException で落ちて、起こし直しの上限（1 時間 5 回）を
+    使い切っていた（2026-09-27 実測）。パーティション数と複製数はブローカーの既定（terraform/pipeline/stream の MSK configuration）。
+    Telegraf と同時に作って TopicExistsException になっても、あるのだから先へ進む"""
+    jvm = spark._jvm
+    props = jvm.java.util.Properties()
+    props.put("bootstrap.servers", bootstrap)
+    for k, v in KAFKA_IAM_PROPS.items():
+        props.put(k, v)
+    admin = jvm.org.apache.kafka.clients.admin.AdminClient.create(props)
+    try:
+        have = set(admin.listTopics().names().get())
+        missing = [t for t in topics if t not in have]
+        if missing:
+            none = jvm.java.util.Optional.empty()
+            new = jvm.java.util.ArrayList()
+            for t in missing:
+                new.add(jvm.org.apache.kafka.clients.admin.NewTopic(t, none, none))
+            try:
+                admin.createTopics(new).all().get()
+            except Exception as e:  # noqa: BLE001 - py4j の例外。TopicExists だけ許す
+                if "TopicExistsException" not in str(e):
+                    raise
+        return missing
+    finally:
+        admin.close()
+
+
 def build(spark, args):
     """引数の格納先ぶんのストリーミングクエリを起こして返す"""
     queries = []
@@ -961,6 +1013,8 @@ def main(argv):
     from pyspark.sql import SparkSession
 
     spark = SparkSession.builder.appName("snmp_sinks").getOrCreate()
+    made = ensure_topics(spark, args.bootstrap, all_topics(args))
+    log("トピック: " + ", ".join(all_topics(args)) + (f"（作った: {', '.join(made)}）" if made else "（全部あった）"))
     queries = build(spark, args)
     log("格納先: " + ", ".join(f"{s}({sink_topics(s, args.metric_topics, args.log_topics)})" for s in args.sinks)
         + (f"; 検知: 履歴 {args.anomaly_events_table} + Neptune {args.neptune_endpoint} → EventBridge {args.event_bus}（Source {args.event_source}）"

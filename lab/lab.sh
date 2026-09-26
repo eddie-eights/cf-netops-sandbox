@@ -120,7 +120,16 @@ case "${1:-}" in
   heal-main) echo "アクセス側 Leaf の fabric (dc1-leaf-01 ethernet-1/1) を戻す"; x dc1-leaf-01 ip link set e1-1 up ;;
   failover)
     # dc1-leaf-01 から dc1-leafsw-01 のループバック（10.255.1.1）への経路。切替前は spine 2 台（172.16.0.4 / 172.16.0.12）の ECMP、切替後は 172.16.0.12 だけ
-    route() { srl dc1-leaf-01 "show network-instance default route-table ipv4-unicast prefix 10.255.1.1/32 detail" | grep -E 'Next-hop|172\.16\.' || true; }
+    # 26.7.2 の sr_cli には "show … route-table ipv4-unicast prefix …" が無い（Unknown token 'ipv4-unicast'。2026-09-27 実測）ので、state の経路 → next-hop-group → next-hop の ip-address をたどる
+    route() {
+      local nhg i
+      nhg=$(srl dc1-leaf-01 "info from state network-instance default route-table ipv4-unicast route 10.255.1.1/32 id * route-type isis route-owner * origin-network-instance * next-hop-group" 2>/dev/null | grep -oE 'next-hop-group [0-9]+' | head -1 | awk '{print $2}')
+      [ -n "$nhg" ] || { echo "  (IS-IS の経路が無い)"; return 0; }
+      for i in $(srl dc1-leaf-01 "info from state network-instance default route-table next-hop-group $nhg next-hop * next-hop" 2>/dev/null | grep -E '^ *next-hop [0-9]+ *$' | awk '{print $2}' | sort -u); do
+        srl dc1-leaf-01 "info from state network-instance default route-table next-hop $i" 2>/dev/null | grep -oE 'ip-address [0-9.]+|subinterface [^ ]+' | tr '\n' ' ' || true
+        echo
+      done
+    }
     echo "== 切替前: dc1-leaf-01 -> dc1-leafsw-01 (10.255.1.1) の経路 =="; route
     "$SELF" fail-main
     echo "== dc1-spine-02 だけに切り替わるのを待つ（最大 60 秒）=="
@@ -181,9 +190,10 @@ case "${1:-}" in
     echo "== 機器から見た trap / syslog の宛先（$MGMT_GW。DNAT で Telegraf へ）と gNMI の受け口（$GNMI_PORT）=="
     for n in $(routers); do
       printf '  %-14s ' "$n"
-      srl "$n" "info from state / system logging remote-server" 2>/dev/null | grep -oE 'remote-server [0-9.]+' | head -1 | tr '\n' ' '
-      srl "$n" "info from state / system snmp trap-group" 2>/dev/null | grep -oE 'address [0-9.]+' | head -1 | tr '\n' ' '
-      srl "$n" "info from state / system gnmi-server network-instance mgmt port" 2>/dev/null | grep -oE 'port [0-9]+' | head -1
+      # list はキー無しだと "Missing value for 'host'" になるので * で全部出す。grep が空でも set -e / pipefail で止めない
+      srl "$n" "info from state / system logging remote-server *" 2>/dev/null | grep -oE 'remote-server [0-9.]+' | head -1 | tr '\n' ' ' || true
+      srl "$n" "info from state / system snmp trap-group * destination *" 2>/dev/null | grep -oE 'address [0-9.]+' | head -1 | tr '\n' ' ' || true
+      srl "$n" "info from state / system grpc-server mgmt port" 2>/dev/null | grep -oE 'port [0-9]+' | head -1 | tr '\n' ' ' || true
       echo
     done
     ;;

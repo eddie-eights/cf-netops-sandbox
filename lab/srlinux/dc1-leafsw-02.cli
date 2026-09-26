@@ -79,7 +79,7 @@ set / system snmp trap-group telegraf network-instance mgmt
 set / system snmp trap-group telegraf destination telegraf admin-state enable
 set / system snmp trap-group telegraf destination telegraf address 203.0.113.1
 set / system snmp trap-group telegraf destination telegraf security-level no-auth-no-priv
-set / system snmp trap-group telegraf destination telegraf community-entry public community public
+set / system snmp trap-group telegraf destination telegraf community-entry telegraf community public
 set / system logging network-instance mgmt
 set / system logging remote-server 203.0.113.1 transport udp
 set / system logging remote-server 203.0.113.1 remote-port 5140

@@ -204,7 +204,7 @@ def srl_config(sw: Switch, switches: list, hosts: list) -> str:
         "set / system snmp trap-group telegraf destination telegraf admin-state enable",
         f"set / system snmp trap-group telegraf destination telegraf address {MGMT_GW}",
         "set / system snmp trap-group telegraf destination telegraf security-level no-auth-no-priv",
-        "set / system snmp trap-group telegraf destination telegraf community-entry public community public",
+        "set / system snmp trap-group telegraf destination telegraf community-entry telegraf community public",  # 名前を community と同じにすると SR Linux が commit を拒む（2026-09-26 実測）
         "set / system logging network-instance mgmt",
         f"set / system logging remote-server {MGMT_GW} transport udp",
         f"set / system logging remote-server {MGMT_GW} remote-port {LOG_PORT}",

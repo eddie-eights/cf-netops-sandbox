@@ -494,7 +494,7 @@ check("lab.sh forward は syslog の LOG_PORT も trap の 162 と同じ仕組�
       and "rsyslog" not in labsh and "LOG_DIR" not in labsh and re.search(r"^\s*logs\)", labsh, re.M) is not None)
 # ログのポートは 4 か所で同じ（lab.sh / telegraf.sh / telegraf.conf.in / lab の locals）
 check("syslog のポートが lab.sh・telegraf.sh・telegraf.conf.in・lab の locals で同じ",
-      re.search(rf"^LOG_PORT={log_port}$", tgsh, re.M) is not None and f'service_address = "udp://:{log_port}"' in tele
+      re.search(rf"^LOG_PORT={log_port}$", tgsh, re.M) is not None and re.search(rf'^\s*server = "udp://:{log_port}"$', tele, re.M) is not None and re.search(r'^\s*service_address = "udp://:162"$', tele, re.M) is not None
       and re.search(rf"^\s*log_port\s*=\s*{log_port}$", lab_locals, re.M) is not None)
 # 管理ネットワークは 3 か所で同じ（containerlab の mgmt / lab.sh / lab の locals の VPC ルート）
 mgmt = re.search(r"^MGMT=(\S+)$", labsh, re.M).group(1)
@@ -520,13 +520,14 @@ check("gNMI の購読先は同じ 6 台の管理 IP:57400 で、telegraf.conf.in
       and 's#__GNMI_TARGETS__#$gnmi#' in tgsh and re.search(r"^GNMI_FILE=gnmi_targets\.txt$", tgsh, re.M) is not None
       and re.fullmatch(r'"[0-9.]+:[0-9]+"(, *"[0-9.]+:[0-9]+")*', _gnmi_line) is not None)
 gnmi_blk = tele.split("[[inputs.gnmi]]", 1)[1].split("# ----", 1)[0]
-check("inputs.gnmi は TLS（自己署名）で bgp_neighbor / isis_adjacency を on_change、evpn_es / mac_table を 30 秒の sample で購読する",
-      'enable_tls = true' in gnmi_blk and 'insecure_skip_verify = true' in gnmi_blk and 'encoding = "json_ietf"' in gnmi_blk
+check("inputs.gnmi は TLS（自己署名）で bgp_neighbor / isis_interface（IS-IS の IF の oper-state。隣接そのものは消えるので取らない）を on_change、evpn_es / mac_table を 30 秒の sample で購読する",
+      re.search(r'^\s*tls_enable = true$', gnmi_blk, re.M) is not None and re.search(r'^\s*enable_tls', gnmi_blk, re.M) is None and 'insecure_skip_verify = true' in gnmi_blk and 'encoding = "json_ietf"' in gnmi_blk
       and re.search(r'name = "bgp_neighbor"\s*\n\s*path = "/network-instance\[name=default\]/protocols/bgp/neighbor\[peer-address=\*\]/session-state"\s*\n\s*subscription_mode = "on_change"', gnmi_blk)
-      and re.search(r'name = "isis_adjacency"\s*\n\s*path = "/network-instance\[name=default\]/protocols/isis/instance\[name=main\]/interface\[interface-name=\*\]/adjacency"\s*\n\s*subscription_mode = "on_change"', gnmi_blk)
+      and re.search(r'name = "isis_interface"\s*\n\s*path = "/network-instance\[name=default\]/protocols/isis/instance\[name=main\]/interface\[interface-name=\*\]/oper-state"\s*\n\s*subscription_mode = "on_change"', gnmi_blk)
+      and 'name = "isis_adjacency"' not in gnmi_blk
       and gnmi_blk.count('subscription_mode = "sample"') == 2 and gnmi_blk.count('sample_interval = "30s"') == 2)
 check("gNMI の 4 つは gnmi トピックへ（metrics には混ざらない）",
-      re.search(r'topic = "gnmi"[\s\S]*?namepass = \["bgp_neighbor", "isis_adjacency", "evpn_es", "mac_table"\]', tele) is not None
+      re.search(r'topic = "gnmi"[\s\S]*?namepass = \["bgp_neighbor", "isis_interface", "evpn_es", "mac_table"\]', tele) is not None
       and re.search(r'topic = "metrics"[\s\S]*?namepass = \["system", "interface"\]', tele) is not None)
 check("lab.sh forward は gNMI の GNMI_PORT/tcp も SNMP の 161/udp と同じく Telegraf から管理ネットワークへ通す",
       re.search(r'-p tcp --dport "\$GNMI_PORT" "\$\{c\[@\]\}" -j ACCEPT', labsh) is not None and re.search(r"^GNMI_PORT=57400$", labsh, re.M) is not None)
@@ -554,11 +555,21 @@ check("bgp_neighbor の session_state が established でなければ bgp_down�
       == [("dc1-leaf-01", "bgp_down", "10.255.0.1", True, "gnmi")]
       and mod.events({"name": "bgp_neighbor", "tags": {"source": "203.0.113.31", "peer_address": "10.255.0.1"}, "fields": {"session_state": "Established"}}, _dm)
       == [("dc1-leaf-01", "bgp_down", "10.255.0.1", False, "gnmi")])
-check("isis_adjacency の adjacency_state が up でなければ isis_down（target = サブインタフェース。field は adjacency/adjacency-state でもよい）",
-      mod.events({"name": "isis_adjacency", "tags": {"source": "203.0.113.31", "interface_name": "ethernet-1/1.0"}, "fields": {"adjacency/adjacency-state": "down"}}, _dm)
+check("isis_interface の oper_state が up でなければ isis_down、up なら閉じる（target = サブインタフェース。実機の行: interface_name / name / source のタグに oper_state の field）",
+      mod.events({"name": "isis_interface", "tags": {"source": "203.0.113.31", "interface_name": "ethernet-1/1.0", "name": "default"}, "fields": {"oper_state": "down"}}, _dm)
+      == [("dc1-leaf-01", "isis_down", "ethernet-1/1.0", True, "gnmi")]
+      and mod.events({"name": "isis_interface", "tags": {"source": "203.0.113.31", "interface_name": "ethernet-1/1.0"}, "fields": {"oper_state": "up"}}, _dm)
+      == [("dc1-leaf-01", "isis_down", "ethernet-1/1.0", False, "gnmi")]
+      and mod.events({"name": "isis_interface", "tags": {"source": "203.0.113.31", "name": "default"}, "fields": {"oper_state": "down"}}, _dm) == [])
+check("isis_adjacency（隣接そのもの）の state が up でなければ isis_down。実機では消えるだけで来ないが、来たら拾う。adjacency_state / adjacency/adjacency-state でもよい",
+      mod.events({"name": "isis_adjacency", "tags": {"source": "203.0.113.31", "interface_name": "ethernet-1/1.0", "neighbor_system_id": "0000.0000.0021", "name": "default"},
+                  "fields": {"state": "down", "neighbor_hostname": "dc1-spine-01", "neighbor_restart_status": "not-helping", "remaining_holdtime": 25}}, _dm)
+      == [("dc1-leaf-01", "isis_down", "ethernet-1/1.0", True, "gnmi")]
+      and mod.events({"name": "isis_adjacency", "tags": {"source": "203.0.113.31", "interface_name": "ethernet-1/1.0"}, "fields": {"adjacency/adjacency-state": "down"}}, _dm)
       == [("dc1-leaf-01", "isis_down", "ethernet-1/1.0", True, "gnmi")]
       and mod.events({"name": "isis_adjacency", "tags": {"source": "203.0.113.31", "interface_name": "ethernet-1/1.0"}, "fields": {"adjacency_state": "up"}}, _dm)
-      == [("dc1-leaf-01", "isis_down", "ethernet-1/1.0", False, "gnmi")])
+      == [("dc1-leaf-01", "isis_down", "ethernet-1/1.0", False, "gnmi")]
+      and mod.events({"name": "isis_adjacency", "tags": {"source": "203.0.113.31", "interface_name": "ethernet-1/1.0"}, "fields": {"remaining_holdtime": 22, "neighbor_restart_status": "not-helping"}}, _dm) == [])
 check("状態の field や対象のタグが無い gNMI の行と、evpn_es / mac_table は異常にしない",
       mod.events({"name": "bgp_neighbor", "tags": {"source": "203.0.113.31"}, "fields": {"session_state": "idle"}}, _dm) == []
       and mod.events({"name": "isis_adjacency", "tags": {"source": "203.0.113.31", "interface_name": "ethernet-1/1.0"}, "fields": {"neighbor_system_id": "x"}}, _dm) == []
