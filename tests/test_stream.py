@@ -336,6 +336,33 @@ check("1 バッチの中は ts の順に並べて最後の状態を採る（coll
 check("逆に up(新) が後なら resolved",
       send([iface("203.0.113.11", "eth1", 1, ts=40.0), iface("203.0.113.11", "eth1", 2, ts=30.0)]) == []
       and nep.plain("hq-ce-01#link_down#eth1")["status"] == "resolved")
+# ---- trap の直後のポーリング（SR Linux の ifOperStatus は 15〜20 秒遅れる。POLL_LAG）
+def ltrap(oid, ts, ifn="ethernet-1/1"):
+    return {**trap("203.0.113.11", oid, {"ifName": ifn}), "ts": ts}
+lk = "hq-ce-01#link_down#ethernet-1/1"
+send, nep, ev, hist = make()
+check("POLL_LAG は 20 秒（実測の遅れ）より長く、ポーリング 10 秒 × 数回ぶん以下", 20 < mod.POLL_LAG <= 60)
+check("linkDown の trap の後 POLL_LAG 秒以内の古い up のポーリングでは閉じない（同じバッチ。短い障害でも物理 IF の link_down が開く）",
+      len(send([ltrap(mod.LINK_DOWN, 100.0), iface("203.0.113.11", None, 1, ifname="ethernet-1/1", ts=110.0),
+                iface("203.0.113.11", None, 1, ifname="ethernet-1/1", ts=120.0)])) == 1
+      and nep.plain(lk)["status"] == "open")
+check("次のバッチでも窓の中の up は捨てる（trap の時刻はバッチをまたいで覚える）",
+      send([iface("203.0.113.11", None, 1, ifname="ethernet-1/1", ts=125.0)]) == [] and nep.plain(lk)["status"] == "open")
+check("窓を過ぎたポーリングはいつもどおり使う（down は開いたまま、up なら閉じる）",
+      send([iface("203.0.113.11", None, 2, ifname="ethernet-1/1", ts=135.0)]) == [] and nep.plain(lk)["status"] == "open"
+      and send([iface("203.0.113.11", None, 1, ifname="ethernet-1/1", ts=200.0)]) == [] and nep.plain(lk)["status"] == "resolved")
+send, nep, ev, hist = make()
+send([ltrap(mod.LINK_DOWN, 100.0)])
+check("linkUp の trap で閉じた直後の古い down のポーリングでは開き直さない（AnomalyOpened を空振りで出さない）",
+      send([ltrap(mod.LINK_UP, 200.0)]) == [] and nep.plain(lk)["status"] == "resolved"
+      and send([iface("203.0.113.11", None, 2, ifname="ethernet-1/1", ts=210.0), iface("203.0.113.11", None, 2, ifname="ethernet-1/1", ts=220.0)]) == []
+      and nep.plain(lk)["status"] == "resolved" and ev.types() == ["AnomalyOpened", "AnomalyResolved"])
+check("窓は IF ごと（別の IF のポーリングは捨てない）",
+      len(send([iface("203.0.113.11", None, 2, ifname="ethernet-1/2", ts=205.0)])) == 1)
+send, nep, ev, hist = make()
+check("trap の ts が無いときは窓を作らない（ポーリングだけで決まる）",
+      len(send([trap("203.0.113.11", mod.LINK_DOWN, {"ifName": "ethernet-1/1"})])) == 1
+      and send([iface("203.0.113.11", None, 1, ifname="ethernet-1/1", ts=110.0)]) == [] and nep.plain(lk)["status"] == "resolved")
 send, nep, ev, hist = make()
 send([iface("203.0.113.11", f"eth{i}", 1) for i in range(mod.NEPTUNE_IDS_PER_QUERY + 5)])
 check(f"キーが {mod.NEPTUNE_IDS_PER_QUERY} を超えたら g.V(…) を分けて読む",

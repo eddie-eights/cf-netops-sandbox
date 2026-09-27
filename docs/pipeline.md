@@ -61,7 +61,7 @@ aws ssm start-session --region ap-northeast-1 --target "$LAB_INSTANCE_ID"
 
 - 機器の CLI: `sudo docker exec -it clab-splab-dc1-leaf-01 sr_cli`（1 行だけなら `sudo lab cli dc1-leaf-01 "show ..."`）。設定は `lab/srlinux/<機器>.cli`（`set /` の行だけ。containerlab が起動時に流し込む。手で直さず `lab/gen_lab.py` で作り直す）
 - `sudo lab failover` を打つと、trap が 5 秒以内に Kafka に届き、次の検知バッチ（トリガー 60 秒）で `link_down`（物理 IF とサブインタフェース）と gNMI の `isis_down` が開く。`sudo lab heal-main` で resolved に戻る（2026-09-27 に EC2 で確認）。
-  - SR Linux の SNMP の `ifOperStatus` は実際の oper-state より 15〜20 秒遅れる（2026-09-27 実測）。検知はバッチ内で時刻順の最後の状態を採るので、落ちてから 1 分ほどで戻すと、遅れたポーリングの up が trap の linkDown より後になり、物理 IF の `link_down` は開かないことがある。サブインタフェースの `link_down`（trap）と `isis_down`（gNMI）は開く。確かめるときは 2 分以上落としておく。
+  - SR Linux の SNMP の `ifOperStatus` は実際の oper-state より 15〜20 秒遅れる（2026-09-27 実測）。そのまま時刻順の最後の状態を採ると、落ちた直後の古い up が trap の linkDown を閉じ（1 分ほどで戻すと物理 IF の `link_down` が開かなかった）、戻った直後の古い down が閉じたばかりの異常を開き直す。検知は link の trap から 30 秒（`snmp_sinks.py` の `POLL_LAG`）のあいだ、同じ IF のポーリングを使わない。
 - 機器のログは SR Linux の `system logging remote-server`（RFC 5424、udp）で lab の EC2 へ出て、Telegraf の `inputs.syslog` が受け、トピック `logs` に出す（measurement は `device_log`。hostname は `sysName` タグに付け替える）。送る subsystem は bgp / chassis / linux / netinst / xdp。
 - SNMP は containerlab が全ノードに v2c の community `public` を入れ、gNMI も全ノードで `57400/tcp`（TLS、containerlab の既定の admin）に開く。監視対象は `lab/srlinux/<機器>.cli` の `system snmp trap-group`（trap の宛先）の有無で決まり、いまは SR Linux の 6 台全部。VM 2 台は対象外。
 - SR Linux の ifTable は未使用の物理ポートも全部出す（`ifAdminStatus` が down）。IF の鍵は `ifName`（`ifDescr` は「名前 + description」）。Spark は admin down の行とサブインタフェース（`ethernet-1/1.0`）を見ない。

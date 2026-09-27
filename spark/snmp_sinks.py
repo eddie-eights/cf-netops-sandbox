@@ -500,6 +500,10 @@ IGNORED_TRAPS = {
 # 以前は一度開くと閉じず、graph の status Lambda が機器を ALARM のままにしていた
 TRAP_TTL = 600
 TRAP_SWEEP = 60
+# SR Linux の SNMP の ifOperStatus は実際の oper-state より 15〜20 秒遅れる（2026-09-27 に lab で 5 秒おきに実測）。
+# linkDown / linkUp の trap から POLL_LAG 秒のあいだの同じ IF のポーリングは古い値とみなして使わない。使うと、落ちた直後の up が trap の down を
+# 閉じ（短い障害で物理 IF の link_down が開かない）、戻った直後の down が閉じたばかりの異常を開き直す（調査ワークフローが空振りで起きる）
+POLL_LAG = 30
 EVENT_RETRIES = 3   # put_events で落ちた entry（FailedEntryCount）だけ打ち直す回数。届かなかったものは notified=false のまま次のバッチで出し直す
 EVENT_SOURCE = "netops.spark"          # --event-source の既定。terraform は接頭辞に合わせて <接頭辞>.spark を渡す
 EVENT_DETAIL_TYPE = "AnomalyOpened"
@@ -775,7 +779,7 @@ def make_history_writer(spark, table):
 
 # ---------------------------------------------------------------- 検知の本体
 def make_detect_sender(store, history, devmap, region, event_bus, event_source=EVENT_SOURCE, events_client=None,
-                       trap_ttl=TRAP_TTL, clock=time.time, sleep=time.sleep):
+                       trap_ttl=TRAP_TTL, poll_lag=POLL_LAG, clock=time.time, sleep=time.sleep):
     """records（row_to_record の辞書）から異常を出し、開いた / 閉じたを history（S3 Tables の anomaly_events）に追記し、
     store（Neptune の NeptuneAnomalies）の「いま」を書き換え、新しく open になったものを AnomalyOpened、open から resolved になったものを
     AnomalyResolved として EventBridge に出す。戻り値は新しく open になったものだけ。
@@ -783,6 +787,8 @@ def make_detect_sender(store, history, devmap, region, event_bus, event_source=E
     events_client はテストで差し替える（無ければ boto3 で作る。EMR Serverless の Python に boto3 は入っている）。
     同じマイクロバッチに同じキーが何度も出るときは、ts の順に並べて最後の状態だけ書く（ポーリングは 10 秒間隔、トリガーは 60 秒。
     collect の順は Kafka のパーティションの順で、時刻の順ではない。ts で並べないと down → up の up が先に来たとき open のまま残る）。
+    link の trap が来た IF は、その trap の ts から poll_lag 秒のポーリングを捨てる（機器の SNMP の値が遅れるため。POLL_LAG）。
+    trap の時刻はバッチをまたいで覚えておく（ドライバのプロセスに持つ。ジョブを起こし直すと忘れるが、そのときはポーリングだけで決まる）。
 
     順番は 履歴 → Neptune → イベント。どこかで落ちるとクエリが止まり、ジョブを起こし直して同じバッチを読み直す（at-least-once）:
       履歴を先に書くので、証跡から開閉が抜けることは無い。代わりに読み直しで同じ行が二度入ることがある（event_id で落とせる。
@@ -796,6 +802,7 @@ def make_detect_sender(store, history, devmap, region, event_bus, event_source=E
         import boto3
         events_client = boto3.client("events", region_name=region)
     swept = {"at": 0}
+    trap_at = {}   # anomaly_key → 最後の link の trap の ts（epoch 秒）
 
     def opened_detail(a):
         return {"anomaly_id": a["anomaly_id"], "device_id": a.get("device_id", ""), "kind": a.get("kind", ""), "target": a.get("target", ""),
@@ -846,9 +853,21 @@ def make_detect_sender(store, history, devmap, region, event_bus, event_source=E
         latest = {}
         rows = sorted((r for r in records if isinstance(r, dict)), key=lambda r: _number(r.get("ts")) or 0.0)
         for rec in rows:
+            ts = _number(rec.get("ts"))
             m = {"name": rec.get("measurement"), "tags": rec.get("tags") or {}, "fields": rec.get("fields") or {}}
             for dev, kind, ifn, opened, src in events(m, devmap):
-                latest[anomaly_key(dev, kind, ifn)] = (dev, kind, ifn, opened, src)
+                key = anomaly_key(dev, kind, ifn)
+                if ts is not None and kind == "link_down":
+                    if src == "trap":
+                        trap_at[key] = max(trap_at.get(key, ts), ts)
+                    elif src == "poll" and key in trap_at and ts < trap_at[key] + poll_lag:
+                        continue   # trap の直後のポーリングは機器側の古い値
+                latest[key] = (dev, kind, ifn, opened, src)
+        if trap_at and rows:
+            # 窓を過ぎた trap の時刻は捨てる（IF の数しか溜まらないが、長く動かすので）
+            newest = max((_number(r.get("ts")) or 0.0) for r in rows)
+            for k in [k for k, t in trap_at.items() if t + poll_lag < newest]:
+                del trap_at[k]
         # trap の TTL の見回り。このバッチに trap が来たキーは閉じない（来た trap で last_seen が進む）
         stale = []
         if now - swept["at"] >= TRAP_SWEEP:
