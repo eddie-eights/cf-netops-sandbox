@@ -9,11 +9,11 @@ Kafka と S3 Tables の jar、カタログの設定は spark-submit の --conf �
   opensearch  ログのトピックだけ → OpenSearch Serverless（TIMESERIES 型のコレクション）の _bulk に SigV4 で POST
   prometheus  メトリクスのトピックだけ → Amazon Managed Service for Prometheus の remote write に SigV4 で POST（数値の field だけ）
   splunk      全トピック → Splunk の HTTP Event Collector（HEC）に 1 行 1 イベントで POST（Authorization: Splunk <token>。
-              token は SSM の SecureString（--splunk-token-parameter）から起動時に読む。Splunk は AWS の外にあり、VPC の NAT Gateway を通して届く
-              （Splunk Cloud の公開 HEC でも、DX / VPN の先の社内の Splunk Enterprise でもよい）。
+              token は SSM の SecureString（--splunk-token-parameter）から起動時に読む。送り先は analytics の ECS の Splunk Enterprise
+              （https://splunk.<prefix>.internal:8088、自己署名なので --splunk-skip-verify。VPC の中。2026-09-28 から AWS の外の Splunk へは送らない）。
               2026-09-26 まで MSK Connect の Splunk Connect for Kafka にする予定だったが、Spark から直接書くことにした）
 どのトピックがメトリクスでどれがログかは --metric-topics / --log-topics（既定は Telegraf の metrics と traps,logs。
-logs は機器の syslog。SR Linux が lab の EC2 へ送り、lab の EC2 が Telegraf の EC2 へ DNAT する）。格納先ごとに別のストリーミングクエリ（別の Kafka の購読と checkpoint）に
+logs は機器の syslog。SR Linux が lab の EC2 へ送り、lab の EC2 が Telegraf（ECS）の内部 NLB へ DNAT する）。格納先ごとに別のストリーミングクエリ（別の Kafka の購読と checkpoint）に
 する。1 つが止まったらジョブを 1 で終わらせ、EMR Serverless に起こし直させる（どのクエリも checkpoint の続きから読む）。
 
 Telegraf の JSON 出力（outputs.kafka の data_format = "json"、json_timestamp_units = "1s"）は
@@ -48,7 +48,7 @@ import time
 import urllib.error
 import urllib.request
 
-METRIC_TOPICS = "metrics,gnmi"   # metrics = Telegraf の inputs.snmp、gnmi = inputs.gnmi（telegraf/telegraf.conf.in。Telegraf の EC2 で動く）
+METRIC_TOPICS = "metrics,gnmi"   # metrics = Telegraf の inputs.snmp、gnmi = inputs.gnmi（telegraf/telegraf.conf.in。Telegraf（ECS）で動く）
 LOG_TOPICS = "traps,logs"   # traps = Telegraf の inputs.snmp_trap、logs = inputs.syslog（機器の syslog。measurement は device_log）
 SINKS = ("iceberg", "opensearch", "prometheus", "splunk")
 TRIGGER = "60 seconds"

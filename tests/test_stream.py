@@ -487,7 +487,7 @@ _src = open(SRC, encoding="utf-8").read()
 check("detect は空のマイクロバッチでも sender を呼ぶ（TTL の見回りと出し直しを止めない）", 'if records or name == "detect":' in _src)
 
 
-# ---- ログの経路: SR Linux の system logging remote-server（udp）→ lab の EC2（203.0.113.1:5140 を DNAT）→ Telegraf の EC2 の inputs.syslog
+# ---- ログの経路: SR Linux の system logging remote-server（udp）→ lab の EC2（203.0.113.1:5140 を Telegraf の NLB へ DNAT）→ Telegraf（ECS）の inputs.syslog
 # → Kafka の logs → Spark（2026-09-26。FRR + rsyslog をやめた）
 def _read(*parts):
     with open(os.path.join(ROOT, *parts), encoding="utf-8") as f:
@@ -500,6 +500,7 @@ labsh = _read("lab", "lab.sh")
 tele = _read("telegraf", "telegraf.conf.in")
 tgsh = _read("telegraf", "telegraf.sh")
 lab_locals = _read("terraform", "pipeline", "lab", "locals.tf")
+stream_tg = _read("terraform", "pipeline", "stream", "telegraf.tf")
 check("SR Linux の 6 台の設定は set / の行だけ（containerlab が候補に流し込んで commit する。enter candidate / commit を書くと二重になる）",
       len(srl_nodes) == 6 and all(all(re.match(r"^(set / |#|\s*$)", l) for l in c.splitlines()) for c in srl_cfg.values()))
 check("containerlab は 6 台とも nokia_srlinux で srlinux/<機器名>.cli を startup-config にする",
@@ -519,16 +520,19 @@ check("containerlab の VM 2 台は linux で、leaf の組へ 2 本（bond）",
 check("lab.sh forward は syslog の LOG_PORT も trap の 162 と同じ仕組みで DNAT する（rsyslog は無い）",
       re.search(r'-p udp --dport "\$LOG_PORT" "\$\{c\[@\]\}" -j DNAT --to-destination "\$t:\$LOG_PORT"', labsh) is not None
       and "rsyslog" not in labsh and "LOG_DIR" not in labsh and re.search(r"^\s*logs\)", labsh, re.M) is not None)
-# ログのポートは 4 か所で同じ（lab.sh / telegraf.sh / telegraf.conf.in / lab の locals）
-check("syslog のポートが lab.sh・telegraf.sh・telegraf.conf.in・lab の locals で同じ",
-      re.search(rf"^LOG_PORT={log_port}$", tgsh, re.M) is not None and re.search(rf'^\s*server = "udp://:{log_port}"$', tele, re.M) is not None and re.search(r'^\s*service_address = "udp://:162"$', tele, re.M) is not None
-      and re.search(rf"^\s*log_port\s*=\s*{log_port}$", lab_locals, re.M) is not None)
+# ログのポートは 5 か所で同じ（lab.sh / telegraf.sh / telegraf.conf.in / lab の locals / stream の NLB）。trap は NLB の 162 → タスクの 1162（非 root）
+check("syslog のポートが lab.sh・telegraf.sh・telegraf.conf.in・lab の locals・stream の NLB で同じで、trap は NLB の 162 をタスクの 1162 で受ける",
+      re.search(rf"^LOG_PORT={log_port}$", tgsh, re.M) is not None and re.search(rf'^\s*server = "udp://:{log_port}"$', tele, re.M) is not None
+      and re.search(r'^\s*service_address = "udp://:1162"$', tele, re.M) is not None and re.search(r"^TRAP_PORT=1162$", tgsh, re.M) is not None
+      and re.search(rf"^\s*log_port\s*=\s*{log_port}$", lab_locals, re.M) is not None
+      and re.search(rf"syslog = \{{ listener = {log_port}, container = {log_port} \}}", stream_tg) is not None
+      and re.search(r"trap\s+= \{ listener = 162, container = 1162 \}", stream_tg) is not None)
 # 管理ネットワークは 3 か所で同じ（containerlab の mgmt / lab.sh / lab の locals の VPC ルート）
 mgmt = re.search(r"^MGMT=(\S+)$", labsh, re.M).group(1)
 check("管理ネットワークが containerlab・lab.sh・lab の locals で同じ",
       re.search(rf"^\s*ipv4-subnet: {re.escape(mgmt)}$", clab, re.M) is not None
       and re.search(rf'^\s*mgmt_cidr\s*=\s*"{re.escape(mgmt)}"$', lab_locals, re.M) is not None)
-# ポーリング先は lab の定義から作る（lab/lab_topology.py --snmp-agents → snmp_agents.txt → telegraf.sh render が埋める）
+# ポーリング先は lab の定義から作る（lab/lab_topology.py --snmp-agents → up.sh が stream の snmp_agents → タスクの SNMP_AGENTS → telegraf.sh render が埋める）
 _lt_spec = importlib.util.spec_from_file_location("lab_topology", os.path.join(ROOT, "lab", "lab_topology.py"))
 lt = importlib.util.module_from_spec(_lt_spec); _lt_spec.loader.exec_module(lt)
 _lab_devices, _, _ = lt.load(os.path.join(ROOT, "lab"))
@@ -537,14 +541,14 @@ _agents = re.findall(r"udp://([\d.]+):161", _agents_line)
 check("Telegraf のポーリング先は lab の監視対象（enabled）の管理 IP で、全部管理ネットワークの中（VPC のルートで lab の EC2 へ行く）",
       len(_agents) == 6 and sorted(_agents) == sorted(d["mgmt_ip"] for d in _lab_devices if d["enabled"])
       and all(ipaddress.ip_address(a) in ipaddress.ip_network(mgmt) for a in _agents))
-check("telegraf.conf.in の agents は __SNMP_AGENTS__ を telegraf.sh render が snmp_agents.txt で埋める（形を確かめてから）",
+check("telegraf.conf.in の agents は __SNMP_AGENTS__ を telegraf.sh render がタスクの SNMP_AGENTS で埋める（形を確かめてから）",
       re.search(r"^\s*agents = \[__SNMP_AGENTS__\]$", tele, re.M) is not None and 's#__SNMP_AGENTS__#$agents#' in tgsh
-      and re.search(r"^AGENTS_FILE=snmp_agents\.txt$", tgsh, re.M) is not None
+      and 'agents="${SNMP_AGENTS:-}"' in tgsh and '{ name = "SNMP_AGENTS", value = var.snmp_agents }' in stream_tg
       and re.fullmatch(r'"udp://[0-9.]+:[0-9]+"(, *"udp://[0-9.]+:[0-9]+")*', _agents_line) is not None)
 _gnmi_line = lt.gnmi_targets(_lab_devices)
-check("gNMI の購読先は同じ 6 台の管理 IP:57400 で、telegraf.conf.in の __GNMI_TARGETS__ を telegraf.sh render が gnmi_targets.txt で埋める",
+check("gNMI の購読先は同じ 6 台の管理 IP:57400 で、telegraf.conf.in の __GNMI_TARGETS__ を telegraf.sh render がタスクの GNMI_TARGETS で埋める",
       re.findall(r"([\d.]+):57400", _gnmi_line) == _agents and re.search(r"^\s*addresses = \[__GNMI_TARGETS__\]$", tele, re.M) is not None
-      and 's#__GNMI_TARGETS__#$gnmi#' in tgsh and re.search(r"^GNMI_FILE=gnmi_targets\.txt$", tgsh, re.M) is not None
+      and 's#__GNMI_TARGETS__#$gnmi#' in tgsh and 'gnmi="${GNMI_TARGETS:-}"' in tgsh and '{ name = "GNMI_TARGETS", value = var.gnmi_targets }' in stream_tg
       and re.fullmatch(r'"[0-9.]+:[0-9]+"(, *"[0-9.]+:[0-9]+")*', _gnmi_line) is not None)
 gnmi_blk = tele.split("[[inputs.gnmi]]", 1)[1].split("# ----", 1)[0]
 check("inputs.gnmi は TLS（自己署名）で bgp_neighbor / isis_interface（IS-IS の IF の oper-state。隣接そのものは消えるので取らない）を on_change、evpn_es / mac_table を 30 秒の sample で購読する",
@@ -558,9 +562,10 @@ check("gNMI の 4 つは gnmi トピックへ（metrics には混ざらない）
       and re.search(r'topic = "metrics"[\s\S]*?namepass = \["system", "interface"\]', tele) is not None)
 check("lab.sh forward は gNMI の GNMI_PORT/tcp も SNMP の 161/udp と同じく Telegraf から管理ネットワークへ通す",
       re.search(r'-p tcp --dport "\$GNMI_PORT" "\$\{c\[@\]\}" -j ACCEPT', labsh) is not None and re.search(r"^GNMI_PORT=57400$", labsh, re.M) is not None)
-check("up.sh と lab の upload_telegraf_command は snmp_agents.txt を s3://<バケット>/telegraf/ に置く",
-      'lab/lab_topology.py lab --snmp-agents' in _read("ops", "up.sh") and "/telegraf/snmp_agents.txt" in _read("ops", "up.sh")
-      and "lab/lab_topology.py lab --snmp-agents" in _read("terraform", "pipeline", "lab", "outputs.tf"))
+_up = _read("ops", "up.sh")
+check("up.sh は lab の定義からポーリング先と gNMI の購読先を作り、stream の snmp_agents / gnmi_targets に渡す（S3 には置かない）",
+      'lab/lab_topology.py lab --snmp-agents' in _up and 'lab/lab_topology.py lab --gnmi-targets' in _up
+      and '-var "snmp_agents=$SNMP_AGENTS" -var "gnmi_targets=$GNMI_TARGETS"' in _up and "/telegraf/" not in _up)
 check("lab.sh up は毎回 forward を呼び、forward / forward-status がある",
       '"$SELF" forward' in labsh and re.search(r"^\s*forward\)", labsh, re.M) is not None and re.search(r"^\s*forward-status\)", labsh, re.M) is not None)
 check("forward の iptables の規則は全部目印付き（unforward で消せる）",
@@ -608,9 +613,13 @@ check("Spark の既定は gnmi トピックも読む（iceberg / prometheus は 
       and mod.sink_topics("iceberg", mod.METRIC_TOPICS, mod.LOG_TOPICS) == "metrics,gnmi,traps,logs" and mod.sink_topics("prometheus", mod.METRIC_TOPICS, mod.LOG_TOPICS) == "metrics,gnmi")
 _access = _read("terraform", "pipeline", "stream", "access.tf")
 _lab_tg = _read("terraform", "pipeline", "lab", "telegraf.tf")
-check("stream の stream_produce は Telegraf が lab の state に無くても role が空にならない（down.sh の destroy が検証で止まらない。2026-09-19）",
-      'role = coalesce(local.telegraf_role_name, "${local.name_prefix}-telegraf")' in _access
-      and re.search(r'resource "aws_iam_role" "telegraf" \{[\s\S]*?name\s+= "\$\{local\.name_prefix\}-telegraf"', _lab_tg) is not None)
+check("Telegraf は stream の ECS で、MSK への書き込みはタスクロール（lab の state のロールに頼らない。2026-09-28）",
+      'resource "aws_iam_role" "telegraf_task"' in stream_tg and "kafka-cluster:WriteData" in stream_tg
+      and "stream_produce" not in _access and "telegraf_role_name" not in _access
+      and 'resource "aws_iam_role"' not in _lab_tg and 'resource "aws_instance"' not in _lab_tg)
+_down = _read("ops", "down.sh")
+check("down.sh は stream の必須変数（snmp_agents / gnmi_targets）に形だけ合う値を渡して destroy する（telegraf.sh の形の検査と同じ）",
+      re.search(r"destroy_root pipeline/stream -var 'snmp_agents=\"udp://[0-9.]+:161\"' -var 'gnmi_targets=\"[0-9.]+:57400\"'", _down) is not None)
 check("Spark の既定は logs も読む", mod.LOG_TOPICS == "traps,logs"
       and mod.sink_topics("opensearch", mod.METRIC_TOPICS, mod.LOG_TOPICS) == "traps,logs")
 

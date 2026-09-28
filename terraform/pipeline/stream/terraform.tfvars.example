@@ -1,13 +1,21 @@
 # Copy to terraform.tfvars only when the defaults are not right. Every value except owner has a default in variables.tf.
-# terraform/base/core and terraform/pipeline/lab (with create_telegraf = true) must be applied first (this root reads their state files).
+# terraform/base/ecr and terraform/base/core must be applied first (this root reads their state files), and the Telegraf image must be in ECR.
+# terraform/pipeline/lab with forward_to_telegraf = true routes the lab mgmt network to Telegraf (without it Telegraf reaches no switch).
+# snmp_agents and gnmi_targets have no default: ops/up.sh makes them from the lab definition.
 # owner is the name of the person who deploys this copy and is REQUIRED: it has no default, so terraform asks for it
 # unless you uncomment the line below (with your own name), export TF_VAR_owner or pass -var owner=<name>.
 # Resource names and the Project tag become <owner>-nwc-poc (up to 14 lowercase letters, digits and single hyphens),
 # so several people can share one AWS account.
 #
 # region      = "ap-northeast-1"
-# owner       = "efukuda"
+# owner       = "yamada"
 #
 # kafka_version        = "4.1.x.kraft"
 # broker_instance_type = "kafka.m5.large"  # Kafka 4.x は kafka.t3.small を受け付けない
 # log_retention_days   = 7
+#
+# telegraf_image_tag   = "1.40.0"          # ops/up.sh passes <telegraf version>-<hash of telegraf/>
+# snmp_agents          = "\"udp://203.0.113.11:161\", ..."   # python3 lab/lab_topology.py lab --snmp-agents
+# gnmi_targets         = "\"203.0.113.11:57400\", ..."       # python3 lab/lab_topology.py lab --gnmi-targets
+# telegraf_task_cpu    = 256
+# telegraf_task_memory = 512

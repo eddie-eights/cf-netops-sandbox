@@ -80,7 +80,7 @@ variable "cloudwatch_logging" {
 }
 
 variable "sinks" {
-  description = "Where the Spark job stores the Telegraf messages: iceberg (all topics to S3 Tables, tables.tf), opensearch (log topics to an OpenSearch Serverless TIMESERIES collection made here), prometheus (metric topics to an Amazon Managed Service for Prometheus workspace made here), splunk (all topics to the HTTP Event Collector of a Splunk outside this Terraform - splunk_hec_url and the token in SSM; nothing is created here). One streaming query per entry. splunk is not in the default because it needs a Splunk (splunk_hec_url and the token in SSM)"
+  description = "Where the Spark job stores the Telegraf messages: iceberg (all topics to S3 Tables, tables.tf), opensearch (log topics to an OpenSearch Serverless TIMESERIES collection made here), prometheus (metric topics to an Amazon Managed Service for Prometheus workspace made here), splunk (all topics to the HTTP Event Collector of the Splunk Enterprise on ECS made here in splunk.tf). One streaming query per entry. splunk is not in the default because the Splunk on ECS costs about 0.12 USD/h and accepts the Splunk license"
   type        = list(string)
   default     = ["iceberg", "opensearch", "prometheus"]
 
@@ -91,19 +91,8 @@ variable "sinks" {
 }
 
 # ---------------------------------------------------------------- splunk (only when sinks has splunk)
-variable "splunk_hec_url" {
-  description = "HTTP Event Collector of the Splunk the splunk sink posts to (https://<host>:8088, /services/collector/event is appended when missing). The workers go out through the NAT Gateway of terraform/base/core (create_nat_gateway = true there; ops/up.sh sets it with SINK_SPLUNK), so Splunk Cloud's public HEC, a Splunk Enterprise behind Direct Connect / VPN or a Splunk in this VPC all work. Required when sinks has splunk"
-  type        = string
-  default     = ""
-
-  validation {
-    condition     = var.splunk_hec_url == "" || can(regex("^https://[^/\\s]+", var.splunk_hec_url))
-    error_message = "splunk_hec_url は https://<host>[:port][/path] の形（HEC は TLS。空なら splunk の格納先は使えない）。"
-  }
-}
-
 variable "splunk_hec_token_parameter" {
-  description = "Name of the SSM SecureString parameter that holds the HEC token. The job reads it at start with the runtime role (ssm:GetParameter through the ssm endpoint of terraform/base/core); Terraform never reads the value. Empty = /<prefix>/splunk/hec-token. Create it by hand before ops/up.sh: aws ssm put-parameter --name /<prefix>/splunk/hec-token --type SecureString --value <token>"
+  description = "Name of the SSM SecureString parameter that holds the HEC token. The job reads it at start with the runtime role (ssm:GetParameter through the ssm endpoint of terraform/base/core); Terraform never reads the value. Empty = /<prefix>/splunk/hec-token. ops/up.sh generates it and the Splunk task on ECS makes the HEC token from it"
   type        = string
   default     = ""
 
@@ -119,10 +108,88 @@ variable "splunk_index" {
   default     = ""
 }
 
-variable "splunk_skip_tls_verify" {
-  description = "true = the job does not verify the TLS certificate of the HEC (self-signed Splunk Enterprise in a trial). Keep false when the Splunk has a certificate the EMR image trusts"
+variable "splunk_image_tag" {
+  description = "Tag of the splunk/splunk image mirrored to the ECR repository <prefix>-splunk (step 2 of ops/up.sh; amd64 only, so the task is X86_64). Used only when sinks has splunk"
+  type        = string
+  default     = "10.4.3"
+
+  validation {
+    condition     = can(regex("^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$", var.splunk_image_tag))
+    error_message = "splunk_image_tag は ECR のタグの形（英数字と _ . -、128 文字まで）。"
+  }
+}
+
+variable "splunk_task_cpu" {
+  description = "vCPU units of the Splunk task (Splunk asks for 2 vCPU or more even for a trial)"
+  type        = number
+  default     = 2048
+
+  validation {
+    condition     = contains([2048, 4096], var.splunk_task_cpu)
+    error_message = "splunk_task_cpu は 2048 か 4096。"
+  }
+}
+
+variable "splunk_task_memory" {
+  description = "Memory (MiB) of the Splunk task"
+  type        = number
+  default     = 4096
+
+  validation {
+    condition     = var.splunk_task_memory >= 4096 && var.splunk_task_memory <= 16384 && var.splunk_task_memory % 1024 == 0
+    error_message = "splunk_task_memory は 4096〜16384 の 1024 の倍数。"
+  }
+}
+
+variable "splunk_ephemeral_storage_gib" {
+  description = "Ephemeral storage of the Splunk task (GiB, 21-200). Indexes live here and vanish with the task; Splunk stops indexing below 5 GB free"
+  type        = number
+  default     = 40
+
+  validation {
+    condition     = var.splunk_ephemeral_storage_gib >= 21 && var.splunk_ephemeral_storage_gib <= 200
+    error_message = "splunk_ephemeral_storage_gib は 21〜200。"
+  }
+}
+
+# ---------------------------------------------------------------- grafana (grafana.tf)
+variable "create_grafana" {
+  description = "Run Grafana OSS on ECS (grafana.tf) with the Prometheus workspace and the OpenSearch logs collection as data sources. Opened through an SSM port forward via the web EC2. ops/up.sh sets it with GRAFANA=1. Needs prometheus or opensearch in sinks"
   type        = bool
   default     = false
+}
+
+variable "grafana_image_tag" {
+  description = "Tag of the grafana/ image in the ECR repository <prefix>-grafana. ops/up.sh builds it as <Grafana version>-<hash of grafana/>"
+  type        = string
+  default     = "13.2.2"
+
+  validation {
+    condition     = can(regex("^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$", var.grafana_image_tag))
+    error_message = "grafana_image_tag は ECR のタグの形（英数字と _ . -、128 文字まで）。"
+  }
+}
+
+variable "grafana_task_cpu" {
+  description = "vCPU units of the Grafana task"
+  type        = number
+  default     = 512
+
+  validation {
+    condition     = contains([256, 512, 1024], var.grafana_task_cpu)
+    error_message = "grafana_task_cpu は 256 / 512 / 1024。"
+  }
+}
+
+variable "grafana_task_memory" {
+  description = "Memory (MiB) of the Grafana task"
+  type        = number
+  default     = 1024
+
+  validation {
+    condition     = contains([512, 1024, 2048], var.grafana_task_memory)
+    error_message = "grafana_task_memory は 512 / 1024 / 2048。"
+  }
 }
 
 # ---------------------------------------------------------------- detection (Spark -> Neptune + S3 Tables anomaly_events -> EventBridge)
@@ -150,7 +217,7 @@ variable "metric_topics" {
 }
 
 variable "log_topics" {
-  description = "Kafka topics that carry logs (traps = Telegraf inputs.snmp_trap, logs = syslog of the SR Linux routers, DNATed by the lab EC2 to the Telegraf EC2). Read by the iceberg and opensearch sinks"
+  description = "Kafka topics that carry logs (traps = Telegraf inputs.snmp_trap, logs = syslog of the SR Linux routers, DNATed by the lab EC2 to the Telegraf NLB). Read by the iceberg and opensearch sinks"
   type        = list(string)
   default     = ["traps", "logs"]
 

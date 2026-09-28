@@ -6,7 +6,7 @@
 # so several people can share one AWS account.
 #
 # region      = "ap-northeast-1"
-# owner       = "efukuda"
+# owner       = "yamada"
 #
 # instance_class      = "db.t4g.medium"
 # engine_version      = "1.4.8.0"

@@ -1,0 +1,16 @@
+# Amazon Managed Service for Prometheus（terraform/pipeline/analytics の metrics ワークスペース）。${...} は起動時に環境変数で埋まる（grafana/start.sh）。
+# 認証はタスクロールの SigV4（sigV4AuthType: default = SDK の既定の探し方。鍵は書かない）。aps-workspaces へは terraform/base/core のエンドポイントを通る
+apiVersion: 1
+datasources:
+  - name: Prometheus (AMP)
+    uid: amp
+    type: grafana-amazonprometheus-datasource
+    access: proxy
+    url: ${PROMETHEUS_URL}
+    isDefault: true
+    editable: false
+    jsonData:
+      httpMethod: POST
+      sigV4Auth: true
+      sigV4AuthType: default
+      sigV4Region: ${AWS_REGION}

@@ -2,8 +2,8 @@
 # iceberg    = 全トピック → tables.tf の S3 Tables（常に作る。テーブルは無料）
 # opensearch = ログのトピック → ここで作る OpenSearch Serverless の TIMESERIES コレクション（terraform/base/core の VPC エンドポイント経由だけ）
 # prometheus = メトリクスのトピック → ここで作る Amazon Managed Service for Prometheus のワークスペース（remote write は terraform/base/core の aps-workspaces のエンドポイント経由）
-# splunk     = 全トピック → AWS の外にある Splunk の HTTP Event Collector（var.splunk_hec_url）。Splunk 自体はここでは作らない。
-#              ここにあるのは実行ロールの ssm:GetParameter（token。access.tf）と job_driver の引数（outputs.tf）だけ（HEC へは terraform/base/core の NAT Gateway から出る。ops/up.sh が SINK_SPLUNK=1 のときだけ作る）。
+# splunk     = 全トピック → splunk.tf の ECS の Splunk Enterprise の HTTP Event Collector（VPC の中）。
+#              ほかは実行ロールの ssm:GetParameter（token。access.tf）と job_driver の引数（outputs.tf）。
 #              2026-09-26 まで MSK Connect の Splunk Connect for Kafka にする予定だったが、Spark から直接書くことにした（コネクタのワーカー分の費用と VPC エンドポイントが要らない）
 
 # ---------------------------------------------------------------- opensearch

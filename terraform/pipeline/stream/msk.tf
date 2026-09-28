@@ -65,19 +65,13 @@ resource "aws_msk_cluster" "stream" {
   }
 
   tags = { Name = "${local.name_prefix}-stream" }
-
-  lifecycle {
-    precondition {
-      condition     = local.telegraf_role_name != ""
-      error_message = "terraform/pipeline/lab の state（terraform/pipeline/lab/terraform.tfstate）から telegraf_role_name が読めない。terraform/pipeline/lab を -var create_telegraf=true で先に apply する（ops/up.sh はそうする）。"
-    }
-  }
 }
 
-# ブローカーのアドレスはクラスタ作成後にしか分からない。Telegraf の EC2（terraform/pipeline/lab）が起動時にここから読む
+# ブローカーのアドレスはクラスタ作成後にしか分からない。Telegraf のタスク（telegraf.tf）は環境変数で直接受け取るので、ここは手で調べるときと
+# 手動構築のために置く（2026-09-28 までは Telegraf の EC2 が起動時にここから読んでいた）
 resource "aws_ssm_parameter" "bootstrap" {
   name        = "/${local.name_prefix}/msk-bootstrap"
   type        = "String"
   value       = aws_msk_cluster.stream.bootstrap_brokers_sasl_iam
-  description = "MSK bootstrap brokers (SASL/IAM, 9098). Read by the Telegraf EC2 (terraform/pipeline/lab) at start."
+  description = "MSK bootstrap brokers (SASL/IAM, 9098). The Telegraf task gets them as an environment variable; kept for manual checks."
 }

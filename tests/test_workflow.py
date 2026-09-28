@@ -513,7 +513,7 @@ check("agent は web のロールに InvokeAgentRuntime を付け、main の run
       and 'output "runtime_role_arn"' in main_out and 'resource "aws_iam_role" "runtime"' in main_tf)
 check("閉域: Runtime のリソースポリシーは VPC の外からの InvokeAgentRuntime を拒み、apply した人は外す（deploy.md の CLI の確認が通る）",
       re.search(r'resource "aws_bedrockagentcore_resource_policy" "runtime"[\s\S]*?"bedrock-agentcore:InvokeAgentRuntime"[\s\S]*?agent_runtime_arn[\s\S]*?"aws:SourceVpc"[\s\S]*?local\.perimeter_exempt_principals', agent_tf) is not None)
-check("down.sh は Runtime の ENI が残るあいだ VPC・サブネット・internal の SG を残して他（NAT Gateway も）を消す",
+check("down.sh は Runtime の ENI が残るあいだ VPC・サブネット・internal の SG を残して他を消す",
       "InterfaceType=='agentic_ai'" in down and "Name=tag:Name,Values=$PREFIX-vpc" in down and "tf base/core output -raw vpc_id" not in down and "Runtime の ENI の確認:" in down
       and '""|data.*|aws_vpc.this|aws_subnet.*|aws_security_group.internal) ;;' in down and "aws_security_group.runtime" not in down
       and down.index("InterfaceType=='agentic_ai'") < down.index("destroy_root base/core") < down.index("destroy_root base/ecr"))

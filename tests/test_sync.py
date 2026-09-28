@@ -142,8 +142,8 @@ check("up.sh 7-3b は lab/lab_topology.py の出力を LAB_TOPOLOGY_B64 で seed
 check("sync-graph.sh は --replace で GRAPH_REPLACE=1、--dry-run は Neptune に触らない", "GRAPH_REPLACE=${REPLACE:-0}" in sync and "--replace) REPLACE=1" in sync and 'if [ -n "$DRY" ]; then printf' in sync)
 check("seed_graph.py は LAB_TOPOLOGY_B64 を読み、GRAPH_REPLACE=1 のときだけ入れ直す", 'os.environ.get("LAB_TOPOLOGY_B64")' in seed and 'os.environ.get("GRAPH_REPLACE") != "1"' in seed)
 check("seed_graph.py は layers も渡す（lab からは JSON の layers、静的データは data/layers.json）", 'lab.get("layers")' in seed and "topology.load_static_layers()" in seed and "graph.seed(devices, links, layers)" in seed)
-check("up.sh は gNMI の購読先も s3://<バケット>/telegraf/gnmi_targets.txt に置き、gateway.tf は data/layers.json を tools の zip に入れる",
-      "lab/lab_topology.py lab --gnmi-targets" in up and "/telegraf/gnmi_targets.txt" in up
+check("up.sh は gNMI の購読先も lab の定義から作って stream の gnmi_targets に渡し、gateway.tf は data/layers.json を tools の zip に入れる",
+      "lab/lab_topology.py lab --gnmi-targets" in up and '-var "gnmi_targets=$GNMI_TARGETS"' in up
       and '"../../agent/data/layers.json"' in read("terraform", "workflow", "gateway.tf"))
 
 # ---- status Lambda（graph.set_status を差し替えて呼び出しを見る）

@@ -1,9 +1,7 @@
-# Telegraf の設定テンプレート。Telegraf の EC2（terraform/pipeline/lab の create_telegraf。telegraf.tf）の上で telegraf.sh render が
-# __KAFKA_BROKERS__ / __AWS_REGION__ を埋めて /etc/telegraf/telegraf.conf に書く。ブローカーは SSM パラメータ /<接頭辞>/msk-bootstrap
-# （terraform/pipeline/stream が書く）から取る。
-#
-# ポーリング先（inputs.snmp の agents）は __SNMP_AGENTS__、gNMI の購読先（inputs.gnmi の addresses）は __GNMI_TARGETS__ で、telegraf.sh render が
-# 同じディレクトリの snmp_agents.txt / gnmi_targets.txt で埋める。どちらも ops/up.sh の 5-1b が lab の定義から作って s3://<バケット>/telegraf/ に置く
+# Telegraf の設定テンプレート。Telegraf のコンテナ（terraform/pipeline/stream の ECS。telegraf/Dockerfile）が起きるとき、telegraf.sh render が
+# タスク定義の環境変数で __KAFKA_BROKERS__ / __AWS_REGION__ / __SNMP_AGENTS__ / __GNMI_TARGETS__ を埋めて /tmp/telegraf.conf に書く。
+# ブローカーは terraform/pipeline/stream が MSK から直接渡す。ポーリング先（inputs.snmp の agents）と gNMI の購読先（inputs.gnmi の addresses）は
+# ops/up.sh が lab の定義から作って terraform/pipeline/stream の変数に渡す
 #（lab/lab_topology.py --snmp-agents / --gnmi-targets。機器の一覧を lab の定義 1 か所にするため、ここに IP を書かない）。
 #
 # 流れ: Spine-Leaf の SR Linux 6 台の SNMP を 10 秒ごとにポーリング（ifTable）+ gNMI で BGP / IS-IS / EVPN の状態を購読
@@ -12,10 +10,12 @@
 #   gnmi    トピック: bgp_neighbor（session_state。on_change）/ isis_interface（oper_state。on_change）/ evpn_es / mac_table（30 秒ごと）
 #   traps   トピック: snmp_trap（linkDown / linkUp）
 #   logs    トピック: device_log（機器の syslog。BGP の隣接の up / down など。lab/srlinux/*.cli の remote-server）
-# 機器は lab の EC2 の中の docker network（203.0.113.0/24）にいる。この EC2 からは次の経路で届く（lab の EC2 で sudo lab forward-status）:
+# 機器は lab の EC2 の中の docker network（203.0.113.0/24）にいる。このコンテナからは次の経路で届く（lab の EC2 で sudo lab forward-status）:
 #   ポーリング  SNMP（161/udp）も gNMI（57400/tcp）も VPC のルートで lab の EC2 へ行き、lab の EC2 が管理ネットワークへ転送する
-#   trap        機器は lab の EC2（203.0.113.1:162）へ送り、lab の EC2 がここへ DNAT する。送り元は機器の管理 IP のまま
-#   syslog      機器は lab の EC2（203.0.113.1:5140/udp）へ送り、lab の EC2 がここへ DNAT する（trap と同じ仕組み。rsyslog は使わない）
+#               （タスクの IP は作り直すたびに変わるので、lab の EC2 はタスクのサブネットの CIDR から来たものを通す）
+#   trap        機器は lab の EC2（203.0.113.1:162）へ送り、lab の EC2 が内部 NLB（IP は NLB がある間は変わらない）へ DNAT し、
+#               NLB が 1162 でここへ渡す。NLB は送り元を変えない（UDP のクライアント IP の保持）ので、送り元は機器の管理 IP のまま
+#   syslog      機器は lab の EC2（203.0.113.1:5140/udp）へ送り、trap と同じ仕組みで NLB からここへ届く（rsyslog は使わない）
 # MIB は入れないので OID は数値で書き、名前を明示する（translator が無くても動く）。trap の varbind 名は数値 OID のまま
 # Kafka に載る（detector 側で ifName の OID を引く）。
 # SR Linux の ifTable は物理ポート全部（未使用の admin-down も）とサブインタフェース（ethernet-1/1.0）を行に出す。落とすのは Spark 側
@@ -116,14 +116,15 @@
     subscription_mode = "sample"
     sample_interval = "30s"
 
-# ---- trap 受信。162 は特権ポートなので unit は root で動かす（setcap でもよい）。source タグは機器の管理 IP（lab の EC2 が送り元を変えない）
+# ---- trap 受信。コンテナは非 root なので 162 ではなく 1162 で待つ（NLB が 162 を 1162 に向ける。telegraf.sh の TRAP_PORT）。
+# source タグは機器の管理 IP（lab の EC2 も NLB も送り元を変えない）
 [[inputs.snmp_trap]]
-  service_address = "udp://:162"
+  service_address = "udp://:1162"
   version = "2c"
   timeout = "5s"
 
 # ---- 機器のログ。SR Linux の system logging remote-server（RFC 5424、udp）を受ける。ポートは lab.sh の LOG_PORT と
-# terraform/pipeline/lab の local.log_port と同じ。lab の EC2 が 203.0.113.1:5140 宛てをここへ DNAT するので、送り元は機器の管理 IP のまま。
+# terraform/pipeline/lab の local.log_port と同じ。lab の EC2 が 203.0.113.1:5140 宛てを NLB へ DNAT し、NLB がここへ渡すので、送り元は機器の管理 IP のまま。
 # RFC 5424 の HOSTNAME は SR Linux の host-name（= sysName）なので、metrics / traps と同じタグ名 sysName に付け替える（下の processors.rename）。
 # best_effort は形の崩れた行（構造化データ無しなど）も捨てずに載せるため
 [[inputs.syslog]]
@@ -140,8 +141,8 @@
 
 # ---- MSK へ。トピックは metric 名で分ける（snmp_trap → traps、device_log → logs、gNMI の 4 つ → gnmi、SNMP のポーリング → metrics）
 # sasl_aws_msk_iam_profile: Telegraf 1.40.0 は profile か role + session のどちらかを書かないと
-# 「both role and session must be set」で落ち、インスタンスプロファイルだけでは起動しない（2026-09-18 に実機で確認。plugins/common/kafka/sasl_aws_iam_msk.go）。
-# telegraf.sh render が region だけの [default] を /etc/telegraf/aws_config に書き、鍵が無いので SDK が IMDS（EC2 のロール）に落ちる
+# 「both role and session must be set」で落ち、インスタンスプロファイルだけでは起動しない（2026-09-18 に EC2 で確認。plugins/common/kafka/sasl_aws_iam_msk.go）。
+# telegraf.sh render が region だけの [default] を /tmp/aws_config に書き、鍵が無いので SDK がタスクロール（ECS のコンテナの認証情報）に落ちる
 [[outputs.kafka]]
   brokers = [__KAFKA_BROKERS__]
   topic = "metrics"
@@ -193,3 +194,9 @@
   required_acks = 1
   max_retry = 3
   namepass = ["device_log"]
+
+# ---- 生きているかの口。NLB のヘルスチェック（terraform/pipeline/stream の telegraf.tf。HTTP 8080）がここを見る。
+# 条件を書かないので、Telegraf が動いていれば 200 を返す。metric は system だけ通す（全部を流し込まない）
+[[outputs.health]]
+  service_address = "http://:8080"
+  namepass = ["system"]

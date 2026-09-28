@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # lab EC2（terraform/pipeline/lab）の上で containerlab を動かす。user_data が /usr/local/bin/lab に置くので、SSM セッションから `sudo lab check` で使う。
 #   lab.sh render | pull | up | down | status | check | snmp [node] | logs [node] | cli <node> [cmd...] | fail-main | heal-main | failover | clab <args...>
-#   lab.sh forward | forward-status     （stream: 別の EC2 の Telegraf へ SNMP / gNMI / trap / syslog を通す。up が毎回呼ぶ。Telegraf 自体は telegraf/telegraf.sh）
+#   lab.sh forward | forward-status     （stream: ECS の Telegraf へ SNMP / gNMI / trap / syslog を通す。up が毎回呼ぶ。Telegraf 自体は telegraf/telegraf.sh）
 # 手元の containerlab と違うのは 3 つ: containerlab を直接呼ぶ（root）、イメージは ECR から取る（pull）、
 # splab.clab.yml はテンプレート（.in）からイメージ URI を埋めて作る（render）。
 # トポロジは Spine-Leaf（gen_lab.py の図。SR Linux 6 台 = leafsw 2 + spine 2 + leaf 2、VM 2 台 = 上流 wan-upstream-01 + アクセス側 dc1-host-01）
@@ -12,7 +12,7 @@ cd "$(dirname "$SELF")"
 LAB=splab
 TOPO=splab.clab.yml
 # containerlab の管理ネットワーク（splab.clab.yml.in の mgmt）と、その上のこの EC2 のアドレス（srlinux/*.cli の trap と syslog の宛先）。
-# Telegraf の EC2 は VPC のルートでここへ来る（terraform/pipeline/lab の telegraf.tf の local.mgmt_cidr）
+# Telegraf のタスク（terraform/pipeline/stream の ECS）は VPC のルートでここへ来る（terraform/pipeline/lab の telegraf.tf の local.mgmt_cidr）
 MGMT=203.0.113.0/24
 MGMT_GW=203.0.113.1
 # SR Linux の syslog（RFC 5424 / udp）を Telegraf へ送るポート（srlinux/*.cli の remote-port、telegraf/telegraf.conf.in の inputs.syslog、
@@ -31,7 +31,7 @@ ACC_VM=dc1-host-01;    ACC_IP=10.100.0.20
 ENV_FILE=$(ls /etc/*-lab.env 2>/dev/null | head -1 || true)
 [ -n "$ENV_FILE" ] && set -a && . "$ENV_FILE" && set +a
 
-# VPC にインターネットへの経路が無い（terraform/base/core は Splunk を使うときだけ NAT Gateway を作る）ので、GitHub への版の確かめをしない
+# VPC にインターネットへの経路が無い（terraform/base/core は NAT Gateway も IGW も作らない）ので、GitHub への版の確かめをしない
 export CLAB_VERSION_CHECK=disable
 clab() { containerlab "$@"; }
 x() { docker exec "clab-$LAB-$1" "${@:2}"; }
@@ -153,36 +153,38 @@ case "${1:-}" in
     done
     echo "$w"
     if iptables -t nat -S PREROUTING 2>/dev/null | grep -q -- "--comment $FW_TAG"; then
-      echo "== Telegraf（stream。別の EC2）=="
+      echo "== Telegraf（stream。ECS のタスク）=="
       echo "  ポーリング（10 秒周期）と SR Linux の linkDown トラップ、syslog、gNMI の IS-IS の隣接が MSK に流れ、analytics の Spark が異常を Neptune に書く（S3 Tables に履歴、EventBridge にも出す）。"
       echo "  GUI の「異常一覧」か、エージェントに「今の異常は？」と聞くと dc1-leaf-01 ethernet-1/1 の link_down（と isis_down）が出る。戻すのは 'lab heal-main'"
     fi
     ;;
   forward)
-    # 別の EC2 の Telegraf（terraform/pipeline/lab の create_telegraf）へ 4 つを通す。アドレスは SSM の $PARAM_PREFIX/telegraf-address。
-    # 無ければ（Telegraf を作っていない）何もしない。何度打っても同じ規則になる（目印の付いた規則を消してから入れる）
+    # ECS の Telegraf（terraform/pipeline/stream の telegraf.tf）へ 4 つを通す。SSM の $PARAM_PREFIX/telegraf-address（内部 NLB の IP。trap と syslog の DNAT の宛先）と
+    # $PARAM_PREFIX/telegraf-source-cidr（タスクのサブネット。タスクの IP は作り直すたびに変わるので、ポーリングはサブネットで通す）を読む。
+    # 無ければ（stream を作っていない）何もしない。何度打っても同じ規則になる（目印の付いた規則を消してから入れる）
     : "${AWS_REGION:?}" "${PARAM_PREFIX:?}"
     t=$(aws ssm get-parameter --region "$AWS_REGION" --name "$PARAM_PREFIX/telegraf-address" --query Parameter.Value --output text 2>/dev/null) || t=""
+    s=$(aws ssm get-parameter --region "$AWS_REGION" --name "$PARAM_PREFIX/telegraf-source-cidr" --query Parameter.Value --output text 2>/dev/null) || s=""
     unforward
-    if [ -z "$t" ]; then
-      echo "SSM $PARAM_PREFIX/telegraf-address が無い（Telegraf の EC2 を作っていない）ので、Telegraf への転送は張らない"
+    if [ -z "$t" ] || [ -z "$s" ]; then
+      echo "SSM $PARAM_PREFIX/telegraf-address か telegraf-source-cidr が無い（terraform/pipeline/stream を作っていない）ので、Telegraf への転送は張らない"
       exit 0
     fi
     c=(-m comment --comment "$FW_TAG")
     # ポーリング: Telegraf → SR Linux の SNMP（161/udp）と gNMI（$GNMI_PORT/tcp）。VPC のルートでこの EC2 に来る。Docker は外から管理ネットワークへの転送を落とすので DOCKER-USER で先に通す
-    iptables -I DOCKER-USER 1 -s "$t" -d "$MGMT" -p udp --dport 161 "${c[@]}" -j ACCEPT
-    iptables -I DOCKER-USER 1 -s "$t" -d "$MGMT" -p tcp --dport "$GNMI_PORT" "${c[@]}" -j ACCEPT
+    iptables -I DOCKER-USER 1 -s "$s" -d "$MGMT" -p udp --dport 161 "${c[@]}" -j ACCEPT
+    iptables -I DOCKER-USER 1 -s "$s" -d "$MGMT" -p tcp --dport "$GNMI_PORT" "${c[@]}" -j ACCEPT
     # Docker 28 以降は raw の PREROUTING でブリッジ以外から来たコンテナ宛てを落とす。その前で抜ける（古い Docker では何もしない規則になる）
-    iptables -t raw -I PREROUTING 1 -s "$t" -d "$MGMT" -p udp --dport 161 "${c[@]}" -j ACCEPT
-    iptables -t raw -I PREROUTING 1 -s "$t" -d "$MGMT" -p tcp --dport "$GNMI_PORT" "${c[@]}" -j ACCEPT
-    # trap と syslog: 機器の宛先（この EC2 の $MGMT_GW の 162 と $LOG_PORT）を Telegraf へ向け直す
+    iptables -t raw -I PREROUTING 1 -s "$s" -d "$MGMT" -p udp --dport 161 "${c[@]}" -j ACCEPT
+    iptables -t raw -I PREROUTING 1 -s "$s" -d "$MGMT" -p tcp --dport "$GNMI_PORT" "${c[@]}" -j ACCEPT
+    # trap と syslog: 機器の宛先（この EC2 の $MGMT_GW の 162 と $LOG_PORT）を Telegraf の NLB へ向け直す（NLB がタスクの 1162 と $LOG_PORT へ）
     iptables -t nat -I PREROUTING 1 -s "$MGMT" -d "$MGMT_GW" -p udp --dport 162 "${c[@]}" -j DNAT --to-destination "$t:162"
     iptables -t nat -I PREROUTING 1 -s "$MGMT" -d "$MGMT_GW" -p udp --dport "$LOG_PORT" "${c[@]}" -j DNAT --to-destination "$t:$LOG_PORT"
     iptables -I DOCKER-USER 1 -s "$MGMT" -d "$t" -p udp --dport 162 "${c[@]}" -j ACCEPT
     iptables -I DOCKER-USER 1 -s "$MGMT" -d "$t" -p udp --dport "$LOG_PORT" "${c[@]}" -j ACCEPT
     # 送り元（機器の管理 IP）を残す。Docker の MASQUERADE（-s $MGMT ! -o <bridge>）より前で抜ける。Spark とエージェントは送り元の IP で機器を引く
     iptables -t nat -I POSTROUTING 1 -s "$MGMT" -d "$t" "${c[@]}" -j RETURN
-    echo "Telegraf（${t}）へ通した: SNMP 161/udp と gNMI $GNMI_PORT/tcp の転送、trap 162/udp と syslog $LOG_PORT/udp の DNAT"
+    echo "Telegraf へ通した: ${s} から SNMP 161/udp と gNMI $GNMI_PORT/tcp の転送、NLB（${t}）へ trap 162/udp と syslog $LOG_PORT/udp の DNAT"
     ;;
   forward-status)
     echo "== iptables（目印 ${FW_TAG}）=="

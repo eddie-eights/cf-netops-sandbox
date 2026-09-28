@@ -35,7 +35,7 @@ fi
 command -v containerlab >/dev/null || dnf install -y $LAB/src/containerlab_${containerlab_version}_linux_arm64.rpm
 chmod 0755 $LAB/src/lab.sh
 ln -sfn $LAB/src/lab.sh /usr/local/bin/lab
-# 前の版は Telegraf をこの EC2 で動かしていた。rpm ごと S3 の lab/ に残っていても、ここでは入れない（Telegraf は別の EC2。telegraf.tf）
+# 前の版は Telegraf をこの EC2 で動かしていた。rpm ごと S3 の lab/ に残っていても、ここでは入れない（Telegraf は terraform/pipeline/stream の ECS のタスク）
 
 cat > /etc/${name_prefix}-lab.env <<__ENV__
 AWS_REGION=${region}

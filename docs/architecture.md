@@ -24,12 +24,14 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-  LAB["lab の EC2<br/>containerlab + Nokia SR Linux（Spine-Leaf）"] -->|"SNMP ポーリング 10 秒 / gNMI / trap / syslog"| TG["Telegraf の EC2"] --> MSK["MSK<br/>metrics / gnmi / traps / logs"]
+  LAB["lab の EC2<br/>containerlab + Nokia SR Linux（Spine-Leaf）"] -->|"SNMP ポーリング 10 秒 / gNMI / trap / syslog"| NLB["内部 NLB<br/>trap 162 / syslog 5140"] --> TG["Telegraf<br/>ECS Fargate"] --> MSK["MSK<br/>metrics / gnmi / traps / logs"]
   MSK --> SPARK["Spark（EMR Serverless）"]
   SPARK -->|"全トピック（正本）"| ICE["S3 Tables<br/>snmp_metrics"]
   SPARK -->|"traps / logs"| OS["OpenSearch<br/>snmp-logs"]
   SPARK -->|"metrics"| PROM["Prometheus"]
-  SPARK -.->|"全トピック（SINK_SPLUNK=1 のとき）"| SPL["Splunk HEC<br/>AWS の外"]
+  SPARK -.->|"全トピック（SINK_SPLUNK=1 のとき）"| SPL["Splunk HEC<br/>analytics の ECS"]
+  GRAF["Grafana（ECS Fargate）<br/>GRAFANA=1"] -.->|"SigV4"| OS
+  GRAF -.->|"SigV4"| PROM
   SPARK -->|"開いた / 閉じた"| AEV["S3 Tables<br/>anomaly_events（証跡）"]
   SPARK -->|"異常の「いま」"| NEP["Neptune<br/>トポロジ + 異常 + 修復案"]
   SPARK -->|"AnomalyOpened"| EB["EventBridge"]
@@ -40,24 +42,28 @@ flowchart LR
   WF -->|"SSM Run Command"| LAB
 ```
 
+- Telegraf は stream の ECS（Fargate ARM64）の 1 タスクで、内部 NLB の後ろにいる。trap（162/udp）はタスクの 1162 へ、syslog（5140/udp）は 5140 へ渡す（非 root なので 1024 未満で受けない）。ポーリングと gNMI はタスクから機器へ直接行く。2026-09-28 に lab の EC2 から移した。
+- Grafana と ECS の Splunk は analytics の ECS クラスタ `<prefix>-analytics` のタスクで、Cloud Map の `grafana.<prefix>.internal:3000` / `splunk.<prefix>.internal` で引く。LB は無く、PC からは Web の EC2 を踏み台にした SSM のポートフォワード（`AWS-StartPortForwardingSessionToRemoteHost`）で開く。
+- Web は EC2 のまま。Grafana と Splunk の踏み台も兼ねる（ECS にするとタスクの IP が変わり、踏み台にしにくい）。
+
 WORKFLOW の流れは [workflow.md](workflow.md)、データの置き場は [data-stores.md](data-stores.md)。
 
 ## 閉域
 
-AWS の API へは全部 VPC エンドポイントから行き、この VPC を通らない呼び出しを拒む。VPC にインターネットへの経路は無く、NAT Gateway は AWS の外にある Splunk の HEC に送るとき（`SINK_SPLUNK=1`）だけ作る。
+AWS の API へは全部 VPC エンドポイントから行き、この VPC を通らない呼び出しを拒む。VPC にインターネットへの経路は無い（NAT Gateway も IGW も作らない。Splunk も analytics の ECS に立て、AWS の外へは送らない）。
 
 | 層 | 何をする | どこ |
 |---|---|---|
-| 経路 | インターフェース型エンドポイント（private DNS）。`ops/up.sh` が機能から選ぶ: 土台 ssm / ssmmessages、AGENT は bedrock-runtime / bedrock-agentcore / ecr.api / ecr.dkr / logs（KB で bedrock-agent-runtime）、lab は ecr、analytics は s3tables / events / logs（Prometheus で aps-workspaces）、WORKFLOW は sqs / s3tables / bedrock-agentcore(.gateway) など。S3 は gateway 型（無料）、OpenSearch Serverless は専用の 1 本 | `terraform/base/core/endpoints.tf` |
+| 経路 | インターフェース型エンドポイント（private DNS）。`ops/up.sh` が機能から選ぶ: 土台 ssm / ssmmessages、AGENT は bedrock-runtime / bedrock-agentcore / ecr.api / ecr.dkr / logs（KB で bedrock-agent-runtime）、lab は ecr、stream は ecr.api / ecr.dkr / logs（Telegraf の ECS）、analytics は s3tables / events / logs（Prometheus で aps-workspaces、Grafana か ECS の Splunk で ecr.api / ecr.dkr）、WORKFLOW は sqs / s3tables / bedrock-agentcore(.gateway) など。S3 は gateway 型（無料）、OpenSearch Serverless は専用の 1 本 | `terraform/base/core/endpoints.tf` |
 | エンドポイントポリシー | このアカウントのプリンシパルだけ（盗んだ他のアカウントの鍵で VPC から持ち出す経路を塞ぐ）。S3 の gateway は付けない（dnf と ECR のレイヤーが止まる） | 同上 |
-| IAM の Deny | ワークロードのロール全部（Web、Runtime、lab、Telegraf、EMR、ECS、tools Lambda）に `<prefix>-network-perimeter` を付ける。s3 / s3tables / sqs / ssm / bedrock / events / aps / AgentCore の呼び出しで `aws:SourceVpc` がこの VPC でなければ拒む | `terraform/base/core/perimeter.tf`、各ルートの attachment |
+| IAM の Deny | ワークロードのロール全部（Web、Runtime、lab、EMR、ECS（Temporal / Telegraf / Grafana / Splunk）、tools Lambda）に `<prefix>-network-perimeter` を付ける。s3 / s3tables / sqs / ssm / bedrock / events / aps / AgentCore の呼び出しで `aws:SourceVpc` がこの VPC でなければ拒む | `terraform/base/core/perimeter.tf`、各ルートの attachment |
 | リソースポリシーの Deny | バケット、S3 Tables のテーブルバケット、SQS（本体と DLQ）、AgentCore の Runtime と Gateway。同じ条件で、どのプリンシパルからでも VPC の外なら拒む | `bucket.tf`、`pipeline/analytics/tables.tf`、`workflow/events.tf`、`workflow/gateway.tf`、`agent/runtime.tf` |
 
 - **拒まないもの**: apply した人（`terraform` を打つ PC は VPC の外なので。PoC の割り切り）、AWS のサービス自身（`aws:PrincipalIsAWSService`）とサービスが代わりに呼ぶもの（`aws:ViaAWSService`。EventBridge → SQS、Bedrock → S3 など）、KB のロール `<prefix>-kb`（取り込みは Bedrock のサービス側で動く）。
 - S3 Tables の Iceberg REST は、S3 Tables が裏で呼ぶ API に元の VPC が付かないので `aws:CalledViaLast = s3tables.amazonaws.com` を外してある。
 - Neptune と MSK の IAM 認証にはこの条件キーが無いので Deny に入れない（どちらも VPC の中にしか口が無い）。Prometheus のワークスペースはリソースポリシーの Deny を確かめていないので IAM の側だけ。
 - apply する人が替わったら、その人が `ops/up.sh` を打ち直す（外すプリンシパルが入れ替わる）。前の人の設定のままバケットに入れないときは [troubleshooting.md](troubleshooting.md) の「閉域」。
-- 本番では、apply も VPC の中（CI のランナーなど）から打ち、外す人を無くす。Splunk のために NAT Gateway を作るなら、出る先を Network Firewall のドメインの許可リストで絞る（この PoC には無い）。
+- 本番では、apply も VPC の中（CI のランナーなど）から打ち、外す人を無くす。AWS の外（Splunk Cloud など）へ送る必要が出て NAT Gateway を足すなら、出る先を Network Firewall のドメインの許可リストで絞る（この PoC には無い）。
 
 ## どのファイルがどこで動くか
 
@@ -78,8 +84,9 @@ AWS の API へは全部 VPC エンドポイントから行き、この VPC を�
 | `workflow/` | Temporal のワークフローとワーカー |
 | `tools/` | Gateway（MCP）の tools Lambda |
 | `spark/` | Spark のジョブ（`snmp_sinks.py`） |
-| `lab/` | containerlab の構成、SR Linux の設定（`srlinux/*.cli`）、Telegraf の EC2 への転送（`lab forward`） |
-| `telegraf/` | Telegraf の設定と `tg`（Telegraf の EC2 で動く） |
+| `lab/` | containerlab の構成、SR Linux の設定（`srlinux/*.cli`）、Telegraf（ECS）への転送（`lab forward`） |
+| `telegraf/` | Telegraf の `Dockerfile`、設定（`telegraf.conf.in`）と `tg`（stream の ECS のタスクで動く） |
+| `grafana/` | Grafana の `Dockerfile` と provisioning（データソースとダッシュボード。analytics の ECS のタスクで動く） |
 | `graph/` | Neptune の `status` を書く Lambda |
 | `kb-docs/` | ナレッジベースに入れる手順書 |
 | `ops/` | `up.sh` / `down.sh` / `check.sh` など |
@@ -89,12 +96,12 @@ AWS の API へは全部 VPC エンドポイントから行き、この VPC を�
 terraform/
 ├── base/
 │   ├── ecr/         ECR リポジトリ
-│   └── core/        VPC / NAT Gateway（SINK_SPLUNK=1 のときだけ）/ VPC エンドポイント / 閉域の Deny（perimeter.tf）/ SG（internal と endpoints）/ バケット / ロール / Web の EC2
+│   └── core/        VPC / VPC エンドポイント / 閉域の Deny（perimeter.tf）/ SG（internal と endpoints）/ バケット / ロール / Web の EC2
 ├── agent/         AGENT=1     Runtime / ガードレール / KB
 ├── pipeline/      PIPELINE=1
-│   ├── lab/         containerlab の EC2 と Telegraf の EC2（stream を作るとき）
-│   ├── stream/      MSK
-│   ├── analytics/   EMR Serverless / S3 Tables / OpenSearch / Prometheus
+│   ├── lab/         containerlab の EC2（stream を作るときは Telegraf への転送も）
+│   ├── stream/      MSK / Telegraf（ECS Fargate + 内部 NLB）
+│   ├── analytics/   EMR Serverless / S3 Tables / OpenSearch / Prometheus / Grafana と Splunk（ECS Fargate）
 │   └── graph/       Neptune
 └── workflow/      WORKFLOW=1  Temporal on ECS / Gateway（MCP）
 ```
@@ -122,6 +129,8 @@ aws resourcegroupstaggingapi get-resources --region ap-northeast-1 \
 | エージェントの実行ログ | CloudWatch Logs `/aws/bedrock-agentcore/runtimes/<id>-DEFAULT`（出力 `runtime_log_group_name`、保持 7 日） |
 | Web の失敗 | Web の EC2 の `journalctl -u <prefix>-web` |
 | ガードレールで止めたか | Runtime のログの `stop=guardrail_intervened` |
+| Telegraf | CloudWatch Logs `/ecs/<prefix>-telegraf`（stream の出力 `telegraf_log_group_name`） |
+| Grafana / ECS の Splunk | CloudWatch Logs `/ecs/<prefix>-grafana` / `/ecs/<prefix>-splunk` |
 | 誰がいつ入ったか | CloudTrail の `StartSession` |
 
 ポートフォワーディングの中身は Session Manager のセッションログに残らない。会話の中身もどこにも保存しない。

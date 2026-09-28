@@ -3,7 +3,7 @@
 #   1. terraform fmt -check -recursive
 #   2. 8 つのルートで init -backend=false + validate（provider を取るだけで state には触らない）
 #   3. スクリプトの構文（ops/*.sh は bash -n、リポジトリの .py は全部 ast.parse）
-#   4. 模擬テスト 6 本（AWS に触れない）
+#   4. 模擬テスト 7 本（AWS に触れない）
 # 最後の行が「すべて通過」なら健全。途中で落ちたらそこで止まる。
 set -euo pipefail
 

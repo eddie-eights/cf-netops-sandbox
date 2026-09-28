@@ -5,7 +5,7 @@
 # スイッチは Nokia SR Linux（kind nokia_srlinux、type ixr-d2l = ライセンス不要。SR-MPLS にするときは ixr6e + ライセンス）。
 # 設定は srlinux/<機器名>.cli（`set /` の行だけ。containerlab が candidate に流して commit save する）。
 # SNMP（v2c、community public）と gNMI（57400、TLS）は containerlab が全ノードで有効にする。6 台とも trap（linkDown / linkUp）と
-# syslog の宛先を 203.0.113.1（この管理網の EC2 側）に向け、lab.sh forward がそれを Telegraf の EC2 へ DNAT する。
+# syslog の宛先を 203.0.113.1（この管理網の EC2 側）に向け、lab.sh forward がそれを Telegraf（ECS）の NLB へ DNAT する。
 #
 #   wan-upstream-01 ═══ dc1-leafsw-01 / dc1-leafsw-02   （LACP の bond0。leafsw 側は lag1 + EVPN multihoming ES-1）
 #                          ╲  ╳  ╱
@@ -19,7 +19,7 @@
 name: splab
 
 mgmt:
-  # 名前と subnet を固定する（EC2 の中だけの docker network）。VPC からは Telegraf の EC2 だけが、VPC のルートで lab の EC2 を経由して届く
+  # 名前と subnet を固定する（EC2 の中だけの docker network）。VPC からは Telegraf のタスクだけが、VPC のルートで lab の EC2 を経由して届く
   # （terraform/pipeline/lab の locals.tf の mgmt_cidr と lab.sh の MGMT が同じ subnet）
   network: netops-lab
   ipv4-subnet: 203.0.113.0/24

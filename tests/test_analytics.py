@@ -38,8 +38,9 @@ with open(ENV_EXAMPLE, encoding="utf-8") as f:
     env_example = f.read()
 
 # ---- 他のルートとのつながり
-check("ファイルは versions / providers / variables / locals / network / tables / emr / sinks / access / outputs",
-      set(tf_files) == {"versions.tf", "providers.tf", "variables.tf", "locals.tf", "network.tf", "tables.tf", "emr.tf", "sinks.tf", "access.tf", "outputs.tf"})
+check("ファイルは versions / providers / variables / locals / network / tables / emr / sinks / access / outputs / ecs / grafana / splunk",
+      set(tf_files) == {"versions.tf", "providers.tf", "variables.tf", "locals.tf", "network.tf", "tables.tf", "emr.tf", "sinks.tf", "access.tf", "outputs.tf",
+                        "ecs.tf", "grafana.tf", "splunk.tf"})
 check("main の state をローカルから読む", re.search(r'data "terraform_remote_state" "main"[\s\S]*?backend\s*=\s*"local"', tf, re.S) is not None
       and '"${path.module}/../../base/core/terraform.tfstate"' in tf)
 check("stream の state をローカルから読む", re.search(r'data "terraform_remote_state" "stream"[\s\S]*?backend\s*=\s*"local"', tf, re.S) is not None
@@ -66,7 +67,7 @@ for root, outs in (("base/core", ("vpc_id", "runtime_subnet_ids", "internal_secu
     for out in outs:
         check(f"terraform/{root} に output {out} がある", re.search(r'^output "' + out + r'"', other, re.M) is not None)
 
-# ---- ネットワーク（SG は土台の internal 1 つを全部で共有。2026-09-28 から AWS の API は土台のインターフェース型エンドポイントを通し、NAT Gateway は AWS の外だけ）
+# ---- ネットワーク（SG は土台の internal 1 つを全部で共有。2026-09-28 から AWS の API は土台のインターフェース型エンドポイントを通し、NAT Gateway は無い）
 _core = "".join(open(os.path.join(ROOT, "terraform", "base", "core", n), encoding="utf-8").read() for n in sorted(os.listdir(os.path.join(ROOT, "terraform", "base", "core"))) if n.endswith(".tf"))
 check("analytics は SG もインターフェース型エンドポイントも作らない（S3 Tables / events / aps / logs の API は土台のエンドポイントを通る）",
       'resource "aws_security_group"' not in tf and 'resource "aws_vpc_endpoint"' not in tf and "aws_vpc_security_group_" not in tf
@@ -116,12 +117,42 @@ check("variable sinks は list、既定 3 つ（iceberg / opensearch / prometheu
 check("variable metric_topics / log_topics（既定 metrics / traps + logs、空を拒否）",
       re.search(r'variable "metric_topics"[\s\S]*?default\s*=\s*\["metrics",\s*"gnmi"\][\s\S]*?validation', tf, re.S) is not None
       and re.search(r'variable "log_topics"[\s\S]*?default\s*=\s*\["traps",\s*"logs"\][\s\S]*?validation', tf, re.S) is not None)
-check("splunk は Terraform が何も作らない（Splunk は AWS の外。変数と IAM と引数だけ）", re.search(r'resource "[^"]*splunk', tf, re.I) is None)
-check("variable splunk_hec_url（既定は空。空か https:// で始まる）/ splunk_hec_token_parameter（既定は空。/ で始まる）/ splunk_index / splunk_skip_tls_verify（bool、既定 false）",
-      re.search(r'variable "splunk_hec_url"[\s\S]*?default\s*=\s*""[\s\S]*?validation[\s\S]*?https://', tf, re.S) is not None
-      and re.search(r'variable "splunk_hec_token_parameter"[\s\S]*?default\s*=\s*""[\s\S]*?validation', tf, re.S) is not None
+_splunk_tf = open(os.path.join(TF_DIR, "splunk.tf"), encoding="utf-8").read()
+_grafana_tf = open(os.path.join(TF_DIR, "grafana.tf"), encoding="utf-8").read()
+_ecs_tf = open(os.path.join(TF_DIR, "ecs.tf"), encoding="utf-8").read()
+check("Splunk のリソースは splunk.tf だけで、全部 splunk_on_ecs（sinks に splunk があるとき）だけ作る",
+      all(n == "splunk.tf" for n in tf_files if re.search(r'resource "[^"]*" "splunk', open(os.path.join(TF_DIR, n), encoding="utf-8").read()))
+      and len(re.findall(r'^resource "', _splunk_tf, re.M)) == len(re.findall(r'count\s*=\s*local\.splunk_on_ecs\b', _splunk_tf))
+      and re.search(r'splunk_on_ecs\s*=\s*local\.sink_splunk\n', tf) is not None)
+check("ECS の Splunk の HEC は Cloud Map の splunk.<prefix>.internal:8088 で、自己署名なので検証しない",
+      re.search(r'splunk_hec_url\s*=\s*"https://splunk\.\$\{local\.service_namespace\}:8088"\n', tf) is not None
+      and re.search(r'splunk_skip_tls_verify\s*=\s*true\n', tf) is not None)
+check("Splunk のパスワードと HEC の token はタスク定義の secrets（SSM の ARN）で渡し、environment に値を書かない",
+      re.search(r'name = "SPLUNK_PASSWORD", valueFrom = local\.splunk_password_arn', _splunk_tf) is not None
+      and re.search(r'name = "SPLUNK_HEC_TOKEN", valueFrom = local\.splunk_token_parameter_arn', _splunk_tf) is not None
+      and "--accept-license" in _splunk_tf and "SPLUNK_GENERAL_TERMS" in _splunk_tf)
+check("Splunk のヘルスチェックは checkstate.sh で、startPeriod は上限の 300",
+      "/sbin/checkstate.sh" in _splunk_tf and re.search(r'startPeriod\s*=\s*300', _splunk_tf) is not None)
+check("Grafana は create_grafana（Prometheus か OpenSearch があるとき）だけで、admin のパスワードは secrets",
+      re.search(r'create_grafana\s*=\s*var\.create_grafana && \(local\.sink_prometheus \|\| local\.sink_opensearch\)', tf) is not None
+      and len(re.findall(r'^resource "', _grafana_tf, re.M)) == len(re.findall(r'count\s*=\s*local\.create_grafana\b', _grafana_tf))
+      and re.search(r'name = "GF_SECURITY_ADMIN_PASSWORD", valueFrom = local\.grafana_password_arn', _grafana_tf) is not None)
+check("Grafana のタスクロールは読むだけ（aps:QueryMetrics などと aoss:APIAccessAll。書き込みの aps:RemoteWrite は無い）",
+      "aps:QueryMetrics" in _grafana_tf and "aps:RemoteWrite" not in _grafana_tf and "aoss:APIAccessAll" in _grafana_tf
+      and "aoss:ReadDocument" in _grafana_tf and "aoss:WriteDocument" not in _grafana_tf)
+check("ECS のロールは全部 perimeter の Deny を付け、信頼ポリシーは aws:SourceAccount で絞る",
+      len(re.findall(r'resource "aws_iam_role" ', _grafana_tf + _splunk_tf)) == len(re.findall(r'policy_arn\s*=\s*local\.perimeter_policy_arn', _grafana_tf + _splunk_tf))
+      and '"aws:SourceAccount"' in _ecs_tf)
+check("up.sh は Grafana / Splunk のパスワードと HEC の token を ensure_secret で SSM に作り（値は Python が本人だけ読める一時ファイルに書いて file:// で渡し、すぐ消す）、down.sh は ManagedBy のタグで消す",
+      'ensure_secret "/$PREFIX/grafana/admin-password" password' in up and 'ensure_secret "/$PREFIX/splunk/admin-password" password' in up
+      and 'ensure_secret "/$PREFIX/splunk/hec-token" uuid' in up and '--cli-input-json "file://$input"' in up and "umask 077" in up
+      and 'rm -f -- "${input:?}"' in up and "file:///dev/stdin" not in up.replace("（file:///dev/stdin）", "")
+      and '"Key=tag:ManagedBy,Values=ops/up.sh"' in down and "aws ssm delete-parameter" in down)
+check("up.sh は ECS の Splunk が HEALTHY になってから Spark のジョブを起こす", up.index('log "7-4b.') < up.index('log "7-5.') and "healthStatus" in up)
+check("variable splunk_hec_token_parameter（既定は空。/ で始まる）/ splunk_index。外の Splunk の splunk_hec_url / splunk_skip_tls_verify は無い（2026-09-28）",
+      re.search(r'variable "splunk_hec_token_parameter"[\s\S]*?default\s*=\s*""[\s\S]*?validation', tf, re.S) is not None
       and re.search(r'variable "splunk_index"[\s\S]*?default\s*=\s*""', tf, re.S) is not None
-      and re.search(r'variable "splunk_skip_tls_verify"[\s\S]*?type\s*=\s*bool[\s\S]*?default\s*=\s*false', tf, re.S) is not None)
+      and 'variable "splunk_hec_url"' not in tf and 'variable "splunk_skip_tls_verify"' not in tf)
 check("locals に sink_iceberg / sink_opensearch / sink_prometheus / sink_splunk",
       all(re.search(r'sink_' + s + r'\s*=\s*contains\(var\.sinks,\s*"' + s + r'"\)', tf) for s in ("iceberg", "opensearch", "prometheus", "splunk")))
 check("HEC の token は SSM の SecureString /<prefix>/splunk/hec-token（変数で変えられる）。runtime role は splunk のときだけ ssm:GetParameter をそのパラメータに限って持つ",
@@ -129,9 +160,8 @@ check("HEC の token は SSM の SecureString /<prefix>/splunk/hec-token（変�
       and re.search(r'splunk_token_parameter_arn\s*=\s*"arn:\$\{local\.partition\}:ssm:\$\{var\.region\}:\$\{local\.account_id\}:parameter\$\{local\.splunk_token_parameter\}"', tf) is not None
       and re.search(r'Sid\s*=\s*"SplunkHecToken"[\s\S]*?"ssm:GetParameter"[\s\S]*?local\.splunk_token_parameter_arn[\s\S]*?if local\.sink_splunk', tf, re.S) is not None)
 check("Terraform は token の値を読まない（data aws_ssm_parameter が無い）", 'data "aws_ssm_parameter"' not in tf)
-check("HEC のポートごとのエグレスは無い（internal SG は全部出せて、splunk のときだけある NAT Gateway で Splunk Cloud にも届く）",
+check("HEC のポートごとのエグレスは無い（internal SG は全部出せる。ECS の Splunk は VPC の中）",
       "splunk_hec_port" not in tf and "emr_splunk" not in tf)
-check("splunk なのに splunk_hec_url が空なら precondition で止まる", re.search(r'condition\s*=\s*!local\.sink_splunk \|\| var\.splunk_hec_url != ""', tf) is not None)
 check("OpenSearch Serverless は TIMESERIES のコレクション <prefix>-logs（count で作る）",
       re.search(r'resource "aws_opensearchserverless_collection" "logs"[\s\S]*?count\s*=\s*local\.sink_opensearch \? 1 : 0[\s\S]*?type\s*=\s*"TIMESERIES"', tf, re.S) is not None
       and re.search(r'logs_collection\s*=\s*"\$\{local\.name_prefix\}-logs"', tf) is not None)
@@ -161,7 +191,8 @@ for out in ("application_id", "runtime_role_arn", "table_identifier", "job_drive
             "sinks", "opensearch_collection_endpoint", "prometheus_workspace_id", "prometheus_remote_write_url", "prometheus_query_url",
             "table_bucket_arn", "table_namespace", "anomaly_events_table", "proposal_events_table_name", "proposal_events_table_arn", "neptune_endpoint",
             "opensearch_collection_name", "opensearch_collection_arn", "opensearch_index", "prometheus_workspace_arn",
-            "splunk_hec_url", "splunk_token_parameter"):
+            "splunk_hec_url", "splunk_token_parameter", "analytics_cluster_name", "splunk_service_name", "splunk_port_forward_command",
+            "splunk_password_command", "grafana_service_name", "grafana_port_forward_command", "grafana_password_command"):
     check(f"output {out} がある", re.search(r'^output "' + out + r'"', tf, re.M) is not None)
 check("job_driver は S3 Tables のカタログを spark-submit の --conf で渡す",
       "software.amazon.s3tables.iceberg.S3TablesCatalog" in tf and "org.apache.iceberg.spark.SparkCatalog" in tf
@@ -174,8 +205,8 @@ check("job_driver の格納先の引数は選んだときだけ（for a in [...]
       re.search(r'\["--iceberg-table",\s*local\.iceberg_table\] : a if local\.sink_iceberg', args_block.group(1)) is not None
       and re.search(r'\["--opensearch-endpoint",\s*local\.opensearch_endpoint,\s*"--opensearch-index",\s*local\.opensearch_index\] : a if local\.sink_opensearch', args_block.group(1)) is not None
       and re.search(r'\["--prometheus-url",\s*local\.prometheus_remote_write_url\] : a if local\.sink_prometheus', args_block.group(1)) is not None
-      and re.search(r'\["--splunk-hec-url",\s*var\.splunk_hec_url,\s*"--splunk-token-parameter",\s*local\.splunk_token_parameter,\s*"--splunk-index",\s*var\.splunk_index\] : a if local\.sink_splunk', args_block.group(1)) is not None
-      and re.search(r'\["--splunk-skip-verify"\] : a if local\.sink_splunk && var\.splunk_skip_tls_verify', args_block.group(1)) is not None)
+      and re.search(r'\["--splunk-hec-url",\s*local\.splunk_hec_url,\s*"--splunk-token-parameter",\s*local\.splunk_token_parameter,\s*"--splunk-index",\s*var\.splunk_index\] : a if local\.sink_splunk', args_block.group(1)) is not None
+      and re.search(r'\["--splunk-skip-verify"\] : a if local\.sink_splunk && local\.splunk_skip_tls_verify', args_block.group(1)) is not None)
 check("job_driver の引数に token の値は無い（SSM のパラメータ名だけ）", "hec-token" not in args_block.group(1) and "splunk_hec_token" not in args_block.group(1))
 check("--sinks は var.sinks をカンマでつなぐ", 'join(",", var.sinks)' in args_block.group(1))
 check("--checkpoint は s3://<バケット>/analytics/checkpoint/<MSK の uuid>/（MSK を作り直したら checkpoint も新しく。格納先ごとに下を切るのはスクリプト）",
@@ -214,7 +245,7 @@ for _t, _cols, _src in (("anomaly_events", _aec, "spark/snmp_sinks.py の ANOMAL
           _blk is not None and "count" not in _blk.group(1) and "required = true" not in _blk.group(1).replace(" ", "").replace("required=true", "required = true"))
     check(f"{_t} の列と順は {_src} と同じ",
           re.findall(r'name\s*=\s*"(\w+)"\s*\n\s*type\s*=\s*"(\w+)"', _blk.group(1)) == [tuple(c) for c in _cols])
-check("events のエンドポイントは無い（EventBridge へは NAT Gateway 経由。2026-09-26）", 'resource "aws_vpc_endpoint" "events"' not in tf and "events_endpoint_id" not in tf)
+check("analytics に events のエンドポイントは無い（EventBridge へは土台の events のエンドポイント）", 'resource "aws_vpc_endpoint" "events"' not in tf and "events_endpoint_id" not in tf)
 check("build の引数は spark / args（格納先ごとに Kafka を読む）", [a.arg for a in funcs["build"].args.args] == ["spark", "args"])
 check("pyspark はモジュールの先頭で import しない（テストと引数の検査を pyspark 無しで動かすため）",
       not any(isinstance(n, (ast.Import, ast.ImportFrom)) and "pyspark" in ast.dump(n) for n in tree.body))
@@ -496,11 +527,11 @@ for jar in ("spark-sql-kafka-0-10_2.12", "spark-token-provider-kafka-0-10_2.12",
 check("up.sh の SPARK_VERSION は emr_release_label の Spark（3.5.6）", re.search(r'^SPARK_VERSION=3\.5\.6$', up, re.M) is not None
       and "7.13.0 = Spark 3.5.6" in tf)
 check("up.sh のスクリプトは spark/snmp_sinks.py", re.search(r'^SPARK_SCRIPT=spark/snmp_sinks\.py$', up, re.M) is not None and "snmp_to_iceberg" not in up)
-check("up.sh は SINK_SPLUNK（既定 0）と SPLUNK_HEC_URL / SPLUNK_INDEX / SPLUNK_SKIP_TLS_VERIFY を読み、splunk なら SSM の SecureString の有無を手順 7-4 で確かめてから渡す（値は読まない）",
-      re.search(r'^SINK_SPLUNK="\$\{SINK_SPLUNK:-0\}"; SPLUNK_HEC_URL="\$\{SPLUNK_HEC_URL:-\}"; SPLUNK_INDEX="\$\{SPLUNK_INDEX:-\}"; SPLUNK_SKIP_TLS_VERIFY="\$\{SPLUNK_SKIP_TLS_VERIFY:-0\}"$', up, re.M) is not None
-      and 'SPLUNK_TOKEN_PARAM="/$PREFIX/splunk/hec-token"' in up and "aws ssm describe-parameters" in up and "get-parameter" not in up
-      and 'ANALYTICS_VARS+=(-var "splunk_hec_url=$SPLUNK_HEC_URL" -var "splunk_index=$SPLUNK_INDEX"' in up
-      and up.index('ANALYTICS_VARS=(-var "sinks=[$SINKS_TF]"') < up.index('SPLUNK_TOKEN_PARAM="/$PREFIX/splunk/hec-token"') < up.index('tf_apply pipeline/analytics "${ANALYTICS_VARS[@]}"'))
+check("up.sh は SINK_SPLUNK（既定 0）と SPLUNK_INDEX を読み、splunk なら ECS の Splunk の token を SSM に作ってから渡す（値は読まない）。外の Splunk の変数は渡さない",
+      re.search(r'^SINK_SPLUNK="\$\{SINK_SPLUNK:-0\}"; SPLUNK_INDEX="\$\{SPLUNK_INDEX:-\}"$', up, re.M) is not None
+      and "get-parameter" not in up and "splunk_hec_url=" not in up and "splunk_skip_tls_verify" not in up and "SPLUNK_TOKEN_PARAM" not in up
+      and 'ANALYTICS_VARS+=(-var "splunk_image_tag=$SPLUNK_VERSION" -var "splunk_index=$SPLUNK_INDEX")' in up
+      and up.index('ANALYTICS_VARS=(-var "sinks=[$SINKS_TF]"') < up.index('ensure_secret "/$PREFIX/splunk/hec-token"') < up.index('tf_apply pipeline/analytics "${ANALYTICS_VARS[@]}"'))
 check("up.sh は SINK_S3 / SINK_OPENSEARCH / SINK_PROMETHEUS（既定 1）を terraform/pipeline/analytics の sinks に組んで渡す",
       re.search(r'^SINK_S3="\$\{SINK_S3:-1\}"; SINK_OPENSEARCH="\$\{SINK_OPENSEARCH:-1\}"; SINK_PROMETHEUS="\$\{SINK_PROMETHEUS:-1\}"$', up, re.M) is not None
       and 'ANALYTICS_VARS=(-var "sinks=[$SINKS_TF]" -var "device_map=$DEVICE_MAP")' in up and 'tf_apply pipeline/analytics "${ANALYTICS_VARS[@]}"' in up)
@@ -557,23 +588,13 @@ check("up.sh は base/core に interface_endpoints / network_perimeter / endpoin
       and 'NETWORK_PERIMETER="${NETWORK_PERIMETER:-1}"' in up
       and all(k in open(os.path.join(ROOT, "ops", "deploy-env.sh"), encoding="utf-8").read() for k in ("NETWORK_PERIMETER", "ENDPOINTS_MULTI_AZ")))
 check("費用の目安にエンドポイント（1 本 1.4 セント × AZ）を足す", "COST_CENTS=$((COST_CENTS + ($(endpoint_count) * 14 * ENDPOINT_AZS + 5) / 10))" in up)
-check("NAT Gateway（パブリックサブネット + IGW + EIP + プライベートの既定ルート）は create_nat_gateway のときだけ。既定は false でインターネットへの経路が無い",
-      all(re.search(r'resource "' + t + r'" "' + n + r'" \{\n\s*count\s*=\s*var\.create_nat_gateway \? 1 : 0', _core)
-          for t, n in (("aws_nat_gateway", "this"), ("aws_internet_gateway", "this"), ("aws_eip", "nat"), ("aws_subnet", "public"),
-                       ("aws_route_table", "public"), ("aws_route", "public_default"), ("aws_route_table_association", "public"), ("aws_route", "private_default")))
-      and re.search(r'resource "aws_route" "private_default"[\s\S]*?destination_cidr_block\s*=\s*"0\.0\.0\.0/0"[\s\S]*?nat_gateway_id\s*=\s*aws_nat_gateway\.this\[0\]\.id', _core, re.S) is not None
-      and re.search(r'resource "aws_subnet" "public"[\s\S]*?map_public_ip_on_launch\s*=\s*false', _core, re.S) is not None
-      and re.search(r'variable "create_nat_gateway" \{[\s\S]*?type\s*=\s*bool\s*default\s*=\s*false', _core) is not None
-      and re.search(r'output "nat_gateway" \{[^}]*?value\s*=\s*var\.create_nat_gateway', _core) is not None)
-check("splunk を選んだのに土台に NAT Gateway が無ければ analytics の precondition で止まる（前の state で output が無ければ有ると見る）",
-      re.search(r'nat_gateway\s*=\s*try\(data\.terraform_remote_state\.main\.outputs\.nat_gateway, true\)', tf) is not None
-      and re.search(r'condition\s*=\s*!local\.sink_splunk \|\| local\.nat_gateway', tf) is not None)
-check("up.sh は SINK_SPLUNK で analytics を作るとき、または state の analytics の sinks に splunk があるときだけ create_nat_gateway=true を渡す",
-      re.search(r'\*" pipeline/analytics "\*\) if \[ -n "\$SINK_SPLUNK" \]; then CREATE_NAT=1; fi', up) is not None
-      and "tf pipeline/analytics output -json sinks 2>/dev/null | grep -q '\"splunk\"'" in up
-      and 'MAIN_VARS+=(-var "create_nat_gateway=$([ -n "$CREATE_NAT" ] && echo true || echo false)")' in up)
-check("費用の目安: 土台は Web の EC2 の 2 セント、NAT Gateway の 6 セントは SINK_SPLUNK で analytics を作るときだけ",
-      "COST_CENTS=2\n" in up and 'if [ -z "$SKIP_ANALYTICS" ] && [ -n "$SINK_SPLUNK" ]; then COST_CENTS=$((COST_CENTS + 6)); fi' in up and "COST_CENTS=8" not in up)
+check("NAT Gateway / IGW / EIP / パブリックサブネット / 既定ルートは作らない（2026-09-28。VPC から AWS の外へ出る経路が無い）。up.sh も create_nat_gateway を渡さない",
+      not any(f'resource "{t}"' in _core for t in ("aws_nat_gateway", "aws_internet_gateway", "aws_eip", "aws_route"))
+      and 'resource "aws_subnet" "public"' not in _core and "create_nat_gateway" not in _core and 'output "nat_gateway"' not in _core
+      and "create_nat_gateway" not in up and "CREATE_NAT" not in up and "nat_gateway" not in tf)
+check("費用の目安: 土台は Web の EC2 の 2 セント（NAT Gateway は無い）。ECS の Splunk は 12、Grafana は 2",
+      "COST_CENTS=2\n" in up and "# NAT Gateway\n" not in up and "COST_CENTS=8" not in up
+      and 'if [ -n "$GRAFANA" ]; then COST_CENTS=$((COST_CENTS + 2)); fi' in up and 'if [ -n "$SPLUNK_ON_ECS" ]; then COST_CENTS=$((COST_CENTS + 12)); fi' in up)
 check("lab.sh は containerlab の版の確かめ（GitHub へ出る）をしない", "export CLAB_VERSION_CHECK=disable" in open(os.path.join(ROOT, "lab", "lab.sh"), encoding="utf-8").read())
 check("up.sh / deploy-env.sh に共用のエンドポイントと CLIENT_CIDR の扱いは無い",
       not any(k in up for k in ("SHARED_ENDPOINTS", "create_shared_endpoints", 'aws_vpc_endpoint.runtime["ecr-api"]', "CLIENT_CIDR"))
@@ -596,19 +617,26 @@ _rc, _out = _sinks(SINK_S3="0", SINK_OPENSEARCH="0", SINK_PROMETHEUS="0")
 check("SINK_* が全部 0 なら止まる", _rc == 1 and "全部 0" in _out)
 _rc, _out = _sinks(SINK_S3="2")
 check("SINK_S3=2 は止まる", _rc == 1 and "SINK_S3 は 1 か 0" in _out)
-check("SINK_SPLUNK=1 と SPLUNK_HEC_URL で splunk が 4 つ目に足される", _sinks(SINK_SPLUNK="1", SPLUNK_HEC_URL="https://s:8088")
+check("SINK_SPLUNK=1 で splunk が 4 つ目に足される", _sinks(SINK_SPLUNK="1")
       == (0, 'OUT: iceberg,opensearch,prometheus,splunk | "iceberg","opensearch","prometheus","splunk"'))
-check("SINK_SPLUNK=1 だけでも 1 つ以上になる", _sinks(SINK_S3="0", SINK_OPENSEARCH="0", SINK_PROMETHEUS="0", SINK_SPLUNK="1", SPLUNK_HEC_URL="https://s:8088") == (0, 'OUT: splunk | "splunk"'))
-_rc, _out = _sinks(SINK_SPLUNK="1")
-check("SINK_SPLUNK=1 なのに SPLUNK_HEC_URL が無ければ止まる", _rc == 1 and "SPLUNK_HEC_URL" in _out)
-_rc, _out = _sinks(SINK_SPLUNK="1", SPLUNK_HEC_URL="http://s:8088")
-check("SPLUNK_HEC_URL は https:// でないと止まる", _rc == 1 and "https://" in _out)
-check("SPLUNK_HEC_URL があっても SINK_SPLUNK=0 なら splunk は入らない", _sinks(SPLUNK_HEC_URL="https://s:8088") == (0, 'OUT: iceberg,opensearch,prometheus | "iceberg","opensearch","prometheus"'))
+check("SINK_SPLUNK=1 だけでも 1 つ以上になる", _sinks(SINK_S3="0", SINK_OPENSEARCH="0", SINK_PROMETHEUS="0", SINK_SPLUNK="1") == (0, 'OUT: splunk | "splunk"'))
+_ECS = 'echo "OUT: $SINKS | $SINKS_TF"; echo "ECS: $SPLUNK_ON_ECS"'
+def _ecs(**env):
+    r = subprocess.run(["bash", "-c", _pre + _blk + _ECS], capture_output=True, text=True, env={"PATH": os.environ["PATH"], **env})
+    return r.returncode, r.stdout.strip().splitlines()
+check("SINK_SPLUNK=1 なら splunk が入り、Splunk を ECS で立てる（SPLUNK_ON_ECS=1）",
+      _ecs(SINK_SPLUNK="1") == (0, ['OUT: iceberg,opensearch,prometheus,splunk | "iceberg","opensearch","prometheus","splunk"', "ECS: 1"]))
+check("SINK_SPLUNK=0 なら SPLUNK_ON_ECS は立たない", _ecs()[1][-1] == "ECS:")
+_rc, _out = _sinks(SINK_SPLUNK="1", SPLUNK_HEC_URL="https://s:8088")
+check("SPLUNK_HEC_URL（2026-09-28 にやめた外の Splunk）が書いてあれば、黙って ECS の Splunk に替えずに止まる", _rc == 1 and "SPLUNK_HEC_URL は 2026-09-28 から使わない" in _out)
+_rc, _out = _sinks(SPLUNK_HEC_URL="https://s:8088")
+check("SPLUNK_HEC_URL は SINK_SPLUNK=0 でも止まる（deploy.env から消してもらう）", _rc == 1 and "deploy.env から消す" in _out)
+check("SPLUNK_SKIP_TLS_VERIFY は使わない（書いてあれば注意だけ）", "for k in ADMIN_ARN OPENSEARCH_CACERT_FILE SPLUNK_SKIP_TLS_VERIFY; do" in up)
 check("deploy-env.sh は SINK_* を読めるキーに持つ",
       all(re.search(rf'(?<![A-Z_]){k}(?![A-Z_])', open(os.path.join(ROOT, "ops", "deploy-env.sh"), encoding="utf-8").read()) for k in ("SINK_S3", "SINK_OPENSEARCH", "SINK_PROMETHEUS", "SINK_SPLUNK", "SPLUNK_HEC_URL", "SPLUNK_INDEX", "SPLUNK_SKIP_TLS_VERIFY")))
-check("deploy.env.example は SINK_SPLUNK=0 を既定にし、token は SSM の put-parameter で入れると書く",
-      re.search(r"^#SINK_SPLUNK=0$", open(ENV_EXAMPLE, encoding="utf-8").read(), re.M) is not None and re.search(r"^#SPLUNK_HEC_URL=https://", open(ENV_EXAMPLE, encoding="utf-8").read(), re.M) is not None
-      and "put-parameter" in open(ENV_EXAMPLE, encoding="utf-8").read() and "SecureString" in open(ENV_EXAMPLE, encoding="utf-8").read())
+check("deploy.env.example は SINK_SPLUNK=0 を既定にし、SPLUNK_HEC_URL / SPLUNK_SKIP_TLS_VERIFY を書かない（2026-09-28 にやめた）",
+      re.search(r"^#SINK_SPLUNK=0$", open(ENV_EXAMPLE, encoding="utf-8").read(), re.M) is not None
+      and "SPLUNK_HEC_URL" not in open(ENV_EXAMPLE, encoding="utf-8").read() and "SPLUNK_SKIP_TLS_VERIFY" not in open(ENV_EXAMPLE, encoding="utf-8").read())
 check("MSK Connect の Splunk は書いていない（2026-09-26 に Spark から書くことにした）",
       "MSK Connect で後回し" not in tf and "MSK Connect で後回し" not in src and "MSK Connect で後回し" not in up)
 check("up.sh は analytics を stream の後に apply し、job を STREAMING で起こす（名前は snmp-sinks）",

@@ -28,7 +28,7 @@ uv sync --group dev
 bash ops/check.sh
 ```
 
-最後の行が `すべて通過` なら健全。中身は `terraform fmt`、8 ルートの `terraform validate`、`bash -n`、`tests/` の 7 本（`test_app` 57 項目、`test_graph` 48、`test_stream` 112、`test_sync` 53、`test_analytics` 220、`test_workflow` 215、`test_kb_index` 7）。途中で落ちたらそこで止まる。
+最後の行が `すべて通過` なら健全。中身は `terraform fmt`、8 ルートの `terraform validate`、`bash -n`、`tests/` の 7 本（`test_app` 57 項目、`test_graph` 48、`test_stream` 113、`test_sync` 53、`test_analytics` 247、`test_workflow` 217、`test_kb_index` 7）。途中で落ちたらそこで止まる。
 
 ## Web を手元で動かす
 
@@ -58,6 +58,6 @@ uv run python web/app.py
 - Temporal の永続化と UI の認証。履歴はタスクと一緒に消え、UI にはポートフォワーディングでしか届かない。
 - 実機への修復。打てるのは lab の `sudo lab heal-main`（`dc1-leaf-01 ethernet-1/1` の fabric を戻す）と `sudo lab check` だけ。
 - 履歴の検索（`query_history`）。Athena をつないでいないので案内だけ返す。
-- Grafana などの可視化。異常一覧と修復案は Neptune の頂点をそのまま表に出す。
+- Web の画面の中のグラフ。異常一覧と修復案は Neptune の頂点をそのまま表に出す（メトリクスとログのグラフは 2026-09-28 から Grafana（`GRAFANA=1`）で見る）。
 - 証跡（S3 Tables の `anomaly_events` / `proposal_events`）を読む画面。書くだけで、読むには Athena などを足す。
 - state の共有。1 人が 1 台の PC で打つ前提。

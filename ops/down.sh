@@ -3,7 +3,7 @@
 # state（terraform/<ルート>/terraform.tfstate）にリソースが載っているルートだけを消す。作っていないルートは飛ばす。
 #
 # 使い方（展開したフォルダの直下で。先に AWS CLI の認証を通しておく。IAM ユーザーなら長期キーのまま打つ）:
-#   ops/down.sh              # 全部消す（workflow → analytics → graph → stream → lab → agent → main → ecr → Runtime のロググループ）。KEEP_ECR=0 と同じ
+#   ops/down.sh              # 全部消す（workflow → analytics → graph → stream → lab → agent → base/core → ecr → Runtime のロググループ → ops/up.sh が作った SSM のパラメータ）。KEEP_ECR=0 と同じ
 #   KEEP_ECR=1 ops/down.sh   # ECR（イメージ）だけ残す。翌日の ops/up.sh でビルドを飛ばせる（保管料は月数円）
 #
 # ops/up.sh と同じ deploy.env（DEPLOY_ENV_FILE=<パス> で別のファイル）を読む。環境変数はファイルより優先。
@@ -152,7 +152,7 @@ echo "ACCOUNT_ID=$ACCOUNT_ID"
 tf_use_cli_credentials
 AGENT_VARS=()
 
-log "1. analytics → graph → stream（analytics は stream の Kafka を読み、stream は lab の state を読むので、この順）"
+log "1. workflow → analytics → graph → stream（workflow は analytics と graph を、analytics は stream の Kafka を読むので、この順）"
 # EMR Serverless のアプリケーションは、ジョブが動いているか STARTED のままだと destroy が落ちる。先にジョブを止め、アプリケーションを止める
 if has_resources pipeline/analytics; then
   APP_ID=$(tf pipeline/analytics output -raw application_id 2>/dev/null || true)
@@ -183,12 +183,13 @@ fi
 destroy_lambda_root workflow "$PREFIX-tools" -var "worker_image_tag=${IMAGE_TAG:-destroy}"
 destroy_root pipeline/analytics
 destroy_lambda_root pipeline/graph "$PREFIX-graph-status"
-destroy_root pipeline/stream
+# stream の snmp_agents / gnmi_targets も必須変数だが destroy では使われないので、形だけ合う値を渡す
+destroy_root pipeline/stream -var 'snmp_agents="udp://0.0.0.0:161"' -var 'gnmi_targets="0.0.0.0:57400"'
 
 log "2. lab"
 destroy_root pipeline/lab
 
-log "3. agent（Runtime / ガードレール / KB。terraform/base/core のロールにポリシーを付けているので main より先）"
+log "3. agent（Runtime / ガードレール / KB。terraform/base/core のロールにポリシーを付けているので base/core より先）"
 LOG_GROUP=""
 if has_resources agent; then
   LOG_GROUP=$(tf agent output -raw runtime_log_group_name 2>/dev/null || true)
@@ -203,7 +204,7 @@ destroy_lambda_root agent "$PREFIX-kb-index" ${AGENT_VARS[@]+"${AGENT_VARS[@]}"}
 log "3-2. 土台（terraform/base/core。VPC / Web の EC2 / バケット（中身ごと消える）/ ロール）"
 # Runtime の ENI（種類 agentic_ai。AWS 側の所有で、自分では外せない）は Runtime を消したあとも最大 8 時間残り、その間はサブネットと
 # internal の SG（全ワークロード共用。2026-09-26 に 1 つにまとめた）が DependencyViolation で消えない（terraform は 20 分待ってから落ちる）。
-# 残っているあいだは、それ以外だけを消して先へ進む。NAT Gateway・EIP・IGW は時間課金があるのでこのとき消す。
+# 残っているあいだは、それ以外だけを消して先へ進む（2026-09-28 より前の state なら NAT Gateway・EIP・IGW も。時間課金があるのでこのとき消す）。
 # 残る VPC・サブネット・SG に時間課金は無く、次の ops/up.sh はそのまま使い回す
 MAIN_LEFT=0
 if has_resources base/core; then
@@ -223,7 +224,7 @@ if has_resources base/core; then
   if [ -n "$AGENT_ENIS" ] && [ "$AGENT_ENIS" != None ]; then
     MAIN_LEFT=1
     echo "Runtime の ENI が残っている: $AGENT_ENIS"
-    echo "VPC・サブネット・internal の SG は残し、それ以外（NAT Gateway も）を消す"
+    echo "VPC・サブネット・internal の SG は残し、それ以外を消す"
     MAIN_TARGETS=()
     while IFS= read -r addr; do
       case "$addr" in
@@ -264,6 +265,18 @@ LOG_GROUPS=$(printf '%s\n' $LOG_GROUPS | grep -v '^None$' | sort -u)
 if [ -z "$LOG_GROUPS" ]; then echo "$LOG_PREFIX*: 無い"; fi
 for g in $LOG_GROUPS; do
   aws logs delete-log-group --region "$REGION" --log-group-name "$g" 2>/dev/null && echo "$g: 消した" || echo "$g: 無い"
+done
+
+log "5-2. ops/up.sh が作った SSM のパラメータ（Grafana / Splunk の admin のパスワード、ECS の Splunk の HEC の token）"
+# Terraform の state に値を載せないよう ops/up.sh が作ったもので、Terraform の管理外。タグ ManagedBy=ops/up.sh の付いたものだけ消す
+# （手で入れたパラメータは消さない）。値は読まない
+SSM_PARAMS=$(aws ssm describe-parameters --region "$REGION" \
+  --parameter-filters "Key=Path,Option=Recursive,Values=/$PREFIX/" "Key=tag:ManagedBy,Values=ops/up.sh" \
+  --query 'Parameters[].Name' --output text) || echo "注意: SSM のパラメータを引けなかった（上のエラー）"
+SSM_PARAMS=$(printf '%s\n' $SSM_PARAMS | grep -v '^None$' || true)
+if [ -z "$SSM_PARAMS" ]; then echo "/$PREFIX/（ManagedBy=ops/up.sh）: 無い"; fi
+for n in $SSM_PARAMS; do
+  aws ssm delete-parameter --region "$REGION" --name "$n" 2>/dev/null && echo "$n: 消した" || echo "$n: 無い"
 done
 
 log "6. 残っていないか（Project=$PREFIX のタグ）"

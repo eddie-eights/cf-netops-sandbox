@@ -1,6 +1,6 @@
 # 起動のたびに流す（cloud-config の always）。S3 の lab/ を置き直して再起動すれば設定も更新される
-# Telegraf はここでは動かさない（telegraf.tf の別の EC2）。Telegraf があるとき、lab の EC2 は管理ネットワークへの転送と trap / syslog の DNAT を
-# 受け持つ（lab.sh forward）
+# Telegraf はここでは動かさない（terraform/pipeline/stream の ECS のタスク）。forward_to_telegraf のとき、lab の EC2 は管理ネットワークへの転送と
+# trap / syslog の DNAT を受け持つ（lab.sh forward）
 resource "aws_instance" "lab" {
   ami                         = data.aws_ssm_parameter.al2023.insecure_value
   instance_type               = var.instance_type
@@ -8,8 +8,8 @@ resource "aws_instance" "lab" {
   subnet_id                   = local.subnet_id
   vpc_security_group_ids      = [local.internal_sg_id]
   associate_public_ip_address = false
-  # Telegraf の EC2 とのあいだで、送り元・宛先が管理ネットワーク（203.0.113.x）の IP のパケットを通す（telegraf.tf の aws_route）
-  source_dest_check = !var.create_telegraf
+  # Telegraf のタスクと NLB とのあいだで、送り元・宛先が管理ネットワーク（203.0.113.x）の IP のパケットを通す（telegraf.tf の aws_route）
+  source_dest_check = !var.forward_to_telegraf
 
   user_data = templatefile("${path.module}/templates/lab_user_data.sh.tftpl", {
     name_prefix          = local.name_prefix
@@ -48,7 +48,5 @@ resource "aws_instance" "lab" {
   depends_on = [
     aws_iam_role_policy_attachment.lab_ssm,
     aws_iam_role_policy.lab_assets,
-    # 最初の起動の lab.sh up（forward）が Telegraf のアドレスを読めるように
-    aws_ssm_parameter.telegraf_address,
   ]
 }

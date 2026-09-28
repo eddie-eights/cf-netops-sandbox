@@ -1,68 +1,58 @@
 #!/usr/bin/env bash
-# Telegraf の EC2（terraform/pipeline/lab の create_telegraf）の上で Telegraf を扱う。user_data が /usr/local/bin/tg に置くので、
-# SSM セッションから `sudo tg status` で使う。unit は /etc/systemd/system/<接頭辞>-telegraf.service（ExecStartPre が render）。
-#   tg render | status | test | gnmi | logs | restart
+# Telegraf のコンテナ（terraform/pipeline/stream の ECS。telegraf/Dockerfile）の入口。イメージの /usr/local/bin/tg。
+#   tg run    （既定。ECS が起こす）設定を作って Telegraf を起こす
+#   tg test | gnmi   （ECS Exec から打つ。コマンドは ops/up.sh の最後に出る）ポーリング / gNMI の購読を 1 回だけ回して標準出力に出す
 # 機器（lab の EC2 の中の containerlab）への経路は lab の EC2 側で `sudo lab forward-status` を見る。
 set -euo pipefail
-# /usr/local/bin/tg（シンボリックリンク）から呼ばれても、テンプレートのある src/ で動く
-SELF=$(readlink -f "$0")
-cd "$(dirname "$SELF")"
-CONF=/etc/telegraf/telegraf.conf
+TEMPLATE=/etc/telegraf/telegraf.conf.in
+# コンテナの / は書けるが、書くのは /tmp だけにする（作り直せば消える）
+CONF=/tmp/telegraf.conf
+export AWS_CONFIG_FILE=/tmp/aws_config
 # 機器の syslog を受ける UDP のポート（telegraf.conf.in の inputs.syslog と lab/lab.sh の LOG_PORT と同じ）
 LOG_PORT=5140
-# ポーリング先（"udp://<IP>:161", ...）。ops/up.sh が lab の定義から作って s3://<バケット>/telegraf/ に置き、user_data の s3 sync で src/ に来る
-AGENTS_FILE=snmp_agents.txt
-# gNMI の購読先（"<IP>:57400", ...）。同じく ops/up.sh が lab の定義から作る（lab/lab_topology.py --gnmi-targets）
-GNMI_FILE=gnmi_targets.txt
-# terraform/pipeline/lab の user_data が書く。AWS_REGION / PARAM_PREFIX
-ENV_FILE=$(ls /etc/*-telegraf.env 2>/dev/null | head -1 || true)
-[ -n "$ENV_FILE" ] && set -a && . "$ENV_FILE" && set +a
-UNIT=$(basename "${ENV_FILE:-/etc/telegraf.env}" .env).service
+# trap を受ける UDP のポート。機器は 162 に送り、NLB が 1162 に向ける（非 root は 1024 未満で待てない）
+TRAP_PORT=1162
 
-case "${1:-}" in
-  render)
-    # terraform/pipeline/stream が SSM に書いたブローカーと、ポーリング先（snmp_agents.txt）を埋めて /etc/telegraf/telegraf.conf を作る。
-    # terraform/pipeline/stream が無いときは失敗して終わる（unit は Restart=on-failure で 60 秒ごとに試し直す）
-    : "${AWS_REGION:?}" "${PARAM_PREFIX:?}"
-    agents=""
-    [ -f "$AGENTS_FILE" ] && agents=$(tr -d '\n' < "$AGENTS_FILE")
-    # 形が崩れていると Telegraf が起きないので、"udp://<IPv4>:<ポート>" をカンマで並べた形だけ通す
-    if ! printf '%s' "$agents" | grep -Eq '^"udp://[0-9.]+:[0-9]+"(, *"udp://[0-9.]+:[0-9]+")*$'; then
-      echo "$PWD/$AGENTS_FILE が無いか形が違う（ops/up.sh の 5-1b が lab の定義から作って s3://<バケット>/telegraf/ に置く。置いたら EC2 を再起動）" >&2; exit 1
-    fi
-    gnmi=""
-    [ -f "$GNMI_FILE" ] && gnmi=$(tr -d '\n' < "$GNMI_FILE")
-    if ! printf '%s' "$gnmi" | grep -Eq '^"[0-9.]+:[0-9]+"(, *"[0-9.]+:[0-9]+")*$'; then
-      echo "$PWD/$GNMI_FILE が無いか形が違う（ops/up.sh の 5-1b が lab の定義から作って s3://<バケット>/telegraf/ に置く。置いたら EC2 を再起動）" >&2; exit 1
-    fi
-    b=$(aws ssm get-parameter --region "$AWS_REGION" --name "$PARAM_PREFIX/msk-bootstrap" --query Parameter.Value --output text) || {
-      echo "SSM $PARAM_PREFIX/msk-bootstrap が読めない。terraform/pipeline/stream はまだ？" >&2; exit 1; }
-    q=$(printf '"%s"' "${b//,/\",\"}")
-    install -d -m 0755 /etc/telegraf
-    # Telegraf の MSK IAM 認証は profile の指定が要る（telegraf.conf.in の注記）。鍵を書かない [default] なので EC2 のロールが使われる
-    printf '[default]\nregion = %s\n' "$AWS_REGION" > /etc/telegraf/aws_config
-    sed -e "s#__KAFKA_BROKERS__#$q#" -e "s#__AWS_REGION__#$AWS_REGION#" -e "s#__SNMP_AGENTS__#$agents#" -e "s#__GNMI_TARGETS__#$gnmi#" telegraf.conf.in > "$CONF"
-    echo "$CONF を作った（brokers: ${b} / agents: ${agents} / gnmi: ${gnmi}）"
-    ;;
-  status)
-    systemctl --no-pager status "$UNIT" || true
-    echo "== 受けているポート（trap 162/udp、機器の syslog $LOG_PORT/udp）=="
-    ss -lunp 'sport = :162' || true
-    ss -lunp "sport = :$LOG_PORT" || true
-    echo "== 直近のログ =="
-    journalctl -u "$UNIT" -n 20 --no-pager
+render() {
+  # ECS のタスク定義の環境変数（terraform/pipeline/stream の telegraf.tf）を埋めて $CONF を作る:
+  #   KAFKA_BROKERS  MSK のブローカー（host:9098 をカンマで。IAM 認証の口）
+  #   SNMP_AGENTS    ポーリング先（"udp://<IP>:161", ...）。ops/up.sh が lab の定義から作る（lab/lab_topology.py --snmp-agents）
+  #   GNMI_TARGETS   gNMI の購読先（"<IP>:57400", ...）。同じく lab/lab_topology.py --gnmi-targets
+  #   AWS_REGION
+  : "${AWS_REGION:?}" "${KAFKA_BROKERS:?}"
+  local agents="${SNMP_AGENTS:-}" gnmi="${GNMI_TARGETS:-}" q
+  # 形が崩れていると Telegraf が起きないので、決まった形だけ通す
+  if ! printf '%s' "$agents" | grep -Eq '^"udp://[0-9.]+:[0-9]+"(, *"udp://[0-9.]+:[0-9]+")*$'; then
+    echo "SNMP_AGENTS が無いか形が違う（ops/up.sh が lab の定義から作って terraform/pipeline/stream の snmp_agents に渡す）: $agents" >&2; exit 1
+  fi
+  if ! printf '%s' "$gnmi" | grep -Eq '^"[0-9.]+:[0-9]+"(, *"[0-9.]+:[0-9]+")*$'; then
+    echo "GNMI_TARGETS が無いか形が違う（ops/up.sh が lab の定義から作って terraform/pipeline/stream の gnmi_targets に渡す）: $gnmi" >&2; exit 1
+  fi
+  if ! printf '%s' "$KAFKA_BROKERS" | grep -Eq '^[A-Za-z0-9.-]+:[0-9]+(,[A-Za-z0-9.-]+:[0-9]+)*$'; then
+    echo "KAFKA_BROKERS の形が違う: $KAFKA_BROKERS" >&2; exit 1
+  fi
+  q=$(printf '"%s"' "${KAFKA_BROKERS//,/\",\"}")
+  # Telegraf の MSK IAM 認証は profile の指定が要る（telegraf.conf.in の注記）。鍵を書かない [default] なので、
+  # SDK はタスクロール（ECS が入れる AWS_CONTAINER_CREDENTIALS_RELATIVE_URI）を使う
+  printf '[default]\nregion = %s\n' "$AWS_REGION" > "$AWS_CONFIG_FILE"
+  sed -e "s#__KAFKA_BROKERS__#$q#" -e "s#__AWS_REGION__#$AWS_REGION#" -e "s#__SNMP_AGENTS__#$agents#" -e "s#__GNMI_TARGETS__#$gnmi#" "$TEMPLATE" > "$CONF"
+  echo "$CONF を作った（brokers: ${KAFKA_BROKERS} / agents: ${agents} / gnmi: ${gnmi} / trap: ${TRAP_PORT}/udp / syslog: ${LOG_PORT}/udp）"
+}
+
+case "${1:-run}" in
+  run)
+    render
+    exec telegraf --config "$CONF"
     ;;
   test)
     # ポーリングだけ 1 回まわして標準出力に出す（MSK には送らない）。機器に届かないときは lab の EC2 の forward を疑う
-    [ -f "$CONF" ] || "$SELF" render
-    AWS_CONFIG_FILE=/etc/telegraf/aws_config telegraf --config "$CONF" --test --input-filter snmp
+    [ -f "$CONF" ] || render
+    telegraf --config "$CONF" --test --input-filter snmp
     ;;
   gnmi)
     # gNMI の購読を 20 秒だけ回して標準出力に出す（MSK には送らない。on_change は最初に今の状態を全部送るので、BGP / IS-IS の一覧が見える）
-    [ -f "$CONF" ] || "$SELF" render
-    AWS_CONFIG_FILE=/etc/telegraf/aws_config timeout 20 telegraf --config "$CONF" --test --input-filter gnmi --test-wait 15 || true
+    [ -f "$CONF" ] || render
+    timeout 20 telegraf --config "$CONF" --test --input-filter gnmi --test-wait 15 || true
     ;;
-  logs) journalctl -u "$UNIT" -n "${LINES:-50}" --no-pager ;;
-  restart) systemctl restart "$UNIT" && systemctl --no-pager status "$UNIT" ;;
-  *) sed -n '2,5p' "$SELF"; exit 1 ;;
+  *) sed -n '2,4p' "$0"; exit 1 ;;
 esac

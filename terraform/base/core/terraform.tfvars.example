@@ -6,7 +6,7 @@
 # so several people can share one AWS account.
 #
 # region      = "ap-northeast-1"
-# owner       = "efukuda"
+# owner       = "yamada"
 #
 # vpc_cidr    = "10.0.0.0/16"
 # az_id_a     = "apne1-az1"

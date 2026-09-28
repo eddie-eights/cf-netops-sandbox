@@ -42,14 +42,6 @@ resource "aws_emrserverless_application" "spark" {
       condition     = local.neptune_host != "" && local.neptune_resource_id != ""
       error_message = "terraform/pipeline/graph の state（terraform/pipeline/graph/terraform.tfstate）から cluster_endpoint / cluster_resource_id が読めない。検知は異常の「いま」を Neptune に書くので、terraform/pipeline/graph を先に apply する（2026-09-24 から）。"
     }
-    precondition {
-      condition     = !local.sink_splunk || var.splunk_hec_url != ""
-      error_message = "sinks に splunk があるのに splunk_hec_url が空。HEC の URL（https://<host>:8088）を渡す（ops/up.sh なら deploy.env の SPLUNK_HEC_URL）。"
-    }
-    precondition {
-      condition     = !local.sink_splunk || local.nat_gateway
-      error_message = "sinks に splunk があるのに terraform/base/core に NAT Gateway が無い（HEC は AWS の外なので VPC から出る経路が要る）。terraform/base/core を create_nat_gateway=true で apply し直す（ops/up.sh は SINK_SPLUNK=1 のとき自動で付ける）。"
-    }
   }
 
   tags = { Name = "${local.name_prefix}-spark" }

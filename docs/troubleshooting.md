@@ -16,7 +16,7 @@
 | `does not have an attribute named "…"` | 前のルート（`base/ecr` → `base/core` → …）をこの PC で apply していない、または先に消した。`ops/up.sh` を打ち直す |
 | `Error acquiring the state lock` | 同じルートを別のターミナルで打っている。終わるのを待つ |
 | `aws_lambda_invocation.kb_index` が失敗（CREATE_KB=1） | KB のベクトルインデックスを VPC の中の Lambda `<接頭辞>-kb-index` が作る。ログは CloudWatch Logs の `/aws/lambda/<接頭辞>-kb-index`。403 や接続できないのは 4 分半まで打ち直してから落ちる: 権限の反映待ちなら `ops/up.sh` を打ち直す。続くなら `terraform/base/core` の OpenSearch Serverless の VPC エンドポイント（`create_opensearch_endpoint`）が ACTIVE か見る |
-| `opensearch_vpc_endpoint_id が空` の precondition で止まる | KB か logs のコレクションを作るのに、base/core に VPC エンドポイントが無い。`ops/up.sh` を通して打つ（`CREATE_KB` か `SINK_OPENSEARCH` を見て base/core に渡す）。ルートを手で apply したなら base/core を `-var create_opensearch_endpoint=true` で打ち直す |
+| 「terraform/base/core に OpenSearch Serverless の VPC エンドポイントが無い」の precondition で止まる | KB か logs のコレクションを作るのに、base/core に VPC エンドポイントが無い。`ops/up.sh` を通して打つ（`CREATE_KB` か `SINK_OPENSEARCH` を見て base/core に渡す）。ルートを手で apply したなら base/core を `-var create_opensearch_endpoint=true` で打ち直す |
 | destroy が `provider["registry.terraform.io/opensearch-project/opensearch"]` で止まる | 2026-09-28 より前に作った agent の state（`opensearch_index.kb` 入り）。コミット f7b1688 の `terraform/agent` で destroy する |
 | ビルドの `pip install` が `CERTIFICATE_VERIFY_FAILED` | 社内 CA の差し替え。`ReadTimeoutError` は QEMU が遅いだけなので打ち直す |
 
@@ -25,7 +25,7 @@
 | 症状 | 原因と直し方 |
 |---|---|
 | ワークロードのログに `<サービス>.ap-northeast-1.amazonaws.com` への接続のタイムアウト（`Connect timeout` / `ConnectTimeoutError`） | そのサービスのインターフェース型エンドポイントが無い（VPC にインターネットへの経路が無いので、どこにも出られない）。手順 0 の一覧にあるか見る。無ければ `ops/up.sh` の `endpoints_for` に足し、`terraform/base/core` の `interface_endpoints` の validation にも足す |
-| ワークロードのログに `AccessDenied ... with an explicit deny in an identity-based policy` | その呼び出しが VPC のエンドポイントを通らず NAT Gateway（`SINK_SPLUNK=1` のときだけある）から出た（`<prefix>-network-perimeter` の Deny）。呼んだサービスのインターフェース型エンドポイントが手順 0 の一覧にあるか見る。無ければ `ops/up.sh` の `endpoints_for` に足す。切り分けは `NETWORK_PERIMETER=0 ops/up.sh`（[setup.md](setup.md) の「閉域を一時的に外すとき」） |
+| ワークロードのログに `AccessDenied ... with an explicit deny in an identity-based policy` | その呼び出しが VPC のエンドポイントを通らなかった（`<prefix>-network-perimeter` の Deny。PC から打った CLI などで、VPC の外から呼んだとき）。呼んだサービスのインターフェース型エンドポイントが手順 0 の一覧にあるか見る。無ければ `ops/up.sh` の `endpoints_for` に足す。切り分けは `NETWORK_PERIMETER=0 ops/up.sh`（[setup.md](setup.md) の「閉域を一時的に外すとき」） |
 | `... in a resource-based policy`（S3 / S3 Tables / SQS / AgentCore） | リソースポリシーの Deny。apply した人と AWS のサービスは外してあるので、ほかの人か、VPC の外の PC から打った。apply した本人の PC から打つか、VPC の中（Web の EC2 に SSM で入る）から打つ |
 | apply する人が替わり、バケットや S3 Tables に `AccessDenied` で apply できない | 外すプリンシパルが前の人のまま。前の人が `ops/up.sh` を打ち直すか、管理者（ルートか、ポリシーを消せる人）が `aws s3api delete-bucket-policy --bucket <バケット>` と `aws s3tables delete-table-bucket-policy --table-bucket-arn <ARN>` でポリシーを消してから、新しい人が `ops/up.sh` を打つ。ポリシーの取得・変更・削除は Deny から外してあるので、同じアカウントで権限のある人なら VPC の外からでも消せる |
 | KB の取り込み（`StartIngestionJob`）が S3 を読めない | KB のロール `<prefix>-kb` はバケットの Deny から外してある。名前を変えたなら `terraform/base/core/perimeter.tf` の `perimeter_exempt_principals` も変える |
@@ -68,6 +68,11 @@ Web のログは Web の EC2 で `sudo journalctl -u <prefix>-web -n 100`、起�
 | 同じ link down が 2 件になり、片方の対象が `?` | 同じ（古いスクリプト）。残った `<機器>#link_down#?` は自動で resolved にならないので、Neptune の `anomaly` と `proposal` の頂点を消す（`g.V('<機器>#link_down#?').drop()`。修復案は id が `<機器>#link_down#?#` で始まるもの） |
 | トポロジに赤い線が出ない | `/aws/lambda/<prefix>-graph-status` のログを見る |
 | 承認しても approved のまま進まない | ワーカーのイメージが古い。`deploy.env` の `IMAGE_TAG` を上げて `ops/up.sh`（[workflow.md](workflow.md)） |
+| 手順 7-2c で「Telegraf のサービスが 10 分たっても安定しない」 | タスクが起きては止まっている。`terraform -chdir=terraform/pipeline/stream output -raw telegraf_list_tasks_command` に `--desired-status STOPPED` を足して打ち、`aws ecs describe-tasks` の `stoppedReason` を見る。`CannotPullContainerError` / `ResourceInitializationError` は ecr.api / ecr.dkr / logs のエンドポイント（手順 0 の一覧）と S3 の gateway。起きてすぐ終わるならロググループ `/ecs/<prefix>-telegraf` の最初の行（`SNMP_AGENTS が無いか形が違う` なら stream の変数 `snmp_agents` の形。`ops/up.sh` を通して打つ）。NLB のヘルスチェック（`8080/tcp`、Telegraf の `outputs.health`。Telegraf が動いていれば 200）が通らないと入れ替えが続く |
+| `tg test` は通るのに trap / syslog が Kafka に来ない | lab の EC2 の DNAT の宛先が古い NLB の IP か、転送が無い。lab の EC2 で `sudo lab forward-status`、無ければ `sudo lab forward`（SSM `/<prefix>/telegraf-address` を読み直す） |
+| Grafana / Splunk のポートフォワードがつながらない | 踏み台は Web の EC2（`Online` か上の「画面に入れない」のコマンドで見る）。タスクが動いているか `aws ecs list-services --cluster <prefix>-analytics` と `describe-services` の `runningCount` を見る。Cloud Map の名前（`grafana.<prefix>.internal` / `splunk.<prefix>.internal`）はタスクが動いていないと引けない。起きないときはロググループ `/ecs/<prefix>-grafana` / `/ecs/<prefix>-splunk` と `stoppedReason`（ECR のエンドポイントと、SSM のパスワードが消えていないか） |
+| Grafana に入れない（パスワードが違う） | admin のパスワードは SSM の値（`grafana_password_command`）。タスクが起きたときに読むので、SSM を手で変えたら `aws ecs update-service --force-new-deployment` で作り直す |
+| 手順 7-4b で「Splunk が 20 分たっても HEALTHY にならない」 | ロググループ `/ecs/<prefix>-splunk` を見る。初回は設定の展開で 5〜10 分かかる。ライセンスに同意していない旨で止まるならタスク定義の `SPLUNK_START_ARGS` / `SPLUNK_GENERAL_TERMS`。Spark のジョブはそのまま起きるので、Splunk が起きたあとで落ちていれば `ops/up.sh` を打ち直す |
 
 ## 消すとき
 

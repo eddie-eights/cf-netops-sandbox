@@ -6,17 +6,15 @@
 # so several people can share one AWS account.
 #
 # region      = "ap-northeast-1"
-# owner       = "efukuda"
+# owner       = "yamada"
 #
 # instance_type     = "t4g.xlarge"
 # ami_ssm_parameter = "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64"
 # volume_size       = 24
 # auto_start_lab    = true
 #
-# create_telegraf        = false        # ops/up.sh passes true when it makes terraform/pipeline/stream
-# telegraf_instance_type = "t4g.micro"
+# forward_to_telegraf = false   # ops/up.sh passes true when it makes (or keeps) terraform/pipeline/stream
 #
 # containerlab_version = "0.79.0"
-# telegraf_version     = "1.40.0"
 # srlinux_image_tag    = "26.7.2"
 # multitool_image_tag  = "v0.10.0"

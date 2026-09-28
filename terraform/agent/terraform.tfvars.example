@@ -8,11 +8,11 @@
 # so several people can share one AWS account.
 #
 # region      = "ap-northeast-1"
-# owner       = "efukuda"
+# owner       = "yamada"
 #
 # agent_image_tag = "v1"
 # agent_image_uri = ""             # leave empty to use the terraform/base/ecr repository
-# runtime_name    = ""             # leave empty to derive it from the prefix (owner efukuda -> efukuda_nwc_poc_agent)
+# runtime_name    = ""             # leave empty to derive it from the prefix (owner yamada -> yamada_nwc_poc_agent)
 # model_id        = "jp.amazon.nova-2-lite-v1:0"
 #
 # create_knowledge_base      = false  # true adds OpenSearch Serverless (about 0.33 USD per hour) and the Bedrock knowledge base

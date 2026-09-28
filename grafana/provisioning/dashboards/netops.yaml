@@ -1,0 +1,10 @@
+# grafana/start.sh が /tmp/grafana-dashboards に並べた JSON（選んだ格納先の分だけ）を netops フォルダに出す。画面からは変えられない（作り直すと消えるので）
+apiVersion: 1
+providers:
+  - name: netops
+    folder: netops
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    options:
+      path: /tmp/grafana-dashboards

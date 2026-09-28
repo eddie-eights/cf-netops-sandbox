@@ -9,31 +9,33 @@ flowchart LR
   subgraph LABEC2["lab の EC2（terraform/pipeline/lab）"]
     CLAB["containerlab<br/>Nokia SR Linux（Spine-Leaf）6 台 + VM 2 台"]
   end
-  CLAB -->|"SNMP ポーリング 10 秒 / gNMI 購読 / trap / syslog"| TG["Telegraf の EC2<br/>（terraform/pipeline/lab）"]
+  CLAB -->|"SNMP ポーリング 10 秒 / gNMI 購読 / trap / syslog"| TG["Telegraf（ECS Fargate + 内部 NLB）<br/>（terraform/pipeline/stream）"]
   TG --> MSK["MSK（stream）<br/>metrics / gnmi / traps / logs"]
   MSK --> SPARK["Spark（analytics）<br/>EMR Serverless"]
   SPARK -->|"SINK_S3"| ICE["S3 Tables<br/>snmp_metrics"]
   SPARK -->|"SINK_OPENSEARCH"| OS["OpenSearch<br/>snmp-logs"]
   SPARK -->|"SINK_PROMETHEUS"| PROM["Prometheus"]
-  SPARK -->|"SINK_SPLUNK（既定 0）"| SPL["Splunk HEC<br/>（AWS の外）"]
+  SPARK -->|"SINK_SPLUNK（既定 0）"| SPL["Splunk HEC<br/>（analytics の ECS）"]
   SPARK -->|"開いた / 閉じた（証跡）"| AEV["S3 Tables<br/>anomaly_events"]
   SPARK -->|"異常の open / resolved"| NEP["Neptune（graph）<br/>トポロジ・状態・異常"]
   SPARK -->|"AnomalyOpened / Resolved"| EB["EventBridge"]
   EB --> GL["Lambda graph-status"] --> NEP
+  GRAF["Grafana（analytics の ECS）<br/>GRAFANA=1"] -.-> OS
+  GRAF -.-> PROM
 ```
 
 - lab は Web やエージェントとはつながっていない。使うのは SNMP とログの発生源としてだけ。
-- Telegraf は lab とは別の EC2 で動く（stream を作るときだけ。`terraform/pipeline/lab` の `create_telegraf`）。Telegraf だけを止める・作り直す・ログを見ることができる。
+- Telegraf は stream の ECS（Fargate ARM64、0.25 vCPU / 0.5 GB）の 1 タスクで動き、内部 NLB の後ろにいる（`terraform/pipeline/stream/telegraf.tf`。2026-09-28 に terraform/pipeline/lab の Telegraf 用の EC2 から移した）。イメージは `telegraf/Dockerfile`（公式の `telegraf:1.40.0` に `telegraf.conf.in` と `tg` を入れたもの）で、`ops/up.sh` が ECR の `<prefix>-telegraf:<版>-<ディレクトリのハッシュ 12 文字>` に作る。ポーリング先と gNMI の購読先は `ops/up.sh` が lab の定義から作って stream の変数 `snmp_agents` / `gnmi_targets` に渡し、タスクの環境変数 `SNMP_AGENTS` / `GNMI_TARGETS` になる。MSK のブローカーは環境変数 `KAFKA_BROKERS`。起動時に `tg run` が設定を埋める。ポーリングが二重にならないよう、作り直すときは古いタスクを止めてから新しいタスクを立てる。
 - lab は Spine-Leaf（EVPN-VXLAN）。上流側の Leaf-SW 2 台と アクセス側の Leaf 2 台が Spine 2 台とフルメッシュ（fabric。IS-IS）、上流 VM は Leaf-SW の組へ、アクセス側 VM は Leaf の組へ LAG（EVPN マルチホーミング）で 2 本ずつ。機器の定義は `lab/gen_lab.py` が作る（[lab を変える](#lab-を変える)）。SR-MPLS は SR Linux のコンテナが `ixr6e` / `ixr10e` + ライセンスを要るので、ライセンスが届くまで license 不要の `ixr-d2l` で EVPN-VXLAN にしている。
-- 機器は lab の EC2 の中の docker network（`203.0.113.0/24`）にいる。Telegraf の EC2 からの SNMP のポーリング（`161/udp`）と gNMI の購読（`57400/tcp`）は VPC のルートで lab の EC2 を通り、trap（`162/udp`）と syslog（`5140/udp`）は機器が lab の EC2（`203.0.113.1`）へ送り、lab の EC2 が Telegraf へ DNAT する。この 4 つは lab の EC2 で `sudo lab forward` が張る（`lab up` が毎回呼ぶ）。
+- 機器は lab の EC2 の中の docker network（`203.0.113.0/24`）にいる。Telegraf のタスクからの SNMP のポーリング（`161/udp`）と gNMI の購読（`57400/tcp`）は VPC のルートで lab の EC2 を通り（タスクの IP は作り直すたびに変わるので、送り元はタスクのサブネットの CIDR（SSM `/<prefix>/telegraf-source-cidr`）で通す）、trap（`162/udp`）と syslog（`5140/udp`）は機器が lab の EC2（`203.0.113.1`）へ送り、lab の EC2 が Telegraf の NLB の IP（SSM `/<prefix>/telegraf-address`）へ DNAT する。NLB は trap をタスクの `1162/udp` へ、syslog を `5140/udp` へ渡す（UDP なので送り元の IP はそのまま）。この 4 つは lab の EC2 で `sudo lab forward` が張る（`lab up` が毎回呼び、`ops/up.sh` も手順 7-2b で打つ。lab の変数 `forward_to_telegraf`）。
 - gNMI（Telegraf の `inputs.gnmi`）は BGP の `session-state` と IS-IS の IF の `oper-state`（隣接そのもの（`interface/adjacency`）は落ちると down を経ずに消え、Telegraf は gNMI の delete を載せないので取らない）を on_change で、EVPN の ethernet-segment の `oper-state` と MAC テーブルを 30 秒おきに取り、トピック `gnmi` に出す。Spark はここから `bgp_down`（相手の IP が対象）と `isis_down`（サブインタフェースが対象）を出す。
 - Spark は起動時に、読むトピック（`metrics` / `gnmi` / `traps` / `logs`）のうち無いものを作る（`snmp_sinks.py` の `ensure_topics`。EMR のロールに `kafka-cluster:CreateTopic`）。MSK の `auto.create.topics.enable=true` は書き込みのときにしか効かず、Telegraf が最初の trap / syslog を出すまで `traps` / `logs` が無い。無いトピックを購読するとジョブは offset 読みで落ちて、起こし直しの上限（1 時間 5 回）を使い切る（2026-09-27 に実測）。
 - 履歴の正本は S3 Tables。異常の「いま」は Neptune の頂点 `anomaly` で、Web の「異常一覧」とエージェントの `list_anomalies` はそれを読む。開いた・閉じたの履歴は `anomaly_events` に残る（[data-stores.md](data-stores.md)）。
 - 検知が Neptune に書くので、analytics は graph が要る。`SKIP_GRAPH=1` にするなら `SKIP_ANALYTICS=1` も書く（トポロジは `agent/data/` の静的データになり、異常一覧は出ない）。
 - テーブルバケットは `SINK_S3=0` でも作る（証跡の置き場）。`ops/down.sh` はバケットごと消すので、証跡も消える。
-- Splunk（`SINK_SPLUNK=1`）は Spark の driver が全トピックを HTTP Event Collector（HEC）に POST する（2026-09-26 に MSK Connect の Splunk Connect for Kafka をやめて、ほかの格納先と同じ形にした）。Splunk 自体は作らない。
-  - token は `deploy.env` に書かず、`ops/up.sh` を打つ前に SSM の SecureString `/<接頭辞>/splunk/hec-token` に手で入れる（`aws ssm put-parameter --type SecureString`）。`ops/up.sh` は手順 7-4 で有無だけ確かめ、ジョブが起動時に 1 回読む。Terraform も引数もログも値を持たない。
-  - `SINK_SPLUNK=1` のときだけ土台に NAT Gateway を作り、Spark はそこから外に出るので（AWS の API はエンドポイントを通り、NAT Gateway を使うのは AWS の外へ出る HEC だけ）、Splunk Cloud の公開 HEC にも、DX / VPN の先の社内の Splunk Enterprise にも届く（SG は全部出せるので HEC のポートは何番でもよい）。analytics は土台に NAT Gateway が無いのに splunk を選ぶと precondition で止まる。
+- Splunk（`SINK_SPLUNK=1`）は Spark の driver が全トピックを HTTP Event Collector（HEC）に POST する（2026-09-26 に MSK Connect の Splunk Connect for Kafka をやめて、ほかの格納先と同じ形にした）。
+  - analytics の ECS に Splunk Enterprise（`splunk/splunk:10.4.3` を ECR の `<prefix>-splunk:10.4.3` に写したもの。amd64 しか無いので Fargate x86、2 vCPU / 4 GB、エフェメラルストレージ 40 GiB）を 1 タスク立て、Spark は Cloud Map の `https://splunk.<prefix>.internal:8088` に送る（イメージの自己署名の証明書なので検証しない）。起動時に Splunk のライセンスと Splunk General Terms に同意する（`SPLUNK_START_ARGS=--accept-license`、`SPLUNK_GENERAL_TERMS=--accept-sgt-current-at-splunk-com`）。試用ライセンス（60 日、1 日 500 MB）。admin のパスワード `/<prefix>/splunk/admin-password` と HEC の token `/<prefix>/splunk/hec-token`（uuid）は `ops/up.sh` が SSM の SecureString に作る（値は出さない。`ops/down.sh` が消す）。index はタスクのエフェメラルストレージにあり、タスクと一緒に消える（検証用）。`ops/up.sh` は手順 7-4b でタスクが HEALTHY になるのを待ってから（最大 20 分）Spark のジョブを起こす。画面は下の「Grafana と Splunk を開く」。
+  - AWS の外の Splunk（Splunk Cloud など）へ NAT Gateway で送る道は 2026-09-28 にやめた（VPC から AWS の外へ出る経路を作らない。`SPLUNK_HEC_URL` が書いてあると `ops/up.sh` が止まる）。
   - HEC が 4xx を返したまとまり（最大 500 件）は捨ててログに出し、ジョブは止めない。5xx は再送する。
 
 ## lab に入る
@@ -56,7 +58,7 @@ aws ssm start-session --region ap-northeast-1 --target "$LAB_INSTANCE_ID"
 | `sudo lab snmp dc1-leaf-01` | 1 台の ifName / ifAdminStatus / ifOperStatus（EC2 から snmpwalk。admin up の IF だけ） |
 | `sudo lab logs` | 機器のログ（`/var/log/srlinux/file/messages`）の末尾。1 台だけなら `sudo lab logs dc1-leaf-01`、行数は `LINES=50` を前に付ける |
 | `sudo lab cli dc1-leaf-01 "show network-instance default protocols bgp neighbor"` | 1 台に SR Linux の CLI を 1 つ打つ |
-| `sudo lab forward-status` | Telegraf の EC2 への転送（iptables の規則と、機器側の remote-server / trap-group）。張り直すのは `sudo lab forward` |
+| `sudo lab forward-status` | Telegraf（ECS）への転送（iptables の規則と、機器側の remote-server / trap-group）。張り直すのは `sudo lab forward` |
 | `sudo lab clab inspect --all` | containerlab をそのまま呼ぶ |
 
 - 機器の CLI: `sudo docker exec -it clab-splab-dc1-leaf-01 sr_cli`（1 行だけなら `sudo lab cli dc1-leaf-01 "show ..."`）。設定は `lab/srlinux/<機器>.cli`（`set /` の行だけ。containerlab が起動時に流し込む。手で直さず `lab/gen_lab.py` で作り直す）
@@ -65,24 +67,6 @@ aws ssm start-session --region ap-northeast-1 --target "$LAB_INSTANCE_ID"
 - 機器のログは SR Linux の `system logging remote-server`（RFC 5424、udp）で lab の EC2 へ出て、Telegraf の `inputs.syslog` が受け、トピック `logs` に出す（measurement は `device_log`。hostname は `sysName` タグに付け替える）。送る subsystem は bgp / chassis / linux / netinst / xdp。
 - SNMP は containerlab が全ノードに v2c の community `public` を入れ、gNMI も全ノードで `57400/tcp`（TLS、containerlab の既定の admin）に開く。監視対象は `lab/srlinux/<機器>.cli` の `system snmp trap-group`（trap の宛先）の有無で決まり、いまは SR Linux の 6 台全部。VM 2 台は対象外。
 - SR Linux の ifTable は未使用の物理ポートも全部出す（`ifAdminStatus` が down）。IF の鍵は `ifName`（`ifDescr` は「名前 + description」）。Spark は admin down の行とサブインタフェース（`ethernet-1/1.0`）を見ない。
-
-## Telegraf に入る
-
-```bash
-TELEGRAF_INSTANCE_ID=$(terraform -chdir=terraform/pipeline/lab output -raw telegraf_instance_id); echo "$TELEGRAF_INSTANCE_ID"
-aws ssm start-session --region ap-northeast-1 --target "$TELEGRAF_INSTANCE_ID"
-```
-
-| コマンド | 何をする |
-|---|---|
-| `sudo tg status` | unit の状態、trap（`162/udp`）と syslog（`5140/udp`）を受けているか、直近のログ |
-| `sudo tg test` | SNMP のポーリングを 1 回だけまわして画面に出す（MSK には送らない） |
-| `sudo tg gnmi` | gNMI の購読を 15 秒だけ受けて画面に出す（MSK には送らない。BGP / IS-IS の行が出れば届いている） |
-| `sudo tg logs` | unit のログ。行数は `LINES=200` を前に付ける |
-| `sudo tg restart` | Telegraf だけを再起動する（`ExecStartPre` の `tg render` で MSK のブローカーを読み直す） |
-
-- 設定のテンプレートは `telegraf/telegraf.conf.in`。変えたときは下の「変えたとき」。
-- `sudo tg test` で機器に届かない、trap が来ない、ログが来ないときは、lab の EC2 で `sudo lab forward-status` を見る（規則が無ければ `sudo lab forward`）。
 
 ### 動かないとき
 
@@ -105,6 +89,48 @@ sudo systemctl restart <prefix>-lab
 ```bash
 terraform -chdir=terraform/pipeline/lab output -raw stop_command; echo
 ```
+
+## Telegraf に入る
+
+ECS Exec で入る（PC に AWS CLI v2 と Session Manager plugin が要る）。`telegraf_exec_command` の `TASK_ID` を、タスクの ARN の最後の部分に置き換えて打つ。
+
+```bash
+terraform -chdir=terraform/pipeline/stream output -raw telegraf_list_tasks_command; echo   # 打つとタスクの ARN が出る
+terraform -chdir=terraform/pipeline/stream output -raw telegraf_exec_command; echo         # TASK_ID を置き換えて打つ（既定は tg test）
+```
+
+| コマンド | 何をする |
+|---|---|
+| `tg test` | SNMP のポーリングを 1 回だけまわして画面に出す（MSK には送らない） |
+| `tg gnmi` | gNMI の購読を 20 秒だけ受けて画面に出す（MSK には送らない。BGP / IS-IS の行が出れば届いている） |
+
+- ログは CloudWatch Logs の `/ecs/<prefix>-telegraf`（出力 `telegraf_log_group_name`）。起動時に `/tmp/telegraf.conf を作った（brokers: …）` が出る。
+
+```bash
+aws logs tail --region ap-northeast-1 "$(terraform -chdir=terraform/pipeline/stream output -raw telegraf_log_group_name)" --since 10m --follow
+```
+
+- 以前の `sudo tg status` / `logs` / `restart` は無い（systemd が無い）。作り直すのは `ops/up.sh`（設定かポーリング先が変わるとタスクが作り直される）か、`aws ecs update-service --force-new-deployment`。
+- 設定のテンプレートは `telegraf/telegraf.conf.in`。変えたときは下の「変えたとき」。
+- `tg test` で機器に届かない、trap が来ない、ログが来ないときは、lab の EC2 で `sudo lab forward-status` を見る（規則が無ければ `sudo lab forward`）。
+
+## Grafana と Splunk を開く
+
+どちらも analytics の ECS のタスクで、LB は無い。Web の EC2 を踏み台にした SSM のポートフォワード（`AWS-StartPortForwardingSessionToRemoteHost`）で開く。コマンドは `ops/up.sh` の最後にも出る。
+
+```bash
+terraform -chdir=terraform/pipeline/analytics output -raw grafana_port_forward_command; echo   # 打って http://localhost:3000/ （ユーザー admin）
+terraform -chdir=terraform/pipeline/analytics output -raw grafana_password_command; echo       # admin のパスワード
+terraform -chdir=terraform/pipeline/analytics output -raw splunk_port_forward_command; echo    # 打って http://localhost:8000/ （ユーザー admin）
+terraform -chdir=terraform/pipeline/analytics output -raw splunk_password_command; echo
+```
+
+- Grafana（`GRAFANA=1`。既定）は Grafana OSS 13.2.2 を Fargate ARM 0.5 vCPU / 1 GB で 1 タスク立てる（Cloud Map `grafana.<prefix>.internal:3000`）。`SINK_PROMETHEUS` か `SINK_OPENSEARCH` があるときだけ作る。データソースは Prometheus（AMP、SigV4）と OpenSearch Serverless（`snmp-logs`）で、タスクロールで読む。OpenSearch Serverless のデータソースは、設定画面の「Save & test」（ヘルスチェック）が中身の無い ERROR を返すことがあるが、ダッシュボードとクエリは読める（2026-09-28 に確認）。
+- データソースの plugin はイメージに焼き込んである（AWS の外へ出る経路が無いので起動時に落とせない）。ダッシュボードは `grafana/provisioning` だけで、UI で変えたものはタスクと一緒に消える。残すなら provisioning に書いて `ops/up.sh`（ディレクトリのハッシュが変わるのでイメージから作り直す）。
+- admin のパスワードは `ops/up.sh` が SSM の SecureString `/<prefix>/grafana/admin-password` に乱数で作り、`ops/down.sh` が消す（タグ `ManagedBy=ops/up.sh`）。
+- Amazon Managed Grafana は使えない。サインインに IAM Identity Center か SAML の IdP が要り、このアカウントには Organizations も Identity Center も無い。
+- Splunk（ECS）は `SINK_SPLUNK=1` のときだけ。検索は `index=main`（HEC の token の既定の index）。
+- Web は EC2 のまま（踏み台を兼ねる。ECS にするとタスクの IP が変わり、踏み台にしにくい）。
 
 ## Spark を確かめる
 
@@ -137,7 +163,7 @@ LOG_GROUP=$(terraform -chdir=terraform/pipeline/analytics output -raw log_group_
 - `FAILED` なら、ロググループ `/aws/emr-serverless/<prefix>` のドライバーの stderr を見る。
 - ジョブは同時に 1 本だけにする（同じチェックポイントを 2 本で書くと壊れる）。`ops/up.sh` の手順 7-5 は、スクリプトと引数のハッシュをジョブのタグ `SpecHash` に付けて起こし、動いているジョブのタグが今のハッシュと同じなら何もせず、違えば止めて（最大 3 分待つ）起こし直す。
 - 格納先ごとのクエリ（iceberg / opensearch / prometheus / splunk）と detect のどれかが止まると、ジョブを終わらせ（exit 1）、STREAMING モードに起こし直させる。チェックポイントの続きから読むので、取りこぼしも二重も無い。起こし直しは既定で 1 時間に 5 回まで（超えると `FAILED`）。
-- チェックポイントは MSK クラスタごとのパス（`checkpoints/<クラスタの uuid>/`）。MSK を作り直すと、前のクラスタのオフセットを読まずに新しいパスから始まる。
+- チェックポイントは MSK クラスタごとのパス（`s3://<バケット>/analytics/checkpoint/<クラスタの uuid>/`）。MSK を作り直すと、前のクラスタのオフセットを読まずに新しいパスから始まる。
 - analytics を消すと S3 Tables の履歴も消える。
 
 ## Neptune のトポロジ
@@ -152,7 +178,7 @@ Neptune に入れる機器・インタフェース・回線（物理層）と、
 | IP | `ip_interface`（アドレス付きサブインタフェース） / `isis_adjacency` | `<機器>#<IF>.0` / `<機器>#isis#<IF>.0` | `interface_id` / `ip_interface_id` |
 | EVPN・BGP | `bgp_session` / `evpn_instance` / `ethernet_segment` | `<機器>#bgp#<相手の IP>` / `<機器>#evi#<EVI>` / `<機器>#es#<名前>` | `ip_interface_id`（ループバック `system0.0`） / `interface_id`（`lag1`） |
 
-同じ定義から、Telegraf のポーリング先（`--snmp-agents` → `s3://<バケット>/telegraf/snmp_agents.txt`）、gNMI の購読先（`--gnmi-targets` → `s3://<バケット>/telegraf/gnmi_targets.txt`）と、Spark の検知が trap の送り元を機器名に直す device map（`--device-map`。hostname・管理 IP・全インタフェースのアドレス → 機器名）も作る。機器の一覧はこの 1 か所だけにある。
+同じ定義から、Telegraf のポーリング先（`--snmp-agents` → stream の変数 `snmp_agents`）、gNMI の購読先（`--gnmi-targets` → stream の変数 `gnmi_targets`）と、Spark の検知が trap の送り元を機器名に直す device map（`--device-map`。hostname・管理 IP・全インタフェースのアドレス → 機器名）も作る。機器の一覧はこの 1 か所だけにある。
 
 ```bash
 ops/sync-graph.sh              # 空のときに入れる
@@ -183,9 +209,10 @@ uv run python lab/lab_topology.py lab --layers > agent/data/layers.json
 | 変えたもの | やること |
 |---|---|
 | `lab/` の設定（`lab/gen_lab.py` を回したあと） | `ops/up.sh` を打つ（手順 5 で S3 に置き直す）→ lab に入って `sudo systemctl restart <prefix>-lab` |
-| `telegraf/telegraf.conf.in` | `ops/up.sh` を打つ（手順 5 で `s3://<バケット>/telegraf/` に置き直す）→ `aws ec2 reboot-instances --region ap-northeast-1 --instance-ids "$TELEGRAF_INSTANCE_ID"`（起動のたびに S3 から取り直す）。lab の EC2 はそのまま |
+| `telegraf/`（`telegraf.conf.in` / `telegraf.sh` / `Dockerfile`） | `ops/up.sh` を打つ（ディレクトリのハッシュが変わるので手順 2 がイメージを作り直し、手順 7 の stream の apply がタスクを入れ替える）。lab の EC2 はそのまま |
+| `grafana/`（provisioning など） | `ops/up.sh` を打つ（同じく手順 2 がイメージを作り直し、手順 7-4 の analytics の apply がタスクを入れ替える） |
 | `spark/snmp_sinks.py` | `ops/up.sh` を打つ（手順 7-5 がハッシュの違いを見て、動いているジョブを止めて起こし直す）。手で止めるコマンドは下 |
-| lab の機器や回線 | 上のあと `ops/sync-graph.sh --replace`。監視する機器を足したら Telegraf の EC2 も再起動（ポーリング先と gNMI の購読先を取り直す）し、`ops/up.sh`（device map はジョブの引数なので、変われば手順 7-5 がジョブを起こし直す） |
+| lab の機器や回線 | 上のあと `ops/sync-graph.sh --replace`。監視する機器を足したら `ops/up.sh`（stream の変数 `snmp_agents` / `gnmi_targets` が変わるので Telegraf のタスクが作り直される。device map はジョブの引数なので、変われば手順 7-5 がジョブを起こし直す） |
 
 ジョブを止めるコマンド（`$APP_ID` と `$JOB_RUN_ID` は上の「Spark を確かめる」で入れる）:
 

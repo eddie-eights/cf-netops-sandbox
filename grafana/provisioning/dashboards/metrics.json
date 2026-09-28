@@ -1,0 +1,327 @@
+{
+  "uid": "netops-metrics",
+  "title": "netops / SNMP metrics",
+  "tags": [
+    "netops"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 41,
+  "version": 1,
+  "editable": false,
+  "refresh": "30s",
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "device",
+        "label": "機器",
+        "type": "query",
+        "datasource": {
+          "type": "grafana-amazonprometheus-datasource",
+          "uid": "amp"
+        },
+        "query": {
+          "qryType": 1,
+          "query": "label_values(snmp_interface_ifOperStatus, sysName)",
+          "refId": "PrometheusVariableQueryEditor-VariableQuery"
+        },
+        "definition": "label_values(snmp_interface_ifOperStatus, sysName)",
+        "includeAll": true,
+        "multi": true,
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        },
+        "refresh": 2,
+        "sort": 1
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "state-timeline",
+      "title": "IF の状態（ifOperStatus。1 = up / 2 = down）",
+      "datasource": {
+        "type": "grafana-amazonprometheus-datasource",
+        "uid": "amp"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 10
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "1": {
+                  "text": "up",
+                  "color": "green"
+                },
+                "2": {
+                  "text": "down",
+                  "color": "red"
+                }
+              }
+            }
+          ],
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 2
+              },
+              {
+                "color": "orange",
+                "value": 3
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showValue": "never",
+        "mergeValues": true,
+        "rowHeight": 0.8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-amazonprometheus-datasource",
+            "uid": "amp"
+          },
+          "expr": "snmp_interface_ifOperStatus{sysName=~\"$device\", ifName=~\"ethernet-.*\"}",
+          "legendFormat": "{{sysName}} {{ifName}}"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "受信（bps）",
+      "datasource": {
+        "type": "grafana-amazonprometheus-datasource",
+        "uid": "amp"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 10,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bps"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-amazonprometheus-datasource",
+            "uid": "amp"
+          },
+          "expr": "rate(snmp_interface_ifInOctets{sysName=~\"$device\", ifName=~\"ethernet-.*\"}[2m]) * 8",
+          "legendFormat": "{{sysName}} {{ifName}}"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "送信（bps）",
+      "datasource": {
+        "type": "grafana-amazonprometheus-datasource",
+        "uid": "amp"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 10,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bps"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-amazonprometheus-datasource",
+            "uid": "amp"
+          },
+          "expr": "rate(snmp_interface_ifOutOctets{sysName=~\"$device\", ifName=~\"ethernet-.*\"}[2m]) * 8",
+          "legendFormat": "{{sysName}} {{ifName}}"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "受信エラー（/s）",
+      "datasource": {
+        "type": "grafana-amazonprometheus-datasource",
+        "uid": "amp"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 18,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-amazonprometheus-datasource",
+            "uid": "amp"
+          },
+          "expr": "rate(snmp_interface_ifInErrors{sysName=~\"$device\", ifName=~\"ethernet-.*\"}[5m])",
+          "legendFormat": "{{sysName}} {{ifName}}"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "送信エラー（/s）",
+      "datasource": {
+        "type": "grafana-amazonprometheus-datasource",
+        "uid": "amp"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 18,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-amazonprometheus-datasource",
+            "uid": "amp"
+          },
+          "expr": "rate(snmp_interface_ifOutErrors{sysName=~\"$device\", ifName=~\"ethernet-.*\"}[5m])",
+          "legendFormat": "{{sysName}} {{ifName}}"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "stat",
+      "title": "稼働時間（sysUpTime）",
+      "datasource": {
+        "type": "grafana-amazonprometheus-datasource",
+        "uid": "amp"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 26,
+        "w": 24,
+        "h": 5
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "none",
+        "textMode": "value_and_name"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-amazonprometheus-datasource",
+            "uid": "amp"
+          },
+          "expr": "snmp_system_sysUpTime{sysName=~\"$device\"} / 100",
+          "legendFormat": "{{sysName}}"
+        }
+      ]
+    }
+  ]
+}

@@ -22,3 +22,18 @@ output "temporal_repository_url" {
   description = "Push temporalio/temporal:1.9.1 here with tag 1.9.1 (step 2 of ops/up.sh)."
   value       = try(aws_ecr_repository.workflow["temporal"].repository_url, "")
 }
+
+output "telegraf_repository_url" {
+  description = "Build telegraf/ (arm64) and push it here with tag <Telegraf version>-<hash of telegraf/> (step 2 of ops/up.sh). terraform/pipeline/stream runs it on ECS."
+  value       = aws_ecr_repository.pipeline["telegraf"].repository_url
+}
+
+output "grafana_repository_url" {
+  description = "Build grafana/ (arm64) and push it here with tag <Grafana version>-<hash of grafana/> (step 2 of ops/up.sh, GRAFANA=1). terraform/pipeline/analytics runs it on ECS."
+  value       = aws_ecr_repository.pipeline["grafana"].repository_url
+}
+
+output "splunk_repository_url" {
+  description = "Push splunk/splunk (amd64 only) here with the same tag (step 2 of ops/up.sh, SINK_SPLUNK=1). terraform/pipeline/analytics runs it on ECS."
+  value       = aws_ecr_repository.pipeline["splunk"].repository_url
+}

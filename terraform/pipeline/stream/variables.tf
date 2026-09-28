@@ -50,3 +50,57 @@ variable "log_retention_days" {
     error_message = "log_retention_days must be one of 1, 3, 7, 14, 30."
   }
 }
+
+# ---------------------------------------------------------------- Telegraf (telegraf.tf)
+variable "telegraf_image_tag" {
+  description = "Tag of the Telegraf image in the <prefix>-telegraf repository (telegraf/Dockerfile). ops/up.sh builds it as <telegraf version>-<hash of telegraf/> and passes it."
+  type        = string
+  default     = "1.40.0"
+
+  validation {
+    condition     = can(regex("^[A-Za-z0-9._-]{1,128}$", var.telegraf_image_tag))
+    error_message = "telegraf_image_tag must be a valid ECR tag (letters, digits, . _ -)."
+  }
+}
+
+variable "snmp_agents" {
+  description = "SNMP polling targets of Telegraf, as the inside of a TOML list (\"udp://<IP>:161\", ...). ops/up.sh makes it from the lab definition (python3 lab/lab_topology.py lab --snmp-agents)."
+  type        = string
+
+  validation {
+    condition     = can(regex("^\"udp://[0-9.]+:[0-9]+\"(, *\"udp://[0-9.]+:[0-9]+\")*$", var.snmp_agents))
+    error_message = "snmp_agents must look like \"udp://203.0.113.11:161\", \"udp://203.0.113.12:161\" (python3 lab/lab_topology.py lab --snmp-agents)."
+  }
+}
+
+variable "gnmi_targets" {
+  description = "gNMI subscription targets of Telegraf, as the inside of a TOML list (\"<IP>:57400\", ...). ops/up.sh makes it from the lab definition (python3 lab/lab_topology.py lab --gnmi-targets)."
+  type        = string
+
+  validation {
+    condition     = can(regex("^\"[0-9.]+:[0-9]+\"(, *\"[0-9.]+:[0-9]+\")*$", var.gnmi_targets))
+    error_message = "gnmi_targets must look like \"203.0.113.11:57400\", \"203.0.113.12:57400\" (python3 lab/lab_topology.py lab --gnmi-targets)."
+  }
+}
+
+variable "telegraf_task_cpu" {
+  description = "Fargate CPU units of the Telegraf task (ARM64). 256 (0.25 vCPU) is enough for 6 SNMP agents, 6 gNMI subscriptions, traps and syslog."
+  type        = number
+  default     = 256
+
+  validation {
+    condition     = contains([256, 512, 1024], var.telegraf_task_cpu)
+    error_message = "telegraf_task_cpu must be 256, 512 or 1024."
+  }
+}
+
+variable "telegraf_task_memory" {
+  description = "Fargate memory (MiB) of the Telegraf task. Must be a valid pair with telegraf_task_cpu (256 takes 512-2048)."
+  type        = number
+  default     = 512
+
+  validation {
+    condition     = contains([512, 1024, 2048], var.telegraf_task_memory)
+    error_message = "telegraf_task_memory must be 512, 1024 or 2048."
+  }
+}

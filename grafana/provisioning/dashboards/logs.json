@@ -1,0 +1,165 @@
+{
+  "uid": "netops-logs",
+  "title": "netops / traps and syslog",
+  "tags": [
+    "netops"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 41,
+  "version": 1,
+  "editable": false,
+  "refresh": "30s",
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "件数（トピックごと）",
+      "datasource": {
+        "type": "grafana-opensearch-datasource",
+        "uid": "aoss-logs"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 7
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 60,
+            "stacking": {
+              "mode": "normal"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-opensearch-datasource",
+            "uid": "aoss-logs"
+          },
+          "queryType": "lucene",
+          "query": "*",
+          "timeField": "@timestamp",
+          "metrics": [
+            {
+              "id": "1",
+              "type": "count"
+            }
+          ],
+          "bucketAggs": [
+            {
+              "id": "3",
+              "type": "terms",
+              "field": "topic.keyword",
+              "settings": {
+                "size": "10",
+                "order": "desc",
+                "orderBy": "_count",
+                "min_doc_count": "1"
+              }
+            },
+            {
+              "id": "2",
+              "type": "date_histogram",
+              "field": "@timestamp",
+              "settings": {
+                "interval": "auto",
+                "min_doc_count": "0"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "logs",
+      "title": "SNMP trap（topic: traps）",
+      "datasource": {
+        "type": "grafana-opensearch-datasource",
+        "uid": "aoss-logs"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 7,
+        "w": 24,
+        "h": 12
+      },
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "sortOrder": "Descending",
+        "enableLogDetails": true
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-opensearch-datasource",
+            "uid": "aoss-logs"
+          },
+          "queryType": "lucene",
+          "query": "topic:traps",
+          "metrics": [
+            {
+              "id": "1",
+              "type": "logs"
+            }
+          ],
+          "bucketAggs": [],
+          "timeField": "@timestamp"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "logs",
+      "title": "syslog（topic: logs）",
+      "datasource": {
+        "type": "grafana-opensearch-datasource",
+        "uid": "aoss-logs"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 19,
+        "w": 24,
+        "h": 12
+      },
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "sortOrder": "Descending",
+        "enableLogDetails": true
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-opensearch-datasource",
+            "uid": "aoss-logs"
+          },
+          "queryType": "lucene",
+          "query": "topic:logs",
+          "metrics": [
+            {
+              "id": "1",
+              "type": "logs"
+            }
+          ],
+          "bucketAggs": [],
+          "timeField": "@timestamp"
+        }
+      ]
+    }
+  ]
+}

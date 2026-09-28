@@ -1,11 +1,12 @@
 # netops-poc - PIPELINE analytics root module. A Spark streaming job on EMR Serverless reads the Telegraf messages
 # (topics metrics / traps) from MSK (terraform/pipeline/stream) and stores them in S3 Tables (Iceberg, all topics), OpenSearch Serverless
-# (log topics), Amazon Managed Service for Prometheus (metric topics) and, when asked, the HTTP Event Collector of a Splunk outside AWS
-# (all topics, var.splunk_hec_url) - see var.sinks. The same job detects link_down / trap anomalies,
+# (log topics), Amazon Managed Service for Prometheus (metric topics) and, when asked, the HTTP Event Collector of a Splunk
+# (all topics; Splunk Enterprise on ECS here in splunk.tf, inside the VPC) - see var.sinks. Grafana OSS on ECS (grafana.tf)
+# shows the Prometheus and OpenSearch sinks. The same job detects link_down / trap anomalies,
 # keeps the current ones as anomaly vertices in Neptune (terraform/pipeline/graph), appends every open / resolve to the S3 Tables anomaly_events
 # (audit trail) and puts AnomalyOpened / AnomalyResolved on the default EventBridge bus (terraform/workflow and terraform/pipeline/graph listen).
 # The table bucket is the long-term record of the pipeline (raw messages, anomaly_events, and proposal_events written by terraform/workflow).
-# Costs about 0.17 USD per hour while the streaming job runs - ops/down.sh cancels the job and destroys this root.
+# Costs about 0.17 USD per hour while the streaming job runs (+ about 0.02 for Grafana, + about 0.12 for the Splunk on ECS) - ops/down.sh cancels the job and destroys this root.
 
 # リソース名の接頭辞であり Project タグの値。デプロイする人の名前（var.owner）から作るので、
 # 1 つの AWS アカウントを何人かで使っても、自分の名前で自分のリソースを探せる
@@ -33,6 +34,15 @@ data "terraform_remote_state" "stream" {
   }
 }
 
+# Grafana / Splunk のイメージは terraform/base/ecr（ops/up.sh の手順 1 と 2）
+data "terraform_remote_state" "ecr" {
+  backend = "local"
+
+  config = {
+    path = "${path.module}/../../base/ecr/terraform.tfstate"
+  }
+}
+
 data "terraform_remote_state" "graph" {
   backend = "local"
 
@@ -45,17 +55,19 @@ locals {
   account_id = data.aws_caller_identity.current.account_id
   partition  = data.aws_partition.current.partition
 
-  vpc_id         = data.terraform_remote_state.main.outputs.vpc_id
-  subnet_ids     = data.terraform_remote_state.main.outputs.runtime_subnet_ids
-  internal_sg_id = data.terraform_remote_state.main.outputs.internal_security_group_id
+  vpc_id     = data.terraform_remote_state.main.outputs.vpc_id
+  subnet_ids = data.terraform_remote_state.main.outputs.runtime_subnet_ids
+  # ECS のタスク（Grafana / Splunk）を置くサブネット（web の EC2 と同じ。SSM のポートフォワードは web の EC2 から届く）
+  instance_subnet_id = data.terraform_remote_state.main.outputs.instance_subnet_id
+  # SSM のポートフォワードの踏み台（Grafana / Splunk の UI。outputs.tf のコマンド）
+  web_instance_id = try(data.terraform_remote_state.main.outputs.web_instance_id, "")
+  internal_sg_id  = data.terraform_remote_state.main.outputs.internal_security_group_id
   # 土台の OpenSearch Serverless の VPC エンドポイント（create_opensearch_endpoint=true のときだけある。古い state には output が無い）
   aoss_vpce_id = try(data.terraform_remote_state.main.outputs.opensearch_vpc_endpoint_id, "")
   bucket       = data.terraform_remote_state.main.outputs.kb_bucket_name
   bucket_arn   = "arn:${local.partition}:s3:::${local.bucket}"
   # terraform/base/core の perimeter.tf の Deny（VPC エンドポイントを通らない AWS の API を拒む）。NETWORK_PERIMETER=0 か古い state なら空
   perimeter_policy_arn = try(data.terraform_remote_state.main.outputs.network_perimeter_policy_arn, "")
-  # AWS の外へ出る NAT Gateway（splunk の格納先だけが使う）。古い state には output が無い（その頃は NAT が常にあった）
-  nat_gateway = try(data.terraform_remote_state.main.outputs.nat_gateway, true)
   # リソースポリシーの Deny から外すプリンシパル（デプロイする人と KB のロール）
   perimeter_exempt_principals = try(data.terraform_remote_state.main.outputs.perimeter_exempt_principals, [])
 
@@ -97,10 +109,25 @@ locals {
   sink_prometheus = contains(var.sinks, "prometheus")
   sink_splunk     = contains(var.sinks, "splunk")
 
-  # splunk: HEC の token を入れた SSM の SecureString（値は Terraform も state も持たない。ジョブが起動時に ssm:GetParameter で読む）。
-  # Splunk は AWS の外にあり、ここでは何も作らない（HEC へは terraform/base/core の NAT Gateway から出る。create_nat_gateway=true が要る。ポートは何番でもよい）
+  # splunk: Splunk Enterprise をここの ECS で立てる（splunk.tf。HEC は VPC の中の splunk.<名前空間>:8088）。
+  # AWS の外の Splunk（NAT Gateway から出る）は 2026-09-28 にやめた（NAT を作らない）
+  splunk_on_ecs = local.sink_splunk
+  # 証明書はイメージの自己署名なので検証しない（VPC の中だけの通信で、宛先は Cloud Map の名前）
+  splunk_hec_url         = "https://splunk.${local.service_namespace}:8088"
+  splunk_skip_tls_verify = true
+  # HEC の token を入れた SSM の SecureString（値は Terraform も state も持たない。ジョブが起動時に ssm:GetParameter で読む）。
+  # ops/up.sh が作り、タスクが同じ値を SPLUNK_HEC_TOKEN として受けて HEC の token にする
   splunk_token_parameter     = var.splunk_hec_token_parameter != "" ? var.splunk_hec_token_parameter : "/${local.name_prefix}/splunk/hec-token"
   splunk_token_parameter_arn = "arn:${local.partition}:ssm:${var.region}:${local.account_id}:parameter${local.splunk_token_parameter}"
+  # 管理者のパスワード（ops/up.sh が無ければ作る SecureString。ECS のタスクが secrets で受ける。ops/down.sh が消す）
+  splunk_password_parameter  = "/${local.name_prefix}/splunk/admin-password"
+  grafana_password_parameter = "/${local.name_prefix}/grafana/admin-password"
+
+  # Grafana は Prometheus か OpenSearch の格納先があるときだけ意味がある
+  create_grafana = var.create_grafana && (local.sink_prometheus || local.sink_opensearch)
+  # ECS のクラスタと Cloud Map の名前空間（ecs.tf）は Grafana か ECS の Splunk があるときだけ
+  create_ecs        = local.create_grafana || local.splunk_on_ecs
+  service_namespace = "${local.name_prefix}.internal"
 
   # put_events の Source（spark/snmp_sinks.py の --event-source）。terraform/workflow と terraform/pipeline/graph の
   # ルールが同じ式で待ち受ける。バスは既定の 1 本を共有するので、ここを接頭辞ごとに変えないと他の人の異常が自分のルールに当たる

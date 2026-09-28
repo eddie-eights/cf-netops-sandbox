@@ -52,22 +52,11 @@ variable "auto_start_lab" {
   default     = true
 }
 
-# ---------------------------------------------------------------- Telegraf EC2 (telegraf.tf)
-variable "create_telegraf" {
-  description = "Create the Telegraf EC2 that sends SNMP polls, traps and syslog of the lab to MSK (terraform/pipeline/stream). ops/up.sh sets true when it makes the stream root. terraform/pipeline/stream needs it."
+# ---------------------------------------------------------------- path to Telegraf (telegraf.tf)
+variable "forward_to_telegraf" {
+  description = "Route the lab mgmt network (203.0.113.0/24) to this EC2 and open the security group for the traps and syslog, so Telegraf (the ECS task of terraform/pipeline/stream) reaches the switches. ops/up.sh sets true when terraform/pipeline/stream is made or kept."
   type        = bool
   default     = false
-}
-
-variable "telegraf_instance_type" {
-  description = "Telegraf only (no containers). t4g.micro (1 GB) is enough for 4 SNMP agents, traps and syslog."
-  type        = string
-  default     = "t4g.micro"
-
-  validation {
-    condition     = contains(["t4g.nano", "t4g.micro", "t4g.small", "t4g.medium"], var.telegraf_instance_type)
-    error_message = "telegraf_instance_type must be t4g.nano, t4g.micro, t4g.small or t4g.medium (arm64)."
-  }
 }
 
 # ---------------------------------------------------------------- assets
@@ -79,17 +68,6 @@ variable "containerlab_version" {
   validation {
     condition     = can(regex("^[0-9]+[.][0-9]+[.][0-9]+$", var.containerlab_version))
     error_message = "containerlab_version must look like 0.79.0."
-  }
-}
-
-variable "telegraf_version" {
-  description = "telegraf-<version>-1.aarch64.rpm must be uploaded to s3://<kb_bucket_name of terraform/base/core>/telegraf/ with telegraf/ of this repository (step 5 of ops/up.sh). The Telegraf EC2 does nothing without it."
-  type        = string
-  default     = "1.40.0"
-
-  validation {
-    condition     = can(regex("^[0-9]+[.][0-9]+[.][0-9]+$", var.telegraf_version))
-    error_message = "telegraf_version must look like 1.40.0."
   }
 }
 

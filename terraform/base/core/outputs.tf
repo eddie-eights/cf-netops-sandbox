@@ -20,12 +20,12 @@ output "vpc_id" {
 }
 
 output "runtime_subnet_ids" {
-  description = "Read by terraform/agent (runtime ENIs), terraform/pipeline/stream (MSK brokers), terraform/pipeline/graph (Neptune subnet group), terraform/pipeline/analytics (EMR) and terraform/workflow (Fargate, Lambda)"
+  description = "Read by terraform/agent (runtime ENIs), terraform/pipeline/stream (MSK brokers, Telegraf task and NLB), terraform/pipeline/graph (Neptune subnet group), terraform/pipeline/analytics (EMR, Grafana / Splunk tasks) and terraform/workflow (Fargate, Lambda)"
   value       = [aws_subnet.a.id, aws_subnet.b.id]
 }
 
 output "instance_subnet_id" {
-  description = "Read by terraform/pipeline/lab (the lab and Telegraf EC2 sit next to the chat web)"
+  description = "Read by terraform/pipeline/lab (the lab EC2 sits next to the chat web)"
   value       = aws_subnet.a.id
 }
 
@@ -40,18 +40,13 @@ output "vpc_cidr" {
 }
 
 output "internal_security_group_id" {
-  description = "The one SG every workload wears (inbound from the VPC, outbound free). Read by terraform/agent (runtime ENIs), terraform/pipeline/lab (lab / Telegraf EC2), terraform/pipeline/stream (MSK brokers), terraform/pipeline/graph (Neptune, status Lambda), terraform/pipeline/analytics (EMR) and terraform/workflow (Fargate, tools Lambda)"
+  description = "The one SG every workload wears (inbound from the VPC, outbound free). Read by terraform/agent (runtime ENIs), terraform/pipeline/lab (lab EC2), terraform/pipeline/stream (MSK brokers, Telegraf task and NLB), terraform/pipeline/graph (Neptune, status Lambda), terraform/pipeline/analytics (EMR, Grafana / Splunk tasks) and terraform/workflow (Fargate, tools Lambda)"
   value       = aws_security_group.internal.id
 }
 
 output "opensearch_vpc_endpoint_id" {
   description = "ID of the OpenSearch Serverless VPC endpoint, empty unless create_opensearch_endpoint. Read by terraform/agent (knowledge base network policy) and terraform/pipeline/analytics (logs network policy)"
   value       = try(aws_opensearchserverless_vpc_endpoint.aoss[0].id, "")
-}
-
-output "nat_gateway" {
-  description = "True when the NAT Gateway exists (create_nat_gateway). terraform/pipeline/analytics refuses the splunk sink without it"
-  value       = var.create_nat_gateway
 }
 
 output "network_perimeter" {

@@ -1,0 +1,22 @@
+# OpenSearch Serverless の logs コレクション（traps と機器の syslog。spark/snmp_sinks.py が _bulk で書く）。
+# コレクションは公開しておらず、terraform/base/core の OpenSearch Serverless の VPC エンドポイントからだけ届く。
+# 読めるのはデータアクセスポリシー（terraform/pipeline/analytics の grafana.tf）でタスクロールに許した読み取りだけ
+apiVersion: 1
+datasources:
+  - name: OpenSearch (logs)
+    uid: aoss-logs
+    type: grafana-opensearch-datasource
+    access: proxy
+    url: ${OPENSEARCH_URL}
+    editable: false
+    jsonData:
+      serverless: true
+      flavor: opensearch
+      version: "1.0.0"
+      database: ${OPENSEARCH_INDEX}
+      timeField: "@timestamp"
+      pplEnabled: true
+      maxConcurrentShardRequests: 5
+      sigV4Auth: true
+      sigV4AuthType: default
+      sigV4Region: ${AWS_REGION}

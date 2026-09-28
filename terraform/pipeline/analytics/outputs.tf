@@ -51,8 +51,8 @@ output "job_driver_json" {
         [for a in ["--opensearch-endpoint", local.opensearch_endpoint, "--opensearch-index", local.opensearch_index] : a if local.sink_opensearch],
         [for a in ["--prometheus-url", local.prometheus_remote_write_url] : a if local.sink_prometheus],
         # token の値は渡さない（SSM のパラメータ名だけ。ジョブが起動時に読む）
-        [for a in ["--splunk-hec-url", var.splunk_hec_url, "--splunk-token-parameter", local.splunk_token_parameter, "--splunk-index", var.splunk_index] : a if local.sink_splunk],
-        [for a in ["--splunk-skip-verify"] : a if local.sink_splunk && var.splunk_skip_tls_verify],
+        [for a in ["--splunk-hec-url", local.splunk_hec_url, "--splunk-token-parameter", local.splunk_token_parameter, "--splunk-index", var.splunk_index] : a if local.sink_splunk],
+        [for a in ["--splunk-skip-verify"] : a if local.sink_splunk && local.splunk_skip_tls_verify],
       )
       # Iceberg のカタログはいつも開く（検知が証跡の anomaly_events に書く。2026-09-24）
       sparkSubmitParameters = join(" ", concat(
@@ -110,13 +110,48 @@ output "sinks" {
 }
 
 output "splunk_hec_url" {
-  description = "HTTP Event Collector the splunk sink posts every topic to (empty unless sinks has splunk). The Splunk itself is outside this Terraform"
-  value       = local.sink_splunk ? var.splunk_hec_url : ""
+  description = "HTTP Event Collector the splunk sink posts every topic to (empty unless sinks has splunk). https://splunk.<namespace>:8088 of the Splunk on ECS (splunk.tf)"
+  value       = local.sink_splunk ? local.splunk_hec_url : ""
 }
 
 output "splunk_token_parameter" {
-  description = "SSM SecureString parameter the job reads the HEC token from (empty unless sinks has splunk). Create it by hand; Terraform never reads the value"
+  description = "SSM SecureString parameter the job (and the Splunk task) reads the HEC token from (empty unless sinks has splunk). ops/up.sh creates it. Terraform never reads the value"
   value       = local.sink_splunk ? local.splunk_token_parameter : ""
+}
+
+output "analytics_cluster_name" {
+  description = "ECS cluster of the Grafana / Splunk tasks (empty when neither runs)"
+  value       = local.create_ecs ? aws_ecs_cluster.analytics[0].name : ""
+}
+
+output "splunk_service_name" {
+  description = "ECS service of the Splunk task (empty unless the Splunk runs on ECS)"
+  value       = local.splunk_on_ecs ? aws_ecs_service.splunk[0].name : ""
+}
+
+output "splunk_port_forward_command" {
+  description = "Open the Splunk Web UI at http://localhost:8000 through the web EC2 (SSM port forward; user admin, password from splunk_password_command). Empty unless the Splunk runs on ECS"
+  value       = local.splunk_on_ecs ? "aws ssm start-session --region ${var.region} --target ${local.web_instance_id} --document-name AWS-StartPortForwardingSessionToRemoteHost --parameters '{\"host\":[\"splunk.${local.service_namespace}\"],\"portNumber\":[\"8000\"],\"localPortNumber\":[\"8000\"]}'" : ""
+}
+
+output "splunk_password_command" {
+  description = "Print the Splunk admin password (SSM SecureString created by ops/up.sh). Empty unless the Splunk runs on ECS"
+  value       = local.splunk_on_ecs ? "aws ssm get-parameter --region ${var.region} --name ${local.splunk_password_parameter} --with-decryption --query Parameter.Value --output text" : ""
+}
+
+output "grafana_service_name" {
+  description = "ECS service of the Grafana task (empty unless create_grafana with prometheus or opensearch in sinks)"
+  value       = local.create_grafana ? aws_ecs_service.grafana[0].name : ""
+}
+
+output "grafana_port_forward_command" {
+  description = "Open Grafana at http://localhost:3000 through the web EC2 (SSM port forward; user admin, password from grafana_password_command). Empty unless Grafana runs"
+  value       = local.create_grafana ? "aws ssm start-session --region ${var.region} --target ${local.web_instance_id} --document-name AWS-StartPortForwardingSessionToRemoteHost --parameters '{\"host\":[\"grafana.${local.service_namespace}\"],\"portNumber\":[\"3000\"],\"localPortNumber\":[\"3000\"]}'" : ""
+}
+
+output "grafana_password_command" {
+  description = "Print the Grafana admin password (SSM SecureString created by ops/up.sh). Empty unless Grafana runs"
+  value       = local.create_grafana ? "aws ssm get-parameter --region ${var.region} --name ${local.grafana_password_parameter} --with-decryption --query Parameter.Value --output text" : ""
 }
 
 output "opensearch_collection_endpoint" {

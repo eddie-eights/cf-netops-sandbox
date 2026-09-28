@@ -20,11 +20,11 @@
 | トポロジと、機器・回線の状態（物理層） | Neptune の頂点 `device` / `interface`、辺 `link` | 投入スクリプト、Lambda `graph-status` | エージェントの `neighbors` / `blast_radius` / `topology_graph` |
 | IP 層・EVPN/BGP 層と、その状態 | Neptune の頂点 `ip_interface` / `isis_adjacency` / `bgp_session` / `evpn_instance` / `ethernet_segment`（[Neptune の層](#neptune-の層)） | 投入スクリプト、Lambda `graph-status`（`bgp_down` / `isis_down`） | エージェントの `layers`、Web の「トポロジ」タブの層の表 |
 
-ほかに、検索用のログ（OpenSearch `snmp-logs`）とグラフ用のメトリクス（Prometheus）がある。この 2 つは見るための写しで、正本ではない。`SINK_SPLUNK=1` なら全トピックを AWS の外の Splunk（HTTP Event Collector）にも送る。これも写しで、Splunk 自体はこのリポジトリの外（docs/pipeline.md）。
+ほかに、検索用のログ（OpenSearch `snmp-logs`）とグラフ用のメトリクス（Prometheus）がある。この 2 つは見るための写しで、正本ではない。`SINK_SPLUNK=1` なら全トピックを Splunk（HTTP Event Collector）にも送る。これも写しで、Splunk は analytics の ECS に立てる（index はタスクと一緒に消える。docs/pipeline.md）。
 
 ```mermaid
 flowchart LR
-  MSK["MSK<br/>metrics / traps / logs"] --> SPARK["Spark<br/>EMR Serverless"]
+  MSK["MSK<br/>metrics / gnmi / traps / logs"] --> SPARK["Spark<br/>EMR Serverless"]
   SPARK -->|"全部 append"| ICE["S3 Tables<br/>snmp_metrics"]
   SPARK -->|"開いた / 閉じた"| AEV["S3 Tables<br/>anomaly_events"]
   SPARK -->|"open / resolved"| NEP["Neptune<br/>トポロジ + anomaly + proposal"]
@@ -110,9 +110,9 @@ flowchart LR
 
 ## コンテナイメージ
 
-ECR に置く 6 つのイメージが「どこで・何をして」いるかのまとめ。2026-09-25 時点のコードで確かめた内容。
+ECR に置くイメージが「どこで・何をして」いるかのまとめ。2026-09-25 時点のコードで確かめた内容に、2026-09-28 に足した `telegraf` / `grafana` / `splunk` を加えた。
 
-### 7. 6 つのイメージと動く場所
+### 7. イメージと動く場所
 
 | イメージ（`<prefix>-…`） | 元 | 動く場所 | 役目 |
 |---|---|---|---|
@@ -121,20 +121,25 @@ ECR に置く 6 つのイメージが「どこで・何をして」いるかの�
 | `lab-multitool` | `ghcr.io/srl-labs/network-multitool`（ミラー） | lab の EC2（containerlab） | ping / traceroute / tcpdump 入りの VM 役（`wan-upstream-01` / `dc1-host-01`）。Leaf の組へ bond0（LACP）で 2 本つなぎ、疎通確認と障害の再現に使う |
 | `temporal` | `temporalio/temporal`（ミラー） | ECS Fargate（WORKFLOW=1） | Temporal のサーバー。`server start-dev` で 1 コンテナで動く。Fargate はプライベート網から Docker Hub を引けないので ECR にミラーする |
 | `worker` | [workflow/](../workflow/)（自前ビルド） | ECS Fargate（WORKFLOW=1） | Temporal のワーカー。SQS の異常を拾い、Runtime に修復案を作らせ、Neptune と S3 Tables に記録し、承認後に SSM で lab の機器へ流して検証する。同じタスクの `temporal` に `localhost:7233` でつなぐ |
+| `telegraf` | [telegraf/](../telegraf/)（公式の `telegraf:1.40.0` に設定のテンプレートと `tg` を足す） | ECS Fargate（stream。内部 NLB の後ろ） | 機器の SNMP のポーリング・gNMI の購読・trap・syslog を受けて MSK に書く。2026-09-28 まで lab とは別の EC2 で systemd の下に rpm で動いていた |
+| `grafana` | [grafana/](../grafana/)（公式の Grafana OSS にデータソースの plugin と provisioning を焼き込む） | ECS Fargate（analytics。`GRAFANA=1`） | Prometheus（AMP）と OpenSearch Serverless を SigV4 で読んで見せる |
+| `splunk` | `splunk/splunk`（ミラー。amd64 だけ、約 2〜3 GB） | ECS Fargate x86（analytics。`SINK_SPLUNK=1` のとき） | Splunk Enterprise（試用ライセンス）。Spark が HEC に全トピックを送る |
 
-分けて見ると、監視される側が `lab-srlinux` / `lab-multitool`、考える側が `agent`、実行する側が `temporal` / `worker`。
+分けて見ると、監視される側が `lab-srlinux` / `lab-multitool`、集める側が `telegraf`、考える側が `agent`、実行する側が `temporal` / `worker`、見る側が `grafana` / `splunk`。
 
-### 8. 全部 arm64
+### 8. arm64 に揃える（Splunk だけ x86）
 
 - **AgentCore Runtime は linux/arm64 のイメージしか動かせない。** x86_64 でビルドしたイメージは起動しない。`agent/Dockerfile` の冒頭にも書いてある。
-- ほかも arm64 に揃えてある: ECS Fargate は `cpu_architecture = "ARM64"`（[terraform/workflow/ecs.tf](../terraform/workflow/ecs.tf)）、lab / Telegraf / Web の EC2 は `t4g`（Graviton）だけを受け付ける。
+- ほかも arm64 に揃えてある: ECS Fargate は `cpu_architecture = "ARM64"`（[terraform/workflow/ecs.tf](../terraform/workflow/ecs.tf)、stream の Telegraf、analytics の Grafana）、lab / Web の EC2 は `t4g`（Graviton）だけを受け付ける。
+- 例外は `splunk`。公式イメージが amd64 しか無いので、そのタスクだけ `X86_64` にし、`docker pull --platform linux/amd64` で写す。
 - だから PC 側の `docker buildx build` は必ず `--platform linux/arm64`、`docker pull` も `--platform linux/arm64`。Mac（Apple Silicon）はそのまま、WSL2 は `binfmt` を入れる（[setup.md](setup.md)）。
 - ミラーの push で「only the available single-platform image was pushed」と出るのは、arm64 だけ push したという意味で問題ない。
 
 ### 9. タグ
 
 - ECR のリポジトリは `IMMUTABLE`（[terraform/base/ecr/main.tf](../terraform/base/ecr/main.tf)）。同じタグへの上書きはできないので、コードを変えたらタグを進める。
-- 自前ビルドの `agent` / `worker` は `IMAGE_TAG`（既定 `v1`）。ミラーは上流の版そのまま（`ops/up.sh` の `SRLINUX_TAG` / `MULTITOOL_TAG` / `TEMPORAL_TAG`）。
+- 自前ビルドの `agent` / `worker` は `IMAGE_TAG`（既定 `v1`）。ミラーは上流の版そのまま（`ops/up.sh` の `SRLINUX_TAG` / `MULTITOOL_TAG` / `TEMPORAL_TAG` / `SPLUNK_VERSION`）。
+- `telegraf` / `grafana` は `<版>-<ディレクトリの中身の sha256 の先頭 12 文字>`（`ops/up.sh` の `dir_tag`）。中身を変えれば自動でタグが変わるので、`IMAGE_TAG` を上げなくてよい。
 - `ops/up.sh` は ECR にそのタグが無いときだけビルドして push する（手順 2）。
 
 ### 10. コードの入口
@@ -146,6 +151,7 @@ ECR に置く 6 つのイメージが「どこで・何をして」いるかの�
 | lab のどの機器がどのイメージか | [lab/splab.clab.yml.in](../lab/splab.clab.yml.in)（[lab/gen_lab.py](../lab/gen_lab.py) が作る） |
 | Runtime がどのイメージを指すか | [terraform/agent/variables.tf](../terraform/agent/variables.tf) の `agent_image_tag` |
 | Fargate のタスク定義（temporal と worker の 2 コンテナ） | [terraform/workflow/ecs.tf](../terraform/workflow/ecs.tf) |
+| Telegraf / Grafana / Splunk のタスク定義 | [terraform/pipeline/stream/telegraf.tf](../terraform/pipeline/stream/telegraf.tf)、[terraform/pipeline/analytics/grafana.tf](../terraform/pipeline/analytics/grafana.tf)、[terraform/pipeline/analytics/splunk.tf](../terraform/pipeline/analytics/splunk.tf) |
 
 ## Neptune の層
 
@@ -234,35 +240,36 @@ flowchart LR
 
 ## MSK とクライアントのつなぎ
 
-Telegraf・Spark が「どのブローカーにつなぐか」をどう知るか。2026-09-25 に手動構築（手順 5）で確かめた内容。
+Telegraf・Spark が「どのブローカーにつなぐか」をどう知るか。2026-09-25 に手動構築（手順 5）で確かめた内容を、2026-09-28 に Telegraf を ECS に移したのに合わせて直した。
 
-### 15. msk-bootstrap の読み取り
+### 15. ブローカーの渡し方と msk-bootstrap
 
 **ブートストラップサーバーとは。** Kafka のクライアントは、クラスターにつなぐときに「最初に話しかけるブローカーのアドレス一覧」が要る。これがブートストラップサーバーで、`b-1.<クラスター>.kafka.ap-northeast-1.amazonaws.com:9098,b-2.<クラスター>...:9098` のような文字列。クライアントはここに一度つなぐと、クラスター全体の構成（どのブローカーがどのパーティションを持つか）を教えてもらい、以降はそれに従って直接つなぐ。だから全ブローカーを列挙する必要は無いが、MSK はふつう全部を返す。ポート 9098 は SASL/IAM 用（9092 が平文、9094 が TLS、9096 が SASL/SCRAM）。この PoC は IAM だけを有効にしているので 9098 しか使わない。
 
-**なぜ SSM に置くか。** この文字列はクラスターを作り終えるまで決まらない（クラスター名から推測できない乱数が入る）。一方 Telegraf の EC2 は [terraform/pipeline/lab](../terraform/pipeline/lab) で MSK より先に作られ、起動後は自分で設定を組み立てなければならない。そこで [terraform/pipeline/stream/msk.tf](../terraform/pipeline/stream/msk.tf) がクラスターを作った直後に SSM パラメータストアの `/<prefix>/msk-bootstrap`（String）へ書き、Telegraf 側は起動時に `ssm:GetParameter` で読む。手動構築では `aws kafka get-bootstrap-brokers` の `BootstrapBrokerStringSaslIam` を `aws ssm put-parameter` で入れる（手順 5-5）。
+**Telegraf は環境変数でもらう。** この文字列はクラスターを作り終えるまで決まらない（クラスター名から推測できない乱数が入る）。2026-09-28 までは Telegraf の EC2 が [terraform/pipeline/lab](../terraform/pipeline/lab) で MSK より先に作られたので、起動時に SSM の `/<prefix>/msk-bootstrap` を読んでいた。いまの Telegraf は MSK と同じ [terraform/pipeline/stream](../terraform/pipeline/stream) の ECS のタスクなので、[telegraf.tf](../terraform/pipeline/stream/telegraf.tf) がタスク定義の環境変数 `KAFKA_BROKERS` に `aws_msk_cluster.stream.bootstrap_brokers_sasl_iam` をそのまま入れる。SSM は読まない。
 
-**Telegraf 側の流れ**（[telegraf/telegraf.sh](../telegraf/telegraf.sh) の `render`。systemd unit の `ExecStartPre`）。
+**`msk-bootstrap` は残す。** [terraform/pipeline/stream/msk.tf](../terraform/pipeline/stream/msk.tf) は今もクラスターを作った直後に `/<prefix>/msk-bootstrap`（String）へ書く。手動構築と確かめるときに使う（手動構築では `aws kafka get-bootstrap-brokers` の `BootstrapBrokerStringSaslIam` を `aws ssm put-parameter` で入れる。手順 5-5）。Runtime と Web のロールに付く `<prefix>-stream-parameters-read` は `parameter/<prefix>/*` の読み取りだけで、Kafka の権限は無い（この 2 つは MSK に書かない）。
 
-1. `/etc/<prefix>-telegraf.env` から `AWS_REGION` と `PARAM_PREFIX` を読む。
-2. `aws ssm get-parameter --name $PARAM_PREFIX/msk-bootstrap` でブローカーの文字列を取る。**取れなければそこで失敗し、unit の `Restart=on-failure` / `RestartSec=60` で 60 秒ごとに試し直す。** MSK を作る前の Telegraf が「`msk-bootstrap` が読めない」で落ち続けるのはこの仕様で、異常ではない。
-3. 取れたら `telegraf.conf.in` の `__KAFKA_BROKERS__` を埋めて `/etc/telegraf/telegraf.conf` を作る。`[[outputs.kafka]]` が metrics / traps / logs の 3 つあり、どれも同じブローカーに `sasl_mechanism = "AWS-MSK-IAM"` でつなぐ。
-4. 認証は EC2 のインスタンスプロファイル（ロール `<prefix>-telegraf`）。Telegraf 1.40.0 はプロファイル名を書かないと起動しないので、鍵の無い `[default]`（region だけ）を `/etc/telegraf/aws_config` に置き、SDK が IMDS のロールに落ちるようにしてある。
+**Telegraf 側の流れ**（[telegraf/telegraf.sh](../telegraf/telegraf.sh) の `render`。コンテナの入口 `tg run` が最初に呼ぶ）。
 
-**IAM は 2 段。** Telegraf のロールに付く `<prefix>-stream-produce`（[terraform/pipeline/stream/access.tf](../terraform/pipeline/stream/access.tf)）は次の 2 文でできている。片方だけでは動かない。
+1. タスクの環境変数 `KAFKA_BROKERS` / `SNMP_AGENTS` / `GNMI_TARGETS` / `AWS_REGION` の形を確かめる。崩れていればそこで終わり、ECS がタスクを立て直す（ログに理由が出る）。
+2. `telegraf.conf.in` の `__KAFKA_BROKERS__` などを埋めて `/tmp/telegraf.conf` を作る。`[[outputs.kafka]]` が metrics / gnmi / traps / logs の分あり、どれも同じブローカーに `sasl_mechanism = "AWS-MSK-IAM"` でつなぐ。
+3. 認証はタスクロール `<prefix>-telegraf-task`。Telegraf の MSK IAM 認証は profile の指定が要る（[telegraf.conf.in](../telegraf/telegraf.conf.in) の注記）ので、鍵の無い `[default]`（region だけ）を `/tmp/aws_config` に置き、SDK が ECS の入れる `AWS_CONTAINER_CREDENTIALS_RELATIVE_URI` のロールに落ちるようにしてある。
+
+**IAM は 1 段。** タスクロールのポリシー `<prefix>-telegraf-task`（[telegraf.tf](../terraform/pipeline/stream/telegraf.tf)）は次の 2 文。前の `<prefix>-stream-produce` にあった `Bootstrap`（`ssm:GetParameter`）は要らなくなったので消した。
 
 | Sid | 許可 | 使うとき |
 |---|---|---|
-| `Bootstrap` | `ssm:GetParameter` を `parameter/<prefix>/msk-bootstrap` だけに | 起動時、つなぎ先を知る |
-| `Kafka` | `kafka-cluster:Connect` / `DescribeCluster` / `WriteData` / `WriteDataIdempotently` / `DescribeTopic` / `CreateTopic` を「クラスターの ARN」と「`topic/<クラスター>/*`」に | つないだ後、トピックに書く（`auto.create.topics.enable=true` なので初回の書き込みでトピックができる。そのために `CreateTopic` が要る） |
+| `Kafka` | `kafka-cluster:Connect` / `DescribeCluster` / `WriteData` / `WriteDataIdempotently` / `DescribeTopic` / `CreateTopic` を「クラスターの ARN」と「`topic/<クラスター>/*`」に | トピックに書く（`auto.create.topics.enable=true` なので初回の書き込みでトピックができる。そのために `CreateTopic` が要る） |
+| `EcsExec` | `ssmmessages` の 4 つ | ECS Exec で入って `tg test` / `tg gnmi` を打つ |
 
-Runtime と Web のロールに付く `<prefix>-stream-parameters-read` は `parameter/<prefix>/*` の読み取りだけで、Kafka の権限は無い（この 2 つは MSK に書かない）。
+実行ロール `<prefix>-telegraf-exec` は `AmazonECSTaskExecutionRolePolicy`（ECR とログ）だけ。どちらのロールにも閉域の Deny（`<prefix>-network-perimeter`）を付ける。
 
-**ほかのクライアントは SSM を読まない。** 同じ文字列でも渡し方が違う。
+**クライアントごとの渡し方。** どちらも SSM を読まない。
 
 | クライアント | ブローカーの知り方 | 理由 |
 |---|---|---|
-| Telegraf（EC2） | SSM `/<prefix>/msk-bootstrap` を起動時に読む | MSK より先に作られ、自分で起動するから |
+| Telegraf（ECS） | タスク定義の環境変数 `KAFKA_BROKERS`（同じ root の MSK の属性） | MSK と同じ root で作られ、タスクは起動のたびに環境変数をもらえるから |
 | Spark（EMR Serverless） | [terraform/pipeline/analytics](../terraform/pipeline/analytics) が stream の state の `bootstrap_brokers` を読み、ジョブの引数 `--bootstrap` で渡す（[spark/snmp_sinks.py](../spark/snmp_sinks.py)） | ジョブは起動のたびに引数をもらえるので、パラメータストアを引く必要が無い |
 
-**確かめ方。** Telegraf の EC2 に SSM セッションで入り `sudo tg status`。`render` が通ると「`/etc/telegraf/telegraf.conf` を作った（brokers: …）」がログに出て、unit が active になる。`sudo tg test` はポーリングだけを 1 回まわして標準出力に出す（MSK には送らない）ので、機器との疎通と MSK との疎通を切り分けられる。
+**確かめ方。** ロググループ `/ecs/<prefix>-telegraf` に「`/tmp/telegraf.conf を作った（brokers: …）`」が出ていれば `render` は通っている。ECS Exec で入って（[pipeline.md](pipeline.md) の「Telegraf に入る」）`tg test` を打つと、ポーリングだけを 1 回まわして標準出力に出す（MSK には送らない）ので、機器との疎通と MSK との疎通を切り分けられる。MSK 側は、Kafka の `WriteData` が拒まれればログに出る。
