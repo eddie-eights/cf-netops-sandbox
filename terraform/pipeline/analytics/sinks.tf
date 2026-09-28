@@ -1,6 +1,6 @@
 # ---------------------------------------------------------------- Spark の格納先（var.sinks で選ぶ。Kafka を 4 つの格納先に分ける）
 # iceberg    = 全トピック → tables.tf の S3 Tables（常に作る。テーブルは無料）
-# opensearch = ログのトピック → ここで作る OpenSearch Serverless の TIMESERIES コレクション（VPC エンドポイント経由だけ）
+# opensearch = ログのトピック → ここで作る OpenSearch Serverless の TIMESERIES コレクション（terraform/base/core の VPC エンドポイント経由だけ）
 # prometheus = メトリクスのトピック → ここで作る Amazon Managed Service for Prometheus のワークスペース（remote write は NAT Gateway 経由）
 # splunk     = 全トピック → AWS の外にある Splunk の HTTP Event Collector（var.splunk_hec_url）。Splunk 自体はここでは作らない。
 #              ここにあるのは実行ロールの ssm:GetParameter（token。access.tf）と job_driver の引数（outputs.tf）だけ（HEC へは NAT Gateway から出る）。
@@ -23,22 +23,13 @@ resource "aws_opensearchserverless_security_policy" "logs_encryption" {
   })
 }
 
-# main の Knowledge Base のコレクションと違って公開しない。Spark の driver は VPC の中にいるので、この VPC エンドポイントからだけ通す
-resource "aws_opensearchserverless_vpc_endpoint" "logs" {
-  count = local.sink_opensearch ? 1 : 0
-
-  name               = local.logs_collection
-  vpc_id             = local.vpc_id
-  subnet_ids         = slice(local.subnet_ids, 0, 2)
-  security_group_ids = [local.endpoint_sg_id]
-}
-
+# 公開しない。Spark の driver（EMR）と workflow の道具の Lambda は VPC の中にいるので、土台の VPC エンドポイントからだけ通す
 resource "aws_opensearchserverless_security_policy" "logs_network" {
   count = local.sink_opensearch ? 1 : 0
 
   name        = local.logs_collection
   type        = "network"
-  description = "Collection reachable only through the VPC endpoint of terraform/pipeline/analytics"
+  description = "Collection reachable only through the OpenSearch Serverless VPC endpoint of terraform/base/core"
 
   policy = jsonencode([{
     Rules = [{
@@ -46,8 +37,15 @@ resource "aws_opensearchserverless_security_policy" "logs_network" {
       Resource     = ["collection/${local.logs_collection}"]
     }]
     AllowFromPublic = false
-    SourceVPCEs     = [aws_opensearchserverless_vpc_endpoint.logs[0].id]
+    SourceVPCEs     = [local.aoss_vpce_id]
   }])
+
+  lifecycle {
+    precondition {
+      condition     = local.aoss_vpce_id != ""
+      error_message = "terraform/base/core に OpenSearch Serverless の VPC エンドポイントが無い。terraform/base/core を -var create_opensearch_endpoint=true で apply し直す（ops/up.sh は SINK_OPENSEARCH=1 のとき付ける）。"
+    }
+  }
 }
 
 # Spark の実行ロールだけ。インデックスは _bulk の最初の書き込みで作られる（CreateIndex が要る）

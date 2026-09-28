@@ -15,8 +15,9 @@
 | apply が `EntityAlreadyExists` など「もうある」 | state を消した・別の PC で apply した。[architecture.md](architecture.md) の get-resources で `Project=<prefix>` を探して手で消す |
 | `does not have an attribute named "…"` | 前のルート（`base/ecr` → `base/core` → …）をこの PC で apply していない、または先に消した。`ops/up.sh` を打ち直す |
 | `Error acquiring the state lock` | 同じルートを別のターミナルで打っている。終わるのを待つ |
-| `opensearch_index` の作成が 403 | 権限の反映待ちなら時間をおいて打ち直す。続くなら `deploy.env` に `ADMIN_ARN` を書く。destroy で出るなら apply した人と別の人で打っている |
-| `opensearch_index` の作成が `x509` / `dial tcp` / `i/o timeout` | 社内 CA（`OPENSEARCH_CACERT_FILE`）か、`*.ap-northeast-1.aoss.amazonaws.com:443` に届かない（[setup.md](setup.md)） |
+| `aws_lambda_invocation.kb_index` が失敗（CREATE_KB=1） | KB のベクトルインデックスを VPC の中の Lambda `<接頭辞>-kb-index` が作る。ログは CloudWatch Logs の `/aws/lambda/<接頭辞>-kb-index`。403 や接続できないのは 4 分半まで打ち直してから落ちる: 権限の反映待ちなら `ops/up.sh` を打ち直す。続くなら `terraform/base/core` の OpenSearch Serverless の VPC エンドポイント（`create_opensearch_endpoint`）が ACTIVE か見る |
+| `opensearch_vpc_endpoint_id が空` の precondition で止まる | KB か logs のコレクションを作るのに、base/core に VPC エンドポイントが無い。`ops/up.sh` を通して打つ（`CREATE_KB` か `SINK_OPENSEARCH` を見て base/core に渡す）。ルートを手で apply したなら base/core を `-var create_opensearch_endpoint=true` で打ち直す |
+| destroy が `provider["registry.terraform.io/opensearch-project/opensearch"]` で止まる | 2026-09-28 より前に作った agent の state（`opensearch_index.kb` 入り）。コミット f7b1688 の `terraform/agent` で destroy する |
 | ビルドの `pip install` が `CERTIFICATE_VERIFY_FAILED` | 社内 CA の差し替え。`ReadTimeoutError` は QEMU が遅いだけなので打ち直す |
 
 ## 画面に入れない

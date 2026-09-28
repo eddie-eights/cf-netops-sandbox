@@ -27,11 +27,13 @@ flowchart LR
 | 機能 | できること | 待機の時間課金（東京） |
 |---|---|---|
 | 土台（必ず） | VPC、NAT Gateway、Web の EC2、S3、ECR | 約 $0.08/h（+ NAT Gateway を通したデータ $0.062/GB） |
-| `AGENT=1`（既定） | チャット（Runtime + ガードレール）。`CREATE_KB=1` で手順書の検索も | 0（質問ごとのモデル料金だけ。KB は +$0.33/h） |
-| `PIPELINE=1` | lab → MSK → Spark → S3 Tables / OpenSearch / Prometheus（`SINK_SPLUNK=1` で外の Splunk にも）、異常検知、Neptune のトポロジ | 約 $1.28/h |
+| `AGENT=1`（既定） | チャット（Runtime + ガードレール）。`CREATE_KB=1` で手順書の検索も | 0（質問ごとのモデル料金だけ。KB は +$0.36/h） |
+| `PIPELINE=1` | lab → MSK → Spark → S3 Tables / OpenSearch / Prometheus（`SINK_SPLUNK=1` で外の Splunk にも）、異常検知、Neptune のトポロジ | 約 $1.31/h |
 | `WORKFLOW=1` | Temporal で調査 → 承認 → 修復。AGENT と PIPELINE が要る | 約 $0.05/h |
 
-全部で約 $1.41/h。**1 か月置くと約 $1,030（約 15 万円）になるので、使い終わったら当日中に消す。**
+OpenSearch Serverless のコレクション（KB と logs）は公開せず、VPC エンドポイント 1 本（$0.03/h。上の KB と PIPELINE の金額に入れてある。両方作っても 1 本）からだけ届く。
+
+全部で約 $1.44/h。**1 か月置くと約 $1,050（約 16 万円）になるので、使い終わったら当日中に消す。**
 
 ## 手順
 

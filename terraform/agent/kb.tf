@@ -17,46 +17,67 @@ resource "aws_opensearchserverless_security_policy" "kb_encryption" {
   })
 }
 
-# Runtime はコレクションを直接呼ばない（Retrieve を呼ぶと Bedrock がサービス側から検索する）。
-# 非公開（SourceVPCEs / SourceServices）にすると PC からのインデックス作成が通らないので、公開にしてデータアクセスポリシーで絞る
+# 公開しない。届くのは土台（terraform/base/core）の VPC エンドポイントと Bedrock のサービス側だけ。
+# Runtime はコレクションを直接呼ばない（Retrieve を呼ぶと Bedrock が SourceServices の経路でサービス側から検索する）。
+# 取り込み（start-ingestion-job）も Bedrock がこの経路で書く。索引は VPC の中の Lambda（下の kb_index）が作る
 resource "aws_opensearchserverless_security_policy" "kb_network" {
   count = local.kb ? 1 : 0
 
   name        = local.collection_name
   type        = "network"
-  description = "Collection endpoint reachable over the public AWS endpoint, data access limited by the access policy"
+  description = "Collection reachable only through the OpenSearch Serverless VPC endpoint of terraform/base/core and from Bedrock"
 
   policy = jsonencode([{
     Rules = [{
       ResourceType = "collection"
       Resource     = ["collection/${local.collection_name}"]
     }]
-    AllowFromPublic = true
+    AllowFromPublic = false
+    SourceVPCEs     = [local.aoss_vpce_id]
+    SourceServices  = ["bedrock.amazonaws.com"]
   }])
+
+  lifecycle {
+    precondition {
+      condition     = local.aoss_vpce_id != ""
+      error_message = "terraform/base/core に OpenSearch Serverless の VPC エンドポイントが無い。terraform/base/core を -var create_opensearch_endpoint=true で apply し直す（ops/up.sh は CREATE_KB=1 のとき付ける）。"
+    }
+  }
 }
 
+# KB のサービスロールは索引の読み書き、索引を作る Lambda は CreateIndex / DescribeIndex だけ。人（apply した人）の ARN は入れない
 resource "aws_opensearchserverless_access_policy" "kb" {
   count = local.kb ? 1 : 0
 
   name        = local.collection_name
   type        = "data"
-  description = "Knowledge base service role and the deployer only"
+  description = "Knowledge base service role reads and writes, the index Lambda creates the vector index"
 
-  policy = jsonencode([{
-    Rules = [
-      {
-        ResourceType = "collection"
-        Resource     = ["collection/${local.collection_name}"]
-        Permission   = ["aoss:CreateCollectionItems", "aoss:DescribeCollectionItems", "aoss:UpdateCollectionItems"]
-      },
-      {
+  policy = jsonencode([
+    {
+      Rules = [
+        {
+          ResourceType = "collection"
+          Resource     = ["collection/${local.collection_name}"]
+          Permission   = ["aoss:CreateCollectionItems", "aoss:DescribeCollectionItems", "aoss:UpdateCollectionItems"]
+        },
+        {
+          ResourceType = "index"
+          Resource     = ["index/${local.collection_name}/*"]
+          Permission   = ["aoss:CreateIndex", "aoss:DescribeIndex", "aoss:UpdateIndex", "aoss:DeleteIndex", "aoss:ReadDocument", "aoss:WriteDocument"]
+        },
+      ]
+      Principal = [aws_iam_role.kb[0].arn]
+    },
+    {
+      Rules = [{
         ResourceType = "index"
-        Resource     = ["index/${local.collection_name}/*"]
-        Permission   = ["aoss:CreateIndex", "aoss:DescribeIndex", "aoss:UpdateIndex", "aoss:DeleteIndex", "aoss:ReadDocument", "aoss:WriteDocument"]
-      },
-    ]
-    Principal = [aws_iam_role.kb[0].arn, local.kb_admin_principal_arn]
-  }])
+        Resource     = ["index/${local.collection_name}/${local.index_name}"]
+        Permission   = ["aoss:CreateIndex", "aoss:DescribeIndex"]
+      }]
+      Principal = [aws_iam_role.kb_index[0].arn]
+    },
+  ])
 }
 
 # アクセスポリシーも先に作る。反映に 1 分ほどかかるので、コレクションの作成（数分）の間に効かせてからインデックスを作る
@@ -87,48 +108,144 @@ resource "time_sleep" "kb_collection_ready" {
   depends_on = [aws_opensearchserverless_collection.kb, aws_opensearchserverless_access_policy.kb]
 }
 
-# ハイブリッド検索は faiss エンジンと、index が true の text フィールドが要る
-resource "opensearch_index" "kb" {
+# ---------------------------------------------------------------- vector index (Lambda in the VPC)
+# コレクションは VPC エンドポイントからしか届かないので、Terraform を打つ PC からは索引を作れない。
+# VPC の中（土台の internal SG。endpoints SG が 443 を受ける）の Lambda（agent/kb_index.py）を apply のときに 1 回呼んで作る。
+# 索引がもうあれば作らない（mappings が違っても直さない）。mappings を変えるときは
+# -replace=aws_opensearchserverless_collection.kb[0] でコレクションごと作り直し、そのあと取り込みをやり直す
+data "archive_file" "kb_index" {
+  type        = "zip"
+  output_path = "${path.module}/.build/kb_index.zip"
+
+  source {
+    content  = file("${path.module}/../../agent/kb_index.py")
+    filename = "index.py"
+  }
+}
+
+resource "aws_iam_role" "kb_index" {
   count = local.kb ? 1 : 0
 
-  name          = local.index_name
-  index_knn     = true
-  force_destroy = true
+  name        = "${local.name_prefix}-kb-index"
+  description = "Lambda that creates the vector index of the ${local.name_prefix} knowledge base from inside the VPC"
 
-  mappings = jsonencode({
-    properties = {
-      "bedrock-kb-vector" = {
-        type      = "knn_vector"
-        dimension = 1024
-        method = {
-          engine     = "faiss"
-          name       = "hnsw"
-          space_type = "l2"
-          parameters = {
-            ef_construction = 128
-            m               = 24
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Service = "lambda.amazonaws.com" }
+      Action    = "sts:AssumeRole"
+    }]
+  })
+
+  tags = { Name = "${local.name_prefix}-kb-index" }
+}
+
+resource "aws_iam_role_policy" "kb_index" {
+  count = local.kb ? 1 : 0
+
+  name = "kb-index"
+  role = aws_iam_role.kb_index[0].id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid      = "Logs"
+        Effect   = "Allow"
+        Action   = ["logs:CreateLogStream", "logs:PutLogEvents"]
+        Resource = "${aws_cloudwatch_log_group.kb_index[0].arn}:*"
+      },
+      {
+        # VPC の中で動くので ENI を作る（AWSLambdaVPCAccessExecutionRole と同じ中身。マネージドポリシーは付けない）
+        Sid      = "VpcEni"
+        Effect   = "Allow"
+        Action   = ["ec2:CreateNetworkInterface", "ec2:DescribeNetworkInterfaces", "ec2:DeleteNetworkInterface", "ec2:AssignPrivateIpAddresses", "ec2:UnassignPrivateIpAddresses"]
+        Resource = "*"
+      },
+      {
+        # 中身に触れるかはデータアクセスポリシー（CreateIndex / DescribeIndex だけ）が決める
+        Sid      = "OpenSearch"
+        Effect   = "Allow"
+        Action   = "aoss:APIAccessAll"
+        Resource = aws_opensearchserverless_collection.kb[0].arn
+      },
+    ]
+  })
+}
+
+resource "aws_cloudwatch_log_group" "kb_index" {
+  count = local.kb ? 1 : 0
+
+  name              = "/aws/lambda/${local.name_prefix}-kb-index"
+  retention_in_days = 7
+}
+
+resource "aws_lambda_function" "kb_index" {
+  count = local.kb ? 1 : 0
+
+  function_name    = "${local.name_prefix}-kb-index"
+  description      = "Creates the vector index of the knowledge base collection (called once by terraform apply)"
+  role             = aws_iam_role.kb_index[0].arn
+  runtime          = "python3.13"
+  architectures    = ["arm64"]
+  handler          = "index.handler"
+  filename         = data.archive_file.kb_index.output_path
+  source_code_hash = data.archive_file.kb_index.output_base64sha256
+  # データアクセスポリシーの反映待ち（403）を中で打ち直すので長めにとる
+  timeout     = 300
+  memory_size = 128
+
+  vpc_config {
+    subnet_ids         = local.subnet_ids
+    security_group_ids = [local.runtime_sg_id]
+  }
+
+  depends_on = [aws_cloudwatch_log_group.kb_index, aws_iam_role_policy.kb_index]
+}
+
+# ハイブリッド検索は faiss エンジンと、index が true の text フィールドが要る。
+# 取り込みのあと Bedrock が id / x-amz-bedrock-kb-* のフィールドを索引に足すが、Lambda は索引があれば触らないので置き換えにならない
+# （2026-09-17 までの opensearch provider では、その差分で毎回 -/+ になって KB のベクトルが消えた）
+resource "aws_lambda_invocation" "kb_index" {
+  count = local.kb ? 1 : 0
+
+  function_name = aws_lambda_function.kb_index[0].function_name
+
+  input = jsonencode({
+    endpoint = aws_opensearchserverless_collection.kb[0].collection_endpoint
+    index    = local.index_name
+    body = {
+      settings = { index = { knn = true } }
+      mappings = {
+        properties = {
+          "bedrock-kb-vector" = {
+            type      = "knn_vector"
+            dimension = 1024
+            method = {
+              engine     = "faiss"
+              name       = "hnsw"
+              space_type = "l2"
+              parameters = {
+                ef_construction = 128
+                m               = 24
+              }
+            }
+          }
+          AMAZON_BEDROCK_TEXT_CHUNK = {
+            type  = "text"
+            index = true
+          }
+          AMAZON_BEDROCK_METADATA = {
+            type  = "text"
+            index = false
           }
         }
-      }
-      AMAZON_BEDROCK_TEXT_CHUNK = {
-        type  = "text"
-        index = true
-      }
-      AMAZON_BEDROCK_METADATA = {
-        type  = "text"
-        index = false
       }
     }
   })
 
   depends_on = [time_sleep.kb_collection_ready]
-
-  # 取り込みのあと Bedrock が id / x-amz-bedrock-kb-* のフィールドを索引に足し、provider は既定値の index = true を返さない。
-  # どちらも mappings の差分になって毎回 -/+（置き換え）になり、KB のベクトルが消える（2026-09-17 に Mac の 2 回目の ops/up.sh で実測）。
-  # mappings を変えたいときは -replace=opensearch_index.kb[0] を付けて手で置き換え、そのあと取り込みをやり直す。
-  lifecycle {
-    ignore_changes = [mappings]
-  }
 }
 
 resource "aws_iam_role" "kb" {
@@ -256,7 +373,7 @@ resource "aws_bedrockagent_knowledge_base" "kb" {
 
   tags = { Name = "${local.name_prefix}-kb" }
 
-  depends_on = [opensearch_index.kb, aws_iam_role_policy.kb]
+  depends_on = [aws_lambda_invocation.kb_index, aws_iam_role_policy.kb]
 }
 
 # DELETE だと destroy 時にベクトルの削除が走り、コレクションが先に消えると失敗する。RETAIN にしてコレクションごと消す

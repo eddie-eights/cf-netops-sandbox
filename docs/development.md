@@ -28,7 +28,7 @@ uv sync --group dev
 bash ops/check.sh
 ```
 
-最後の行が `すべて通過` なら健全。中身は `terraform fmt`、8 ルートの `terraform validate`、`bash -n`、`tests/` の 6 本（`test_app` 57 項目、`test_graph` 48、`test_stream` 104、`test_sync` 53、`test_analytics` 213、`test_workflow` 212）。途中で落ちたらそこで止まる。
+最後の行が `すべて通過` なら健全。中身は `terraform fmt`、8 ルートの `terraform validate`、`bash -n`、`tests/` の 7 本（`test_app` 57 項目、`test_graph` 48、`test_stream` 112、`test_sync` 53、`test_analytics` 220、`test_workflow` 215、`test_kb_index` 7）。途中で落ちたらそこで止まる。
 
 ## Web を手元で動かす
 

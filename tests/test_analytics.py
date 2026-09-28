@@ -44,7 +44,7 @@ check("main の state をローカルから読む", re.search(r'data "terraform_
       and '"${path.module}/../../base/core/terraform.tfstate"' in tf)
 check("stream の state をローカルから読む", re.search(r'data "terraform_remote_state" "stream"[\s\S]*?backend\s*=\s*"local"', tf, re.S) is not None
       and '"${path.module}/../stream/terraform.tfstate"' in tf)
-for out in ("vpc_id", "runtime_subnet_ids", "internal_security_group_id", "endpoint_security_group_id", "kb_bucket_name"):
+for out in ("vpc_id", "runtime_subnet_ids", "internal_security_group_id", "opensearch_vpc_endpoint_id", "kb_bucket_name"):
     check(f"main の output {out} を使う", f"data.terraform_remote_state.main.outputs.{out}" in tf)
 for out in ("msk_cluster_arn", "bootstrap_brokers"):
     check(f"stream の output {out} を try で読む（無ければ precondition で止める）",
@@ -58,7 +58,7 @@ check("graph が無いときは「terraform/pipeline/graph を先に apply す�
 check("stream が無いときは「terraform/pipeline/stream を先に apply する」と出る",
       re.search(r'precondition\s*\{[\s\S]*?msk_cluster_arn\s*!=\s*""[\s\S]*?terraform/pipeline/stream を先に apply する', tf, re.S) is not None)
 # main / stream の outputs.tf に本当にその output があるか
-for root, outs in (("base/core", ("vpc_id", "runtime_subnet_ids", "internal_security_group_id", "endpoint_security_group_id", "kb_bucket_name")),
+for root, outs in (("base/core", ("vpc_id", "runtime_subnet_ids", "internal_security_group_id", "opensearch_vpc_endpoint_id", "kb_bucket_name")),
                    ("pipeline/stream", ("msk_cluster_arn", "bootstrap_brokers")),
                    ("pipeline/graph", ("cluster_endpoint", "cluster_resource_id"))):
     with open(os.path.join(ROOT, "terraform", root, "outputs.tf"), encoding="utf-8") as f:
@@ -135,9 +135,14 @@ check("splunk なのに splunk_hec_url が空なら precondition で止まる", 
 check("OpenSearch Serverless は TIMESERIES のコレクション <prefix>-logs（count で作る）",
       re.search(r'resource "aws_opensearchserverless_collection" "logs"[\s\S]*?count\s*=\s*local\.sink_opensearch \? 1 : 0[\s\S]*?type\s*=\s*"TIMESERIES"', tf, re.S) is not None
       and re.search(r'logs_collection\s*=\s*"\$\{local\.name_prefix\}-logs"', tf) is not None)
-check("OpenSearch のコレクションは公開せず VPC エンドポイントからだけ（エンドポイントの SG は土台の endpoints）",
-      re.search(r'resource "aws_opensearchserverless_vpc_endpoint" "logs"[\s\S]*?security_group_ids\s*=\s*\[local\.endpoint_sg_id\]', tf, re.S) is not None
-      and re.search(r'"logs_network"[\s\S]*?AllowFromPublic\s*=\s*false[\s\S]*?SourceVPCEs\s*=\s*\[aws_opensearchserverless_vpc_endpoint\.logs\[0\]\.id\]', tf, re.S) is not None)
+check("OpenSearch のコレクションは公開せず、土台の VPC エンドポイント（KB と共用。2026-09-28）からだけ。無ければ precondition で止まる",
+      "aws_opensearchserverless_vpc_endpoint" not in tf
+      and re.search(r'aoss_vpce_id\s*=\s*try\(data\.terraform_remote_state\.main\.outputs\.opensearch_vpc_endpoint_id,\s*""\)', tf) is not None
+      and re.search(r'"logs_network"[\s\S]*?AllowFromPublic\s*=\s*false[\s\S]*?SourceVPCEs\s*=\s*\[local\.aoss_vpce_id\][\s\S]*?precondition\s*\{[\s\S]*?local\.aoss_vpce_id\s*!=\s*""', tf, re.S) is not None)
+check("土台の OpenSearch Serverless の VPC エンドポイントは create_opensearch_endpoint（既定 false）の count で 1 本、SG は endpoints",
+      re.search(r'resource "aws_opensearchserverless_vpc_endpoint" "aoss" \{\n\s*count\s*=\s*var\.create_opensearch_endpoint \? 1 : 0[\s\S]*?security_group_ids\s*=\s*\[aws_security_group\.endpoints\.id\]', _core, re.S) is not None
+      and re.search(r'variable "create_opensearch_endpoint"[\s\S]*?default\s*=\s*false', _core) is not None
+      and _core.count('resource "aws_opensearchserverless_vpc_endpoint"') == 1)
 check("OpenSearch のデータアクセスは EMR の実行ロールだけ、snmp-logs のインデックスに WriteDocument / CreateIndex",
       re.search(r'resource "aws_opensearchserverless_access_policy" "logs"[\s\S]*?"aoss:CreateIndex"[\s\S]*?"aoss:WriteDocument"[\s\S]*?Principal\s*=\s*\[aws_iam_role\.emr\.arn\]', tf, re.S) is not None
       and re.search(r'opensearch_index\s*=\s*"snmp-logs"', tf) is not None)

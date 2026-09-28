@@ -48,9 +48,10 @@ locals {
   vpc_id         = data.terraform_remote_state.main.outputs.vpc_id
   subnet_ids     = data.terraform_remote_state.main.outputs.runtime_subnet_ids
   internal_sg_id = data.terraform_remote_state.main.outputs.internal_security_group_id
-  endpoint_sg_id = data.terraform_remote_state.main.outputs.endpoint_security_group_id
-  bucket         = data.terraform_remote_state.main.outputs.kb_bucket_name
-  bucket_arn     = "arn:${local.partition}:s3:::${local.bucket}"
+  # 土台の OpenSearch Serverless の VPC エンドポイント（create_opensearch_endpoint=true のときだけある。古い state には output が無い）
+  aoss_vpce_id = try(data.terraform_remote_state.main.outputs.opensearch_vpc_endpoint_id, "")
+  bucket       = data.terraform_remote_state.main.outputs.kb_bucket_name
+  bucket_arn   = "arn:${local.partition}:s3:::${local.bucket}"
 
   # stream が無いと読む Kafka が無い。emr.tf の precondition で「stream を先に」と出す
   msk_cluster_arn = try(data.terraform_remote_state.stream.outputs.msk_cluster_arn, "")

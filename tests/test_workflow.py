@@ -481,7 +481,20 @@ check("Runtime / ガードレール / KB は terraform/agent にあり、terrafo
       all(r in agent_tf for r in ('resource "aws_bedrockagentcore_agent_runtime" "agent"', 'resource "aws_bedrock_guardrail" "this"', 'resource "aws_bedrockagent_knowledge_base" "kb"'))
       and 'resource "aws_vpc_endpoint"' not in agent_tf and 'resource "aws_security_group"' not in agent_tf
       and re.search(r'runtime_sg_id\s*=\s*data\.terraform_remote_state\.main\.outputs\.internal_security_group_id', agent_tf) is not None
-      and not any(r in main_tf for r in ("aws_bedrockagentcore_agent_runtime", "aws_bedrock_guardrail", "aws_bedrockagent_knowledge_base", "aws_opensearchserverless")))
+      and not any(r in main_tf for r in ("aws_bedrockagentcore_agent_runtime", "aws_bedrock_guardrail", "aws_bedrockagent_knowledge_base", "aws_opensearchserverless_collection")))
+check("KB のコレクションは公開せず、土台の VPC エンドポイントと Bedrock のサービスからだけ。人の ARN はデータアクセスポリシーに入らない（2026-09-28）",
+      re.search(r'"kb_network"[\s\S]*?AllowFromPublic\s*=\s*false[\s\S]*?SourceVPCEs\s*=\s*\[local\.aoss_vpce_id\][\s\S]*?SourceServices\s*=\s*\["bedrock\.amazonaws\.com"\]', agent_tf, re.S) is not None
+      and re.search(r'aoss_vpce_id\s*=\s*try\(data\.terraform_remote_state\.main\.outputs\.opensearch_vpc_endpoint_id,\s*""\)', agent_tf) is not None
+      and "kb_admin_principal_arn" not in agent_tf and "aws_iam_session_context" not in agent_tf
+      and "opensearch-project/opensearch" not in agent_tf and 'resource "opensearch_index"' not in agent_tf)
+check("KB のベクトルインデックスは VPC の中の Lambda（agent/kb_index.py）が作り、KB はその後に作る。Lambda は CreateIndex / DescribeIndex だけ",
+      re.search(r'resource "aws_lambda_function" "kb_index"[\s\S]*?vpc_config\s*\{[\s\S]*?security_group_ids\s*=\s*\[local\.runtime_sg_id\]', agent_tf, re.S) is not None
+      and "agent/kb_index.py" in agent_tf and 'resource "aws_lambda_invocation" "kb_index"' in agent_tf
+      and re.search(r'"aoss:CreateIndex",\s*"aoss:DescribeIndex"\][\s\S]*?Principal\s*=\s*\[aws_iam_role\.kb_index\[0\]\.arn\]', agent_tf, re.S) is not None
+      and re.search(r'resource "aws_bedrockagent_knowledge_base" "kb"[\s\S]*?depends_on\s*=\s*\[aws_lambda_invocation\.kb_index', agent_tf, re.S) is not None)
+check("up.sh は KB か logs のコレクションがあるときだけ base/core に create_opensearch_endpoint=true を渡す（費用 +3 セント）",
+      "MAIN_VARS+=(-var create_opensearch_endpoint=true)" in up and up.index("NEED_AOSS=") < up.index("tf_apply base/core")
+      and "ADMIN_ARN=" not in up and "opensearch_cacert_file" not in up and "opensearch_cacert_file" not in down)
 check("KB は create_knowledge_base（既定 false）の count で作り、Runtime は KB があるときだけ KNOWLEDGE_BASE_ID を受ける",
       re.search(r'variable "create_knowledge_base"[\s\S]*?default\s*=\s*false', agent_tf) is not None and 'resource "aws_bedrockagent_knowledge_base" "kb" {\n  count = local.kb ? 1 : 0' in agent_tf
       and re.search(r'local\.kb \? \{\n\s*KNOWLEDGE_BASE_ID', agent_tf) is not None)
@@ -498,7 +511,7 @@ check("down.sh は Runtime の ENI が残るあいだ VPC・サブネット・in
       and '""|data.*|aws_vpc.this|aws_subnet.*|aws_security_group.internal) ;;' in down and "aws_security_group.runtime" not in down
       and down.index("InterfaceType=='agentic_ai'") < down.index("destroy_root base/core") < down.index("destroy_root base/ecr"))
 check("down.sh は agent を lab の後、main の前に消し、ロググループ名を agent の state から読む",
-      down.index("destroy_root pipeline/lab") < down.index("destroy_root agent") < down.index("destroy_root base/core") and "tf agent output -raw runtime_log_group_name" in down)
+      down.index("destroy_root pipeline/lab") < down.index('destroy_lambda_root agent "$PREFIX-kb-index"') < down.index("destroy_root base/core") and "tf agent output -raw runtime_log_group_name" in down)
 check("up.sh は main の後に agent を apply し、CREATE_KB のときだけ手順書を取り込む",
       up.index("tf_apply base/core") < up.index('tf_apply agent "${AGENT_VARS[@]}"') < up.index("start-ingestion-job")
       and re.search(r'if \[ -n "\$CREATE_KB" \]; then\nlog "4-3\. 手順書を置いて取り込む', up) is not None and 'AGENT_VARS+=(-var create_knowledge_base=true)' in up)

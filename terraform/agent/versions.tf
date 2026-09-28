@@ -6,10 +6,10 @@ terraform {
       source  = "hashicorp/aws"
       version = "~> 6.0"
     }
-    # OpenSearch Serverless のベクトルインデックスを作る（aws provider にインデックスのリソースが無い）。create_knowledge_base = true のときだけ使う
-    opensearch = {
-      source  = "opensearch-project/opensearch"
-      version = "~> 2.3"
+    # KB のベクトル索引を作る Lambda（kb.tf の kb_index）の zip。create_knowledge_base = false でも zip だけは作る
+    archive = {
+      source  = "hashicorp/archive"
+      version = "~> 2.7"
     }
     time = {
       source  = "hashicorp/time"

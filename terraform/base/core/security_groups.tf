@@ -5,7 +5,7 @@
 #              MSK / Neptune は IAM 認証、S3 / ECR / Bedrock はロールのポリシー）。
 #              lab の管理ネットワーク（203.0.113.0/24。trap の送り元）からの受信は terraform/pipeline/lab が足す。
 #              EMR Serverless は 0.0.0.0/0 の受信ルールがある SG を拒むので、受信は VPC の CIDR で書く
-#   endpoints  VPC の中に残すエンドポイント（OpenSearch Serverless の VPC エンドポイント。terraform/pipeline/analytics）に付ける。
+#   endpoints  VPC の中に残すエンドポイント（OpenSearch Serverless の VPC エンドポイント。endpoints.tf）に付ける。
 #              受信は internal からの 443 だけ、送信は無し。PrivateLink に戻すときはインターフェース型エンドポイントにもこれを付ける
 # インターネットからの受信は SG 以前に経路が無い（vpc.tf: private subnet は IGW に向かない）。
 # 2026-09-26 まではワークロードごとの SG（12 個）と相互参照のルール（46 本）だった。戻すときは 7c42b0f を見る

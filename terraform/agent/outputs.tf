@@ -40,7 +40,7 @@ output "data_source_id" {
 }
 
 output "collection_endpoint" {
-  description = "OpenSearch Serverless collection endpoint (the vector index lives here). Empty without create_knowledge_base."
+  description = "OpenSearch Serverless collection endpoint (the vector index lives here). Reachable only from the VPC endpoint of terraform/base/core and from Bedrock. Empty without create_knowledge_base."
   value       = try(aws_opensearchserverless_collection.kb[0].collection_endpoint, "")
 }
 

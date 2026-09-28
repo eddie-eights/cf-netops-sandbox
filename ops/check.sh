@@ -42,7 +42,7 @@ echo "構文エラーなし"
 
 log "4. 模擬テスト"
 if command -v uv >/dev/null; then
-  for t in tests/test_app.py tests/test_graph.py tests/test_stream.py tests/test_sync.py tests/test_analytics.py tests/test_workflow.py; do
+  for t in tests/test_app.py tests/test_graph.py tests/test_stream.py tests/test_sync.py tests/test_analytics.py tests/test_workflow.py tests/test_kb_index.py; do
     uv run --group dev python "$t" || die "$t が失敗した"
   done
 else

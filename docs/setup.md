@@ -8,13 +8,13 @@
 
 - **VPC は `terraform/base/core` が作る。**既定は `10.0.0.0/16` に `/24` のプライベートサブネット 2 つ（`apne1-az1` / `apne1-az4`）と、NAT Gateway だけを置くパブリックサブネット 1 つ（`apne1-az1`）。外へは NAT Gateway（1 AZ）で出て、外から入る経路は無い。社内のネットワークと重なるなら `deploy.env` の `VPC_CIDR` を変える（`/16`〜`/24`）。
 - **SG は 2 つだけ。**`internal`（VPC の CIDR から全部受け、外へは全部出す）を Web / Runtime / lab / Telegraf / MSK / EMR / Neptune / Lambda / Fargate の全部に付け、`endpoints`（`internal` からの 443 だけ）を OpenSearch Serverless の VPC エンドポイントに付ける。ワークロード同士のポートごとのルールは無い（境界は VPC）。
-- AWS の API（SSM / ECR / CloudWatch Logs / Bedrock / S3 Tables / EventBridge / SQS / Prometheus）へは NAT Gateway で出る。VPC エンドポイントは S3 の Gateway 型だけ（無料。ポリシーは付けない）。2026-09-26 まではインターフェース型エンドポイント（PrivateLink）12 本の閉域だった（下の「PrivateLink に戻すとき」）。
+- AWS の API（SSM / ECR / CloudWatch Logs / Bedrock / S3 Tables / EventBridge / SQS / Prometheus）へは NAT Gateway で出る。VPC エンドポイントは S3 の Gateway 型（無料。ポリシーは付けない）と、KB か logs のコレクションを作るときの OpenSearch Serverless の 1 本（2 AZ で約 $0.03/h）だけ。2026-09-26 まではインターフェース型エンドポイント（PrivateLink）12 本の閉域だった（下の「PrivateLink に戻すとき」）。
 - 使うモデル: Nova 2 Lite（`jp.amazon.nova-2-lite-v1:0`）、Titan Text Embeddings V2、Rerank（`amazon.rerank-v1:0`）。どれも Amazon のモデルなので Marketplace の購読は要らない。SCP や IAM でモデルを絞っているなら、この 3 つを許可する。
 - apply する人に要る権限（管理者権限なら足りる）:
   - IAM ロールの作成と `iam:CreateServiceLinkedRole`
   - `aoss:*`
   - ガードレールの作成。`guardrail-profile/apac.guardrail.v1:0` への `bedrock:CreateGuardrail` も要る
-- **apply と destroy は同じ人（同じロール）で打つ。**OpenSearch のデータアクセスポリシーには apply した人の ARN が入るので、別の人が destroy すると 403 になる。自動で ARN が取れないときは `ADMIN_ARN` に書く。
+- **OpenSearch Serverless のコレクション（KB と logs）は公開しない。**ネットワークポリシーは `terraform/base/core` の VPC エンドポイント 1 本（2 つのコレクションで共用）だけを通し、KB はそれに加えて Bedrock のサービス（`bedrock.amazonaws.com`）を通す。NAT Gateway を通った接続は公開側からの扱いになるので、VPC の中からでもエンドポイントが無ければ届かない。KB のベクトルインデックスは VPC の中の Lambda が作り、apply する人の PC は OpenSearch につながない（データアクセスポリシーにも人は入らない。apply と destroy を別の人が打ってもよい）。
 - ガードレールの判定は、東京以外の APAC のリージョン（大阪、ソウル、ムンバイ、シンガポール、シドニー）で行われることがある。データを国内に留める決まりがあるなら使えない。
 - Session Manager の設定で KMS の暗号化を必須にしているなら、インスタンスロールへの `kms:Decrypt` が別に要る（この Terraform には入れていない。`kms` の API へは NAT Gateway で届く）。
 - **PIPELINE は組織の SCP / IAM で止められやすい**（EC2 の t4g.xlarge、Neptune、MSK、EMR Serverless、S3 Tables）。apply が `explicitly denied` で止まったら、管理者に許可を頼むか `SKIP_*` で外す。
@@ -27,7 +27,7 @@ DX / VPN から VPC のエンドポイントに向ける `CLIENT_CIDR` は、エ
 ## Terraform を打つ PC 側
 
 - AWS CLI v2、Terraform 1.11 以上、Docker buildx（arm64）、Session Manager plugin、uv。
-- `registry.terraform.io` と `*.ap-northeast-1.aoss.amazonaws.com` に 443 で届くこと（OpenSearch のインデックスはこの PC から作る）。
+- `registry.terraform.io` に 443 で届くこと（OpenSearch Serverless には PC からつながない）。
 - イメージをビルドするので、インターネットに出られること。
 
 ### Mac
@@ -87,14 +87,10 @@ sudo cp <エクスポートしたファイル> /usr/local/share/ca-certificates/
 ```
 
 2. Docker Engine を WSL に入れているなら `sudo systemctl restart docker`。
-3. AWS CLI と OpenSearch の provider に同じファイルを渡す設定を `~/.bashrc` に書き、ターミナルを開き直す。
+3. AWS CLI と Terraform にファイルの場所を渡す設定を `~/.bashrc` に書き、ターミナルを開き直す。
 
 ```bash
-cat >> ~/.bashrc <<'EOF2'
-export AWS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
-export OPENSEARCH_CACERT_FILE=/etc/ssl/certs/ca-certificates.crt
-export TF_VAR_opensearch_cacert_file=/etc/ssl/certs/ca-certificates.crt
-EOF2
+echo 'export AWS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt' >> ~/.bashrc
 ```
 
 `terraform init` で `x509: certificate signed by unknown authority` が出たら 1 をやり直す。

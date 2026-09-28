@@ -30,7 +30,8 @@
 #   AGENT=1                 agent での分析（既定 1）。terraform/agent を作る
 #   PIPELINE=1              データパイプライン（既定 0）。lab / stream / analytics / graph を作る（SKIP_* で減らせる）
 #   WORKFLOW=1              Temporal での実行（既定 0）。workflow を作る。AGENT と PIPELINE が要り、SKIP_LAB / SKIP_STREAM / SKIP_ANALYTICS / SKIP_GRAPH は書けない
-#   CREATE_KB=1             AGENT=1 で Knowledge Base（OpenSearch Serverless。+$0.36/h）も作る（既定 0）
+#   CREATE_KB=1             AGENT=1 で Knowledge Base（OpenSearch Serverless。+$0.36/h）も作る（既定 0）。
+#                           コレクションは公開せず、terraform/base/core の VPC エンドポイント（+$0.03/h。SINK_OPENSEARCH と共用）と Bedrock からだけ届く
 #   SKIP_LAB=1              PIPELINE=1 で lab を作らない（stream は lab が要るので SKIP_STREAM=1 も要る）
 #   SKIP_STREAM=1           PIPELINE=1 で stream と analytics（stream の Kafka を読む）を作らない
 #   SKIP_ANALYTICS=1        PIPELINE=1 で analytics（Spark → S3 Tables / OpenSearch / Prometheus と異常検知）を作らない。「異常一覧」は使えない
@@ -44,9 +45,7 @@
 #                           SPLUNK_INDEX（既定は空 = token の既定の index）、SPLUNK_SKIP_TLS_VERIFY=1（自己署名の Splunk の検証用）は任意
 #   SKIP_GRAPH=1            PIPELINE=1 で graph（Neptune）を作らない。analytics の検知が異常を Neptune に書くので、SKIP_ANALYTICS=1（か SKIP_STREAM=1）も要る
 #   IMAGE_TAG               エージェント（WORKFLOW=1 ではワーカーも）のイメージのタグ。既定 v1。ECR にそのタグが無いときだけ PC の docker buildx でビルドして push する（タグは上書きできない）
-#   ADMIN_ARN               terraform/agent の kb_admin_principal_arn（CREATE_KB=1 のとき）。既定は空（Terraform が今の認証情報から決める）
 #   VPC_CIDR                terraform/base/core の vpc_cidr（社内と重なるとき）
-#   OPENSEARCH_CACERT_FILE  terraform/agent の opensearch_cacert_file（社内の SSL 検査の CA の PEM）。既定は AWS_CA_BUNDLE と同じ
 #   LOCAL_PORT              PC 側のポート。既定 8080
 #   NO_PORTFORWARD=1        ポートフォワーディングを開かずに終わる
 #   TF_VERBOSE=1            terraform の出力を全部画面に出す（既定は進みと結果だけ。全文は ops/logs/tf-<ルート>-apply.log）
@@ -88,8 +87,9 @@ cd "$(dirname "$0")/.."
 
 log()  { printf '\n\033[1;34m== %s\033[0m\n' "$*"; }
 die()  { printf '\033[1;31mNG: %s\033[0m\n' "$*" >&2; exit 1; }
-# terraform に渡す認証情報。terraform/agent の opensearch provider は古い AWS SDK（Go v1）で、`aws login` で入ったプロファイル
-# （login_session）を読めずに NoCredentialProviders で落ちる。鍵が環境変数に無い（= プロファイルから読む）ときは、AWS CLI から
+# terraform に渡す認証情報。もとは terraform/agent の opensearch provider（古い AWS SDK の Go v1）が `aws login` で入ったプロファイル
+# （login_session）を読めずに NoCredentialProviders で落ちたための回避（provider は 2026-09-28 に外した。aws provider が
+# login_session を読めるかは確かめていないので残す）。鍵が環境変数に無い（= プロファイルから読む）ときは、AWS CLI から
 # 資格情報を受け取る credential_process だけのプロファイルを一時ファイルに書き、terraform にはそちらを読ませる
 # （AWS CLI ユーザーガイド「Sharing Login credentials as process credentials」の形。15 分ごとの更新は CLI が続ける）
 TF_AWS_CONFIG=""
@@ -275,13 +275,13 @@ case "$CALLER_ARN" in
     if [ -n "${AWS_SESSION_TOKEN:-}" ]; then
       die "IAM ユーザーの一時セッション（get-session-token）で入っている。IAM の API が呼べないので、一時セッションを挟まず長期キーのまま入り直す"
     fi ;;
-  arn:aws:sts::*:assumed-role/*) ;;
-  *) if [ -n "$CREATE_KB" ] && [ -z "${ADMIN_ARN:-}" ]; then
-       die "この認証情報の形（${CALLER_ARN}）では kb_admin_principal_arn を決められない。deploy.env に ADMIN_ARN=arn:aws:iam::<アカウント ID>:role/<ロール名> を書く"
-     fi ;;
 esac
+# 2026-09-28 に KB のコレクションを閉じ、索引は VPC の中の Lambda が作るようにした。PC から OpenSearch につながないので、
+# apply する人をデータアクセスポリシーに入れる ADMIN_ARN も、PC の社内 CA を渡す OPENSEARCH_CACERT_FILE も要らない
+for k in ADMIN_ARN OPENSEARCH_CACERT_FILE; do
+  if [ -n "${!k:-}" ]; then echo "注意: $k は 2026-09-28 から使わない（deploy.env から消してよい）"; fi
+done
 tf_use_cli_credentials
-CACERT="${OPENSEARCH_CACERT_FILE:-${AWS_CA_BUNDLE:-}}"
 ROOTS="base/ecr base/core"
 if [ -n "$AGENT" ]; then ROOTS="$ROOTS agent"; fi
 if [ -z "$SKIP_LAB" ]; then ROOTS="$ROOTS pipeline/lab"; fi
@@ -300,6 +300,8 @@ echo "作るルート: $ROOTS"
 #   NAT Gateway に替えてエンドポイントは S3 の Gateway 型だけになった。戻すときは 7c42b0f（docs/setup.md））、
 # agent = 0（Runtime は使った分だけ。bedrock のエンドポイント 3 本は NAT Gateway に替えて無くなった）
 #   + CREATE_KB なら 33（OpenSearch Serverless の OCU）、
+# OpenSearch Serverless の VPC エンドポイント = 3（1.4 × 2 AZ。公表単価からで Price List API では確かめていない。
+#   KB と logs のコレクションを公開しないために作り、両方で 1 本を共用する。NEED_AOSS のときだけ）、
 # lab = 9、graph = 14、stream = 57 + Telegraf の EC2 1（terraform/pipeline/lab が作る t4g.micro。
 #   公表単価 $0.0108/h からで、Price List API では確かめていない）、
 # analytics = 14（ストリーミングのジョブが動いている間の EMR Serverless の 2 vCPU。単価は 2026-09-17 に確認。
@@ -324,6 +326,7 @@ if [ -z "$SKIP_ANALYTICS" ]; then
   if [ -n "$SINK_OPENSEARCH" ]; then COST_CENTS=$((COST_CENTS + 33)); fi
 fi
 if [ -n "$WORKFLOW" ]; then COST_CENTS=$((COST_CENTS + 5)); fi
+if { [ -n "$AGENT" ] && [ -n "$CREATE_KB" ]; } || { [ -z "$SKIP_ANALYTICS" ] && [ -n "$SINK_OPENSEARCH" ]; }; then COST_CENTS=$((COST_CENTS + 3)); fi
 COST_NOTE=$(printf '待機だけで約 $%d.%02d/h（約 %d 円/h。チャットの分は別）の時間課金。使い終わったら当日中に ops/down.sh を打つ' \
   $((COST_CENTS / 100)) $((COST_CENTS % 100)) $(((COST_CENTS * 150 + 50) / 100)))
 printf '\033[1;33m%s\033[0m\n' "$COST_NOTE"
@@ -391,6 +394,18 @@ fi
 log "3. 土台（terraform/base/core。VPC / Web の EC2 / バケット / ロール。初回は 3〜5 分）"
 MAIN_VARS=()
 if [ -n "${VPC_CIDR:-}" ];    then MAIN_VARS+=(-var "vpc_cidr=$VPC_CIDR"); fi
+# OpenSearch Serverless の VPC エンドポイントは KB と logs のコレクションで 1 本を共用する（どちらも公開しない）。
+# 今回どちらも作らなくても、前に作ったコレクションが state に残っていれば外さない（外すとそのコレクションに届かなくなる）
+NEED_AOSS=""
+if [ -n "$CREATE_KB" ]; then NEED_AOSS=1; fi
+if [ -z "$SKIP_ANALYTICS" ] && [ -n "$SINK_OPENSEARCH" ]; then NEED_AOSS=1; fi
+for r in agent pipeline/analytics; do
+  if [ -z "$NEED_AOSS" ] && [ -f "terraform/$r/terraform.tfstate" ]; then
+    tf_init "$r"
+    if tf "$r" state list 2>/dev/null | grep -q '^aws_opensearchserverless_collection\.'; then NEED_AOSS=1; fi
+  fi
+done
+if [ -n "$NEED_AOSS" ]; then MAIN_VARS+=(-var create_opensearch_endpoint=true); fi
 # 2026-09-26 までの配置（インターフェース型エンドポイント 12 本と SG 12 個）の state が残っていると、apply がエンドポイントと SG を消して
 # NAT Gateway に置き替える（Runtime の ENI が古い SG を掴んでいると SG の削除で 20 分待って落ちる）。一度 ops/down.sh で消してから打つ方が確実
 tf_apply base/core ${MAIN_VARS[@]+"${MAIN_VARS[@]}"}
@@ -418,8 +433,6 @@ if [ -n "$AGENT" ]; then
   fi
   AGENT_VARS=(-var "agent_image_tag=$IMAGE_TAG")
   if [ -n "$CREATE_KB" ];       then AGENT_VARS+=(-var create_knowledge_base=true); fi
-  if [ -n "${ADMIN_ARN:-}" ];   then AGENT_VARS+=(-var "kb_admin_principal_arn=$ADMIN_ARN"); fi
-  if [ -n "$CACERT" ];          then AGENT_VARS+=(-var "opensearch_cacert_file=$CACERT"); fi
   tf_apply agent "${AGENT_VARS[@]}"
   LOG_GROUP=$(tf agent output -raw runtime_log_group_name)
   if [ -n "$CREATE_KB" ]; then

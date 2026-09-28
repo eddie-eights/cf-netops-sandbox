@@ -60,17 +60,6 @@ variable "create_knowledge_base" {
   default     = false
 }
 
-variable "kb_admin_principal_arn" {
-  description = "Optional (create_knowledge_base = true). IAM role or user ARN whose credentials run this apply (not an sts assumed-role ARN). It is added to the OpenSearch Serverless data access policy so Terraform can create the vector index. Leave empty to derive it from the caller (assumed-role sessions resolve to the role ARN)."
-  type        = string
-  default     = ""
-
-  validation {
-    condition     = can(regex("^$|^arn:aws:iam::[0-9]{12}:(role|user)/.+$", var.kb_admin_principal_arn))
-    error_message = "kb_admin_principal_arn must be empty or arn:aws:iam::<account>:(role|user)/<name>."
-  }
-}
-
 variable "guardrail_profile_id" {
   description = "System-defined guardrail profile for cross-Region inference (required by the Standard tier). apac.guardrail.v1:0 for Tokyo."
   type        = string
@@ -113,11 +102,5 @@ variable "number_of_reranked_results" {
     condition     = var.number_of_reranked_results >= 1 && var.number_of_reranked_results <= 100
     error_message = "number_of_reranked_results must be between 1 and 100."
   }
-}
-
-variable "opensearch_cacert_file" {
-  description = "Optional. Path of a PEM file with the CA that signs HTTPS on this PC (corporate SSL inspection). Passed to the opensearch provider that creates the vector index. The aws provider reads AWS_CA_BUNDLE instead."
-  type        = string
-  default     = ""
 }
 

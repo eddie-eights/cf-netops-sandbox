@@ -11,13 +11,15 @@
 #   OWNER      **必須。**デプロイした人の名前。リソース名の接頭辞と Project タグの <owner>-nwc-poc もここから作る。
 #              **作ったときの ops/up.sh と同じ値にする**（deploy.env を書き換えずに打てば自動で揃う）。違う値だと Terraform が消す相手を取り違える
 #   KEEP_ECR   ECR を残すか。1 = 残す、0 = 消す（既定）。それ以外の値は何も消さずに止まる
-#   AWS_PROFILE / AWS_CA_BUNDLE / OPENSEARCH_CACERT_FILE  ops/up.sh と同じ
+#   AWS_PROFILE / AWS_CA_BUNDLE  ops/up.sh と同じ
 #
 # PIPELINE / AGENT / WORKFLOW / SKIP_* / CREATE_KB は見ない。機能の設定に関係なく、state にリソースが載っているルートを全部消す
 # （作っていないルートは飛ばす）。analytics は Spark のジョブを止めてから消す。
 #
-# 社内の SSL 検査がある PC では ops/up.sh と同じく AWS_CA_BUNDLE（または OPENSEARCH_CACERT_FILE）を入れてから打つ。
-# terraform/agent の destroy は（KB を作っていたとき）ベクトルインデックスを消すために OpenSearch Serverless のエンドポイントへ HTTPS でつなぐ。
+# 社内の SSL 検査がある PC では ops/up.sh と同じく AWS_CA_BUNDLE を入れてから打つ。
+# KB のベクトルインデックスはコレクションごと消える（PC から OpenSearch にはつながない。2026-09-28 にコレクションを閉じてから）。
+# それより前の agent の state（opensearch_index.kb が載っている）は、いまの terraform/agent では消せない（opensearch provider を外した）。
+# その state が残っているなら、コミット f7b1688 の terraform/agent で destroy してから、この版に上げる
 set -uo pipefail
 
 REGION=ap-northeast-1
@@ -28,8 +30,9 @@ cd "$(dirname "$0")/.."
 
 log()  { printf '\n\033[1;34m== %s\033[0m\n' "$*"; }
 die()  { printf '\033[1;31mNG: %s\033[0m\n' "$*" >&2; exit 1; }
-# terraform に渡す認証情報。terraform/agent の opensearch provider は古い AWS SDK（Go v1）で、`aws login` で入ったプロファイル
-# （login_session）を読めずに NoCredentialProviders で落ちる。鍵が環境変数に無い（= プロファイルから読む）ときは、AWS CLI から
+# terraform に渡す認証情報。もとは terraform/agent の opensearch provider（古い AWS SDK の Go v1）が `aws login` で入ったプロファイル
+# （login_session）を読めずに NoCredentialProviders で落ちたための回避（provider は 2026-09-28 に外した。aws provider が
+# login_session を読めるかは確かめていないので残す）。鍵が環境変数に無い（= プロファイルから読む）ときは、AWS CLI から
 # 資格情報を受け取る credential_process だけのプロファイルを一時ファイルに書き、terraform にはそちらを読ませる
 # （AWS CLI ユーザーガイド「Sharing Login credentials as process credentials」の形。15 分ごとの更新は CLI が続ける）
 TF_AWS_CONFIG=""
@@ -147,9 +150,7 @@ command -v terraform >/dev/null || die "terraform が無い"
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text) || die "認証が通っていない（aws configure か aws login で入り直す）"
 echo "ACCOUNT_ID=$ACCOUNT_ID"
 tf_use_cli_credentials
-CACERT="${OPENSEARCH_CACERT_FILE:-${AWS_CA_BUNDLE:-}}"
 AGENT_VARS=()
-if [ -n "$CACERT" ]; then AGENT_VARS+=(-var "opensearch_cacert_file=$CACERT"); fi
 
 log "1. analytics → graph → stream（analytics は stream の Kafka を読み、stream は lab の state を読むので、この順）"
 # EMR Serverless のアプリケーションは、ジョブが動いているか STARTED のままだと destroy が落ちる。先にジョブを止め、アプリケーションを止める
@@ -196,7 +197,8 @@ fi
 if has_resources agent && tf agent state list 2>/dev/null | grep -q '^aws_opensearchserverless_collection\.kb\['; then
   AGENT_VARS+=(-var create_knowledge_base=true)
 fi
-destroy_root agent ${AGENT_VARS[@]+"${AGENT_VARS[@]}"}
+# KB を作っていれば、ベクトルインデックスを作る Lambda（terraform/agent/kb.tf）が VPC の中にいる。ENI を刈りながら消す
+destroy_lambda_root agent "$PREFIX-kb-index" ${AGENT_VARS[@]+"${AGENT_VARS[@]}"}
 
 log "3-2. 土台（terraform/base/core。VPC / Web の EC2 / バケット（中身ごと消える）/ ロール）"
 # Runtime の ENI（種類 agentic_ai。AWS 側の所有で、自分では外せない）は Runtime を消したあとも最大 8 時間残り、その間はサブネットと

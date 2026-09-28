@@ -12,7 +12,8 @@
 #   - 知らないキーと、同じキーの 2 回目は止まる（打ち間違いで違う機能を作らないため）
 # ファイルの場所は既定で展開したフォルダ直下の deploy.env。DEPLOY_ENV_FILE=<パス> で変えられる（相対パスは打った場所から）。
 
-# 読めるキー（意味は deploy.env.example）。OWNER だけ必須で、ほかは任意。これ以外のキーが書いてあれば止まる
+# 読めるキー（意味は deploy.env.example）。OWNER だけ必須で、ほかは任意。これ以外のキーが書いてあれば止まる。
+# ADMIN_ARN と OPENSEARCH_CACERT_FILE は 2026-09-28 から使わない。前の deploy.env で止まらないよう読むだけ読み、ops/up.sh が注意を出す
 DEPLOY_ENV_KEYS="OWNER PIPELINE AGENT WORKFLOW CREATE_KB SKIP_LAB SKIP_STREAM SKIP_ANALYTICS SKIP_GRAPH SINK_S3 SINK_OPENSEARCH SINK_PROMETHEUS
 SINK_SPLUNK SPLUNK_HEC_URL SPLUNK_INDEX SPLUNK_SKIP_TLS_VERIFY IMAGE_TAG ADMIN_ARN
 VPC_CIDR OPENSEARCH_CACERT_FILE LOCAL_PORT NO_PORTFORWARD KEEP_ECR TF_VERBOSE AWS_PROFILE AWS_CA_BUNDLE"

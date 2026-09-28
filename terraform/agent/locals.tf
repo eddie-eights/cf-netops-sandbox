@@ -14,11 +14,6 @@ locals {
 data "aws_caller_identity" "current" {}
 data "aws_partition" "current" {}
 
-# assumed-role のセッションなら元のロールの ARN、IAM ユーザーならそのままユーザーの ARN になる
-data "aws_iam_session_context" "current" {
-  arn = data.aws_caller_identity.current.arn
-}
-
 # VPC / サブネット / SG / バケット / ロールは terraform/base/core の state から読む
 data "terraform_remote_state" "main" {
   backend = "local"
@@ -50,10 +45,10 @@ locals {
   web_role_name     = data.terraform_remote_state.main.outputs.web_role_name
   bucket_name       = data.terraform_remote_state.main.outputs.kb_bucket_name
   bucket_arn        = data.terraform_remote_state.main.outputs.kb_bucket_arn
+  # 土台の OpenSearch Serverless の VPC エンドポイント（create_opensearch_endpoint=true のときだけある。古い state には output が無い）
+  aoss_vpce_id = try(data.terraform_remote_state.main.outputs.opensearch_vpc_endpoint_id, "")
 
   kb = var.create_knowledge_base
-
-  kb_admin_principal_arn = var.kb_admin_principal_arn != "" ? var.kb_admin_principal_arn : data.aws_iam_session_context.current.issuer_arn
 
   rerank           = var.rerank_model_id != ""
   rerank_model_arn = local.rerank ? "arn:${local.partition}:bedrock:${var.region}::foundation-model/${var.rerank_model_id}" : ""

@@ -20,7 +20,7 @@ output "vpc_id" {
 }
 
 output "runtime_subnet_ids" {
-  description = "Read by terraform/agent (runtime ENIs), terraform/pipeline/stream (MSK brokers), terraform/pipeline/graph (Neptune subnet group), terraform/pipeline/analytics (EMR, OpenSearch Serverless endpoint) and terraform/workflow (Fargate, Lambda)"
+  description = "Read by terraform/agent (runtime ENIs), terraform/pipeline/stream (MSK brokers), terraform/pipeline/graph (Neptune subnet group), terraform/pipeline/analytics (EMR) and terraform/workflow (Fargate, Lambda)"
   value       = [aws_subnet.a.id, aws_subnet.b.id]
 }
 
@@ -44,9 +44,9 @@ output "internal_security_group_id" {
   value       = aws_security_group.internal.id
 }
 
-output "endpoint_security_group_id" {
-  description = "SG of the VPC endpoints (HTTPS from internal_security_group_id). Read by terraform/pipeline/analytics (OpenSearch Serverless VPC endpoint)"
-  value       = aws_security_group.endpoints.id
+output "opensearch_vpc_endpoint_id" {
+  description = "ID of the OpenSearch Serverless VPC endpoint, empty unless create_opensearch_endpoint. Read by terraform/agent (knowledge base network policy) and terraform/pipeline/analytics (logs network policy)"
+  value       = try(aws_opensearchserverless_vpc_endpoint.aoss[0].id, "")
 }
 
 output "kb_bucket_name" {
