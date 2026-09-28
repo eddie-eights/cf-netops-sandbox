@@ -9,6 +9,32 @@ resource "aws_s3tables_table_bucket" "tables" {
   name = local.table_bucket
 }
 
+# この VPC のエンドポイントを通らない呼び出しを拒む（terraform/base/core の perimeter.tf の資源側）。
+# Iceberg REST の中の呼び出しは元の VPC を引き継がないので aws:CalledViaLast = s3tables.amazonaws.com を外す。
+# 表の保守（compaction など）は S3 Tables 自身が出すので aws:PrincipalIsAWSService で外れる。
+# ポリシーの読み書きは外す（デプロイする人が変わって締め出されても、その人が delete-table-bucket-policy で戻せる）
+resource "aws_s3tables_table_bucket_policy" "tables" {
+  count = local.perimeter_policy_arn != "" ? 1 : 0
+
+  table_bucket_arn = aws_s3tables_table_bucket.tables.arn
+  resource_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Sid       = "DenyOutsideVpc"
+      Effect    = "Deny"
+      Principal = "*"
+      NotAction = ["s3tables:GetTableBucketPolicy", "s3tables:PutTableBucketPolicy", "s3tables:DeleteTableBucketPolicy"]
+      Resource  = [aws_s3tables_table_bucket.tables.arn, "${aws_s3tables_table_bucket.tables.arn}/*"]
+      Condition = {
+        StringNotEqualsIfExists = { "aws:SourceVpc" = local.vpc_id, "aws:CalledViaLast" = "s3tables.amazonaws.com" }
+        BoolIfExists            = { "aws:ViaAWSService" = "false" }
+        Bool                    = { "aws:PrincipalIsAWSService" = "false" }
+        ArnNotLike              = { "aws:PrincipalArn" = local.perimeter_exempt_principals }
+      }
+    }]
+  })
+}
+
 resource "aws_s3tables_namespace" "netops" {
   namespace        = var.namespace
   table_bucket_arn = aws_s3tables_table_bucket.tables.arn

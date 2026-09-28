@@ -7,8 +7,9 @@
 ## AWS 側
 
 - **VPC は `terraform/base/core` が作る。**既定は `10.0.0.0/16` に `/24` のプライベートサブネット 2 つ（`apne1-az1` / `apne1-az4`）と、NAT Gateway だけを置くパブリックサブネット 1 つ（`apne1-az1`）。外へは NAT Gateway（1 AZ）で出て、外から入る経路は無い。社内のネットワークと重なるなら `deploy.env` の `VPC_CIDR` を変える（`/16`〜`/24`）。
-- **SG は 2 つだけ。**`internal`（VPC の CIDR から全部受け、外へは全部出す）を Web / Runtime / lab / Telegraf / MSK / EMR / Neptune / Lambda / Fargate の全部に付け、`endpoints`（`internal` からの 443 だけ）を OpenSearch Serverless の VPC エンドポイントに付ける。ワークロード同士のポートごとのルールは無い（境界は VPC）。
-- AWS の API（SSM / ECR / CloudWatch Logs / Bedrock / S3 Tables / EventBridge / SQS / Prometheus）へは NAT Gateway で出る。VPC エンドポイントは S3 の Gateway 型（無料。ポリシーは付けない）と、KB か logs のコレクションを作るときの OpenSearch Serverless の 1 本（2 AZ で約 $0.03/h）だけ。2026-09-26 まではインターフェース型エンドポイント（PrivateLink）12 本の閉域だった（下の「PrivateLink に戻すとき」）。
+- **SG は 2 つだけ。**`internal`（VPC の CIDR から全部受け、外へは全部出す）を Web / Runtime / lab / Telegraf / MSK / EMR / Neptune / Lambda / Fargate の全部に付け、`endpoints`（`internal` からの 443 だけ）を VPC エンドポイントに付ける。ワークロード同士のポートごとのルールは無い（境界は VPC）。
+- AWS の API（SSM / ECR / CloudWatch Logs / Bedrock / AgentCore / S3 Tables / EventBridge / SQS / Prometheus）へはインターフェース型エンドポイントで届き、VPC の外からの呼び出しは Deny で拒む（[architecture.md](architecture.md) の「閉域」）。ほかに S3 の Gateway 型（無料。ポリシーは付けない）と、KB か logs のコレクションを作るときの OpenSearch Serverless の 1 本（2 AZ で約 $0.03/h）。NAT Gateway は AWS の外へ出るためだけに使う。
+- 組織の SCP で `aws:SourceVpc` の Deny をすでに掛けているなら、この Terraform の Deny と重なっても害は無い。逆に VPC エンドポイントの作成を SCP で止めていると、手順 3 で落ちる。
 - 使うモデル: Nova 2 Lite（`jp.amazon.nova-2-lite-v1:0`）、Titan Text Embeddings V2、Rerank（`amazon.rerank-v1:0`）。どれも Amazon のモデルなので Marketplace の購読は要らない。SCP や IAM でモデルを絞っているなら、この 3 つを許可する。
 - apply する人に要る権限（管理者権限なら足りる）:
   - IAM ロールの作成と `iam:CreateServiceLinkedRole`
@@ -16,13 +17,13 @@
   - ガードレールの作成。`guardrail-profile/apac.guardrail.v1:0` への `bedrock:CreateGuardrail` も要る
 - **OpenSearch Serverless のコレクション（KB と logs）は公開しない。**ネットワークポリシーは `terraform/base/core` の VPC エンドポイント 1 本（2 つのコレクションで共用）だけを通し、KB はそれに加えて Bedrock のサービス（`bedrock.amazonaws.com`）を通す。NAT Gateway を通った接続は公開側からの扱いになるので、VPC の中からでもエンドポイントが無ければ届かない。KB のベクトルインデックスは VPC の中の Lambda が作り、apply する人の PC は OpenSearch につながない（データアクセスポリシーにも人は入らない。apply と destroy を別の人が打ってもよい）。
 - ガードレールの判定は、東京以外の APAC のリージョン（大阪、ソウル、ムンバイ、シンガポール、シドニー）で行われることがある。データを国内に留める決まりがあるなら使えない。
-- Session Manager の設定で KMS の暗号化を必須にしているなら、インスタンスロールへの `kms:Decrypt` が別に要る（この Terraform には入れていない。`kms` の API へは NAT Gateway で届く）。
+- Session Manager の設定で KMS の暗号化を必須にしているなら、インスタンスロールへの `kms:Decrypt` が別に要る（この Terraform には入れていない。`kms` のエンドポイントも作らないので、`kms` の API へは NAT Gateway で届く。閉域を守るなら `kms` のエンドポイントを足す）。
 - **PIPELINE は組織の SCP / IAM で止められやすい**（EC2 の t4g.xlarge、Neptune、MSK、EMR Serverless、S3 Tables）。apply が `explicitly denied` で止まったら、管理者に許可を頼むか `SKIP_*` で外す。
 
 ## 利用者の PC 側
 
-AWS CLI v2 と Session Manager plugin を入れる。PC から `ssm.ap-northeast-1.amazonaws.com` と `ssmmessages.ap-northeast-1.amazonaws.com` に 443 で届く必要がある（社内プロキシ経由でよい）。EC2 側は NAT Gateway で同じ 2 つに届く。
-DX / VPN から VPC のエンドポイントに向ける `CLIENT_CIDR` は、エンドポイントごと無くなった（2026-09-26）。DX / VPN の先からしか AWS の API に出られない PC なら、下の「PrivateLink に戻すとき」で戻す。
+AWS CLI v2 と Session Manager plugin を入れる。PC から `ssm.ap-northeast-1.amazonaws.com` と `ssmmessages.ap-northeast-1.amazonaws.com` に 443 で届く必要がある（社内プロキシ経由でよい）。EC2 側は VPC の ssm / ssmmessages のエンドポイントで同じ 2 つに届く。
+エンドポイントの SG は VPC の中からしか受けないので、DX / VPN の先の PC から VPC のエンドポイントを使う形（2026-09-26 まであった `CLIENT_CIDR`）には対応していない。PC は公開の SSM の API に出られればよい（ポートフォワーディングは PoC だけの入口として割り切る）。
 
 ## Terraform を打つ PC 側
 
@@ -95,13 +96,8 @@ echo 'export AWS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt' >> ~/.bashrc
 
 `terraform init` で `x509: certificate signed by unknown authority` が出たら 1 をやり直す。
 
-## PrivateLink に戻すとき
+## 閉域を一時的に外すとき
 
-2026-09-26 に NAT Gateway に替えるまでは、VPC に IGW も NAT も無く、AWS の API へはインターフェース型エンドポイント（PrivateLink）12 本で届く閉域だった（SG もワークロードごとに 12 個、相互参照のルール 46 本）。閉域が要件になったら、その配置は git の履歴にそのまま残っているので、次で戻す。
+`AccessDenied`（`with an explicit deny in an identity-based policy` / `resource-based policy`）が出て、VPC の外からの呼び出しを疑うときは、`NETWORK_PERIMETER=0 ops/up.sh` で Deny だけを外して打ち直す（エンドポイントは残る）。通るようになったら、どの呼び出しがエンドポイントを通っていないかを CloudTrail の `vpcEndpointId` の無いイベントで探し、直したら `1` に戻す。
 
-1. **最後の PrivateLink の commit は `7c42b0f`**（「Splunk を Spark から直接書く」）。`git show 7c42b0f --stat` で当時の `terraform/` を確かめる。
-2. 動いているものがあれば `ops/down.sh` で全部消す（NAT Gateway とエンドポイントは同じ VPC で入れ替えられるが、Runtime の ENI が SG を掴んで 20 分待ちになるので、消してから戻す方が速い）。
-3. `git checkout 7c42b0f -- terraform/ ops/up.sh ops/down.sh ops/deploy-env.sh deploy.env.example` で Terraform とスクリプトを戻す。`7c42b0f` より後に足した機能（このファイルの履歴を見る）は、戻したファイルに手で入れ直す。
-4. `deploy.env` に `CLIENT_CIDR`（DX / VPN 経由のとき）を書き、`ops/up.sh` を打つ。エンドポイントの IP は `aws ec2 describe-network-interfaces --filters Name=description,Values='VPC Endpoint Interface vpce-*' Name=tag:Project,Values=<prefix>` で引き、社内 DNS か hosts に書く。
-
-費用は土台が約 $0.05/h + 共用のエンドポイント約 $0.08/h に戻り、機能ごとのエンドポイント（agent 3 本、analytics 6 本、workflow 1 本）が加わる（1 本 $0.014/h × AZ）。NAT Gateway のデータ課金（$0.062/GB）は無くなる。Splunk Cloud の公開 HEC には届かなくなる。
+2026-09-26 に NAT Gateway に替える前の配置（エンドポイント 12 本と SG 12 個。最後の commit は `7c42b0f`）は、エンドポイントを戻したいまは使わない。

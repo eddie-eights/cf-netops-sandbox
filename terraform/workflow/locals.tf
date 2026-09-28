@@ -74,6 +74,10 @@ locals {
   vpc_id         = data.terraform_remote_state.main.outputs.vpc_id
   subnet_id      = data.terraform_remote_state.main.outputs.instance_subnet_id # サブネット a（Web の EC2 と同じ）
   internal_sg_id = data.terraform_remote_state.main.outputs.internal_security_group_id
+  # terraform/base/core の perimeter.tf の Deny（VPC エンドポイントを通らない AWS の API を拒む）。NETWORK_PERIMETER=0 か古い state なら空
+  perimeter_policy_arn = try(data.terraform_remote_state.main.outputs.network_perimeter_policy_arn, "")
+  # リソースポリシーの Deny から外すプリンシパル（デプロイする人と KB のロール）
+  perimeter_exempt_principals = try(data.terraform_remote_state.main.outputs.perimeter_exempt_principals, [])
   # agent が無いとワークフローが原因を聞く先が無い。下の precondition で「agent を先に」と出す
   runtime_arn = try(data.terraform_remote_state.agent.outputs.agent_runtime_arn, "")
 

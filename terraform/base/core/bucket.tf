@@ -38,9 +38,11 @@ resource "aws_s3_bucket_ownership_controls" "kb" {
 resource "aws_s3_bucket_policy" "kb" {
   bucket = aws_s3_bucket.kb.id
 
+  # DenyOutsideVpc は perimeter.tf の資源側。バケットポリシーの読み書きだけは外す（デプロイする人が変わって締め出されても、
+  # その人が aws s3api delete-bucket-policy で戻せる。docs/troubleshooting.md）
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [{
+    Statement = concat([{
       Sid       = "DenyInsecureTransport"
       Effect    = "Deny"
       Principal = "*"
@@ -49,7 +51,19 @@ resource "aws_s3_bucket_policy" "kb" {
       Condition = {
         Bool = { "aws:SecureTransport" = "false" }
       }
-    }]
+      }], var.network_perimeter ? [{
+      Sid       = "DenyOutsideVpc"
+      Effect    = "Deny"
+      Principal = "*"
+      NotAction = ["s3:GetBucketPolicy", "s3:PutBucketPolicy", "s3:DeleteBucketPolicy"]
+      Resource  = [aws_s3_bucket.kb.arn, "${aws_s3_bucket.kb.arn}/*"]
+      Condition = {
+        StringNotEqualsIfExists = { "aws:SourceVpc" = aws_vpc.this.id }
+        BoolIfExists            = { "aws:ViaAWSService" = "false" }
+        Bool                    = { "aws:PrincipalIsAWSService" = "false" }
+        ArnNotLike              = { "aws:PrincipalArn" = local.perimeter_exempt_principals }
+      }
+    }] : [])
   })
 
   depends_on = [aws_s3_bucket_public_access_block.kb]

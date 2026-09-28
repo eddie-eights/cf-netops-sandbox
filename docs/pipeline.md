@@ -33,7 +33,7 @@ flowchart LR
 - テーブルバケットは `SINK_S3=0` でも作る（証跡の置き場）。`ops/down.sh` はバケットごと消すので、証跡も消える。
 - Splunk（`SINK_SPLUNK=1`）は Spark の driver が全トピックを HTTP Event Collector（HEC）に POST する（2026-09-26 に MSK Connect の Splunk Connect for Kafka をやめて、ほかの格納先と同じ形にした）。Splunk 自体は作らない。
   - token は `deploy.env` に書かず、`ops/up.sh` を打つ前に SSM の SecureString `/<接頭辞>/splunk/hec-token` に手で入れる（`aws ssm put-parameter --type SecureString`）。`ops/up.sh` は手順 7-4 で有無だけ確かめ、ジョブが起動時に 1 回読む。Terraform も引数もログも値を持たない。
-  - Spark は NAT Gateway で外に出るので、Splunk Cloud の公開 HEC にも、DX / VPN の先の社内の Splunk Enterprise にも届く（SG は全部出せるので HEC のポートは何番でもよい）。2026-09-26 までは VPC に NAT も IGW も無く、VPC の中から届く Splunk に限っていた。
+  - Spark は NAT Gateway で外に出るので（AWS の API はエンドポイントを通り、NAT Gateway を使うのは AWS の外へ出る HEC だけ）、Splunk Cloud の公開 HEC にも、DX / VPN の先の社内の Splunk Enterprise にも届く（SG は全部出せるので HEC のポートは何番でもよい）。2026-09-26 までは VPC に NAT も IGW も無く、VPC の中から届く Splunk に限っていた。
   - HEC が 4xx を返したまとまり（最大 500 件）は捨ててログに出し、ジョブは止めない。5xx は再送する。
 
 ## lab に入る
@@ -93,7 +93,7 @@ sudo tail -n 50 /var/log/cloud-init-output.log
 sudo systemctl restart <prefix>-lab
 ```
 
-- ECR からイメージを取れない（`docker pull` がタイムアウトする）: プライベートのルートテーブルに `0.0.0.0/0 → NAT Gateway` があるか（`terraform/base/core` の `aws_route.private_default`）、NAT Gateway が `available` かを見る。
+- ECR からイメージを取れない（`docker pull` がタイムアウトする）: ecr.api / ecr.dkr のエンドポイントが `ops/up.sh` の手順 0 の一覧にあるか、レイヤーを取る S3 の gateway エンドポイントがプライベートのルートテーブルに載っているかを見る。`explicit deny` なら VPC のエンドポイントを通っていない（[troubleshooting.md](troubleshooting.md) の「閉域」）。
 - SR Linux が起きない（`containerlab deploy` が readiness で止まる）: 6 台で 10 GB ほど使うので `free -m` を見る。`t4g.large` では足りない（既定は `t4g.xlarge`）。1 台の起動ログは `sudo docker logs clab-splab-dc1-leaf-01`。
 - VM の `bond0` が無い（`sudo lab check` の LAG が「bond0 が無い」）: EC2 のカーネルに bonding モジュールが要る。`lsmod | grep bonding`、無ければ `sudo modprobe bonding`（`terraform/pipeline/lab` の user data が起動時に入れる）。
 - 設定が入らない（deploy が `startup-config` で失敗する）: `lab/srlinux/<機器>.cli` の行を `sudo lab cli <機器>` で 1 行ずつ流して、どの行で落ちるかを見る。

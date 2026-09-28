@@ -68,3 +68,11 @@ resource "aws_iam_instance_profile" "lab" {
   name = "${local.name_prefix}-lab"
   role = aws_iam_role.lab.name
 }
+
+# terraform/base/core の perimeter.tf の Deny（VPC エンドポイントを通らない呼び出しを拒む）
+resource "aws_iam_role_policy_attachment" "lab_perimeter" {
+  count = local.perimeter_policy_arn != "" ? 1 : 0
+
+  role       = aws_iam_role.lab.name
+  policy_arn = local.perimeter_policy_arn
+}

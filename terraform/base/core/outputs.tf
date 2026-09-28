@@ -49,6 +49,21 @@ output "opensearch_vpc_endpoint_id" {
   value       = try(aws_opensearchserverless_vpc_endpoint.aoss[0].id, "")
 }
 
+output "network_perimeter" {
+  description = "True when the Deny outside aws:SourceVpc is on (perimeter.tf). Read by the other roots to add their resource policy Deny statements"
+  value       = var.network_perimeter
+}
+
+output "network_perimeter_policy_arn" {
+  description = "IAM policy that denies AWS API calls not coming through a VPC endpoint, empty unless network_perimeter. Attached by terraform/pipeline/lab, terraform/pipeline/analytics and terraform/workflow to their workload roles"
+  value       = var.network_perimeter ? aws_iam_policy.network_perimeter.arn : ""
+}
+
+output "perimeter_exempt_principals" {
+  description = "Principals the resource policy Deny statements leave out (the deployer and the knowledge base role). Read by terraform/pipeline/analytics (S3 Tables) and terraform/workflow (SQS)"
+  value       = local.perimeter_exempt_principals
+}
+
 output "kb_bucket_name" {
   description = "Read by terraform/agent (docs/), terraform/pipeline/lab (lab/ telegraf/) and terraform/pipeline/analytics (analytics/)"
   value       = aws_s3_bucket.kb.bucket

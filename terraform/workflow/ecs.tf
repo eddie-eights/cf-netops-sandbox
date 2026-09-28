@@ -1,7 +1,7 @@
 # ---------------------------------------------------------------- network
 # タスクの SG は terraform/base/core の internal（VPC の中からは何でも受ける、送信は自由）。Neptune の 8182 も Temporal UI の 8233
 # （Web の EC2 を踏み台にした SSM のポートフォワーディング。docs/workflow.md「Temporal UI を開く」）も同じ SG の中なので穴は要らない。
-# ECR / logs / SSM / AgentCore / SQS / s3tables へは NAT Gateway から出る。
+# ECR / logs / SSM / AgentCore / SQS / s3tables へは terraform/base/core のインターフェース型エンドポイント（ops/up.sh が WORKFLOW のときに作らせる）を通る。
 # 2026-09-26 まではここにタスクの SG と 7 本のルールがあった（7c42b0f）
 
 # ---------------------------------------------------------------- cluster / logs

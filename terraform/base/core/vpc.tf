@@ -1,6 +1,6 @@
 # ---------------------------------------------------------------- VPC
 # この root module が VPC ごと作り、destroy すると VPC ごと消える（消し忘れを残さない）。
-# ワークロードは private subnet a / b に置き、外へは 1 AZ の NAT Gateway から出る（受信の経路は無い: IGW に向くのは public subnet だけで、
+# ワークロードは private subnet a / b に置き、AWS の外へは 1 AZ の NAT Gateway から出る（AWS の API は endpoints.tf のエンドポイント。受信の経路は無い: IGW に向くのは public subnet だけで、
 # そこに置くのは NAT Gateway だけ。private subnet のアドレスにはインターネットから届かない）。
 # 2026-09-26 まではインターフェース型エンドポイント（PrivateLink）だけの閉域だった。戻すときは 7c42b0f の terraform/ を見る（docs/setup.md）
 resource "aws_vpc" "this" {
@@ -97,7 +97,8 @@ resource "aws_nat_gateway" "this" {
   depends_on = [aws_internet_gateway.this]
 }
 
-# private subnet の外向きは全部 NAT へ（S3 だけは endpoints.tf の gateway エンドポイントが先に取る）
+# private subnet の外向きは全部 NAT へ（S3 は endpoints.tf の gateway エンドポイントが経路で先に取り、ほかの AWS の API は
+# インターフェース型エンドポイントの private DNS で VPC の中のアドレスに向く。NAT を通るのは AWS の外だけ）
 resource "aws_route" "private_default" {
   route_table_id         = aws_route_table.private.id
   destination_cidr_block = "0.0.0.0/0"

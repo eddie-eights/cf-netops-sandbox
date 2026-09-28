@@ -27,6 +27,21 @@ resource "aws_iam_role_policy_attachment" "execution" {
   policy_arn = "arn:${local.partition}:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
 }
 
+# terraform/base/core の perimeter.tf の Deny（VPC エンドポイントを通らない呼び出しを拒む）。実行ロールとタスクロールの両方に付ける
+resource "aws_iam_role_policy_attachment" "execution_perimeter" {
+  count = local.perimeter_policy_arn != "" ? 1 : 0
+
+  role       = aws_iam_role.execution.name
+  policy_arn = local.perimeter_policy_arn
+}
+
+resource "aws_iam_role_policy_attachment" "task_perimeter" {
+  count = local.perimeter_policy_arn != "" ? 1 : 0
+
+  role       = aws_iam_role.task.name
+  policy_arn = local.perimeter_policy_arn
+}
+
 # ---------------------------------------------------------------- task role (the worker)
 resource "aws_iam_role" "task" {
   name               = "${local.name_prefix}-workflow-task"

@@ -66,9 +66,9 @@ for root, outs in (("base/core", ("vpc_id", "runtime_subnet_ids", "internal_secu
     for out in outs:
         check(f"terraform/{root} に output {out} がある", re.search(r'^output "' + out + r'"', other, re.M) is not None)
 
-# ---- ネットワーク（2026-09-26 に PrivateLink から NAT Gateway に替え、SG は土台の internal 1 つを全部で共有。戻すときは 7c42b0f）
+# ---- ネットワーク（SG は土台の internal 1 つを全部で共有。2026-09-28 から AWS の API は土台のインターフェース型エンドポイントを通し、NAT Gateway は AWS の外だけ）
 _core = "".join(open(os.path.join(ROOT, "terraform", "base", "core", n), encoding="utf-8").read() for n in sorted(os.listdir(os.path.join(ROOT, "terraform", "base", "core"))) if n.endswith(".tf"))
-check("analytics は SG もインターフェース型エンドポイントも作らない（S3 Tables / events / aps の API は NAT Gateway 経由）",
+check("analytics は SG もインターフェース型エンドポイントも作らない（S3 Tables / events / aps / logs の API は土台のエンドポイントを通る）",
       'resource "aws_security_group"' not in tf and 'resource "aws_vpc_endpoint"' not in tf and "aws_vpc_security_group_" not in tf
       and not any(k in tf for k in ("msk_sg_id", "neptune_sg_id", "emr_self", "msk_from_emr", "endpoints_from_emr")))
 check("EMR のアプリケーションは土台の internal SG を使う",
@@ -78,7 +78,7 @@ check("土台の internal SG は VPC の CIDR から全部受け（EMR Serverles
       re.search(r'resource "aws_vpc_security_group_ingress_rule" "internal_from_vpc"[\s\S]*?security_group_id\s*=\s*aws_security_group\.internal\.id[\s\S]*?ip_protocol\s*=\s*"-1"[\s\S]*?cidr_ipv4\s*=\s*var\.vpc_cidr', _core, re.S) is not None
       and re.search(r'resource "aws_vpc_security_group_egress_rule" "internal_all"[\s\S]*?ip_protocol\s*=\s*"-1"[\s\S]*?cidr_ipv4\s*=\s*"0\.0\.0\.0/0"', _core, re.S) is not None
       and "0.0.0.0/0" not in re.search(r'resource "aws_vpc_security_group_ingress_rule" "internal_from_vpc" \{(.*?)\n\}', _core, re.S).group(1))
-check("土台の endpoints SG は internal からの 443 だけ受け、外へ出さない（OpenSearch Serverless の VPC エンドポイント用）",
+check("土台の endpoints SG は internal からの 443 だけ受け、外へ出さない（インターフェース型と OpenSearch Serverless の VPC エンドポイント用）",
       re.search(r'"endpoints_from_internal"[\s\S]*?security_group_id\s*=\s*aws_security_group\.endpoints\.id[\s\S]*?from_port\s*=\s*443[\s\S]*?referenced_security_group_id\s*=\s*aws_security_group\.internal\.id', _core, re.S) is not None
       and _core.count('resource "aws_security_group"') == 2)
 
@@ -146,7 +146,7 @@ check("土台の OpenSearch Serverless の VPC エンドポイントは create_o
 check("OpenSearch のデータアクセスは EMR の実行ロールだけ、snmp-logs のインデックスに WriteDocument / CreateIndex",
       re.search(r'resource "aws_opensearchserverless_access_policy" "logs"[\s\S]*?"aoss:CreateIndex"[\s\S]*?"aoss:WriteDocument"[\s\S]*?Principal\s*=\s*\[aws_iam_role\.emr\.arn\]', tf, re.S) is not None
       and re.search(r'opensearch_index\s*=\s*"snmp-logs"', tf) is not None)
-check("Prometheus はワークスペース <prefix>-metrics（remote write は NAT Gateway 経由。aps のエンドポイントは無い）",
+check("Prometheus はワークスペース <prefix>-metrics（remote write は土台の aps-workspaces のエンドポイントを通る。analytics はエンドポイントを持たない）",
       re.search(r'resource "aws_prometheus_workspace" "metrics"[\s\S]*?count\s*=\s*local\.sink_prometheus \? 1 : 0[\s\S]*?alias\s*=\s*local\.metrics_workspace', tf, re.S) is not None
       and re.search(r'metrics_workspace\s*=\s*"\$\{local\.name_prefix\}-metrics"', tf) is not None
       and 'resource "aws_vpc_endpoint" "aps"' not in tf)
@@ -507,15 +507,56 @@ check("up.sh は SINK_S3 / SINK_OPENSEARCH / SINK_PROMETHEUS（既定 1）を te
 check("up.sh は検知の device map を lab の定義から作って渡し（lab/lab_topology.py --device-map）、graph の投入は Spark のジョブより先",
       'DEVICE_MAP=$("${PY[@]}" lab/lab_topology.py lab --device-map)' in up
       and up.index("7-3b. Neptune が空なら") < up.index("tf_apply pipeline/analytics") < up.index('log "7-5. Spark'))
-check("up.sh は AGENT=0 でも CloudWatch へのログを切らない（CloudWatch Logs へは NAT Gateway で届く）",
+check("up.sh は AGENT=0 でも CloudWatch へのログを切らない（CloudWatch Logs へは土台の logs のエンドポイントで届く）",
       "cloudwatch_logging=false" not in up and re.search(r'variable "cloudwatch_logging" \{[^}]*default\s*=\s*true', tf) is not None)
-# 2026-09-26 に PrivateLink（インターフェース型エンドポイント 12 本）から NAT Gateway に替えた。戻すときは 7c42b0f（docs/setup.md）
-check("土台のエンドポイントは S3 の Gateway 型 1 本だけで、ポリシーは付けない（2026-09-15 / 17 の障害）",
-      _core.count('resource "aws_vpc_endpoint"') == 1
-      and re.search(r'resource "aws_vpc_endpoint" "s3" \{(.*?)\n\}', _core, re.S) is not None
-      and 'vpc_endpoint_type = "Gateway"' in re.search(r'resource "aws_vpc_endpoint" "s3" \{(.*?)\n\}', _core, re.S).group(1)
-      and "policy" not in re.search(r'resource "aws_vpc_endpoint" "s3" \{(.*?)\n\}', _core, re.S).group(1)
+# 2026-09-26〜28 は NAT Gateway だけで AWS の API に出ていた。2026-09-28 に閉域（エンドポイント + aws:SourceVpc の Deny）にした
+_s3ep = re.search(r'resource "aws_vpc_endpoint" "s3" \{(.*?)\n\}', _core, re.S)
+check("土台の S3 は Gateway 型で、ポリシーは付けない（2026-09-15 / 17 の障害）",
+      _s3ep is not None and 'vpc_endpoint_type = "Gateway"' in _s3ep.group(1) and "policy" not in _s3ep.group(1)
       and not any(k in _core for k in ("create_shared_endpoints", "create_ssm_endpoints", "client_cidr")))
+_ifep = re.search(r'resource "aws_vpc_endpoint" "interface" \{(.*?)\n\}', _core, re.S)
+check("インターフェース型エンドポイントは var.interface_endpoints の for_each 1 か所だけ（private DNS、endpoints SG、このアカウントだけのポリシー）",
+      _core.count('resource "aws_vpc_endpoint"') == 2 and _ifep is not None
+      and "for_each = toset(var.interface_endpoints)" in _ifep.group(1) and "private_dns_enabled = true" in _ifep.group(1)
+      and "security_group_ids  = [aws_security_group.endpoints.id]" in _ifep.group(1)
+      and re.search(r'Sid\s*=\s*"OwnAccountOnly"[\s\S]*?"aws:PrincipalAccount"\s*=\s*local\.account_id', _ifep.group(1)) is not None
+      and re.search(r'variable "interface_endpoints"[\s\S]*?default\s*=\s*\["ssm", "ssmmessages"\]', _core) is not None
+      and re.search(r'subnet_ids\s*=\s*local\.endpoint_subnet_ids', _ifep.group(1)) is not None
+      and re.search(r'endpoint_subnet_ids\s*=\s*var\.endpoints_multi_az \? \[aws_subnet\.a\.id, aws_subnet\.b\.id\] : \[aws_subnet\.a\.id\]', _core) is not None)
+# ---- 閉域の Deny（terraform/base/core/perimeter.tf と、analytics が付けるもの）
+_perim = open(os.path.join(ROOT, "terraform", "base", "core", "perimeter.tf"), encoding="utf-8").read()
+check("perimeter.tf: aws:SourceVpc がこの VPC でなく、AWS のサービス経由でもない呼び出しを拒む（S3 Tables が裏で呼ぶ分は外す）",
+      re.search(r'StringNotEqualsIfExists\s*=\s*\{\s*"aws:SourceVpc"\s*=\s*aws_vpc\.this\.id,\s*"aws:CalledViaLast"\s*=\s*"s3tables\.amazonaws\.com"\s*\}', _perim) is not None
+      and re.search(r'BoolIfExists\s*=\s*\{\s*"aws:ViaAWSService"\s*=\s*"false"\s*\}', _perim) is not None
+      and all(f'"{a}"' in _perim for a in ("s3:*", "s3tables:*", "sqs:*", "ssm:*", "bedrock:*", "events:*", "aps:*", "bedrock-agentcore:InvokeAgentRuntime"))
+      and "neptune-db" not in _perim.split("perimeter_denied_actions")[1].split("]")[0] and "kafka-cluster" not in _perim.split("perimeter_denied_actions")[1].split("]")[0])
+check("perimeter.tf: ポリシーはいつも作り、NETWORK_PERIMETER=0 では何も拒まない中身にする（他のルートが付けたままでも base/core の apply が落ちない）",
+      re.search(r'resource "aws_iam_policy" "network_perimeter" \{\n\s*name', _perim) is not None
+      and 'var.network_perimeter ? aws_iam_policy.network_perimeter.arn : ""' in _core)
+check("analytics: EMR のロールに perimeter を付け、テーブルバケットにも VPC の外を拒むポリシーを付ける（ポリシーの操作とデプロイする人は外す）",
+      re.search(r'resource "aws_iam_role_policy_attachment" "emr_perimeter"[\s\S]*?count\s*=\s*local\.perimeter_policy_arn != "" \? 1 : 0', tf) is not None
+      and re.search(r'resource "aws_s3tables_table_bucket_policy" "tables"[\s\S]*?"s3tables:DeleteTableBucketPolicy"[\s\S]*?"aws:CalledViaLast"\s*=\s*"s3tables\.amazonaws\.com"[\s\S]*?"aws:PrincipalIsAWSService"\s*=\s*"false"[\s\S]*?local\.perimeter_exempt_principals', tf) is not None
+      and re.search(r'perimeter_policy_arn\s*=\s*try\(data\.terraform_remote_state\.main\.outputs\.network_perimeter_policy_arn,\s*""\)', tf) is not None)
+# up.sh のエンドポイントの選び方を切り出して bash で動かす
+_epblk = up[up.index('ENDPOINTS=""'):up.index('echo "インターフェース型エンドポイント')]
+def _endpoints(roots, **env):
+    r = subprocess.run(["bash", "-c", f'ROOTS="{roots}"\n' + _epblk + 'echo "OUT: $ENDPOINTS | $(endpoint_count) | $ENDPOINT_AZS"'],
+                       capture_output=True, text=True, env={"PATH": os.environ["PATH"], **env})
+    return r.stdout.strip().splitlines()[-1] if r.stdout.strip() else r.stderr
+import subprocess
+check("土台だけなら ssm / ssmmessages の 2 本", _endpoints("base/ecr base/core") == "OUT: ssm ssmmessages | 2 | 1")
+check("AGENT は bedrock-runtime / bedrock-agentcore / ecr / logs を足し、KB で bedrock-agent-runtime",
+      _endpoints("base/ecr base/core agent", AGENT="1") == "OUT: ssm ssmmessages bedrock-runtime bedrock-agentcore ecr.api ecr.dkr logs | 7 | 1"
+      and _endpoints("base/ecr base/core agent", AGENT="1", CREATE_KB="1").startswith("OUT: ssm ssmmessages bedrock-runtime bedrock-agentcore ecr.api ecr.dkr logs bedrock-agent-runtime | 8"))
+check("全部なら 13 本で重複しない（ecr / logs / s3tables / bedrock-agentcore は 1 本ずつ）、ENDPOINTS_MULTI_AZ=1 で 2 AZ",
+      _endpoints("base/ecr base/core agent pipeline/lab pipeline/stream pipeline/analytics pipeline/graph workflow", AGENT="1", CREATE_KB="1", SINK_PROMETHEUS="1", ENDPOINTS_MULTI_AZ="1")
+      == "OUT: ssm ssmmessages bedrock-runtime bedrock-agentcore ecr.api ecr.dkr logs s3tables events sqs bedrock-agentcore.gateway bedrock-agent-runtime aps-workspaces | 13 | 2")
+check("up.sh は base/core に interface_endpoints / network_perimeter / endpoints_multi_az を渡し、state に残るルートの分も足す",
+      'MAIN_VARS+=(-var "interface_endpoints=[' in up and 'MAIN_VARS+=(-var "network_perimeter=' in up and 'MAIN_VARS+=(-var "endpoints_multi_az=' in up
+      and re.search(r'if has_resources "\$r"; then\n\s*endpoints_for "\$r"', up) is not None
+      and 'NETWORK_PERIMETER="${NETWORK_PERIMETER:-1}"' in up
+      and all(k in open(os.path.join(ROOT, "ops", "deploy-env.sh"), encoding="utf-8").read() for k in ("NETWORK_PERIMETER", "ENDPOINTS_MULTI_AZ")))
+check("費用の目安にエンドポイント（1 本 1.4 セント × AZ）を足す", "COST_CENTS=$((COST_CENTS + ($(endpoint_count) * 14 * ENDPOINT_AZS + 5) / 10))" in up)
 check("土台は NAT Gateway 1 つ（パブリックサブネット + IGW + EIP）とプライベートの既定ルートを持つ",
       all(r in _core for r in ('resource "aws_nat_gateway" "this"', 'resource "aws_internet_gateway" "this"', 'resource "aws_eip" "nat"', 'resource "aws_subnet" "public"'))
       and re.search(r'resource "aws_route" "private_default"[\s\S]*?destination_cidr_block\s*=\s*"0\.0\.0\.0/0"[\s\S]*?nat_gateway_id\s*=\s*aws_nat_gateway\.this\.id', _core, re.S) is not None

@@ -52,6 +52,10 @@ locals {
   aoss_vpce_id = try(data.terraform_remote_state.main.outputs.opensearch_vpc_endpoint_id, "")
   bucket       = data.terraform_remote_state.main.outputs.kb_bucket_name
   bucket_arn   = "arn:${local.partition}:s3:::${local.bucket}"
+  # terraform/base/core の perimeter.tf の Deny（VPC エンドポイントを通らない AWS の API を拒む）。NETWORK_PERIMETER=0 か古い state なら空
+  perimeter_policy_arn = try(data.terraform_remote_state.main.outputs.network_perimeter_policy_arn, "")
+  # リソースポリシーの Deny から外すプリンシパル（デプロイする人と KB のロール）
+  perimeter_exempt_principals = try(data.terraform_remote_state.main.outputs.perimeter_exempt_principals, [])
 
   # stream が無いと読む Kafka が無い。emr.tf の precondition で「stream を先に」と出す
   msk_cluster_arn = try(data.terraform_remote_state.stream.outputs.msk_cluster_arn, "")

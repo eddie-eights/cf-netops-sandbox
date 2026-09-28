@@ -74,7 +74,7 @@ variable "log_retention_days" {
 }
 
 variable "cloudwatch_logging" {
-  description = "Send the driver stdout / stderr to CloudWatch Logs (through the NAT Gateway of the base root). false keeps the logs only in the asset bucket"
+  description = "Send the driver stdout / stderr to CloudWatch Logs (through the logs interface endpoint of the base root). false keeps the logs only in the asset bucket"
   type        = bool
   default     = true
 }

@@ -14,17 +14,19 @@
 | `AGENT` | チャット（Runtime + ガードレール）。既定 `1` |
 | `PIPELINE` | lab / stream / analytics / graph。既定 `0` |
 | `WORKFLOW` | Temporal での調査と修復。`AGENT=1` と `PIPELINE=1` が要り、`SKIP_LAB` / `SKIP_STREAM` / `SKIP_ANALYTICS` とは一緒に書けない |
-| `CREATE_KB` | ナレッジベース（+$0.36/h。OpenSearch Serverless の VPC エンドポイント $0.03 を含み、`SINK_OPENSEARCH` の logs と共用）。`AGENT=1` のとき |
+| `CREATE_KB` | ナレッジベース（+$0.37/h。OpenSearch Serverless の VPC エンドポイント $0.03（`SINK_OPENSEARCH` の logs と共用）と bedrock-agent-runtime のエンドポイント $0.014 を含む）。`AGENT=1` のとき |
 | `SKIP_LAB` | lab を作らない（-$0.09/h）。`SKIP_STREAM=1` も要る |
-| `SKIP_STREAM` | stream と Telegraf の EC2 を作らない（-$1.08/h）。analytics も外れる |
-| `SKIP_ANALYTICS` | analytics を作らない（-$0.50/h。KB を作るなら VPC エンドポイントは残るので -$0.47/h）。異常一覧は使えない |
+| `SKIP_STREAM` | stream と Telegraf の EC2 を作らない（-$1.12/h）。analytics も外れる |
+| `SKIP_ANALYTICS` | analytics を作らない（-$0.54/h。KB を作るなら OpenSearch Serverless の VPC エンドポイントは残るので -$0.51/h）。異常一覧は使えない |
 | `SKIP_GRAPH` | Neptune を作らない（-$0.14/h）。トポロジは静的データになる |
 | `SINK_S3` / `SINK_OPENSEARCH` / `SINK_PROMETHEUS` | Spark の格納先。既定は 3 つとも `1`。`0` にするとリソースごと作らない。`SINK_SPLUNK` と合わせて全部 `0` は止まる |
-| `SINK_SPLUNK` | 4 本目の格納先。`1` で Spark が全トピックを AWS の外の Splunk の HTTP Event Collector（HEC）に送る。既定 `0`。`SPLUNK_HEC_URL`（`https://…:8088`）が要り、token は先に SSM の SecureString `/<接頭辞>/splunk/hec-token` に手で入れる。Spark は NAT Gateway で外に出るので、Splunk Cloud の公開 HEC にも社内の Splunk Enterprise にも届く。`SPLUNK_INDEX`（空なら token の既定）と `SPLUNK_SKIP_TLS_VERIFY`（自己署名のとき `1`）も読む。AWS 側の費用は 0 |
+| `SINK_SPLUNK` | 4 本目の格納先。`1` で Spark が全トピックを AWS の外の Splunk の HTTP Event Collector（HEC）に送る。既定 `0`。`SPLUNK_HEC_URL`（`https://…:8088`）が要り、token は先に SSM の SecureString `/<接頭辞>/splunk/hec-token` に手で入れる。Spark は NAT Gateway で外に出るので（AWS の外へ出るのは NAT Gateway の役目。AWS の API はエンドポイントを通る）、Splunk Cloud の公開 HEC にも社内の Splunk Enterprise にも届く。`SPLUNK_INDEX`（空なら token の既定）と `SPLUNK_SKIP_TLS_VERIFY`（自己署名のとき `1`）も読む。AWS 側の費用は 0 |
 | `IMAGE_TAG` | エージェントとワーカーのイメージのタグ。既定 `v1` |
 | `KEEP_ECR` | `1` で `ops/down.sh` が ECR を残す（保管料は月数円） |
 | `AWS_PROFILE` / `LOCAL_PORT` / `NO_PORTFORWARD` | プロファイル / PC 側のポート（既定 8080）/ ポートフォワーディングを開かない |
 | `VPC_CIDR` | VPC の CIDR（[setup.md](setup.md)） |
+| `NETWORK_PERIMETER` | VPC のエンドポイントを通らない AWS の API の呼び出しを拒む Deny（[architecture.md](architecture.md) の「閉域」）。既定 `1`。`0` は `AccessDenied` の切り分けのときだけ（エンドポイントは作ったまま、Deny だけを外す） |
+| `ENDPOINTS_MULTI_AZ` | インターフェース型エンドポイントを 2 AZ に置く（本番の形。エンドポイントの費用が倍）。既定 `0` でサブネット a だけ（b のワークロードも private DNS で a の ENI に届く） |
 | `AWS_CA_BUNDLE` | 社内 PC の CA（[setup.md](setup.md)）。前にあった `OPENSEARCH_CACERT_FILE` と `ADMIN_ARN` は 2026-09-28 から使わない（書いてあっても止まらず、注意だけ出る） |
 | `TF_VERBOSE` | `1` で terraform の出力を全部出す。既定は要点だけで、全文は `ops/logs/tf-<ルート>-apply.log` |
 
@@ -37,10 +39,10 @@
 
 | 手順 | 何をする |
 |---|---|
-| 0 | `deploy.env` と道具と認証を確かめ、作るルートと費用の目安を出す |
+| 0 | `deploy.env` と道具と認証を確かめ、作るルート、インターフェース型エンドポイント、費用の目安を出す |
 | 1 | `terraform/base/ecr` |
 | 2 | ECR に無いタグだけ arm64 でビルドして push（agent、lab の srlinux / multitool のミラー、worker、Temporal のミラー） |
-| 3 | `terraform/base/core`。graph を作るなら裏で `terraform/pipeline/graph` を始める（ログは `ops/logs/graph-apply.log`） |
+| 3 | `terraform/base/core`（エンドポイントは今回作る機能の分に、state にリソースが残っているルートの分を足す）。graph を作るなら裏で `terraform/pipeline/graph` を始める（ログは `ops/logs/graph-apply.log`） |
 | 3-3 | `terraform/agent` |
 | 4 | Web の部品を S3 に置く。`CREATE_KB=1` なら手順書を取り込む。Web を再起動 |
 | 5 | lab の rpm、Telegraf のポーリング先（lab の定義から作る）、Spark の jar 6 本と `spark/snmp_sinks.py` を S3 に置く |
@@ -126,7 +128,7 @@ terraform -chdir=terraform/base/core output -raw start_session_command
 | 「dc1-leaf-01 の BGP のセッションは？」 | `layers` ツールで EVPN/BGP 層（相手の Spine 2 台、EVI 100、ES-2）が返る |
 | 「今の異常は？」 | PIPELINE があれば異常一覧が返る |
 
-Runtime だけを CLI で確かめる:
+Runtime だけを CLI で確かめる（Runtime のリソースポリシーは VPC の外からの呼び出しを拒むが、apply した人は外してあるので PC から打てる）:
 
 ```bash
 RUNTIME_ARN=$(terraform -chdir=terraform/agent output -raw agent_runtime_arn); echo "$RUNTIME_ARN"

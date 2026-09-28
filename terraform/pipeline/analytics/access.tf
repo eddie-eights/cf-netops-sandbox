@@ -121,7 +121,7 @@ resource "aws_iam_role_policy" "emr" {
         Resource = local.sink_prometheus ? aws_prometheus_workspace.metrics[0].arn : ""
       }] : s if local.sink_prometheus],
       [for s in [{
-        # HEC の token（SSM の SecureString）を起動時に読む（ssm の API へは NAT Gateway から出る）。
+        # HEC の token（SSM の SecureString）を起動時に読む（ssm の API へは terraform/base/core の ssm のエンドポイントを通る）。
         # 復号は SSM の AWS 管理キー aws/ssm のキーポリシーが ssm 経由の呼び出しに許しているので kms:Decrypt は要らない
         # （自分の KMS キーで暗号化したパラメータなら、そのキーに kms:Decrypt を足す）
         Sid      = "SplunkHecToken"
@@ -131,4 +131,14 @@ resource "aws_iam_role_policy" "emr" {
       }] : s if local.sink_splunk],
     )
   })
+}
+
+# terraform/base/core の perimeter.tf の Deny（VPC エンドポイントを通らない呼び出しを拒む）。
+# スクリプト・jar・checkpoint は S3 gateway、S3 Tables は s3tables のエンドポイント、remote write は aps-workspaces、
+# put_events は events、token は ssm のエンドポイントを通る。HEC だけが NAT から AWS の外へ出る
+resource "aws_iam_role_policy_attachment" "emr_perimeter" {
+  count = local.perimeter_policy_arn != "" ? 1 : 0
+
+  role       = aws_iam_role.emr.name
+  policy_arn = local.perimeter_policy_arn
 }

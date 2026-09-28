@@ -1,6 +1,6 @@
 # netops-poc - agent root module (feature "agent"). The AgentCore Runtime (VPC mode) that answers the chat, its
-# execution policy and the guardrail (the runtime reaches Bedrock / ECR / CloudWatch Logs through the NAT Gateway of
-# terraform/base/core; the interface endpoints were removed on 2026-09-26). Optionally (create_knowledge_base = true) a Bedrock
+# execution policy and the guardrail (the runtime reaches Bedrock / SSM / the gateway through the interface endpoints of
+# terraform/base/core, which ops/up.sh asks for when AGENT=1; the perimeter there denies calls from outside the VPC). Optionally (create_knowledge_base = true) a Bedrock
 # Knowledge Base on OpenSearch Serverless for RAG - off by default because the collection costs about 0.33 USD per hour.
 # The VPC, the security groups, the S3 bucket, the chat web EC2 and the runtime IAM role come from terraform/base/core
 # (read through terraform_remote_state), so this root can be created and destroyed on its own while the base stays.
@@ -47,6 +47,9 @@ locals {
   bucket_arn        = data.terraform_remote_state.main.outputs.kb_bucket_arn
   # 土台の OpenSearch Serverless の VPC エンドポイント（create_opensearch_endpoint=true のときだけある。古い state には output が無い）
   aoss_vpce_id = try(data.terraform_remote_state.main.outputs.opensearch_vpc_endpoint_id, "")
+  # terraform/base/core の perimeter.tf（NETWORK_PERIMETER=0 か古い state なら空）
+  perimeter_policy_arn        = try(data.terraform_remote_state.main.outputs.network_perimeter_policy_arn, "")
+  perimeter_exempt_principals = try(data.terraform_remote_state.main.outputs.perimeter_exempt_principals, [])
 
   kb = var.create_knowledge_base
 

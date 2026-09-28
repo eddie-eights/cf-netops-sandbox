@@ -116,7 +116,8 @@ data "aws_iam_policy_document" "tools" {
 }
 
 # ---------------------------------------------------------------- tools Lambda network (subnet a of terraform/base/core)
-# Lambda の SG は terraform/base/core の internal。Neptune と aoss の VPC エンドポイントは同じ SG の中、SSM / aps / logs へは NAT Gateway から出る。
+# Lambda の SG は terraform/base/core の internal。Neptune と aoss の VPC エンドポイントは同じ SG の中、SSM / aps へは terraform/base/core の
+# インターフェース型エンドポイントを通る（ログは Lambda のサービスが書く）。
 # 2026-09-26 まではここに tools の SG と 4 本のルールがあった（7c42b0f）
 
 # 検索だけ。terraform/pipeline/analytics の data access policy は Spark の実行ロール（書く側）だけなので、読む側はここで足す
@@ -150,6 +151,14 @@ resource "aws_iam_role_policy" "tools" {
   name   = "${local.name_prefix}-tools"
   role   = aws_iam_role.tools[0].name
   policy = data.aws_iam_policy_document.tools.json
+}
+
+# terraform/base/core の perimeter.tf の Deny。ログと ENI は Lambda のサービスがこのロールで出すので、Deny の対象に入っていない
+resource "aws_iam_role_policy_attachment" "tools_perimeter" {
+  count = var.create_gateway && local.perimeter_policy_arn != "" ? 1 : 0
+
+  role       = aws_iam_role.tools[0].name
+  policy_arn = local.perimeter_policy_arn
 }
 
 resource "aws_cloudwatch_log_group" "tools" {
@@ -254,6 +263,29 @@ resource "aws_bedrockagentcore_gateway" "tools" {
   }
 
   depends_on = [aws_iam_role_policy.gateway]
+}
+
+# この VPC のエンドポイント（bedrock-agentcore.gateway）を通らない InvokeGateway を拒む（terraform/base/core の perimeter.tf の資源側。
+# AgentCore の文書の DenyAllExceptVPC と同じ形）。呼ぶのはチャットの Runtime だけで、Runtime は VPC の中にいる
+resource "aws_bedrockagentcore_resource_policy" "gateway" {
+  count = var.create_gateway && local.perimeter_policy_arn != "" ? 1 : 0
+
+  resource_arn = aws_bedrockagentcore_gateway.tools[0].gateway_arn
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Sid       = "DenyOutsideVpc"
+      Effect    = "Deny"
+      Principal = "*"
+      Action    = "bedrock-agentcore:InvokeGateway"
+      Resource  = aws_bedrockagentcore_gateway.tools[0].gateway_arn
+      Condition = {
+        StringNotEqualsIfExists = { "aws:SourceVpc" = local.vpc_id }
+        BoolIfExists            = { "aws:ViaAWSService" = "false" }
+        ArnNotLike              = { "aws:PrincipalArn" = local.perimeter_exempt_principals }
+      }
+    }]
+  })
 }
 
 resource "aws_bedrockagentcore_gateway_target" "tools" {

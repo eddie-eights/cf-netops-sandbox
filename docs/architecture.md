@@ -42,6 +42,23 @@ flowchart LR
 
 WORKFLOW の流れは [workflow.md](workflow.md)、データの置き場は [data-stores.md](data-stores.md)。
 
+## 閉域
+
+AWS の API へは全部 VPC エンドポイントから行き、この VPC を通らない呼び出しを拒む。NAT Gateway は AWS の外（Splunk の HEC など）へ出るためだけに置く。
+
+| 層 | 何をする | どこ |
+|---|---|---|
+| 経路 | インターフェース型エンドポイント（private DNS）。`ops/up.sh` が機能から選ぶ: 土台 ssm / ssmmessages、AGENT は bedrock-runtime / bedrock-agentcore / ecr.api / ecr.dkr / logs（KB で bedrock-agent-runtime）、lab は ecr、analytics は s3tables / events / logs（Prometheus で aps-workspaces）、WORKFLOW は sqs / s3tables / bedrock-agentcore(.gateway) など。S3 は gateway 型（無料）、OpenSearch Serverless は専用の 1 本 | `terraform/base/core/endpoints.tf` |
+| エンドポイントポリシー | このアカウントのプリンシパルだけ（盗んだ他のアカウントの鍵で VPC から持ち出す経路を塞ぐ）。S3 の gateway は付けない（dnf と ECR のレイヤーが止まる） | 同上 |
+| IAM の Deny | ワークロードのロール全部（Web、Runtime、lab、Telegraf、EMR、ECS、tools Lambda）に `<prefix>-network-perimeter` を付ける。s3 / s3tables / sqs / ssm / bedrock / events / aps / AgentCore の呼び出しで `aws:SourceVpc` がこの VPC でなければ拒む | `terraform/base/core/perimeter.tf`、各ルートの attachment |
+| リソースポリシーの Deny | バケット、S3 Tables のテーブルバケット、SQS（本体と DLQ）、AgentCore の Runtime と Gateway。同じ条件で、どのプリンシパルからでも VPC の外なら拒む | `bucket.tf`、`pipeline/analytics/tables.tf`、`workflow/events.tf`、`workflow/gateway.tf`、`agent/runtime.tf` |
+
+- **拒まないもの**: apply した人（`terraform` を打つ PC は VPC の外なので。PoC の割り切り）、AWS のサービス自身（`aws:PrincipalIsAWSService`）とサービスが代わりに呼ぶもの（`aws:ViaAWSService`。EventBridge → SQS、Bedrock → S3 など）、KB のロール `<prefix>-kb`（取り込みは Bedrock のサービス側で動く）。
+- S3 Tables の Iceberg REST は、S3 Tables が裏で呼ぶ API に元の VPC が付かないので `aws:CalledViaLast = s3tables.amazonaws.com` を外してある。
+- Neptune と MSK の IAM 認証にはこの条件キーが無いので Deny に入れない（どちらも VPC の中にしか口が無い）。Prometheus のワークスペースはリソースポリシーの Deny を確かめていないので IAM の側だけ。
+- apply する人が替わったら、その人が `ops/up.sh` を打ち直す（外すプリンシパルが入れ替わる）。前の人の設定のままバケットに入れないときは [troubleshooting.md](troubleshooting.md) の「閉域」。
+- 本番では、apply も VPC の中（CI のランナーなど）から打ち、外す人を無くす。NAT から出る先を絞るなら Network Firewall のドメインの許可リストを足す（この PoC には無い）。
+
 ## どのファイルがどこで動くか
 
 `app.py` が 2 つあり、動く場所が違う。
@@ -72,7 +89,7 @@ WORKFLOW の流れは [workflow.md](workflow.md)、データの置き場は [dat
 terraform/
 ├── base/
 │   ├── ecr/         ECR リポジトリ
-│   └── core/        VPC / NAT Gateway / SG（internal と endpoints）/ バケット / ロール / Web の EC2
+│   └── core/        VPC / NAT Gateway / VPC エンドポイント / 閉域の Deny（perimeter.tf）/ SG（internal と endpoints）/ バケット / ロール / Web の EC2
 ├── agent/         AGENT=1     Runtime / ガードレール / KB
 ├── pipeline/      PIPELINE=1
 │   ├── lab/         containerlab の EC2 と Telegraf の EC2（stream を作るとき）

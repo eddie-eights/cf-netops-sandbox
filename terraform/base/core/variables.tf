@@ -81,3 +81,31 @@ variable "create_opensearch_endpoint" {
   type        = bool
   default     = false
 }
+
+# ---------------------------------------------------------------- network perimeter (endpoints.tf, perimeter.tf)
+variable "interface_endpoints" {
+  description = "Interface VPC endpoints to create (the part after com.amazonaws.<region>.). Every AWS API the workloads call goes through one of these instead of the NAT Gateway, so the perimeter (perimeter.tf) can require aws:SourceVpc. ops/up.sh builds the list from the features (and from roots that still have resources). About 0.014 USD/h per AZ each."
+  type        = list(string)
+  default     = ["ssm", "ssmmessages"]
+
+  validation {
+    condition = alltrue([for s in var.interface_endpoints : contains([
+      "ssm", "ssmmessages", "ecr.api", "ecr.dkr", "logs",
+      "bedrock-runtime", "bedrock-agent-runtime", "bedrock-agentcore", "bedrock-agentcore.gateway",
+      "s3tables", "events", "aps-workspaces", "sqs",
+    ], s)])
+    error_message = "interface_endpoints may only list ssm, ssmmessages, ecr.api, ecr.dkr, logs, bedrock-runtime, bedrock-agent-runtime, bedrock-agentcore, bedrock-agentcore.gateway, s3tables, events, aps-workspaces and sqs."
+  }
+}
+
+variable "endpoints_multi_az" {
+  description = "Put the interface endpoints in both subnets (production). false puts them in subnet a only - workloads in subnet b still reach them through the private DNS (cross-AZ), at half the hourly price."
+  type        = bool
+  default     = false
+}
+
+variable "network_perimeter" {
+  description = "Deny AWS API calls that do not come through this VPC (aws:SourceVpc): an IAM policy on the workload roles (perimeter.tf, attached by every root) and resource policies on the bucket here, the S3 Tables bucket, the SQS queues and the AgentCore Runtime and Gateway in the other roots (Prometheus has no resource policy - only the IAM side). The deployer (whoever runs terraform) and AWS service principals are excepted. false only to rule it out while troubleshooting."
+  type        = bool
+  default     = true
+}

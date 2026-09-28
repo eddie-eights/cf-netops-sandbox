@@ -1,7 +1,7 @@
 # ---------------------------------------------------------------- Spark の格納先（var.sinks で選ぶ。Kafka を 4 つの格納先に分ける）
 # iceberg    = 全トピック → tables.tf の S3 Tables（常に作る。テーブルは無料）
 # opensearch = ログのトピック → ここで作る OpenSearch Serverless の TIMESERIES コレクション（terraform/base/core の VPC エンドポイント経由だけ）
-# prometheus = メトリクスのトピック → ここで作る Amazon Managed Service for Prometheus のワークスペース（remote write は NAT Gateway 経由）
+# prometheus = メトリクスのトピック → ここで作る Amazon Managed Service for Prometheus のワークスペース（remote write は terraform/base/core の aps-workspaces のエンドポイント経由）
 # splunk     = 全トピック → AWS の外にある Splunk の HTTP Event Collector（var.splunk_hec_url）。Splunk 自体はここでは作らない。
 #              ここにあるのは実行ロールの ssm:GetParameter（token。access.tf）と job_driver の引数（outputs.tf）だけ（HEC へは NAT Gateway から出る）。
 #              2026-09-26 まで MSK Connect の Splunk Connect for Kafka にする予定だったが、Spark から直接書くことにした（コネクタのワーカー分の費用と VPC エンドポイントが要らない）
@@ -102,4 +102,6 @@ resource "aws_prometheus_workspace" "metrics" {
   tags = { Name = local.metrics_workspace }
 }
 
-# remote write の API（aps-workspaces）へは NAT Gateway から出る（2026-09-26 までは interface endpoint。7c42b0f）
+# remote write の API（aps-workspaces）へは terraform/base/core の aps-workspaces のエンドポイントを通る（ops/up.sh が SINK_PROMETHEUS のときに作らせる）。
+# ワークスペースのリソースポリシーでは VPC の外を拒まない（Prometheus 互換の API の共有用で、Deny と aws:SourceVpc が効くか確かめられない。
+# terraform/base/core の perimeter.tf の IAM 側の Deny だけで止める）

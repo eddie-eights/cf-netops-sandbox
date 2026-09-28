@@ -1,10 +1,12 @@
 # ---------------------------------------------------------------- VPC endpoints
-# 残すのは S3 の gateway エンドポイントと、OpenSearch Serverless の VPC エンドポイント（create_opensearch_endpoint のとき）だけ。
-# S3 の gateway エンドポイントは無料（S3 / S3 Tables / ECR のレイヤー / AL2023 の dnf リポジトリの転送量を NAT の 0.062 USD/GB から外す）。
-# S3 のエンドポイントポリシーは付けない: バケットへの操作の絞り込みは各ロールの IAM ポリシーで行う。
-# ポリシーで絞っていた頃は 2026-09-15（ListBucket が落ちて web/ の取得が失敗）と 2026-09-17（S3 Tables の metadata.json が AccessDenied）に止まった。
-# ssm / ssmmessages / ecr.api / ecr.dkr / logs / bedrock-* / s3tables / events / aps / sqs のインターフェース型エンドポイントは
-# 2026-09-26 に NAT Gateway（vpc.tf）に置き換えた。戻すときは 7c42b0f の terraform/ を見る
+# AWS の API へは全部 VPC エンドポイントから行く。NAT Gateway（vpc.tf）は AWS の外（Splunk の HEC など）へ出るためだけに残す。
+# 経路を VPC エンドポイントに寄せると、リクエストに aws:SourceVpc（この VPC）が付くので、perimeter.tf の拒否（IAM とリソースポリシー）で
+# 「この VPC の外からの呼び出し」を止められる。NAT から出た呼び出しには aws:SourceVpc が付かない（2026-09-28 ユーザー決定: NAT は置くが閉域で高セキュアに）。
+#
+# S3 の gateway エンドポイントは無料（S3 / S3 Tables のデータ / ECR のレイヤー / AL2023 の dnf リポジトリ）。
+# S3 のエンドポイントポリシーは付けない: dnf のリポジトリは匿名の GET で、ECR のレイヤーは ECR が署名した URL なので、
+# aws:PrincipalAccount やバケットで絞ると止まる。ポリシーで絞っていた頃は 2026-09-15（ListBucket）と 2026-09-17（S3 Tables の metadata.json）に止まった。
+# バケットの側（bucket.tf、terraform/pipeline/analytics の S3 Tables）で aws:SourceVpc を要求する
 resource "aws_vpc_endpoint" "s3" {
   count = var.create_s3_gateway_endpoint ? 1 : 0
 
@@ -30,4 +32,41 @@ resource "aws_opensearchserverless_vpc_endpoint" "aoss" {
   vpc_id             = aws_vpc.this.id
   subnet_ids         = [aws_subnet.a.id, aws_subnet.b.id]
   security_group_ids = [aws_security_group.endpoints.id]
+}
+
+# インターフェース型エンドポイント。どれを作るかは ops/up.sh が機能から決めて var.interface_endpoints で渡す
+# （土台は ssm / ssmmessages: Web の EC2 の SSM Agent とポートフォワーディング、SSM パラメータ）。
+# 同じサービスの private DNS 付きエンドポイントは 1 つの VPC に 1 本しか作れないので、ルートごとに持たずここに集める
+# （2026-09-26 まではルートごとに持っていた。7c42b0f）。
+# エンドポイントポリシーは「このアカウントのプリンシパルだけ」: 盗んだ他のアカウントの鍵でこの VPC から外へ持ち出す経路を塞ぐ。
+# 1 本 1.4 セント/h × AZ（endpoints_multi_az = false ならサブネット a だけ。b のワークロードも private DNS で a の ENI に届く）
+locals {
+  endpoint_subnet_ids = var.endpoints_multi_az ? [aws_subnet.a.id, aws_subnet.b.id] : [aws_subnet.a.id]
+}
+
+resource "aws_vpc_endpoint" "interface" {
+  for_each = toset(var.interface_endpoints)
+
+  vpc_id              = aws_vpc.this.id
+  service_name        = "com.amazonaws.${var.region}.${each.key}"
+  vpc_endpoint_type   = "Interface"
+  private_dns_enabled = true
+  subnet_ids          = local.endpoint_subnet_ids
+  security_group_ids  = [aws_security_group.endpoints.id]
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Sid       = "OwnAccountOnly"
+      Effect    = "Allow"
+      Principal = "*"
+      Action    = "*"
+      Resource  = "*"
+      Condition = {
+        StringEquals = { "aws:PrincipalAccount" = local.account_id }
+      }
+    }]
+  })
+
+  tags = { Name = "${local.name_prefix}-${replace(each.key, ".", "-")}" }
 }

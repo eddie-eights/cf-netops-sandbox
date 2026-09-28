@@ -34,6 +34,8 @@ locals {
   subnet_id      = data.terraform_remote_state.main.outputs.instance_subnet_id
   internal_sg_id = data.terraform_remote_state.main.outputs.internal_security_group_id
   bucket         = data.terraform_remote_state.main.outputs.kb_bucket_name
+  # terraform/base/core の perimeter.tf の Deny（VPC エンドポイントを通らない AWS の API を拒む）。NETWORK_PERIMETER=0 か古い state なら空
+  perimeter_policy_arn = try(data.terraform_remote_state.main.outputs.network_perimeter_policy_arn, "")
   # 1 本（terraform/base/core の private）。Telegraf の EC2 から lab の管理ネットワークへの経路を足す
   route_table_ids = data.terraform_remote_state.main.outputs.route_table_ids
 

@@ -3,6 +3,18 @@
 # Spark の driver（terraform/pipeline/analytics）が既定のバスに Source <接頭辞>.spark / DetailType AnomalyOpened を put_events し、ここのルールが SQS に流す。
 # worker（workflow/worker.py の starter）は SQS を long polling して investigate-<anomaly_id> のワークフローを起こす（キューが無ければ従来どおりテーブルを polling）。
 # SQS を挟む理由: ECS のタスクは EventBridge から直接叩けない（API ターゲットも Lambda も要らない一番安い経路。SQS は 100 万リクエスト/月まで無料）。
+# キューのポリシーには VPC の外からの呼び出しを拒む Deny も入れる（terraform/base/core の perimeter.tf の資源側）。EventBridge は
+# aws:PrincipalIsAWSService で外れ、キューの属性（ポリシーを含む）の読み書きはデプロイする人が変わっても戻せるように外す
+
+locals {
+  sqs_policy_actions = ["sqs:GetQueueAttributes", "sqs:SetQueueAttributes"]
+  perimeter_conditions = [
+    { test = "StringNotEqualsIfExists", variable = "aws:SourceVpc", values = [local.vpc_id] },
+    { test = "BoolIfExists", variable = "aws:ViaAWSService", values = ["false"] },
+    { test = "Bool", variable = "aws:PrincipalIsAWSService", values = ["false"] },
+    { test = "ArnNotLike", variable = "aws:PrincipalArn", values = local.perimeter_exempt_principals },
+  ]
+}
 
 resource "aws_cloudwatch_event_rule" "anomalies" {
   name        = "${local.name_prefix}-anomalies"
@@ -50,6 +62,28 @@ data "aws_iam_policy_document" "anomalies_queue" {
       values   = [aws_cloudwatch_event_rule.anomalies.arn]
     }
   }
+
+  dynamic "statement" {
+    for_each = local.perimeter_policy_arn != "" ? [aws_sqs_queue.anomalies.arn] : []
+    content {
+      sid         = "DenyOutsideVpc"
+      effect      = "Deny"
+      not_actions = local.sqs_policy_actions
+      resources   = [statement.value]
+      principals {
+        type        = "*"
+        identifiers = ["*"]
+      }
+      dynamic "condition" {
+        for_each = local.perimeter_conditions
+        content {
+          test     = condition.value.test
+          variable = condition.value.variable
+          values   = condition.value.values
+        }
+      }
+    }
+  }
 }
 
 resource "aws_sqs_queue_policy" "anomalies" {
@@ -85,6 +119,28 @@ data "aws_iam_policy_document" "anomalies_dlq" {
       values   = [aws_cloudwatch_event_rule.anomalies.arn]
     }
   }
+
+  dynamic "statement" {
+    for_each = local.perimeter_policy_arn != "" ? [aws_sqs_queue.anomalies_dlq.arn] : []
+    content {
+      sid         = "DenyOutsideVpc"
+      effect      = "Deny"
+      not_actions = local.sqs_policy_actions
+      resources   = [statement.value]
+      principals {
+        type        = "*"
+        identifiers = ["*"]
+      }
+      dynamic "condition" {
+        for_each = local.perimeter_conditions
+        content {
+          test     = condition.value.test
+          variable = condition.value.variable
+          values   = condition.value.values
+        }
+      }
+    }
+  }
 }
 
 resource "aws_sqs_queue_policy" "anomalies_dlq" {
@@ -92,4 +148,4 @@ resource "aws_sqs_queue_policy" "anomalies_dlq" {
   policy    = data.aws_iam_policy_document.anomalies_dlq.json
 }
 
-# worker から SQS へは terraform/base/core の NAT Gateway から出る（2026-09-26 までは sqs の interface endpoint。7c42b0f）
+# worker から SQS へは terraform/base/core の sqs のインターフェース型エンドポイントを通る（ops/up.sh が WORKFLOW のときに作らせる）

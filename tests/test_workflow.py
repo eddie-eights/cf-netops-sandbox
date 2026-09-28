@@ -372,7 +372,12 @@ check("EventBridge のルールは <接頭辞>.spark / AnomalyOpened を SQS（a
       and 'resource "aws_cloudwatch_event_target" "anomalies"' in tf)
 check("キューのポリシーは events.amazonaws.com の SendMessage をそのルールに絞る", '"sqs:SendMessage"' in tf and "events.amazonaws.com" in tf and "aws_cloudwatch_event_rule.anomalies.arn" in tf)
 check("タスクロールは SQS の ReceiveMessage / DeleteMessage", '"sqs:ReceiveMessage", "sqs:DeleteMessage"' in tf)
-check("sqs のエンドポイントは無い（SQS へは NAT Gateway 経由。2026-09-26）", 'resource "aws_vpc_endpoint"' not in tf and "create_sqs_endpoint" not in tf)
+check("workflow はエンドポイントを持たない（SQS / S3 Tables / AgentCore へは土台のインターフェース型エンドポイント。2026-09-28）", 'resource "aws_vpc_endpoint"' not in tf and "create_sqs_endpoint" not in tf)
+check("閉域: 実行ロール・タスクロール・tools Lambda に perimeter を付け、キュー 2 つと Gateway は VPC の外からの呼び出しを拒む",
+      all(f'resource "aws_iam_role_policy_attachment" "{n}"' in tf for n in ("execution_perimeter", "task_perimeter", "tools_perimeter"))
+      and tf.count('sid         = "DenyOutsideVpc"') == 2 and "not_actions = local.sqs_policy_actions" in tf
+      and re.search(r'resource "aws_bedrockagentcore_resource_policy" "gateway"[\s\S]*?"bedrock-agentcore:InvokeGateway"[\s\S]*?aws_bedrockagentcore_gateway\.tools\[0\]\.gateway_arn[\s\S]*?"aws:SourceVpc"', tf) is not None
+      and all(v in tf for v in ('"aws:ViaAWSService"', '"aws:PrincipalIsAWSService"', "local.perimeter_exempt_principals")))
 check("output に anomaly_queue_url / anomaly_rule_name / tools_function_name", all(f'output "{o}"' in tf for o in ("anomaly_queue_url", "anomaly_rule_name", "tools_function_name")))
 check("Gateway の URL を SSM の gateway-url に書く", '"${local.param_prefix}/gateway-url"' in tf)
 check("aws_iam_role の description は ASCII だけ",
@@ -506,6 +511,8 @@ check("Runtime の ARN は agent が SSM に書き、web はそれを読む（ma
 check("agent は web のロールに InvokeAgentRuntime を付け、main の runtime ロールにポリシーを足す",
       'role = local.web_role_name' in agent_tf and 'bedrock-agentcore:InvokeAgentRuntime' in agent_tf and 'role = local.runtime_role_name' in agent_tf
       and 'output "runtime_role_arn"' in main_out and 'resource "aws_iam_role" "runtime"' in main_tf)
+check("閉域: Runtime のリソースポリシーは VPC の外からの InvokeAgentRuntime を拒み、apply した人は外す（deploy.md の CLI の確認が通る）",
+      re.search(r'resource "aws_bedrockagentcore_resource_policy" "runtime"[\s\S]*?"bedrock-agentcore:InvokeAgentRuntime"[\s\S]*?agent_runtime_arn[\s\S]*?"aws:SourceVpc"[\s\S]*?local\.perimeter_exempt_principals', agent_tf) is not None)
 check("down.sh は Runtime の ENI が残るあいだ VPC・サブネット・internal の SG を残して他（NAT Gateway も）を消す",
       "InterfaceType=='agentic_ai'" in down and "Name=tag:Name,Values=$PREFIX-vpc" in down and "tf base/core output -raw vpc_id" not in down and "Runtime の ENI の確認:" in down
       and '""|data.*|aws_vpc.this|aws_subnet.*|aws_security_group.internal) ;;' in down and "aws_security_group.runtime" not in down

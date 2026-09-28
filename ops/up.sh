@@ -46,11 +46,13 @@
 #   SKIP_GRAPH=1            PIPELINE=1 で graph（Neptune）を作らない。analytics の検知が異常を Neptune に書くので、SKIP_ANALYTICS=1（か SKIP_STREAM=1）も要る
 #   IMAGE_TAG               エージェント（WORKFLOW=1 ではワーカーも）のイメージのタグ。既定 v1。ECR にそのタグが無いときだけ PC の docker buildx でビルドして push する（タグは上書きできない）
 #   VPC_CIDR                terraform/base/core の vpc_cidr（社内と重なるとき）
+#   NETWORK_PERIMETER=0     VPC の外からの AWS の API を拒む Deny（terraform/base/core の perimeter.tf）を外す。既定 1。切り分けのときだけ
+#   ENDPOINTS_MULTI_AZ=1    インターフェース型エンドポイントを 2 AZ に置く（本番の形。費用は倍）。既定 0 でサブネット a だけ
 #   LOCAL_PORT              PC 側のポート。既定 8080
 #   NO_PORTFORWARD=1        ポートフォワーディングを開かずに終わる
 #   TF_VERBOSE=1            terraform の出力を全部画面に出す（既定は進みと結果だけ。全文は ops/logs/tf-<ルート>-apply.log）
 #   AWS_PROFILE / AWS_CA_BUNDLE  AWS CLI と terraform がそのまま読む
-# AGENT / PIPELINE / WORKFLOW / CREATE_KB / SKIP_* / SINK_* / NO_PORTFORWARD は 1 / 0 のほか true / false、yes / no でも書ける（ops/down.sh の KEEP_ECR は 1 か 0 だけ）。
+# AGENT / PIPELINE / WORKFLOW / CREATE_KB / SKIP_* / SINK_* / NO_PORTFORWARD / NETWORK_PERIMETER / ENDPOINTS_MULTI_AZ は 1 / 0 のほか true / false、yes / no でも書ける（ops/down.sh の KEEP_ECR は 1 か 0 だけ）。
 #
 # 手順 6（利用者への権限）は人に渡す作業なので入れていない。
 set -euo pipefail
@@ -249,6 +251,10 @@ if [ -z "$AGENT" ] && [ -n "$CREATE_KB" ]; then
   echo "AGENT=0 なので CREATE_KB は効かない（Knowledge Base は agent の一部）"
   CREATE_KB=""
 fi
+# 閉域（terraform/base/core の endpoints.tf と perimeter.tf）。AWS の API は全部インターフェース型エンドポイントを通し、通らない呼び出しを拒む
+NETWORK_PERIMETER="${NETWORK_PERIMETER:-1}"
+flag_value NETWORK_PERIMETER; flag_value ENDPOINTS_MULTI_AZ
+if [ -z "$NETWORK_PERIMETER" ]; then echo "NETWORK_PERIMETER=0: VPC の外からの呼び出しを拒む Deny を外す（エンドポイントは作る。切り分けが済んだら 1 に戻して打ち直す）"; fi
 if [ -z "$AGENT$PIPELINE$WORKFLOW" ]; then
   echo "機能が全部 0 なので土台（base/ecr + base/core）だけ作る（Web は「チャット」で「配備されていない」と返す）"
 fi
@@ -294,25 +300,55 @@ echo "CALLER_ARN=$CALLER_ARN"
 echo "IMAGE_TAG=$IMAGE_TAG"
 echo "AGENT=${AGENT:-0} PIPELINE=${PIPELINE:-0} WORKFLOW=${WORKFLOW:-0} CREATE_KB=${CREATE_KB:-0}"
 echo "作るルート: $ROOTS"
+# インターフェース型エンドポイント（terraform/base/core の var.interface_endpoints）。ルートが呼ぶ AWS の API ごとに 1 本。
+# 手順 3 で、今回作らなくても state にリソースが残っているルートの分を足す（外すとそのルートの呼び出しが NAT に出て perimeter の Deny に当たる）
+ENDPOINTS=""
+add_endpoints() {  # add_endpoints <サービス名…>  重複は足さない
+  local s
+  for s in "$@"; do
+    case " $ENDPOINTS " in *" $s "*) ;; *) ENDPOINTS="${ENDPOINTS:+$ENDPOINTS }$s" ;; esac
+  done
+}
+endpoints_for() {  # endpoints_for <ルート>  そのルートが呼ぶ AWS の API
+  case "$1" in
+    # Runtime（VPC モード）はイメージを ECR から引き、ログを CloudWatch に書く。モデルとガードレールは bedrock-runtime
+    agent) add_endpoints bedrock-runtime bedrock-agentcore ecr.api ecr.dkr logs ;;
+    # lab の EC2 と Telegraf の EC2 はイメージを ECR から引く（SSM は土台の分）
+    pipeline/lab) add_endpoints ecr.api ecr.dkr ;;
+    # Spark: S3 Tables の API、put_events、ドライバのログ（MSK / Neptune は VPC の中で、S3 は gateway）
+    pipeline/analytics) add_endpoints s3tables events logs ;;
+    # ワーカー: SQS、S3 Tables（修復案の証跡）、ECR、ログ、Runtime、Gateway
+    workflow) add_endpoints sqs s3tables ecr.api ecr.dkr logs bedrock-agentcore bedrock-agentcore.gateway ;;
+  esac
+}
+add_endpoints ssm ssmmessages   # 土台: Web の EC2 の SSM Agent とポートフォワーディング、SSM パラメータ
+for r in $ROOTS; do endpoints_for "$r"; done
+if [ -n "$AGENT" ] && [ -n "$CREATE_KB" ]; then add_endpoints bedrock-agent-runtime; fi   # KB の Retrieve
+if [ -z "$SKIP_ANALYTICS" ] && [ -n "$SINK_PROMETHEUS" ]; then add_endpoints aps-workspaces; fi   # remote write とツールの query
+endpoint_count() { set -- $ENDPOINTS; echo $#; }
+if [ -n "$ENDPOINTS_MULTI_AZ" ]; then ENDPOINT_AZS=2; else ENDPOINT_AZS=1; fi
+echo "インターフェース型エンドポイント（$(endpoint_count) 本 × ${ENDPOINT_AZS} AZ）: $ENDPOINTS"
 # 待機時の 1 時間あたりの目安（セント。東京リージョンの税抜。単価は 2026-09-14〜15 に Price List API で確認。README の「作るもの」と docs/deploy.md の金額はここから出している）。
 # 土台 = 8（NAT Gateway 1 つ 6.2 + Web の EC2 の t4g.small 2.2。NAT Gateway は通したデータに別に $0.062/GB かかる。
-#   2026-09-26 までは ssm / ssmmessages / ecr.api / ecr.dkr / logs のインターフェース型エンドポイント（1 本 1.4 × AZ）で、土台 5 + 共用 8 だった。
-#   NAT Gateway に替えてエンドポイントは S3 の Gateway 型だけになった。戻すときは 7c42b0f（docs/setup.md））、
-# agent = 0（Runtime は使った分だけ。bedrock のエンドポイント 3 本は NAT Gateway に替えて無くなった）
+#   NAT Gateway は AWS の外（Splunk の HEC など）へ出るためだけに置く）、
+# インターフェース型エンドポイント = 1 本 1.4 × AZ（ENDPOINTS。土台の ssm / ssmmessages 2 本と、ルートごとの分。同じサービスはルートをまたいで 1 本。
+#   2026-09-26〜28 は NAT Gateway だけで AWS の API へも出ていたが、閉域（aws:SourceVpc で拒む）にするため戻した。データ処理 $0.01/GB は別）、
+# agent = 0（Runtime は使った分だけ）
 #   + CREATE_KB なら 33（OpenSearch Serverless の OCU）、
 # OpenSearch Serverless の VPC エンドポイント = 3（1.4 × 2 AZ。公表単価からで Price List API では確かめていない。
 #   KB と logs のコレクションを公開しないために作り、両方で 1 本を共用する。NEED_AOSS のときだけ）、
 # lab = 9、graph = 14、stream = 57 + Telegraf の EC2 1（terraform/pipeline/lab が作る t4g.micro。
 #   公表単価 $0.0108/h からで、Price List API では確かめていない）、
 # analytics = 14（ストリーミングのジョブが動いている間の EMR Serverless の 2 vCPU。単価は 2026-09-17 に確認。
-#   s3tables / events / aps のエンドポイントは NAT Gateway に替えて無くなった。S3 Tables のテーブルは無料）
+#   S3 Tables のテーブルは無料）
 #   + SINK_PROMETHEUS は 0（取り込みのサンプル課金は別）
 #   + SINK_OPENSEARCH なら 33（logs コレクションの OCU。KB のコレクションと共有されるか確認できていないので最大値で数える。
 #     共有されれば 0 に近づく）
 #   + SINK_SPLUNK は 0（AWS 側には何も作らない。Splunk 側の取り込みのライセンスは別）、
-# workflow = 5（Fargate ARM 1 vCPU / 2 GB のタスク 1 つ。sqs のエンドポイントは NAT Gateway に替えて無くなった。Gateway と Lambda と SQS と S3 Tables への追記は使った分だけ。単価は 2026-09-17 に確認）。
+# workflow = 5（Fargate ARM 1 vCPU / 2 GB のタスク 1 つ。Gateway と Lambda と SQS と S3 Tables への追記は使った分だけ。単価は 2026-09-17 に確認）。
 # ここを変えたら README の「作るもの」と docs/deploy.md の金額も変える
 COST_CENTS=8
+COST_CENTS=$((COST_CENTS + ($(endpoint_count) * 14 * ENDPOINT_AZS + 5) / 10))
 if [ -n "$AGENT" ] && [ -n "$CREATE_KB" ]; then COST_CENTS=$((COST_CENTS + 33)); fi
 if [ -z "$SKIP_LAB" ]; then COST_CENTS=$((COST_CENTS + 9)); fi
 if [ -z "$SKIP_GRAPH" ]; then COST_CENTS=$((COST_CENTS + 14)); fi
@@ -406,8 +442,31 @@ for r in agent pipeline/analytics; do
   fi
 done
 if [ -n "$NEED_AOSS" ]; then MAIN_VARS+=(-var create_opensearch_endpoint=true); fi
-# 2026-09-26 までの配置（インターフェース型エンドポイント 12 本と SG 12 個）の state が残っていると、apply がエンドポイントと SG を消して
-# NAT Gateway に置き替える（Runtime の ENI が古い SG を掴んでいると SG の削除で 20 分待って落ちる）。一度 ops/down.sh で消してから打つ方が確実
+# 今回作らないルートでも、state にリソースが残っていればそのエンドポイントを残す
+for r in agent pipeline/lab pipeline/analytics workflow; do
+  case " $ROOTS " in *" $r "*) continue ;; esac
+  if [ -f "terraform/$r/terraform.tfstate" ]; then
+    tf_init "$r"
+    if has_resources "$r"; then
+      endpoints_for "$r"
+      echo "terraform/$r は今回作らないが state にリソースが残っているので、そのエンドポイントを残す"
+    fi
+  fi
+done
+for pair in 'agent aws_bedrockagent_knowledge_base\.' 'pipeline/analytics aws_prometheus_workspace\.'; do
+  r=${pair%% *}
+  [ -f "terraform/$r/terraform.tfstate" ] || continue
+  tf_init "$r"
+  if tf "$r" state list 2>/dev/null | grep -q "^${pair#* }"; then
+    case "$r" in agent) add_endpoints bedrock-agent-runtime ;; *) add_endpoints aps-workspaces ;; esac
+  fi
+done
+MAIN_VARS+=(-var "interface_endpoints=[\"$(printf '%s' "$ENDPOINTS" | sed 's/ /","/g')\"]")
+MAIN_VARS+=(-var "network_perimeter=$([ -n "$NETWORK_PERIMETER" ] && echo true || echo false)")
+MAIN_VARS+=(-var "endpoints_multi_az=$([ -n "$ENDPOINTS_MULTI_AZ" ] && echo true || echo false)")
+echo "エンドポイント: $ENDPOINTS"
+# 2026-09-26〜28 の配置（NAT Gateway だけ）の state からでもそのまま apply できる（エンドポイントと perimeter が足されるだけ）。
+# それより前（7c42b0f まで、ルートごとにエンドポイントと SG を持っていた頃）の state が残っていれば、先に ops/down.sh で消す
 tf_apply base/core ${MAIN_VARS[@]+"${MAIN_VARS[@]}"}
 INSTANCE_ID=$(tf base/core output -raw web_instance_id)
 KB_BUCKET=$(tf base/core output -raw kb_bucket_name)

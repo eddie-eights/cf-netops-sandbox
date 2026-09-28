@@ -78,8 +78,8 @@ output "configuration_overrides_json" {
     monitoringConfiguration = {
       s3MonitoringConfiguration                 = { logUri = "s3://${local.bucket}/${local.logs_prefix}/" }
       managedPersistenceMonitoringConfiguration = { enabled = false }
-      # CloudWatch Logs へは NAT Gateway から出る（2026-09-26 まではエンドポイント経由で、無い VPC で有効にするとジョブが
-      # 「Unable to push logs ... Connect timeout on endpoint URL: https://logs...」で FAILED になった）
+      # CloudWatch Logs へは terraform/base/core の logs のエンドポイントを通る（無い VPC で NAT も無いとジョブが
+      # 「Unable to push logs ... Connect timeout on endpoint URL: https://logs...」で FAILED になる。2026-09-17 に実測）
       cloudWatchLoggingConfiguration = {
         enabled      = var.cloudwatch_logging
         logGroupName = aws_cloudwatch_log_group.emr.name

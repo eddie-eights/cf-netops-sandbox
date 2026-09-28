@@ -70,6 +70,14 @@ resource "aws_iam_role_policy_attachment" "telegraf_ssm" {
   policy_arn = "arn:${local.partition}:iam::aws:policy/AmazonSSMManagedInstanceCore"
 }
 
+# terraform/base/core の perimeter.tf の Deny（VPC エンドポイントを通らない呼び出しを拒む）
+resource "aws_iam_role_policy_attachment" "telegraf_perimeter" {
+  count = var.create_telegraf && local.perimeter_policy_arn != "" ? 1 : 0
+
+  role       = aws_iam_role.telegraf[0].name
+  policy_arn = local.perimeter_policy_arn
+}
+
 resource "aws_iam_role_policy" "telegraf_assets" {
   count = var.create_telegraf ? 1 : 0
 

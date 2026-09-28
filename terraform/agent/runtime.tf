@@ -148,8 +148,33 @@ resource "aws_bedrockagentcore_agent_runtime" "agent" {
 
   tags = { Name = "${local.name_prefix}-agent" }
 
-  # イメージ取得とログ出力は terraform/base/core の NAT Gateway と S3 gateway エンドポイントを通る（base が先にできている）
+  # イメージ取得とログ出力は AgentCore のサービスがこのロールで行う。コンテナの中から Bedrock / SSM へは terraform/base/core の
+  # インターフェース型エンドポイントを通る（base が先にできている）
   depends_on = [aws_iam_role_policy.runtime]
+}
+
+# この VPC のエンドポイント（bedrock-agentcore）を通らない InvokeAgentRuntime を拒む（terraform/base/core の perimeter.tf の資源側。
+# AgentCore の文書の DenyAllExceptVPC と同じ形）。呼ぶのは Web の EC2 と workflow のワーカーで、どちらも VPC の中。
+# デプロイする人は外れるので、docs/deploy.md の「Runtime だけを CLI で確かめる」は PC から打てる
+resource "aws_bedrockagentcore_resource_policy" "runtime" {
+  count = local.perimeter_policy_arn != "" ? 1 : 0
+
+  resource_arn = aws_bedrockagentcore_agent_runtime.agent.agent_runtime_arn
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Sid       = "DenyOutsideVpc"
+      Effect    = "Deny"
+      Principal = "*"
+      Action    = "bedrock-agentcore:InvokeAgentRuntime"
+      Resource  = aws_bedrockagentcore_agent_runtime.agent.agent_runtime_arn
+      Condition = {
+        StringNotEqualsIfExists = { "aws:SourceVpc" = local.vpc_id }
+        BoolIfExists            = { "aws:ViaAWSService" = "false" }
+        ArnNotLike              = { "aws:PrincipalArn" = local.perimeter_exempt_principals }
+      }
+    }]
+  })
 }
 
 # ---------------------------------------------------------------- hand the runtime ARN to the chat web
