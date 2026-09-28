@@ -4,6 +4,8 @@
 
 `<prefix>` は `deploy.env` の `OWNER` から作る接頭辞 `<owner>-nwc-poc`。
 
+スライドの構成図は [architecture.pptx](architecture.pptx)。1 枚目は通信の流れ、2 枚目は本番を想定した 2 AZ の配置（PoC は単一 AZ。違いはスライドの注記）。
+
 ## チャットの経路
 
 ```mermaid
