@@ -92,7 +92,7 @@ variable "sinks" {
 
 # ---------------------------------------------------------------- splunk (only when sinks has splunk)
 variable "splunk_hec_url" {
-  description = "HTTP Event Collector of the Splunk the splunk sink posts to (https://<host>:8088, /services/collector/event is appended when missing). The workers go out through the NAT Gateway of terraform/base/core, so Splunk Cloud's public HEC, a Splunk Enterprise behind Direct Connect / VPN or a Splunk in this VPC all work. Required when sinks has splunk"
+  description = "HTTP Event Collector of the Splunk the splunk sink posts to (https://<host>:8088, /services/collector/event is appended when missing). The workers go out through the NAT Gateway of terraform/base/core (create_nat_gateway = true there; ops/up.sh sets it with SINK_SPLUNK), so Splunk Cloud's public HEC, a Splunk Enterprise behind Direct Connect / VPN or a Splunk in this VPC all work. Required when sinks has splunk"
   type        = string
   default     = ""
 

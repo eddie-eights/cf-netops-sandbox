@@ -49,6 +49,11 @@ output "opensearch_vpc_endpoint_id" {
   value       = try(aws_opensearchserverless_vpc_endpoint.aoss[0].id, "")
 }
 
+output "nat_gateway" {
+  description = "True when the NAT Gateway exists (create_nat_gateway). terraform/pipeline/analytics refuses the splunk sink without it"
+  value       = var.create_nat_gateway
+}
+
 output "network_perimeter" {
   description = "True when the Deny outside aws:SourceVpc is on (perimeter.tf). Read by the other roots to add their resource policy Deny statements"
   value       = var.network_perimeter

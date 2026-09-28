@@ -33,7 +33,7 @@ flowchart LR
 - テーブルバケットは `SINK_S3=0` でも作る（証跡の置き場）。`ops/down.sh` はバケットごと消すので、証跡も消える。
 - Splunk（`SINK_SPLUNK=1`）は Spark の driver が全トピックを HTTP Event Collector（HEC）に POST する（2026-09-26 に MSK Connect の Splunk Connect for Kafka をやめて、ほかの格納先と同じ形にした）。Splunk 自体は作らない。
   - token は `deploy.env` に書かず、`ops/up.sh` を打つ前に SSM の SecureString `/<接頭辞>/splunk/hec-token` に手で入れる（`aws ssm put-parameter --type SecureString`）。`ops/up.sh` は手順 7-4 で有無だけ確かめ、ジョブが起動時に 1 回読む。Terraform も引数もログも値を持たない。
-  - Spark は NAT Gateway で外に出るので（AWS の API はエンドポイントを通り、NAT Gateway を使うのは AWS の外へ出る HEC だけ）、Splunk Cloud の公開 HEC にも、DX / VPN の先の社内の Splunk Enterprise にも届く（SG は全部出せるので HEC のポートは何番でもよい）。2026-09-26 までは VPC に NAT も IGW も無く、VPC の中から届く Splunk に限っていた。
+  - `SINK_SPLUNK=1` のときだけ土台に NAT Gateway を作り、Spark はそこから外に出るので（AWS の API はエンドポイントを通り、NAT Gateway を使うのは AWS の外へ出る HEC だけ）、Splunk Cloud の公開 HEC にも、DX / VPN の先の社内の Splunk Enterprise にも届く（SG は全部出せるので HEC のポートは何番でもよい）。analytics は土台に NAT Gateway が無いのに splunk を選ぶと precondition で止まる。
   - HEC が 4xx を返したまとまり（最大 500 件）は捨ててログに出し、ジョブは止めない。5xx は再送する。
 
 ## lab に入る

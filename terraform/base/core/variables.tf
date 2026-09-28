@@ -19,7 +19,7 @@ variable "owner" {
 
 # ---------------------------------------------------------------- network
 variable "vpc_cidr" {
-  description = "CIDR of the VPC this root module creates (/16 to /24). Two /(n+8) private subnets and one /(n+8) public subnet (NAT Gateway only) are cut from it."
+  description = "CIDR of the VPC this root module creates (/16 to /24). Two /(n+8) private subnets and one /(n+8) public subnet (NAT Gateway only, when create_nat_gateway) are cut from it."
   type        = string
   default     = "10.0.0.0/16"
 
@@ -30,7 +30,7 @@ variable "vpc_cidr" {
 }
 
 variable "az_id_a" {
-  description = "AZ ID of subnet A (chat web EC2, lab, Runtime) and of the public subnet (NAT Gateway). AZ IDs supported by AgentCore Runtime in Tokyo."
+  description = "AZ ID of subnet A (chat web EC2, lab, Runtime) and of the public subnet (NAT Gateway, when create_nat_gateway). AZ IDs supported by AgentCore Runtime in Tokyo."
   type        = string
   default     = "apne1-az1"
 
@@ -69,9 +69,15 @@ variable "ami_ssm_parameter" {
   default     = "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64"
 }
 
+variable "create_nat_gateway" {
+  description = "Create a public subnet, an internet gateway and a NAT Gateway in 1 AZ (vpc.tf) so the workloads can reach something outside AWS. Only the Splunk HEC of terraform/pipeline/analytics needs it - ops/up.sh sets true with SINK_SPLUNK. false (default) leaves the VPC without any route to the internet. About 0.062 USD/h + 0.062 USD/GB."
+  type        = bool
+  default     = false
+}
+
 # ---------------------------------------------------------------- existing VPC endpoints
 variable "create_s3_gateway_endpoint" {
-  description = "Create the S3 gateway endpoint (free; keeps S3 / S3 Tables / ECR layer traffic off the NAT Gateway). Set false if the route tables already have one."
+  description = "Create the S3 gateway endpoint (free; S3 / S3 Tables / ECR layers / the AL2023 dnf repositories are reached through it - there is no NAT Gateway by default). Set false if the route tables already have one."
   type        = bool
   default     = true
 }
@@ -84,7 +90,7 @@ variable "create_opensearch_endpoint" {
 
 # ---------------------------------------------------------------- network perimeter (endpoints.tf, perimeter.tf)
 variable "interface_endpoints" {
-  description = "Interface VPC endpoints to create (the part after com.amazonaws.<region>.). Every AWS API the workloads call goes through one of these instead of the NAT Gateway, so the perimeter (perimeter.tf) can require aws:SourceVpc. ops/up.sh builds the list from the features (and from roots that still have resources). About 0.014 USD/h per AZ each."
+  description = "Interface VPC endpoints to create (the part after com.amazonaws.<region>.). Every AWS API the workloads call goes through one of these (there is no other way out of the VPC unless create_nat_gateway), so the perimeter (perimeter.tf) can require aws:SourceVpc. ops/up.sh builds the list from the features (and from roots that still have resources). About 0.014 USD/h per AZ each."
   type        = list(string)
   default     = ["ssm", "ssmmessages"]
 

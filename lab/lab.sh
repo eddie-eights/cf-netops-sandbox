@@ -31,6 +31,8 @@ ACC_VM=dc1-host-01;    ACC_IP=10.100.0.20
 ENV_FILE=$(ls /etc/*-lab.env 2>/dev/null | head -1 || true)
 [ -n "$ENV_FILE" ] && set -a && . "$ENV_FILE" && set +a
 
+# VPC にインターネットへの経路が無い（terraform/base/core は Splunk を使うときだけ NAT Gateway を作る）ので、GitHub への版の確かめをしない
+export CLAB_VERSION_CHECK=disable
 clab() { containerlab "$@"; }
 x() { docker exec "clab-$LAB-$1" "${@:2}"; }
 # SR Linux の CLI。引数を 1 行ずつ流す（sr_cli "a" "b" は 1 行に繋がるので stdin から）

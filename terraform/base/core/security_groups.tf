@@ -1,7 +1,7 @@
 # ---------------------------------------------------------------- security groups
 # SG は 2 つだけ。
 #   internal   VPC の中のワークロード全部（web EC2 / lab / Telegraf / Runtime / MSK / Neptune / EMR / Fargate / Lambda）に付ける。
-#              受信は VPC の中から（var.vpc_cidr）だけ、送信は自由（AWS の外へは NAT から出る。相手ごとの絞り込みは IAM で行う:
+#              受信は VPC の中から（var.vpc_cidr）だけ、送信は自由（届く先は VPC の中とエンドポイントだけで、AWS の外へは NAT があるとき（SINK_SPLUNK）だけ出る。相手ごとの絞り込みは IAM で行う:
 #              MSK / Neptune は IAM 認証、S3 / ECR / Bedrock はロールのポリシーと perimeter.tf の VPC の外を拒む Deny）。
 #              lab の管理ネットワーク（203.0.113.0/24。trap の送り元）からの受信は terraform/pipeline/lab が足す。
 #              EMR Serverless は 0.0.0.0/0 の受信ルールがある SG を拒むので、受信は VPC の CIDR で書く

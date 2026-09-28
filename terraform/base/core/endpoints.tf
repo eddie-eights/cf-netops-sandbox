@@ -1,7 +1,8 @@
 # ---------------------------------------------------------------- VPC endpoints
-# AWS の API へは全部 VPC エンドポイントから行く。NAT Gateway（vpc.tf）は AWS の外（Splunk の HEC など）へ出るためだけに残す。
+# AWS の API へは全部 VPC エンドポイントから行く。VPC にはほかに出口が無い（NAT Gateway は vpc.tf の create_nat_gateway のときだけ、Splunk の HEC のために作る）。
 # 経路を VPC エンドポイントに寄せると、リクエストに aws:SourceVpc（この VPC）が付くので、perimeter.tf の拒否（IAM とリソースポリシー）で
-# 「この VPC の外からの呼び出し」を止められる。NAT から出た呼び出しには aws:SourceVpc が付かない（2026-09-28 ユーザー決定: NAT は置くが閉域で高セキュアに）。
+# 「この VPC の外からの呼び出し」を止められる。NAT から出た呼び出しには aws:SourceVpc が付かない（2026-09-28 ユーザー決定: 閉域で高セキュアに。同日、NAT も既定では作らないと決めた）。
+# エンドポイントが無いサービスは、NAT が無いと接続のタイムアウトになる（docs/troubleshooting.md）。
 #
 # S3 の gateway エンドポイントは無料（S3 / S3 Tables のデータ / ECR のレイヤー / AL2023 の dnf リポジトリ）。
 # S3 のエンドポイントポリシーは付けない: dnf のリポジトリは匿名の GET で、ECR のレイヤーは ECR が署名した URL なので、
@@ -19,7 +20,7 @@ resource "aws_vpc_endpoint" "s3" {
 }
 
 # OpenSearch Serverless のコレクション（terraform/agent の KB、terraform/pipeline/analytics の logs）はどちらも公開せず、
-# ネットワークポリシーの SourceVPCEs にこのエンドポイントだけを書く。NAT Gateway から出ると公開扱いになり、
+# ネットワークポリシーの SourceVPCEs にこのエンドポイントだけを書く。NAT Gateway から出ると（NAT があっても）公開扱いになり、
 # ネットワークポリシーには IP の許可リストが無いので、VPC の中から閉じて届く経路はこれしかない。
 # 1 つの VPC に 1 本あれば全コレクションに届き（AWS の文書「You only need one OpenSearch Serverless VPC endpoint in a VPC」）、
 # 作ると AOSS が *.<region>.aoss.amazonaws.com の private hosted zone を VPC に付ける。2 本目を作らないよう、ここに 1 本だけ置く。

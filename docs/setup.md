@@ -6,18 +6,18 @@
 
 ## AWS 側
 
-- **VPC は `terraform/base/core` が作る。**既定は `10.0.0.0/16` に `/24` のプライベートサブネット 2 つ（`apne1-az1` / `apne1-az4`）と、NAT Gateway だけを置くパブリックサブネット 1 つ（`apne1-az1`）。外へは NAT Gateway（1 AZ）で出て、外から入る経路は無い。社内のネットワークと重なるなら `deploy.env` の `VPC_CIDR` を変える（`/16`〜`/24`）。
+- **VPC は `terraform/base/core` が作る。**既定は `10.0.0.0/16` に `/24` のプライベートサブネット 2 つ（`apne1-az1` / `apne1-az4`）。インターネットへの経路は無い。`SINK_SPLUNK=1` のときだけ、NAT Gateway（1 AZ）を置くパブリックサブネット 1 つ（`apne1-az1`）を足して AWS の外へ出る。外から入る経路はどちらでも無い。社内のネットワークと重なるなら `deploy.env` の `VPC_CIDR` を変える（`/16`〜`/24`）。
 - **SG は 2 つだけ。**`internal`（VPC の CIDR から全部受け、外へは全部出す）を Web / Runtime / lab / Telegraf / MSK / EMR / Neptune / Lambda / Fargate の全部に付け、`endpoints`（`internal` からの 443 だけ）を VPC エンドポイントに付ける。ワークロード同士のポートごとのルールは無い（境界は VPC）。
-- AWS の API（SSM / ECR / CloudWatch Logs / Bedrock / AgentCore / S3 Tables / EventBridge / SQS / Prometheus）へはインターフェース型エンドポイントで届き、VPC の外からの呼び出しは Deny で拒む（[architecture.md](architecture.md) の「閉域」）。ほかに S3 の Gateway 型（無料。ポリシーは付けない）と、KB か logs のコレクションを作るときの OpenSearch Serverless の 1 本（2 AZ で約 $0.03/h）。NAT Gateway は AWS の外へ出るためだけに使う。
+- AWS の API（SSM / ECR / CloudWatch Logs / Bedrock / AgentCore / S3 Tables / EventBridge / SQS / Prometheus）へはインターフェース型エンドポイントで届き、VPC の外からの呼び出しは Deny で拒む（[architecture.md](architecture.md) の「閉域」）。ほかに S3 の Gateway 型（無料。ポリシーは付けない）と、KB か logs のコレクションを作るときの OpenSearch Serverless の 1 本（2 AZ で約 $0.03/h）。エンドポイントの無い API へは届かない（NAT Gateway が無いので Deny より先に接続のタイムアウトになる）。
 - 組織の SCP で `aws:SourceVpc` の Deny をすでに掛けているなら、この Terraform の Deny と重なっても害は無い。逆に VPC エンドポイントの作成を SCP で止めていると、手順 3 で落ちる。
 - 使うモデル: Nova 2 Lite（`jp.amazon.nova-2-lite-v1:0`）、Titan Text Embeddings V2、Rerank（`amazon.rerank-v1:0`）。どれも Amazon のモデルなので Marketplace の購読は要らない。SCP や IAM でモデルを絞っているなら、この 3 つを許可する。
 - apply する人に要る権限（管理者権限なら足りる）:
   - IAM ロールの作成と `iam:CreateServiceLinkedRole`
   - `aoss:*`
   - ガードレールの作成。`guardrail-profile/apac.guardrail.v1:0` への `bedrock:CreateGuardrail` も要る
-- **OpenSearch Serverless のコレクション（KB と logs）は公開しない。**ネットワークポリシーは `terraform/base/core` の VPC エンドポイント 1 本（2 つのコレクションで共用）だけを通し、KB はそれに加えて Bedrock のサービス（`bedrock.amazonaws.com`）を通す。NAT Gateway を通った接続は公開側からの扱いになるので、VPC の中からでもエンドポイントが無ければ届かない。KB のベクトルインデックスは VPC の中の Lambda が作り、apply する人の PC は OpenSearch につながない（データアクセスポリシーにも人は入らない。apply と destroy を別の人が打ってもよい）。
+- **OpenSearch Serverless のコレクション（KB と logs）は公開しない。**ネットワークポリシーは `terraform/base/core` の VPC エンドポイント 1 本（2 つのコレクションで共用）だけを通し、KB はそれに加えて Bedrock のサービス（`bedrock.amazonaws.com`）を通す。エンドポイントを通らない接続は公開側からの扱いになるので、VPC の中からでもエンドポイントが無ければ届かない。KB のベクトルインデックスは VPC の中の Lambda が作り、apply する人の PC は OpenSearch につながない（データアクセスポリシーにも人は入らない。apply と destroy を別の人が打ってもよい）。
 - ガードレールの判定は、東京以外の APAC のリージョン（大阪、ソウル、ムンバイ、シンガポール、シドニー）で行われることがある。データを国内に留める決まりがあるなら使えない。
-- Session Manager の設定で KMS の暗号化を必須にしているなら、インスタンスロールへの `kms:Decrypt` が別に要る（この Terraform には入れていない。`kms` のエンドポイントも作らないので、`kms` の API へは NAT Gateway で届く。閉域を守るなら `kms` のエンドポイントを足す）。
+- Session Manager の設定で KMS の暗号化を必須にしているなら、インスタンスロールへの `kms:Decrypt` が別に要る（この Terraform には入れていない。`kms` のエンドポイントも作らず NAT Gateway も無いので、`kms` の API へは届かない。そのときは `kms` のエンドポイントを足す）。
 - **PIPELINE は組織の SCP / IAM で止められやすい**（EC2 の t4g.xlarge、Neptune、MSK、EMR Serverless、S3 Tables）。apply が `explicitly denied` で止まったら、管理者に許可を頼むか `SKIP_*` で外す。
 
 ## 利用者の PC 側

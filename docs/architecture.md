@@ -44,7 +44,7 @@ WORKFLOW の流れは [workflow.md](workflow.md)、データの置き場は [dat
 
 ## 閉域
 
-AWS の API へは全部 VPC エンドポイントから行き、この VPC を通らない呼び出しを拒む。NAT Gateway は AWS の外（Splunk の HEC など）へ出るためだけに置く。
+AWS の API へは全部 VPC エンドポイントから行き、この VPC を通らない呼び出しを拒む。VPC にインターネットへの経路は無く、NAT Gateway は AWS の外にある Splunk の HEC に送るとき（`SINK_SPLUNK=1`）だけ作る。
 
 | 層 | 何をする | どこ |
 |---|---|---|
@@ -57,7 +57,7 @@ AWS の API へは全部 VPC エンドポイントから行き、この VPC を�
 - S3 Tables の Iceberg REST は、S3 Tables が裏で呼ぶ API に元の VPC が付かないので `aws:CalledViaLast = s3tables.amazonaws.com` を外してある。
 - Neptune と MSK の IAM 認証にはこの条件キーが無いので Deny に入れない（どちらも VPC の中にしか口が無い）。Prometheus のワークスペースはリソースポリシーの Deny を確かめていないので IAM の側だけ。
 - apply する人が替わったら、その人が `ops/up.sh` を打ち直す（外すプリンシパルが入れ替わる）。前の人の設定のままバケットに入れないときは [troubleshooting.md](troubleshooting.md) の「閉域」。
-- 本番では、apply も VPC の中（CI のランナーなど）から打ち、外す人を無くす。NAT から出る先を絞るなら Network Firewall のドメインの許可リストを足す（この PoC には無い）。
+- 本番では、apply も VPC の中（CI のランナーなど）から打ち、外す人を無くす。Splunk のために NAT Gateway を作るなら、出る先を Network Firewall のドメインの許可リストで絞る（この PoC には無い）。
 
 ## どのファイルがどこで動くか
 
@@ -89,7 +89,7 @@ AWS の API へは全部 VPC エンドポイントから行き、この VPC を�
 terraform/
 ├── base/
 │   ├── ecr/         ECR リポジトリ
-│   └── core/        VPC / NAT Gateway / VPC エンドポイント / 閉域の Deny（perimeter.tf）/ SG（internal と endpoints）/ バケット / ロール / Web の EC2
+│   └── core/        VPC / NAT Gateway（SINK_SPLUNK=1 のときだけ）/ VPC エンドポイント / 閉域の Deny（perimeter.tf）/ SG（internal と endpoints）/ バケット / ロール / Web の EC2
 ├── agent/         AGENT=1     Runtime / ガードレール / KB
 ├── pipeline/      PIPELINE=1
 │   ├── lab/         containerlab の EC2 と Telegraf の EC2（stream を作るとき）

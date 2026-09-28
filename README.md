@@ -3,7 +3,7 @@
 ブラウザのチャットから AgentCore Runtime のエージェントに聞くと、Amazon Nova 2 Lite がトポロジのツール（と任意の手順書の検索）を使って答える。
 lab（containerlab の Nokia SR Linux で組んだ Spine-Leaf）の機器の SNMP・gNMI・ログを Kafka → Spark に流して異常を見つけ、Temporal のワークフローで原因を調べて修復案を出し、人が承認したら直す、までを試せる。
 全部を**プライベートサブネット**に作り、**AWS の API へは VPC エンドポイントだけを通す閉域**にする。この VPC のエンドポイントを通らない呼び出しは、IAM とリソースポリシーの Deny（`aws:SourceVpc`）で拒む（鍵が漏れても VPC の外からは使えない）。
-NAT Gateway は AWS の外（Splunk の HEC など）へ出るためだけに置き、外から入る経路は無い。PC からは SSM のポートフォワーディングで入り、インターネットからの受信ルールは無い。
+VPC にインターネットへの経路は無い（NAT Gateway は AWS の外にある Splunk の HEC に送る `SINK_SPLUNK=1` のときだけ作る）。PC からは SSM のポートフォワーディングで入り、インターネットからの受信ルールは無い。
 
 ```mermaid
 flowchart LR
@@ -27,7 +27,7 @@ flowchart LR
 
 | 機能 | できること | 待機の時間課金（東京） |
 |---|---|---|
-| 土台（必ず） | VPC、NAT Gateway、SSM のエンドポイント 2 本、Web の EC2、S3、ECR | 約 $0.11/h（+ NAT Gateway を通したデータ $0.062/GB） |
+| 土台（必ず） | VPC、SSM のエンドポイント 2 本、Web の EC2、S3、ECR | 約 $0.05/h（`SINK_SPLUNK=1` なら NAT Gateway の +$0.06/h と、通したデータ $0.062/GB） |
 | `AGENT=1`（既定） | チャット（Runtime + ガードレール）。`CREATE_KB=1` で手順書の検索も | 約 $0.07/h（エンドポイント 5 本。ほかは質問ごとのモデル料金だけ。KB は +$0.37/h） |
 | `PIPELINE=1` | lab → MSK → Spark → S3 Tables / OpenSearch / Prometheus（`SINK_SPLUNK=1` で外の Splunk にも）、異常検知、Neptune のトポロジ | 約 $1.35/h |
 | `WORKFLOW=1` | Temporal で調査 → 承認 → 修復。AGENT と PIPELINE が要る | 約 $0.08/h |
@@ -35,7 +35,7 @@ flowchart LR
 インターフェース型エンドポイントは 1 本 $0.014/h（1 AZ。`ENDPOINTS_MULTI_AZ=1` で 2 AZ にすると倍）で、作る機能が呼ぶ API の分だけ `ops/up.sh` が選ぶ（上の金額に入れてある。同じサービスは機能をまたいで 1 本）。
 OpenSearch Serverless のコレクション（KB と logs）も公開せず、VPC エンドポイント 1 本（$0.03/h。両方作っても 1 本）からだけ届く。
 
-全部で約 $1.61/h（KB を除く）。**1 か月置くと約 $1,180（約 18 万円）になるので、使い終わったら当日中に消す。**
+全部で約 $1.55/h（KB と Splunk を除く）。**1 か月置くと約 $1,130（約 17 万円）になるので、使い終わったら当日中に消す。**
 
 ## 手順
 

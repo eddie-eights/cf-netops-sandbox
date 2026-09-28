@@ -54,6 +54,8 @@ locals {
   bucket_arn   = "arn:${local.partition}:s3:::${local.bucket}"
   # terraform/base/core の perimeter.tf の Deny（VPC エンドポイントを通らない AWS の API を拒む）。NETWORK_PERIMETER=0 か古い state なら空
   perimeter_policy_arn = try(data.terraform_remote_state.main.outputs.network_perimeter_policy_arn, "")
+  # AWS の外へ出る NAT Gateway（splunk の格納先だけが使う）。古い state には output が無い（その頃は NAT が常にあった）
+  nat_gateway = try(data.terraform_remote_state.main.outputs.nat_gateway, true)
   # リソースポリシーの Deny から外すプリンシパル（デプロイする人と KB のロール）
   perimeter_exempt_principals = try(data.terraform_remote_state.main.outputs.perimeter_exempt_principals, [])
 
@@ -96,7 +98,7 @@ locals {
   sink_splunk     = contains(var.sinks, "splunk")
 
   # splunk: HEC の token を入れた SSM の SecureString（値は Terraform も state も持たない。ジョブが起動時に ssm:GetParameter で読む）。
-  # Splunk は AWS の外にあり、ここでは何も作らない（HEC へは NAT Gateway から出る。ポートは何番でもよい）
+  # Splunk は AWS の外にあり、ここでは何も作らない（HEC へは terraform/base/core の NAT Gateway から出る。create_nat_gateway=true が要る。ポートは何番でもよい）
   splunk_token_parameter     = var.splunk_hec_token_parameter != "" ? var.splunk_hec_token_parameter : "/${local.name_prefix}/splunk/hec-token"
   splunk_token_parameter_arn = "arn:${local.partition}:ssm:${var.region}:${local.account_id}:parameter${local.splunk_token_parameter}"
 

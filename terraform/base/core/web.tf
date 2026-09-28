@@ -100,7 +100,7 @@ resource "aws_instance" "web" {
   tags = { Name = "${local.name_prefix}-web" }
 
   # 起動スクリプトが S3 gateway（web/ と dnf）と ssm / ssmmessages のエンドポイント（SSM Agent の登録）を使うので、先に作らせる。
-  # network_perimeter の Deny もエンドポイントより先に効くと、エンドポイントができるまでの SSM の呼び出しが NAT から出て拒まれる
+  # network_perimeter の Deny もエンドポイントより先に効くと、エンドポイントができるまでの SSM の呼び出しが届かない（NAT が無ければタイムアウト、あれば NAT から出て拒まれる）
   depends_on = [
     aws_iam_role_policy_attachment.web_ssm,
     aws_iam_role_policy.web_assets,

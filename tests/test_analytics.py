@@ -129,7 +129,7 @@ check("HEC の token は SSM の SecureString /<prefix>/splunk/hec-token（変�
       and re.search(r'splunk_token_parameter_arn\s*=\s*"arn:\$\{local\.partition\}:ssm:\$\{var\.region\}:\$\{local\.account_id\}:parameter\$\{local\.splunk_token_parameter\}"', tf) is not None
       and re.search(r'Sid\s*=\s*"SplunkHecToken"[\s\S]*?"ssm:GetParameter"[\s\S]*?local\.splunk_token_parameter_arn[\s\S]*?if local\.sink_splunk', tf, re.S) is not None)
 check("Terraform は token の値を読まない（data aws_ssm_parameter が無い）", 'data "aws_ssm_parameter"' not in tf)
-check("HEC のポートごとのエグレスは無い（internal SG は全部出せて、NAT Gateway で Splunk Cloud にも届く。2026-09-26）",
+check("HEC のポートごとのエグレスは無い（internal SG は全部出せて、splunk のときだけある NAT Gateway で Splunk Cloud にも届く）",
       "splunk_hec_port" not in tf and "emr_splunk" not in tf)
 check("splunk なのに splunk_hec_url が空なら precondition で止まる", re.search(r'condition\s*=\s*!local\.sink_splunk \|\| var\.splunk_hec_url != ""', tf) is not None)
 check("OpenSearch Serverless は TIMESERIES のコレクション <prefix>-logs（count で作る）",
@@ -557,10 +557,24 @@ check("up.sh は base/core に interface_endpoints / network_perimeter / endpoin
       and 'NETWORK_PERIMETER="${NETWORK_PERIMETER:-1}"' in up
       and all(k in open(os.path.join(ROOT, "ops", "deploy-env.sh"), encoding="utf-8").read() for k in ("NETWORK_PERIMETER", "ENDPOINTS_MULTI_AZ")))
 check("費用の目安にエンドポイント（1 本 1.4 セント × AZ）を足す", "COST_CENTS=$((COST_CENTS + ($(endpoint_count) * 14 * ENDPOINT_AZS + 5) / 10))" in up)
-check("土台は NAT Gateway 1 つ（パブリックサブネット + IGW + EIP）とプライベートの既定ルートを持つ",
-      all(r in _core for r in ('resource "aws_nat_gateway" "this"', 'resource "aws_internet_gateway" "this"', 'resource "aws_eip" "nat"', 'resource "aws_subnet" "public"'))
-      and re.search(r'resource "aws_route" "private_default"[\s\S]*?destination_cidr_block\s*=\s*"0\.0\.0\.0/0"[\s\S]*?nat_gateway_id\s*=\s*aws_nat_gateway\.this\.id', _core, re.S) is not None
-      and re.search(r'resource "aws_subnet" "public"[\s\S]*?map_public_ip_on_launch\s*=\s*false', _core, re.S) is not None)
+check("NAT Gateway（パブリックサブネット + IGW + EIP + プライベートの既定ルート）は create_nat_gateway のときだけ。既定は false でインターネットへの経路が無い",
+      all(re.search(r'resource "' + t + r'" "' + n + r'" \{\n\s*count\s*=\s*var\.create_nat_gateway \? 1 : 0', _core)
+          for t, n in (("aws_nat_gateway", "this"), ("aws_internet_gateway", "this"), ("aws_eip", "nat"), ("aws_subnet", "public"),
+                       ("aws_route_table", "public"), ("aws_route", "public_default"), ("aws_route_table_association", "public"), ("aws_route", "private_default")))
+      and re.search(r'resource "aws_route" "private_default"[\s\S]*?destination_cidr_block\s*=\s*"0\.0\.0\.0/0"[\s\S]*?nat_gateway_id\s*=\s*aws_nat_gateway\.this\[0\]\.id', _core, re.S) is not None
+      and re.search(r'resource "aws_subnet" "public"[\s\S]*?map_public_ip_on_launch\s*=\s*false', _core, re.S) is not None
+      and re.search(r'variable "create_nat_gateway" \{[\s\S]*?type\s*=\s*bool\s*default\s*=\s*false', _core) is not None
+      and re.search(r'output "nat_gateway" \{[^}]*?value\s*=\s*var\.create_nat_gateway', _core) is not None)
+check("splunk を選んだのに土台に NAT Gateway が無ければ analytics の precondition で止まる（前の state で output が無ければ有ると見る）",
+      re.search(r'nat_gateway\s*=\s*try\(data\.terraform_remote_state\.main\.outputs\.nat_gateway, true\)', tf) is not None
+      and re.search(r'condition\s*=\s*!local\.sink_splunk \|\| local\.nat_gateway', tf) is not None)
+check("up.sh は SINK_SPLUNK で analytics を作るとき、または state の analytics の sinks に splunk があるときだけ create_nat_gateway=true を渡す",
+      re.search(r'\*" pipeline/analytics "\*\) if \[ -n "\$SINK_SPLUNK" \]; then CREATE_NAT=1; fi', up) is not None
+      and "tf pipeline/analytics output -json sinks 2>/dev/null | grep -q '\"splunk\"'" in up
+      and 'MAIN_VARS+=(-var "create_nat_gateway=$([ -n "$CREATE_NAT" ] && echo true || echo false)")' in up)
+check("費用の目安: 土台は Web の EC2 の 2 セント、NAT Gateway の 6 セントは SINK_SPLUNK で analytics を作るときだけ",
+      "COST_CENTS=2\n" in up and 'if [ -z "$SKIP_ANALYTICS" ] && [ -n "$SINK_SPLUNK" ]; then COST_CENTS=$((COST_CENTS + 6)); fi' in up and "COST_CENTS=8" not in up)
+check("lab.sh は containerlab の版の確かめ（GitHub へ出る）をしない", "export CLAB_VERSION_CHECK=disable" in open(os.path.join(ROOT, "lab", "lab.sh"), encoding="utf-8").read())
 check("up.sh / deploy-env.sh に共用のエンドポイントと CLIENT_CIDR の扱いは無い",
       not any(k in up for k in ("SHARED_ENDPOINTS", "create_shared_endpoints", 'aws_vpc_endpoint.runtime["ecr-api"]', "CLIENT_CIDR"))
       and "CLIENT_CIDR" not in open(os.path.join(ROOT, "ops", "deploy-env.sh"), encoding="utf-8").read())
@@ -601,7 +615,7 @@ check("up.sh は analytics を stream の後に apply し、job を STREAMING �
       up.index("tf_apply pipeline/stream") < up.index("tf_apply pipeline/analytics") < up.index("--name snmp-sinks --mode STREAMING"))
 check("up.sh は analytics に 14 セント（EMR だけ。エンドポイントは無い）と opensearch の OCU を足し、prometheus は足さず、opensearch は analytics を作るときだけ OCU の注意を出す",
       re.search(r'COST_CENTS=\$\(\(COST_CENTS \+ 14\)\)\n\s*if \[ -n "\$SINK_OPENSEARCH" \]; then COST_CENTS=\$\(\(COST_CENTS \+ 33\)\); fi', up) is not None
-      and '"$SINK_PROMETHEUS" ]; then COST_CENTS' not in up and "COST_CENTS=8\n" in up
+      and '"$SINK_PROMETHEUS" ]; then COST_CENTS' not in up and "COST_CENTS=2\n" in up
       and re.search(r'\*,opensearch,\*\) if \[ -z "\$SKIP_ANALYTICS" \]; then printf', up) is not None)
 check("up.sh は同じ SpecHash のジョブが動いていれば起こさない", "--states SUBMITTED PENDING SCHEDULED RUNNING" in up
       and "jobRun.tags.SpecHash" in up and 'if [ "$spec" != "$JOB_SPEC" ]; then STALE=' in up)

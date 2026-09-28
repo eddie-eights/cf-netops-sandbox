@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # deploy.env の PIPELINE / AGENT / WORKFLOW で選んだ機能を 1 本で起こす。機能は互いに独立で、要るものだけ作る（費用を抑えるため）。
-#   土台（必ず作る）  base/ecr + base/core（VPC / NAT Gateway / Web の EC2 / バケット / ロール）。約 $0.08/h + NAT Gateway を通したデータ $0.062/GB。
+#   土台（必ず作る）  base/ecr + base/core（VPC / Web の EC2 / バケット / ロール。インターネットへの経路は無い）。約 $0.02/h + エンドポイント。
 #   AGENT（既定 1）   agent での分析。terraform/agent（AgentCore Runtime + ガードレール。CREATE_KB=1 なら Knowledge Base も）。
 #                     Web の「チャット」タブが使える
 #   PIPELINE          データパイプライン。lab（containerlab。stream を作るなら Telegraf の EC2 も）→ stream（MSK）→ analytics（Spark on EMR Serverless → S3 Tables / OpenSearch / Prometheus、
@@ -40,7 +40,7 @@
 #                           SINK_S3 = 全トピック → S3 Tables（Iceberg）、SINK_OPENSEARCH = traps と logs（機器の syslog）→ OpenSearch Serverless、
 #                           SINK_PROMETHEUS = metrics → Amazon Managed Service for Prometheus。terraform/pipeline/analytics の var.sinks（iceberg / opensearch / prometheus / splunk）に組んで渡す。
 #   SINK_SPLUNK=1           4 本目の格納先: 全トピック → AWS の外にある Splunk の HTTP Event Collector（既定 0。Splunk 自体は作らない）。
-#                           SPLUNK_HEC_URL（https://<host>:8088。NAT Gateway で外に出るので Splunk Cloud でもよい）が要り、HEC の token は
+#                           SPLUNK_HEC_URL（https://<host>:8088。このときだけ土台に NAT Gateway（+$0.06/h + $0.062/GB）を作って外に出るので Splunk Cloud でもよい）が要り、HEC の token は
 #                           SSM の SecureString /<接頭辞>/splunk/hec-token に手で入れておく（deploy.env には書かない。手順 7-4 で有無だけ確かめる）。
 #                           SPLUNK_INDEX（既定は空 = token の既定の index）、SPLUNK_SKIP_TLS_VERIFY=1（自己署名の Splunk の検証用）は任意
 #   SKIP_GRAPH=1            PIPELINE=1 で graph（Neptune）を作らない。analytics の検知が異常を Neptune に書くので、SKIP_ANALYTICS=1（か SKIP_STREAM=1）も要る
@@ -301,7 +301,8 @@ echo "IMAGE_TAG=$IMAGE_TAG"
 echo "AGENT=${AGENT:-0} PIPELINE=${PIPELINE:-0} WORKFLOW=${WORKFLOW:-0} CREATE_KB=${CREATE_KB:-0}"
 echo "作るルート: $ROOTS"
 # インターフェース型エンドポイント（terraform/base/core の var.interface_endpoints）。ルートが呼ぶ AWS の API ごとに 1 本。
-# 手順 3 で、今回作らなくても state にリソースが残っているルートの分を足す（外すとそのルートの呼び出しが NAT に出て perimeter の Deny に当たる）
+# 手順 3 で、今回作らなくても state にリソースが残っているルートの分を足す（外すとそのルートの呼び出しがどこにも出られず接続のタイムアウトになる。
+# NAT Gateway がある（SINK_SPLUNK=1）ときは NAT に出て perimeter の Deny に当たる）
 ENDPOINTS=""
 add_endpoints() {  # add_endpoints <サービス名…>  重複は足さない
   local s
@@ -329,8 +330,9 @@ endpoint_count() { set -- $ENDPOINTS; echo $#; }
 if [ -n "$ENDPOINTS_MULTI_AZ" ]; then ENDPOINT_AZS=2; else ENDPOINT_AZS=1; fi
 echo "インターフェース型エンドポイント（$(endpoint_count) 本 × ${ENDPOINT_AZS} AZ）: $ENDPOINTS"
 # 待機時の 1 時間あたりの目安（セント。東京リージョンの税抜。単価は 2026-09-14〜15 に Price List API で確認。README の「作るもの」と docs/deploy.md の金額はここから出している）。
-# 土台 = 8（NAT Gateway 1 つ 6.2 + Web の EC2 の t4g.small 2.2。NAT Gateway は通したデータに別に $0.062/GB かかる。
-#   NAT Gateway は AWS の外（Splunk の HEC など）へ出るためだけに置く）、
+# 土台 = 2（Web の EC2 の t4g.small 2.2）
+#   + SINK_SPLUNK なら 6（NAT Gateway 1 つ 6.2。通したデータに別に $0.062/GB。AWS の外にある Splunk の HEC へ出るためだけに作る。
+#     2026-09-28 から、それ以外では作らない）、
 # インターフェース型エンドポイント = 1 本 1.4 × AZ（ENDPOINTS。土台の ssm / ssmmessages 2 本と、ルートごとの分。同じサービスはルートをまたいで 1 本。
 #   2026-09-26〜28 は NAT Gateway だけで AWS の API へも出ていたが、閉域（aws:SourceVpc で拒む）にするため戻した。データ処理 $0.01/GB は別）、
 # agent = 0（Runtime は使った分だけ）
@@ -347,7 +349,7 @@ echo "インターフェース型エンドポイント（$(endpoint_count) 本 �
 #   + SINK_SPLUNK は 0（AWS 側には何も作らない。Splunk 側の取り込みのライセンスは別）、
 # workflow = 5（Fargate ARM 1 vCPU / 2 GB のタスク 1 つ。Gateway と Lambda と SQS と S3 Tables への追記は使った分だけ。単価は 2026-09-17 に確認）。
 # ここを変えたら README の「作るもの」と docs/deploy.md の金額も変える
-COST_CENTS=8
+COST_CENTS=2
 COST_CENTS=$((COST_CENTS + ($(endpoint_count) * 14 * ENDPOINT_AZS + 5) / 10))
 if [ -n "$AGENT" ] && [ -n "$CREATE_KB" ]; then COST_CENTS=$((COST_CENTS + 33)); fi
 if [ -z "$SKIP_LAB" ]; then COST_CENTS=$((COST_CENTS + 9)); fi
@@ -362,6 +364,7 @@ if [ -z "$SKIP_ANALYTICS" ]; then
   if [ -n "$SINK_OPENSEARCH" ]; then COST_CENTS=$((COST_CENTS + 33)); fi
 fi
 if [ -n "$WORKFLOW" ]; then COST_CENTS=$((COST_CENTS + 5)); fi
+if [ -z "$SKIP_ANALYTICS" ] && [ -n "$SINK_SPLUNK" ]; then COST_CENTS=$((COST_CENTS + 6)); fi   # NAT Gateway
 if { [ -n "$AGENT" ] && [ -n "$CREATE_KB" ]; } || { [ -z "$SKIP_ANALYTICS" ] && [ -n "$SINK_OPENSEARCH" ]; }; then COST_CENTS=$((COST_CENTS + 3)); fi
 COST_NOTE=$(printf '待機だけで約 $%d.%02d/h（約 %d 円/h。チャットの分は別）の時間課金。使い終わったら当日中に ops/down.sh を打つ' \
   $((COST_CENTS / 100)) $((COST_CENTS % 100)) $(((COST_CENTS * 150 + 50) / 100)))
@@ -461,11 +464,29 @@ for pair in 'agent aws_bedrockagent_knowledge_base\.' 'pipeline/analytics aws_pr
     case "$r" in agent) add_endpoints bedrock-agent-runtime ;; *) add_endpoints aps-workspaces ;; esac
   fi
 done
+# NAT Gateway は AWS の外にある Splunk の HEC へ出るためだけに作る（terraform/base/core の var.create_nat_gateway）。
+# 今回 analytics を作らなくても、state の analytics が splunk に送っていれば外さない（外すと HEC に届かなくなる）
+CREATE_NAT=""
+case " $ROOTS " in
+  *" pipeline/analytics "*) if [ -n "$SINK_SPLUNK" ]; then CREATE_NAT=1; fi ;;
+  *)
+    if [ -f terraform/pipeline/analytics/terraform.tfstate ]; then
+      tf_init pipeline/analytics
+      if has_resources pipeline/analytics && tf pipeline/analytics output -json sinks 2>/dev/null | grep -q '"splunk"'; then
+        CREATE_NAT=1
+        echo "terraform/pipeline/analytics は今回作らないが state の格納先に splunk があるので、NAT Gateway を残す"
+      fi
+    fi
+    ;;
+esac
+MAIN_VARS+=(-var "create_nat_gateway=$([ -n "$CREATE_NAT" ] && echo true || echo false)")
 MAIN_VARS+=(-var "interface_endpoints=[\"$(printf '%s' "$ENDPOINTS" | sed 's/ /","/g')\"]")
 MAIN_VARS+=(-var "network_perimeter=$([ -n "$NETWORK_PERIMETER" ] && echo true || echo false)")
 MAIN_VARS+=(-var "endpoints_multi_az=$([ -n "$ENDPOINTS_MULTI_AZ" ] && echo true || echo false)")
 echo "エンドポイント: $ENDPOINTS"
-# 2026-09-26〜28 の配置（NAT Gateway だけ）の state からでもそのまま apply できる（エンドポイントと perimeter が足されるだけ）。
+echo "NAT Gateway: $([ -n "$CREATE_NAT" ] && echo 作る（Splunk の HEC へ出る） || echo 作らない（インターネットへの経路は無い）)"
+# 2026-09-26〜28 の配置（NAT Gateway だけ）の state からでもそのまま apply できる（エンドポイントと perimeter が足され、
+# Splunk を使わなければ NAT Gateway / インターネットゲートウェイ / パブリックサブネットが消える）。
 # それより前（7c42b0f まで、ルートごとにエンドポイントと SG を持っていた頃）の state が残っていれば、先に ops/down.sh で消す
 tf_apply base/core ${MAIN_VARS[@]+"${MAIN_VARS[@]}"}
 INSTANCE_ID=$(tf base/core output -raw web_instance_id)
@@ -682,7 +703,7 @@ fi
 # ---- 7-4. analytics ------------------------------------------------------------------
 if [ -z "$SKIP_ANALYTICS" ]; then
   log "7-4. analytics（terraform/pipeline/analytics。EMR Serverless と格納先: ${SINKS}。数分）"
-  # ドライバーのログは CloudWatch Logs へ出す（NAT Gateway で届く）
+  # ドライバーのログは CloudWatch Logs へ出す（terraform/base/core の logs のエンドポイントで届く）
   # 検知の device map（別名=機器名,...）も lab の定義から作る。trap には sysName が無いので、送り元の IP から機器名を引くのに要る
   DEVICE_MAP=$("${PY[@]}" lab/lab_topology.py lab --device-map) || die "lab/lab_topology.py が lab の定義から device map を作れなかった"
   ANALYTICS_VARS=(-var "sinks=[$SINKS_TF]" -var "device_map=$DEVICE_MAP")

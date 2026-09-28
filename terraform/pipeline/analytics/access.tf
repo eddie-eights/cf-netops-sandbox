@@ -135,7 +135,7 @@ resource "aws_iam_role_policy" "emr" {
 
 # terraform/base/core の perimeter.tf の Deny（VPC エンドポイントを通らない呼び出しを拒む）。
 # スクリプト・jar・checkpoint は S3 gateway、S3 Tables は s3tables のエンドポイント、remote write は aps-workspaces、
-# put_events は events、token は ssm のエンドポイントを通る。HEC だけが NAT から AWS の外へ出る
+# put_events は events、token は ssm のエンドポイントを通る。HEC だけが NAT（splunk を選んだときだけある）から AWS の外へ出る
 resource "aws_iam_role_policy_attachment" "emr_perimeter" {
   count = local.perimeter_policy_arn != "" ? 1 : 0
 

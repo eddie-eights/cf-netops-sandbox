@@ -1,6 +1,6 @@
 # ---------------------------------------------------------------- network perimeter (2026-09-28)
 # AWS の API は全部 VPC エンドポイント（endpoints.tf）を通すので、正しいリクエストには aws:SourceVpc = この VPC が付く。
-# それが付かないリクエスト（NAT Gateway から出た、盗んだ認証情報を VPC の外で使った）を 2 か所で拒む:
+# それが付かないリクエスト（盗んだ認証情報を VPC の外で使った、NAT Gateway があるときにそこから出た）を 2 か所で拒む:
 #   1. IAM 側   ワークロードのロールに付ける Deny（下の network_perimeter）。付け先は web / runtime（ここ）、lab / Telegraf（pipeline/lab）、
 #               Spark（pipeline/analytics）、ワーカー（workflow）、ツールの Lambda（workflow）
 #   2. 資源側   バケット（下）、S3 Tables（pipeline/analytics）、SQS（workflow）のリソースポリシーの Deny
