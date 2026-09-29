@@ -67,6 +67,30 @@ AWS の API へは全部 VPC エンドポイントから行き、この VPC を�
 - apply する人が替わったら、その人が `ops/up.sh` を打ち直す（外すプリンシパルが入れ替わる）。前の人の設定のままバケットに入れないときは [troubleshooting.md](troubleshooting.md) の「閉域」。
 - 本番では、apply も VPC の中（CI のランナーなど）から打ち、外す人を無くす。AWS の外（Splunk Cloud など）へ送る必要が出て NAT Gateway を足すなら、出る先を Network Firewall のドメインの許可リストで絞る（この PoC には無い）。
 
+## SG
+
+ワークロードごとに SG を 1 つと、VPC エンドポイント用の `endpoints`。SG もルールも `terraform/base/core/security_groups.tf` にまとめ、ルールは通信の表（`local.sg_flows`）から作る。表に無い通信は受信も送信も通らない。ほかのルートは土台の output `security_group_ids` から自分の SG を読んで付けるだけで、ルールは作らない（SG とルールに時間課金は無いので、機能を作らないときもそろえて作る）。
+
+| 送る側 | 受ける側 | ポート | 何のため |
+|---|---|---|---|
+| web / lab / telegraf / spark / grafana / splunk / lambda / workflow / runtime | endpoints / S3（プレフィックスリスト） | 443/tcp | AWS の API（インターフェース型）と S3（gateway 型。ECR のレイヤーと dnf も） |
+| web / runtime / spark / lambda / workflow | neptune | 8182/tcp | Gremlin（Neptune は IAM 認証） |
+| web | grafana / splunk / workflow | 3000 / 8000 / 8233（tcp） | SSM のポートフォワーディング（Grafana / Splunk Web / Temporal UI） |
+| telegraf / spark | msk | 9098/tcp | Kafka（IAM 認証） |
+| msk | msk | 9092〜9098/tcp | ブローカー同士 |
+| spark | spark | 全部の tcp | 1 つのジョブのドライバとエグゼキュータ |
+| spark | splunk | 8088/tcp | HEC（`SINK_SPLUNK=1`） |
+| telegraf_nlb | telegraf | 1162/udp、5140/udp、8080/tcp | trap・syslog の転送と、NLB のヘルスチェック |
+| lab の管理ネットワーク（203.0.113.0/24） | telegraf_nlb | 162/udp、5140/udp | 機器の trap と syslog（lab の EC2 が DNAT するので送り元は機器の IP のまま） |
+| telegraf | lab の管理ネットワーク | 161/udp、57400/tcp | SNMP のポーリングと gNMI（VPC のルートで lab の EC2 へ） |
+
+- lab の EC2 が転送する流れは、SG が見る IP が lab の EC2 ではなく機器の管理 IP になる。そこで、相手の ENI の IP が見える側だけを SG の参照で書き（lab の送信は telegraf_nlb へ、lab の受信は telegraf から）、反対側は管理ネットワークの CIDR で書く。
+- 開けていないもの: Temporal の gRPC 7233（ワーカーは同じタスクの `localhost`。Temporal も `127.0.0.1` だけで待つ）と Splunk の管理 API 8089。インターネットからの受信は、SG の前に経路が無い。
+- DNS（VPC の +2）・IMDS・ECS のタスクメタデータ・Time Sync は SG の対象外なので、表に無くても届く。
+- `endpoints` は表の 443 だけを受け、外へは出さない。
+- VPC の全 ENI の通信は VPC フローログ（`terraform/base/core/flow_logs.tf`）でロググループ `/<prefix>/vpc-flow-logs` に残る（保存 7 日。集約 60 秒）。表の漏れで拒んだ通信は `action = REJECT` で出る（問い合わせは [troubleshooting.md](troubleshooting.md)）。
+- SG の説明（description）を変えると作り直しになり、ENI が付いていると消えない。変えるときは先に `ops/down.sh` を打つ。2026-09-29 より前の state（全部で共有する `internal` 1 つ）が残っていると、`ops/up.sh` は手順 0 の後で止まる。ほかのルートは土台の `security_group_ids` を読むが、無ければ apply の前に止まり（`terraform_remote_state` の postcondition）、destroy は古い state のままでも通る（SG の ID は `try` で読む）。
+
 ## どのファイルがどこで動くか
 
 `app.py` が 2 つあり、動く場所が違う。
@@ -98,7 +122,7 @@ AWS の API へは全部 VPC エンドポイントから行き、この VPC を�
 terraform/
 ├── base/
 │   ├── ecr/         ECR リポジトリ
-│   └── core/        VPC / VPC エンドポイント / 閉域の Deny（perimeter.tf）/ SG（internal と endpoints）/ バケット / ロール / Web の EC2
+│   └── core/        VPC / VPC エンドポイント / 閉域の Deny（perimeter.tf）/ SG（ワークロードごと。通信の表は security_groups.tf）/ フローログ / バケット / ロール / Web の EC2
 ├── agent/         AGENT=1     Runtime / ガードレール / KB
 ├── pipeline/      PIPELINE=1
 │   ├── lab/         containerlab の EC2（stream を作るときは Telegraf への転送も）

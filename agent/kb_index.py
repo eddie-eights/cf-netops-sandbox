@@ -1,7 +1,7 @@
 """Knowledge Base のベクトル索引を作る Lambda（terraform/agent/kb.tf の aws_lambda_invocation.kb_index が apply のときに 1 回呼ぶ）。
 
 コレクションは VPC エンドポイントからしか届かない（ネットワークポリシーが AllowFromPublic = false）ので、
-Terraform を打つ PC からは索引を作れない。この Lambda は VPC の中（土台の internal SG）で動き、
+Terraform を打つ PC からは索引を作れない。この Lambda は VPC の中（土台の lambda の SG）で動き、
 自分のロール（データアクセスポリシーでは CreateIndex / DescribeIndex だけ）で SigV4 に署名して PUT する。
 
 入力: {"endpoint": "https://<id>.<region>.aoss.amazonaws.com", "index": "kb-index", "body": {settings と mappings}}

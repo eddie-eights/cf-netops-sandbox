@@ -54,7 +54,7 @@ variable "auto_start_lab" {
 
 # ---------------------------------------------------------------- path to Telegraf (telegraf.tf)
 variable "forward_to_telegraf" {
-  description = "Route the lab mgmt network (203.0.113.0/24) to this EC2 and open the security group for the traps and syslog, so Telegraf (the ECS task of terraform/pipeline/stream) reaches the switches. ops/up.sh sets true when terraform/pipeline/stream is made or kept."
+  description = "Route the lab mgmt network (203.0.113.0/24) to this EC2 and turn off its source/destination check, so Telegraf (the ECS task of terraform/pipeline/stream) reaches the switches. The security group rules for the polling, traps and syslog are always there (terraform/base/core security_groups.tf). ops/up.sh sets true when terraform/pipeline/stream is made or kept."
   type        = bool
   default     = false
 }

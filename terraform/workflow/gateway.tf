@@ -116,8 +116,8 @@ data "aws_iam_policy_document" "tools" {
 }
 
 # ---------------------------------------------------------------- tools Lambda network (subnet a of terraform/base/core)
-# Lambda の SG は terraform/base/core の internal。Neptune と aoss の VPC エンドポイントは同じ SG の中、SSM / aps へは terraform/base/core の
-# インターフェース型エンドポイントを通る（ログは Lambda のサービスが書く）。
+# Lambda の SG は terraform/base/core の lambda（Neptune の 8182 とエンドポイントの 443 へ出られる）。aoss / SSM / aps へは terraform/base/core の
+# VPC エンドポイントを通る（ログは Lambda のサービスが書く）。
 # 2026-09-26 まではここに tools の SG と 4 本のルールがあった（7c42b0f）
 
 # 検索だけ。terraform/pipeline/analytics の data access policy は Spark の実行ロール（書く側）だけなので、読む側はここで足す
@@ -181,10 +181,10 @@ resource "aws_lambda_function" "tools" {
   timeout          = 60
   memory_size      = 256
 
-  # VPC の中（サブネット a）。SG は terraform/base/core の internal
+  # VPC の中（サブネット a）。SG は terraform/base/core の lambda
   vpc_config {
     subnet_ids         = [local.subnet_id]
-    security_group_ids = [local.internal_sg_id]
+    security_group_ids = [local.lambda_sg_id]
   }
 
   environment {

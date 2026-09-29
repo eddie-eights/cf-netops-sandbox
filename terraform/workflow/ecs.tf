@@ -1,6 +1,7 @@
 # ---------------------------------------------------------------- network
-# タスクの SG は terraform/base/core の internal（VPC の中からは何でも受ける、送信は自由）。Neptune の 8182 も Temporal UI の 8233
-# （Web の EC2 を踏み台にした SSM のポートフォワーディング。docs/workflow.md「Temporal UI を開く」）も同じ SG の中なので穴は要らない。
+# タスクの SG は terraform/base/core の workflow。受信は Web の EC2 からの Temporal UI の 8233（SSM のポートフォワーディング。docs/workflow.md
+# 「Temporal UI を開く」）だけ、送信は Neptune の 8182 とエンドポイントと S3 の 443（security_groups.tf の通信の表）。
+# Temporal の gRPC（7233）はタスクの中の localhost だけで待つ（ワーカーは同じタスク。下の --ip 127.0.0.1）。
 # ECR / logs / SSM / AgentCore / SQS / s3tables へは terraform/base/core のインターフェース型エンドポイント（ops/up.sh が WORKFLOW のときに作らせる）を通る。
 # 2026-09-26 まではここにタスクの SG と 7 本のルールがあった（7c42b0f）
 
@@ -39,10 +40,11 @@ resource "aws_ecs_task_definition" "workflow" {
       name      = "temporal"
       image     = local.temporal_image
       essential = true
-      # temporalio/temporal の entrypoint は `temporal`（CLI）。start-dev は SQLite を /tmp に置く（タスクが消えると消える）
-      command = ["server", "start-dev", "--ip", "0.0.0.0", "--db-filename", "/tmp/temporal.db", "--log-level", "warn"]
+      # temporalio/temporal の entrypoint は `temporal`（CLI）。start-dev は SQLite を /tmp に置く（タスクが消えると消える）。
+      # gRPC（7233）と HTTP・メトリクスのポートは --ip の 127.0.0.1（同じタスクのワーカーだけが localhost でつなぐ）、Web UI だけ --ui-ip で外に出す
+      # （UI は同じコンテナの中から 127.0.0.1:7233 を読む）。2026-09-29 までは --ip 0.0.0.0 で 7233 もタスクの外に開いていた
+      command = ["server", "start-dev", "--ip", "127.0.0.1", "--ui-ip", "0.0.0.0", "--db-filename", "/tmp/temporal.db", "--log-level", "warn"]
       portMappings = [
-        { containerPort = 7233, protocol = "tcp" }, # gRPC（ワーカー）
         { containerPort = 8233, protocol = "tcp" }, # Web UI（docs/workflow.md「Temporal UI を開く」）
       ]
       logConfiguration = {
@@ -121,7 +123,7 @@ resource "aws_ecs_service" "workflow" {
 
   network_configuration {
     subnets          = [local.subnet_id]
-    security_groups  = [local.internal_sg_id]
+    security_groups  = [local.workflow_sg_id]
     assign_public_ip = false
   }
 

@@ -426,6 +426,15 @@ case ",$SINKS," in
   *,opensearch,*) if [ -z "$SKIP_ANALYTICS" ]; then printf '\033[1;33m%s\033[0m\n' "SINK_OPENSEARCH=1（既定）: OpenSearch Serverless の logs コレクションを作る。OCU が KB のコレクションと共有されなければ最大 \$0.33/h で、上の目安はそれを含んでいる"; fi ;;
 esac
 
+# SG は 2026-09-29 にワークロードごとに分けた（terraform/base/core の security_groups.tf）。それより前の state（全部で共有する internal 1 つ）からは
+# apply できない（ほかのルートのリソースと Runtime の ENI が internal を付けたままなので、消すところで DependencyViolation になる）。何か作る前に止める
+if [ -f terraform/base/core/terraform.tfstate ]; then
+  tf_init base/core
+  if tf base/core state list 2>/dev/null | grep -qx 'aws_security_group\.internal'; then
+    die "terraform/base/core の state に 2026-09-29 より前の SG（internal）が残っている。先に ops/down.sh で消す（Runtime の ENI が残るあいだは VPC・サブネットと一緒に残るので、時間をおいて打ち直す）。まだ何も作っていない"
+  fi
+fi
+
 # ---- 1. ECR --------------------------------------------------------------------
 log "1. ECR リポジトリ（terraform/base/ecr）"
 tf_apply base/ecr
@@ -548,9 +557,8 @@ MAIN_VARS+=(-var "interface_endpoints=[\"$(printf '%s' "$ENDPOINTS" | sed 's/ /"
 MAIN_VARS+=(-var "network_perimeter=$([ -n "$NETWORK_PERIMETER" ] && echo true || echo false)")
 MAIN_VARS+=(-var "endpoints_multi_az=$([ -n "$ENDPOINTS_MULTI_AZ" ] && echo true || echo false)")
 echo "エンドポイント: $ENDPOINTS"
-# 2026-09-26〜28 の配置（NAT Gateway あり）の state からでもそのまま apply できる（エンドポイントと perimeter が足され、
-# NAT Gateway / インターネットゲートウェイ / パブリックサブネットが消える）。
-# それより前（7c42b0f まで、ルートごとにエンドポイントと SG を持っていた頃）の state が残っていれば、先に ops/down.sh で消す
+# SG が internal 1 つだった頃（2026-09-26〜29）の state は手順 0 の後で止めている（先に ops/down.sh）。
+# それより前（7c42b0f まで、ルートごとにエンドポイントと SG を持っていた頃）の state が残っていれば、同じく先に ops/down.sh で消す
 tf_apply base/core ${MAIN_VARS[@]+"${MAIN_VARS[@]}"}
 INSTANCE_ID=$(tf base/core output -raw web_instance_id)
 KB_BUCKET=$(tf base/core output -raw kb_bucket_name)

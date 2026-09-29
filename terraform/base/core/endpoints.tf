@@ -25,7 +25,7 @@ resource "aws_vpc_endpoint" "s3" {
 # 1 つの VPC に 1 本あれば全コレクションに届き（AWS の文書「You only need one OpenSearch Serverless VPC endpoint in a VPC」）、
 # 作ると AOSS が *.<region>.aoss.amazonaws.com の private hosted zone を VPC に付ける。2 本目を作らないよう、ここに 1 本だけ置く。
 # ops/up.sh は CREATE_KB か SINK_OPENSEARCH のとき create_opensearch_endpoint=true で apply する。
-# ENI は 2 AZ（1 本 1.4 セント/h × 2）。SG は endpoints（internal からの 443 だけ）
+# ENI は 2 AZ（1 本 1.4 セント/h × 2）。SG は endpoints（ワークロードの SG からの 443 だけ。security_groups.tf）
 resource "aws_opensearchserverless_vpc_endpoint" "aoss" {
   count = var.create_opensearch_endpoint ? 1 : 0
 

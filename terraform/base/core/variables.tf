@@ -104,6 +104,12 @@ variable "endpoints_multi_az" {
   default     = false
 }
 
+variable "flow_log_retention_days" {
+  description = "Retention of the VPC flow log group /<prefix>/vpc-flow-logs (flow_logs.tf)"
+  type        = number
+  default     = 7
+}
+
 variable "network_perimeter" {
   description = "Deny AWS API calls that do not come through this VPC (aws:SourceVpc): an IAM policy on the workload roles (perimeter.tf, attached by every root) and resource policies on the bucket here, the S3 Tables bucket, the SQS queues and the AgentCore Runtime and Gateway in the other roots (Prometheus has no resource policy - only the IAM side). The deployer (whoever runs terraform) and AWS service principals are excepted. false only to rule it out while troubleshooting."
   type        = bool

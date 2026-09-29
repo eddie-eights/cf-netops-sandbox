@@ -108,7 +108,7 @@ resource "aws_ecs_service" "grafana" {
 
   network_configuration {
     subnets          = [local.instance_subnet_id]
-    security_groups  = [local.internal_sg_id]
+    security_groups  = [local.grafana_sg_id]
     assign_public_ip = false
   }
 

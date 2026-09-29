@@ -4,7 +4,8 @@
 #   人      → SSM のポートフォワード（AWS-StartPortForwardingSessionToRemoteHost）で web の EC2 を踏み台に grafana.<名前空間>:3000 / splunk.<名前空間>:8000
 #   Spark   → splunk.<名前空間>:8088（HEC）
 # タスクの IP は作り直すたびに変わるので、Cloud Map の A レコード（TTL 10 秒）で引く。
-# SG は terraform/base/core の internal（VPC の CIDR から全部受ける）。ECR / CloudWatch Logs / SSM の API は VPC エンドポイントを通る（ops/up.sh が足す）
+# SG は terraform/base/core の grafana と splunk（Web の EC2 から 3000 / 8000、Spark から 8088 を受ける。security_groups.tf の通信の表）。
+# ECR / CloudWatch Logs / SSM の API は VPC エンドポイントを通る（ops/up.sh が足す）
 
 resource "aws_ecs_cluster" "analytics" {
   count = local.create_ecs ? 1 : 0

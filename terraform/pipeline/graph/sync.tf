@@ -90,10 +90,10 @@ resource "aws_lambda_function" "status" {
   timeout          = 30
   memory_size      = 128
 
-  # Neptune と同じサブネット、SG は terraform/base/core の internal（SSM は引かない。エンドポイントは環境変数で渡す）
+  # Neptune と同じサブネット、SG は terraform/base/core の lambda（Neptune の 8182 へ出られる。SSM は引かない。エンドポイントは環境変数で渡す）
   vpc_config {
     subnet_ids         = local.subnet_ids
-    security_group_ids = [local.internal_sg_id]
+    security_group_ids = [local.lambda_sg_id]
   }
 
   environment {

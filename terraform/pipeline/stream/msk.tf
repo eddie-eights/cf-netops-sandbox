@@ -26,7 +26,7 @@ resource "aws_msk_cluster" "stream" {
   broker_node_group_info {
     instance_type   = var.broker_instance_type
     client_subnets  = local.broker_subnet_ids
-    security_groups = [local.internal_sg_id]
+    security_groups = [local.msk_sg_id]
 
     storage_info {
       ebs_storage_info {

@@ -39,9 +39,9 @@ output "vpc_cidr" {
   value       = aws_vpc.this.cidr_block
 }
 
-output "internal_security_group_id" {
-  description = "The one SG every workload wears (inbound from the VPC, outbound free). Read by terraform/agent (runtime ENIs), terraform/pipeline/lab (lab EC2), terraform/pipeline/stream (MSK brokers, Telegraf task and NLB), terraform/pipeline/graph (Neptune, status Lambda), terraform/pipeline/analytics (EMR, Grafana / Splunk tasks) and terraform/workflow (Fargate, tools Lambda)"
-  value       = aws_security_group.internal.id
+output "security_group_ids" {
+  description = "SG of each workload (security_groups.tf), keyed web / lab / telegraf / telegraf_nlb / msk / spark / grafana / splunk / neptune / lambda / workflow / runtime / endpoints. Read by terraform/agent (runtime, lambda), terraform/pipeline/lab (lab), terraform/pipeline/stream (telegraf, telegraf_nlb, msk), terraform/pipeline/graph (neptune, lambda), terraform/pipeline/analytics (spark, grafana, splunk) and terraform/workflow (workflow, lambda)"
+  value       = local.sg_ids
 }
 
 output "opensearch_vpc_endpoint_id" {
@@ -87,6 +87,11 @@ output "runtime_role_arn" {
 output "web_role_name" {
   description = "Read by terraform/agent (InvokeAgentRuntime) / terraform/pipeline/stream / terraform/pipeline/graph"
   value       = aws_iam_role.web.name
+}
+
+output "flow_log_group_name" {
+  description = "VPC flow logs (flow_logs.tf). Query REJECT with CloudWatch Logs Insights (docs/troubleshooting.md)"
+  value       = aws_cloudwatch_log_group.flow_logs.name
 }
 
 # ---------------------------------------------------------------- commands

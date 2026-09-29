@@ -110,7 +110,7 @@ resource "time_sleep" "kb_collection_ready" {
 
 # ---------------------------------------------------------------- vector index (Lambda in the VPC)
 # コレクションは VPC エンドポイントからしか届かないので、Terraform を打つ PC からは索引を作れない。
-# VPC の中（土台の internal SG。endpoints SG が 443 を受ける）の Lambda（agent/kb_index.py）を apply のときに 1 回呼んで作る。
+# VPC の中（土台の lambda の SG。endpoints の SG が 443 を受ける）の Lambda（agent/kb_index.py）を apply のときに 1 回呼んで作る。
 # 索引がもうあれば作らない（mappings が違っても直さない）。mappings を変えるときは
 # -replace=aws_opensearchserverless_collection.kb[0] でコレクションごと作り直し、そのあと取り込みをやり直す
 data "archive_file" "kb_index" {
@@ -198,7 +198,7 @@ resource "aws_lambda_function" "kb_index" {
 
   vpc_config {
     subnet_ids         = local.subnet_ids
-    security_group_ids = [local.runtime_sg_id]
+    security_group_ids = [local.lambda_sg_id]
   }
 
   depends_on = [aws_cloudwatch_log_group.kb_index, aws_iam_role_policy.kb_index]

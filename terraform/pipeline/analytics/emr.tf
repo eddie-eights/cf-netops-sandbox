@@ -22,10 +22,10 @@ resource "aws_emrserverless_application" "spark" {
     memory = var.max_memory
   }
 
-  # SG は terraform/base/core の internal（network.tf）
+  # SG は terraform/base/core の spark（network.tf）
   network_configuration {
     subnet_ids         = slice(local.subnet_ids, 0, 2)
-    security_group_ids = [local.internal_sg_id]
+    security_group_ids = [local.spark_sg_id]
   }
 
   # scheduler_configuration（max_concurrent_runs / queue_timeout_minutes）は書かない。API が既定値（15 / 360）を返すので、

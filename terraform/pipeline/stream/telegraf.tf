@@ -9,8 +9,10 @@
 #   syslog      機器 → lab の EC2 の 5140/udp → DNAT → NLB の 5140 → タスクの 5140
 # タスクの IP は作り直すと変わるので、DNAT の宛先は変わらない NLB の IP にする（SSM の /<接頭辞>/telegraf-address）。
 # NLB は送り元の IP を残す（UDP のターゲットは client IP preservation が既定で、Spark とエージェントは送り元の IP で機器を引く）。
-# SG は NLB もタスクも terraform/base/core の internal。送り元が機器の管理 IP のままなので、udp 162 / 5140（NLB）と 1162（タスク）を
-# 管理ネットワークから受けるルールは terraform/pipeline/lab が足す（VPC の CIDR のルールには当たらない）。NLB のヘルスチェック（8080/tcp）は VPC の中から来るので通る
+# SG は NLB（telegraf_nlb）とタスク（telegraf）で別々で、ルールは terraform/base/core の security_groups.tf の通信の表にある:
+#   NLB   管理ネットワークの CIDR から udp 162 / 5140 を受け（送り元が機器の管理 IP のまま）、タスクの SG へ udp 1162 / 5140 と tcp 8080（ヘルスチェック）を送る
+#   タスク NLB の SG から受け（送り元の IP が残っても、NLB の SG を参照したルールで通る）、MSK の 9098・管理ネットワークの udp 161 / tcp 57400・
+#         エンドポイントと S3 の 443 へ送る
 
 locals {
   telegraf_repository_url = try(data.terraform_remote_state.ecr.outputs.telegraf_repository_url, "")
@@ -34,8 +36,8 @@ resource "aws_lb" "telegraf" {
   internal           = true
   load_balancer_type = "network"
   subnets            = [local.telegraf_subnet_id]
-  # NLB の SG は作るときにしか付けられない（後から足すと作り直し）
-  security_groups = [local.internal_sg_id]
+  # NLB の SG は作るときにしか付けられない（後から足すと作り直し。付けて作った NLB なら入れ替えはできる）
+  security_groups = [local.telegraf_nlb_sg_id]
 
   tags = { Name = "${local.name_prefix}-telegraf" }
 }
@@ -188,7 +190,7 @@ resource "aws_ecs_service" "telegraf" {
 
   network_configuration {
     subnets          = [local.telegraf_subnet_id]
-    security_groups  = [local.internal_sg_id]
+    security_groups  = [local.telegraf_sg_id]
     assign_public_ip = false
   }
 

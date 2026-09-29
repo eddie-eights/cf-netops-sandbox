@@ -75,7 +75,7 @@ flowchart LR
 
 - 手順 5-2 で、`ops/up.sh` が作った SSM のパラメータ（`/<prefix>/` の下でタグ `ManagedBy=ops/up.sh` のもの。Grafana / Splunk の admin のパスワードと Splunk の HEC の token）を消す。手で入れたパラメータは消さない。
 - 最後に `Project=<prefix>` のタグが残っているものを出す。何も出なければ全部消えている。
-- **Runtime の ENI は最大 8 時間残る。**その間は VPC、サブネット、全ワークロードが共有する internal の SG を残して他を消す。時間をおいて打ち直す。
+- **Runtime の ENI は最大 8 時間残る。**その間は VPC、サブネット、Runtime の SG（`<prefix>-runtime`）を残して他を消す。時間をおいて打ち直す。
 - graph / workflow / KB（`<prefix>-kb-index`）の Lambda の ENI（20〜40 分残る）は裏で消す。
 - `KEEP_ECR=1 ops/down.sh` で ECR を残すと、翌朝のビルドを飛ばせる。
 

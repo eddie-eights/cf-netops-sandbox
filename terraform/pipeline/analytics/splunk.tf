@@ -120,7 +120,7 @@ resource "aws_ecs_service" "splunk" {
 
   network_configuration {
     subnets          = [local.instance_subnet_id]
-    security_groups  = [local.internal_sg_id]
+    security_groups  = [local.splunk_sg_id]
     assign_public_ip = false
   }
 

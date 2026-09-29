@@ -307,13 +307,13 @@ for root in ("base/core", "pipeline/lab", "base/ecr", "agent"):
     check(f"{root} の state をローカルから読む", f'"${{path.module}}/../{root}/terraform.tfstate"' in tf)
 main_out = read("terraform", "base", "core", "outputs.tf")
 lab_out = read("terraform", "pipeline", "lab", "outputs.tf"); ecr_out = read("terraform", "base", "ecr", "outputs.tf"); agent_out = read("terraform", "agent", "outputs.tf")
-for out in ("vpc_id", "instance_subnet_id", "internal_security_group_id", "runtime_role_name", "web_role_name"):
+for out in ("vpc_id", "instance_subnet_id", "security_group_ids", "runtime_role_name", "web_role_name"):
     check(f"main の出力 {out} がある", f'output "{out}"' in main_out and f"outputs.{out}" in tf)
 check("agent の出力 agent_runtime_arn を try で読み、無ければ precondition で止まる（terraform/agent を先に apply）",
       'output "agent_runtime_arn"' in agent_out and re.search(r'try\(data\.terraform_remote_state\.agent\.outputs\.agent_runtime_arn, ""\)', tf) is not None
       and 'condition     = local.runtime_arn != ""' in tf and "terraform/agent を先に apply" in tf)
 graph_out = read("terraform", "pipeline", "graph", "outputs.tf"); analytics_out = read("terraform", "pipeline", "analytics", "outputs.tf")
-check("graph の出力 cluster_endpoint / cluster_resource_id を読む（SG は 2026-09-26 に土台の internal 1 つになった）",
+check("graph の出力 cluster_endpoint / cluster_resource_id を読む（SG は土台の security_groups.tf）",
       all(f'output "{o}"' in graph_out and f"outputs.{o}" in tf for o in ("cluster_endpoint", "cluster_resource_id")) and "neptune_security_group_id" not in tf)
 check("analytics の出力（テーブルバケット・namespace・proposal_events）を読む",
       all(f'output "{o}"' in analytics_out and f"outputs.{o}" in tf for o in ("table_bucket_arn", "table_namespace", "proposal_events_table_name")))
@@ -322,7 +322,11 @@ check("lab の出力 lab_instance_id がある", 'output "lab_instance_id"' in l
 check("ecr の出力 worker_repository_url / temporal_repository_url がある",
       all(f'output "{o}"' in ecr_out and f"outputs.{o}" in tf for o in ("worker_repository_url", "temporal_repository_url")))
 check("ECS のタスクは Fargate の ARM64", 'cpu_architecture        = "ARM64"' in tf and '"FARGATE"' in tf)
-check("temporal コンテナは start-dev を SQLite で、0.0.0.0 で待つ", '"server", "start-dev", "--ip", "0.0.0.0"' in tf and "--db-filename" in tf)
+check("temporal コンテナは start-dev を SQLite で動かし、gRPC 7233 は 127.0.0.1 だけで待ち、UI の 8233 だけを 0.0.0.0 に出す（2026-09-29）",
+      '"server", "start-dev", "--ip", "127.0.0.1", "--ui-ip", "0.0.0.0"' in tf and "--db-filename" in tf and '"0.0.0.0", "--db' not in tf.replace('"--ui-ip", "0.0.0.0"', ""))
+_temporal_ports = re.search(r'name\s*=\s*"temporal"[\s\S]*?portMappings\s*=\s*\[([\s\S]*?)\]', tf)
+check("temporal コンテナの portMappings は UI の 8233 だけ（7233 は出さない。ワーカーは同じタスクの localhost）",
+      _temporal_ports is not None and re.findall(r'containerPort\s*=\s*(\d+)', _temporal_ports.group(1)) == ["8233"] and "7233" not in _temporal_ports.group(1))
 check("worker は temporal の後に起き、localhost:7233 につなぐ", '"localhost:7233"' in tf and 'condition = "START"' in tf)
 for env in ("NEPTUNE_ENDPOINT", "AUDIT_TABLE_BUCKET_ARN", "AUDIT_NAMESPACE", "PROPOSAL_EVENTS_TABLE", "ANOMALY_QUEUE_URL", "AGENT_RUNTIME_ARN", "LAB_INSTANCE_ID", "POLL_INTERVAL", "APPROVAL_TIMEOUT_MINUTES", "VERIFY_ATTEMPTS", "PARAM_PREFIX"):
     check(f"worker の環境変数 {env} を渡す", f'name = "{env}"' in tf or f'name  = "{env}"' in tf or re.search(rf'name\s*=\s*"{env}"', tf) is not None)
@@ -335,8 +339,8 @@ check("タスクロールは Neptune の読み書きと、証跡テーブルの 
       task_doc is not None and re.search(r'sid\s*=\s*"Neptune"', task_doc.group(0)) and '"neptune-db:WriteDataViaQuery"' in task_doc.group(0)
       and re.search(r'sid\s*=\s*"AuditTable"', task_doc.group(0)) and '"s3tables:PutTableData"' in task_doc.group(0)
       and '"s3tables:UpdateTableMetadataLocation"' in task_doc.group(0))
-check("タスクと Lambda は土台の internal SG を使い、SG もポートごとのルールも作らない（2026-09-26）",
-      re.search(r'security_groups\s*=\s*\[local\.internal_sg_id\]', tf) is not None and re.search(r'security_group_ids\s*=\s*\[local\.internal_sg_id\]', tf) is not None
+check("タスクと Lambda は土台の workflow / lambda の SG を使い、SG もルールも作らない（ルールは土台の通信の表。2026-09-29）",
+      re.search(r'security_groups\s*=\s*\[local\.workflow_sg_id\]', tf) is not None and re.search(r'security_group_ids\s*=\s*\[local\.lambda_sg_id\]', tf) is not None
       and 'resource "aws_security_group"' not in tf and "aws_vpc_security_group_" not in tf and "neptune_sg_id" not in tf)
 check("graph と analytics が無ければ precondition で止まる（ワーカーが起きてから Neptune / 証跡に届かず落ちるより先に）",
       'local.neptune_endpoint != ""' in tf and 'local.audit_bucket_arn != ""' in tf and 'local.proposal_events_table_name != ""' in tf)
@@ -482,10 +486,11 @@ check("terraform/agent のファイルは versions / providers / variables / loc
       agent_files == {"versions.tf", "providers.tf", "variables.tf", "locals.tf", "runtime.tf", "kb.tf", "outputs.tf"})
 agent_tf = "".join(read("terraform", "agent", n) for n in sorted(agent_files))
 main_tf = "".join(read("terraform", "base", "core", n) for n in sorted(os.listdir(os.path.join(ROOT, "terraform", "base", "core"))) if n.endswith(".tf"))
-check("Runtime / ガードレール / KB は terraform/agent にあり、terraform/base/core には無い。agent にエンドポイントは無く、Runtime は土台の internal SG を使う",
+check("Runtime / ガードレール / KB は terraform/agent にあり、terraform/base/core には無い。agent にエンドポイントも SG も無く、Runtime は土台の runtime の SG を使う",
       all(r in agent_tf for r in ('resource "aws_bedrockagentcore_agent_runtime" "agent"', 'resource "aws_bedrock_guardrail" "this"', 'resource "aws_bedrockagent_knowledge_base" "kb"'))
       and 'resource "aws_vpc_endpoint"' not in agent_tf and 'resource "aws_security_group"' not in agent_tf
-      and re.search(r'runtime_sg_id\s*=\s*data\.terraform_remote_state\.main\.outputs\.internal_security_group_id', agent_tf) is not None
+      and re.search(r'runtime_sg_id\s*=\s*try\(data\.terraform_remote_state\.main\.outputs\.security_group_ids\["runtime"\], ""\)', agent_tf) is not None
+      and "aws_vpc_security_group_" not in agent_tf
       and not any(r in main_tf for r in ("aws_bedrockagentcore_agent_runtime", "aws_bedrock_guardrail", "aws_bedrockagent_knowledge_base", "aws_opensearchserverless_collection")))
 check("KB のコレクションは公開せず、土台の VPC エンドポイントと Bedrock のサービスからだけ。人の ARN はデータアクセスポリシーに入らない（2026-09-28）",
       re.search(r'"kb_network"[\s\S]*?AllowFromPublic\s*=\s*false[\s\S]*?SourceVPCEs\s*=\s*\[local\.aoss_vpce_id\][\s\S]*?SourceServices\s*=\s*\["bedrock\.amazonaws\.com"\]', agent_tf, re.S) is not None
@@ -493,7 +498,8 @@ check("KB のコレクションは公開せず、土台の VPC エンドポイ�
       and "kb_admin_principal_arn" not in agent_tf and "aws_iam_session_context" not in agent_tf
       and "opensearch-project/opensearch" not in agent_tf and 'resource "opensearch_index"' not in agent_tf)
 check("KB のベクトルインデックスは VPC の中の Lambda（agent/kb_index.py）が作り、KB はその後に作る。Lambda は CreateIndex / DescribeIndex だけ",
-      re.search(r'resource "aws_lambda_function" "kb_index"[\s\S]*?vpc_config\s*\{[\s\S]*?security_group_ids\s*=\s*\[local\.runtime_sg_id\]', agent_tf, re.S) is not None
+      re.search(r'resource "aws_lambda_function" "kb_index"[\s\S]*?vpc_config\s*\{[\s\S]*?security_group_ids\s*=\s*\[local\.lambda_sg_id\]', agent_tf, re.S) is not None
+      and re.search(r'lambda_sg_id\s*=\s*try\(data\.terraform_remote_state\.main\.outputs\.security_group_ids\["lambda"\], ""\)', agent_tf) is not None
       and "agent/kb_index.py" in agent_tf and 'resource "aws_lambda_invocation" "kb_index"' in agent_tf
       and re.search(r'"aoss:CreateIndex",\s*"aoss:DescribeIndex"\][\s\S]*?Principal\s*=\s*\[aws_iam_role\.kb_index\[0\]\.arn\]', agent_tf, re.S) is not None
       and re.search(r'resource "aws_bedrockagent_knowledge_base" "kb"[\s\S]*?depends_on\s*=\s*\[aws_lambda_invocation\.kb_index', agent_tf, re.S) is not None)
@@ -513,10 +519,23 @@ check("agent は web のロールに InvokeAgentRuntime を付け、main の run
       and 'output "runtime_role_arn"' in main_out and 'resource "aws_iam_role" "runtime"' in main_tf)
 check("閉域: Runtime のリソースポリシーは VPC の外からの InvokeAgentRuntime を拒み、apply した人は外す（deploy.md の CLI の確認が通る）",
       re.search(r'resource "aws_bedrockagentcore_resource_policy" "runtime"[\s\S]*?"bedrock-agentcore:InvokeAgentRuntime"[\s\S]*?agent_runtime_arn[\s\S]*?"aws:SourceVpc"[\s\S]*?local\.perimeter_exempt_principals', agent_tf) is not None)
-check("down.sh は Runtime の ENI が残るあいだ VPC・サブネット・internal の SG を残して他を消す",
+check("down.sh は Runtime の ENI が残るあいだ VPC・サブネット・runtime の SG を残して他を消す（aws_security_group.internal は 2026-09-29 より前の state）",
       "InterfaceType=='agentic_ai'" in down and "Name=tag:Name,Values=$PREFIX-vpc" in down and "tf base/core output -raw vpc_id" not in down and "Runtime の ENI の確認:" in down
-      and '""|data.*|aws_vpc.this|aws_subnet.*|aws_security_group.internal) ;;' in down and "aws_security_group.runtime" not in down
+      and '''""|data.*|aws_vpc.this|aws_subnet.*|'aws_security_group.workload["runtime"]'|aws_security_group.internal) ;;''' in down
+      and "aws_security_group.runtime" not in down
       and down.index("InterfaceType=='agentic_ai'") < down.index("destroy_root base/core") < down.index("destroy_root base/ecr"))
+check("up.sh は base/core の state に 2026-09-29 より前の SG（aws_security_group.internal）があれば、ECR より前に止めて先に down.sh を打たせる",
+      re.search(r"grep -qx 'aws_security_group\\\.internal'", up) is not None
+      and up.index("aws_security_group\\.internal") < up.index('log "1. ECR リポジトリ') and "先に ops/down.sh で消す" in up)
+_sg_roots = ("agent", "pipeline/analytics", "pipeline/graph", "pipeline/lab", "pipeline/stream", "workflow")
+_sg_locals = {r: read("terraform", *r.split("/"), "locals.tf") for r in _sg_roots}
+check("SG の ID を読む 6 ルートは try で読み（古い state のまま down.sh の destroy が通る）、base/core の state に security_group_ids が無ければ apply の前に止める",
+      all(re.search(r'data "terraform_remote_state" "main" \{[\s\S]*?lifecycle \{\s*postcondition \{\s*condition\s*=\s*can\(self\.outputs\.security_group_ids\)', s) is not None
+          and re.findall(r'security_group_ids\[', s)
+          and len(re.findall(r'security_group_ids\[', s)) == len(re.findall(r'= try\(data\.terraform_remote_state\.main\.outputs\.security_group_ids\["\w+"\], ""\)', s))
+          for s in _sg_locals.values())
+      and not any("security_group_ids[" in read("terraform", *r.split("/"), f) for r in _sg_roots
+                  for f in os.listdir(os.path.join(ROOT, "terraform", *r.split("/"))) if f.endswith(".tf") and f != "locals.tf"))
 check("down.sh は agent を lab の後、main の前に消し、ロググループ名を agent の state から読む",
       down.index("destroy_root pipeline/lab") < down.index('destroy_lambda_root agent "$PREFIX-kb-index"') < down.index("destroy_root base/core") and "tf agent output -raw runtime_log_group_name" in down)
 check("up.sh は main の後に agent を apply し、CREATE_KB のときだけ手順書を取り込む",
@@ -720,9 +739,13 @@ check("名前は空白を詰めて「<名前> (web)」で decided_by に残し�
 iv.decide_proposal("p1", "rejected", "pending", "x" * 100)
 check(f"却下はチェック無しで通り、名前は {iv.APPROVER_MAX} 字で切る", decided[-1] == ("p1", "rejected", "x" * iv.APPROVER_MAX + " (web)"))
 
-# ---- Temporal UI（8233）: 2026-09-24 のレビューではポートごとの SG ルールの抜けで UI が開かなかった。2026-09-26 に SG を internal 1 つにしたので、ルール自体が無い
-check("Temporal UI（8233）にポートごとの SG ルールは無く、Web の EC2 とタスクは同じ internal SG",
-      "task_ui_from_web" not in tf and "web_to_task_ui" not in tf and "web_sg_id" not in tf and "instance_security_group_id" not in tf
-      and 'output "internal_security_group_id"' in main_out and "outputs.internal_security_group_id" in tf)
+# ---- Temporal UI（8233）: 2026-09-24 のレビューではポートごとの SG ルールの抜けで UI が開かなかった。2026-09-29 からルールは土台の通信の表にあり、
+#      Web の EC2 から workflow の 8233 の 1 行で送信と受信の 2 本ができる（7233 は無い）
+_sg_tf = read("terraform", "base", "core", "security_groups.tf")
+check("Temporal UI（8233）は土台の通信の表の web → workflow の 1 行で、workflow にはルールも Web の SG の参照も無く、7233 の行は無い",
+      re.search(r'\{ from = "web", to = "workflow", protocol = "tcp", port = 8233,', _sg_tf) is not None
+      and re.search(r'to = "workflow", protocol = "tcp", port = 7233', _sg_tf) is None and "7233" not in _sg_tf.replace("gRPC 7233", "")
+      and "task_ui_from_web" not in tf and "web_to_task_ui" not in tf and "web_sg_id" not in tf and "instance_security_group_id" not in tf
+      and 'output "security_group_ids"' in main_out and 'outputs.security_group_ids["workflow"]' in tf)
 check("修復案の status に obsolete がある（tools.json の説明も）", "obsolete" in proposals.STATUSES and all("obsolete" in t["description"] for t in tools if t["name"] == "list_proposals"))
 print(f"通過 {passed} / 失敗 0")

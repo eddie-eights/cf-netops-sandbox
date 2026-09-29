@@ -6,7 +6,7 @@ resource "aws_instance" "lab" {
   instance_type               = var.instance_type
   iam_instance_profile        = aws_iam_instance_profile.lab.name
   subnet_id                   = local.subnet_id
-  vpc_security_group_ids      = [local.internal_sg_id]
+  vpc_security_group_ids      = [local.lab_sg_id]
   associate_public_ip_address = false
   # Telegraf のタスクと NLB とのあいだで、送り元・宛先が管理ネットワーク（203.0.113.x）の IP のパケットを通す（telegraf.tf の aws_route）
   source_dest_check = !var.forward_to_telegraf

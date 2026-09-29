@@ -55,7 +55,7 @@ stateDiagram-v2
 ## Temporal UI を開く
 
 UI（8233）はプライベートサブネットのタスクにあるので、Web の EC2 を踏み台にしてポートフォワーディングする。`ops/up.sh` の手順 8-5 が同じコマンドを表示する。
-SG は土台の `internal` 1 つを Web の EC2 もタスクも使い、VPC の中は全部通るので、8233 のためのルールは無い（2026-09-26 まではポートごとの SG ルールだった）。
+8233 は土台の通信の表の `web` → `workflow` の 1 行で開いている（[architecture.md](architecture.md) の「SG」）。gRPC の 7233 はタスクの外に出さない（Temporal は `--ip 127.0.0.1` で待ち、UI だけを `--ui-ip 0.0.0.0` で出す。ワーカーは同じタスクの `localhost:7233`）。
 
 ```bash
 INSTANCE_ID=$(terraform -chdir=terraform/base/core output -raw web_instance_id); echo "$INSTANCE_ID"
@@ -84,4 +84,4 @@ terraform -chdir=terraform/workflow output -raw worker_logs_command; echo
 | 修復案が出ない | Spark のジョブが古いまま動いている（[troubleshooting.md](troubleshooting.md) の「パイプラインと WORKFLOW」） |
 | trap の異常に修復案が出ない | 仕様。ワークフローを起こすのは `link_down` だけ（`workflow/rules.py` の `START_KINDS`） |
 | 承認したのに `obsolete` になった | 承認までに異常が閉じた（または開き直して別の発生になった）。古い処置は打たない。開き直した発生には別の修復案が出る |
-| ポートフォワーディングはつながるが Temporal UI が開かない | タスクが RUNNING か（`aws ecs describe-services`）と、ポートフォワーディングの先の IP がそのタスクか。2026-09-26 までは 8233 の SG ルールの抜けが原因になったが、いまは SG が 1 つで VPC の中は全部通る |
+| ポートフォワーディングはつながるが Temporal UI が開かない | タスクが RUNNING か（`aws ecs describe-services`）と、ポートフォワーディングの先の IP がそのタスクか。タスクの ENI に `<prefix>-workflow`、Web の EC2 に `<prefix>-web` の SG が付いているか（8233 は土台の通信の表の `web` → `workflow`） |

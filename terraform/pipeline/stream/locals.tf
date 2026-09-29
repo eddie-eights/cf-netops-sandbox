@@ -20,6 +20,15 @@ data "terraform_remote_state" "main" {
   config = {
     path = "${path.module}/../../base/core/terraform.tfstate"
   }
+
+  # SG の ID（security_group_ids）は 2026-09-29 から。それより前の state（全部で共有する internal 1 つ）なら apply の前に止める。
+  # destroy ではこの条件を見ないので、locals の SG の try と合わせて古い state のまま ops/down.sh で消せる（Terraform 1.16 で確認）
+  lifecycle {
+    postcondition {
+      condition     = can(self.outputs.security_group_ids)
+      error_message = "terraform/base/core の state に security_group_ids が無い（2026-09-29 より前の SG）。先に ops/down.sh で消してから ops/up.sh を打ち直す"
+    }
+  }
 }
 
 data "terraform_remote_state" "ecr" {
@@ -34,10 +43,13 @@ locals {
   account_id = data.aws_caller_identity.current.account_id
   partition  = data.aws_partition.current.partition
 
-  vpc_id            = data.terraform_remote_state.main.outputs.vpc_id
-  subnet_ids        = data.terraform_remote_state.main.outputs.runtime_subnet_ids
-  internal_sg_id    = data.terraform_remote_state.main.outputs.internal_security_group_id
-  reader_role_names = toset([data.terraform_remote_state.main.outputs.runtime_role_name, data.terraform_remote_state.main.outputs.web_role_name])
+  vpc_id     = data.terraform_remote_state.main.outputs.vpc_id
+  subnet_ids = data.terraform_remote_state.main.outputs.runtime_subnet_ids
+  # SG は古い state の destroy でも評価できるように try（空のまま apply に進まないよう remote_state の postcondition で止める）
+  telegraf_sg_id     = try(data.terraform_remote_state.main.outputs.security_group_ids["telegraf"], "")
+  telegraf_nlb_sg_id = try(data.terraform_remote_state.main.outputs.security_group_ids["telegraf_nlb"], "")
+  msk_sg_id          = try(data.terraform_remote_state.main.outputs.security_group_ids["msk"], "")
+  reader_role_names  = toset([data.terraform_remote_state.main.outputs.runtime_role_name, data.terraform_remote_state.main.outputs.web_role_name])
 
   # Telegraf のタスクと NLB はサブネット a（lab の EC2 と Web の EC2 と同じ）
   telegraf_subnet_id = data.terraform_remote_state.main.outputs.instance_subnet_id

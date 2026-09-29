@@ -208,9 +208,10 @@ check("EventBridge のルールは <接頭辞>.spark の AnomalyOpened と Anoma
       re.search(r'source\s*=\s*\["\$\{local\.name_prefix\}\.spark"\]', tf) and '"detail-type" = ["AnomalyOpened", "AnomalyResolved"]' in tf)
 check("Lambda は VPC の中で NEPTUNE_ENDPOINT を環境変数で持ち、ロググループは retention 付き",
       "vpc_config" in tf and "NEPTUNE_ENDPOINT = " in tf and "retention_in_days = var.log_retention_days" in tf)
-check("Lambda と Neptune は base/core の internal SG 1 つに相乗り（2026-09-26 に SG を 12 個から 2 個にした。専用の SG と 8182 の rule は無い）",
-      "security_group_ids = [local.internal_sg_id]" in tf and "aws_vpc_security_group_egress_rule" not in tf and "aws_vpc_security_group_ingress_rule" not in tf
-      and "vpc_security_group_ids              = [local.internal_sg_id]" in read("terraform", "pipeline", "graph", "neptune.tf"))
+check("Lambda と Neptune は base/core の lambda / neptune の SG を使い、graph は SG もルールも作らない（lambda から neptune の 8182 は土台の通信の表。2026-09-29）",
+      "security_group_ids = [local.lambda_sg_id]" in tf and "aws_vpc_security_group_egress_rule" not in tf and "aws_vpc_security_group_ingress_rule" not in tf
+      and "vpc_security_group_ids              = [local.neptune_sg_id]" in read("terraform", "pipeline", "graph", "neptune.tf")
+      and re.search(r'\{ from = "lambda", to = "neptune", protocol = "tcp", port = 8182,', read("terraform", "base", "core", "security_groups.tf")) is not None)
 # property('status', ...) は既存値の削除を伴うので Delete も要る（無いと AccessDenied で検知がトポロジに映らない。2026-09-18 実機）
 check("Lambda のロールは neptune-db の Read / Write / Delete（Gremlin だけ、他のサービスは持たない）",
       all(f'"neptune-db:{a}DataViaQuery"' in tf for a in ("Read", "Write", "Delete")) and "neptune-db:*" not in tf)

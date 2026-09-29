@@ -21,6 +21,15 @@ data "terraform_remote_state" "main" {
   config = {
     path = "${path.module}/../base/core/terraform.tfstate"
   }
+
+  # SG の ID（security_group_ids）は 2026-09-29 から。それより前の state（全部で共有する internal 1 つ）なら apply の前に止める。
+  # destroy ではこの条件を見ないので、locals の SG の try と合わせて古い state のまま ops/down.sh で消せる（Terraform 1.16 で確認）
+  lifecycle {
+    postcondition {
+      condition     = can(self.outputs.security_group_ids)
+      error_message = "terraform/base/core の state に security_group_ids が無い（2026-09-29 より前の SG）。先に ops/down.sh で消してから ops/up.sh を打ち直す"
+    }
+  }
 }
 
 # エージェントのイメージの置き場は terraform/base/ecr の state から読む
@@ -37,9 +46,11 @@ locals {
   account_id = data.aws_caller_identity.current.account_id
   partition  = data.aws_partition.current.partition
 
-  vpc_id            = data.terraform_remote_state.main.outputs.vpc_id
-  subnet_ids        = data.terraform_remote_state.main.outputs.runtime_subnet_ids
-  runtime_sg_id     = data.terraform_remote_state.main.outputs.internal_security_group_id
+  vpc_id     = data.terraform_remote_state.main.outputs.vpc_id
+  subnet_ids = data.terraform_remote_state.main.outputs.runtime_subnet_ids
+  # SG は古い state の destroy でも評価できるように try（空のまま apply に進まないよう remote_state の postcondition で止める）
+  runtime_sg_id     = try(data.terraform_remote_state.main.outputs.security_group_ids["runtime"], "")
+  lambda_sg_id      = try(data.terraform_remote_state.main.outputs.security_group_ids["lambda"], "") # kb.tf の索引を作る Lambda
   runtime_role_name = data.terraform_remote_state.main.outputs.runtime_role_name
   runtime_role_arn  = data.terraform_remote_state.main.outputs.runtime_role_arn
   web_role_name     = data.terraform_remote_state.main.outputs.web_role_name

@@ -501,6 +501,7 @@ tele = _read("telegraf", "telegraf.conf.in")
 tgsh = _read("telegraf", "telegraf.sh")
 lab_locals = _read("terraform", "pipeline", "lab", "locals.tf")
 stream_tg = _read("terraform", "pipeline", "stream", "telegraf.tf")
+core_sg = _read("terraform", "base", "core", "security_groups.tf")
 check("SR Linux の 6 台の設定は set / の行だけ（containerlab が候補に流し込んで commit する。enter candidate / commit を書くと二重になる）",
       len(srl_nodes) == 6 and all(all(re.match(r"^(set / |#|\s*$)", l) for l in c.splitlines()) for c in srl_cfg.values()))
 check("containerlab は 6 台とも nokia_srlinux で srlinux/<機器名>.cli を startup-config にする",
@@ -520,18 +521,22 @@ check("containerlab の VM 2 台は linux で、leaf の組へ 2 本（bond）",
 check("lab.sh forward は syslog の LOG_PORT も trap の 162 と同じ仕組みで DNAT する（rsyslog は無い）",
       re.search(r'-p udp --dport "\$LOG_PORT" "\$\{c\[@\]\}" -j DNAT --to-destination "\$t:\$LOG_PORT"', labsh) is not None
       and "rsyslog" not in labsh and "LOG_DIR" not in labsh and re.search(r"^\s*logs\)", labsh, re.M) is not None)
-# ログのポートは 5 か所で同じ（lab.sh / telegraf.sh / telegraf.conf.in / lab の locals / stream の NLB）。trap は NLB の 162 → タスクの 1162（非 root）
-check("syslog のポートが lab.sh・telegraf.sh・telegraf.conf.in・lab の locals・stream の NLB で同じで、trap は NLB の 162 をタスクの 1162 で受ける",
+# ログのポートは 5 か所で同じ（lab.sh / telegraf.sh / telegraf.conf.in / stream の NLB / 土台の SG の通信の表）。trap は NLB の 162 → タスクの 1162（非 root）
+check("syslog のポートが lab.sh・telegraf.sh・telegraf.conf.in・stream の NLB・土台の通信の表で同じで、trap は NLB の 162 をタスクの 1162 で受ける",
       re.search(rf"^LOG_PORT={log_port}$", tgsh, re.M) is not None and re.search(rf'^\s*server = "udp://:{log_port}"$', tele, re.M) is not None
       and re.search(r'^\s*service_address = "udp://:1162"$', tele, re.M) is not None and re.search(r"^TRAP_PORT=1162$", tgsh, re.M) is not None
-      and re.search(rf"^\s*log_port\s*=\s*{log_port}$", lab_locals, re.M) is not None
+      and all(re.search(rf'\{{ from = "{a}", to = "{b}", protocol = "udp", port = {pt},', core_sg) is not None
+              for a, b, pt in (("lab_mgmt", "telegraf_nlb", log_port), ("lab", "telegraf_nlb", log_port), ("telegraf_nlb", "telegraf", log_port),
+                               ("lab_mgmt", "telegraf_nlb", 162), ("lab", "telegraf_nlb", 162), ("telegraf_nlb", "telegraf", 1162)))
+      and "log_port" not in lab_locals
       and re.search(rf"syslog = \{{ listener = {log_port}, container = {log_port} \}}", stream_tg) is not None
       and re.search(r"trap\s+= \{ listener = 162, container = 1162 \}", stream_tg) is not None)
-# 管理ネットワークは 3 か所で同じ（containerlab の mgmt / lab.sh / lab の locals の VPC ルート）
+# 管理ネットワークは 4 か所で同じ（containerlab の mgmt / lab.sh / lab の locals の VPC ルート / 土台の SG の lab_mgmt）
 mgmt = re.search(r"^MGMT=(\S+)$", labsh, re.M).group(1)
-check("管理ネットワークが containerlab・lab.sh・lab の locals で同じ",
+check("管理ネットワークが containerlab・lab.sh・lab の locals・土台の SG の lab_mgmt_cidr で同じ",
       re.search(rf"^\s*ipv4-subnet: {re.escape(mgmt)}$", clab, re.M) is not None
-      and re.search(rf'^\s*mgmt_cidr\s*=\s*"{re.escape(mgmt)}"$', lab_locals, re.M) is not None)
+      and re.search(rf'^\s*mgmt_cidr\s*=\s*"{re.escape(mgmt)}"$', lab_locals, re.M) is not None
+      and re.search(rf'^\s*lab_mgmt_cidr\s*=\s*"{re.escape(mgmt)}"$', core_sg, re.M) is not None)
 # ポーリング先は lab の定義から作る（lab/lab_topology.py --snmp-agents → up.sh が stream の snmp_agents → タスクの SNMP_AGENTS → telegraf.sh render が埋める）
 _lt_spec = importlib.util.spec_from_file_location("lab_topology", os.path.join(ROOT, "lab", "lab_topology.py"))
 lt = importlib.util.module_from_spec(_lt_spec); _lt_spec.loader.exec_module(lt)
@@ -617,6 +622,10 @@ check("Telegraf は stream の ECS で、MSK への書き込みはタスクロ�
       'resource "aws_iam_role" "telegraf_task"' in stream_tg and "kafka-cluster:WriteData" in stream_tg
       and "stream_produce" not in _access and "telegraf_role_name" not in _access
       and 'resource "aws_iam_role"' not in _lab_tg and 'resource "aws_instance"' not in _lab_tg)
+check("lab と stream は SG も SG のルールも作らない（ポーリング・trap・syslog のルールは土台の通信の表。2026-09-29）",
+      all('resource "aws_security_group"' not in t and "aws_vpc_security_group_" not in t
+          for t in (_lab_tg, lab_locals, stream_tg, _access, _read("terraform", "pipeline", "stream", "msk.tf"), _read("terraform", "pipeline", "lab", "instance.tf")))
+      and 'security_groups = [local.telegraf_nlb_sg_id]' in stream_tg and 'security_groups  = [local.telegraf_sg_id]' in stream_tg)
 _down = _read("ops", "down.sh")
 check("down.sh は stream の必須変数（snmp_agents / gnmi_targets）に形だけ合う値を渡して destroy する（telegraf.sh の形の検査と同じ）",
       re.search(r"destroy_root pipeline/stream -var 'snmp_agents=\"udp://[0-9.]+:161\"' -var 'gnmi_targets=\"[0-9.]+:57400\"'", _down) is not None)

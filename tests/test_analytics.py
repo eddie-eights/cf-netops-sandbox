@@ -45,12 +45,12 @@ check("main の state をローカルから読む", re.search(r'data "terraform_
       and '"${path.module}/../../base/core/terraform.tfstate"' in tf)
 check("stream の state をローカルから読む", re.search(r'data "terraform_remote_state" "stream"[\s\S]*?backend\s*=\s*"local"', tf, re.S) is not None
       and '"${path.module}/../stream/terraform.tfstate"' in tf)
-for out in ("vpc_id", "runtime_subnet_ids", "internal_security_group_id", "opensearch_vpc_endpoint_id", "kb_bucket_name"):
+for out in ("vpc_id", "runtime_subnet_ids", "security_group_ids", "opensearch_vpc_endpoint_id", "kb_bucket_name"):
     check(f"main の output {out} を使う", f"data.terraform_remote_state.main.outputs.{out}" in tf)
 for out in ("msk_cluster_arn", "bootstrap_brokers"):
     check(f"stream の output {out} を try で読む（無ければ precondition で止める）",
           re.search(r'try\(data\.terraform_remote_state\.stream\.outputs\.' + out + r',\s*""\)', tf) is not None)
-check("graph の state をローカルから読み、Neptune の endpoint / resource id を try で読む（検知が Neptune に書く。2026-09-24。SG は 2026-09-26 に土台の internal 1 つになった）",
+check("graph の state をローカルから読み、Neptune の endpoint / resource id を try で読む（検知が Neptune に書く。2026-09-24。SG は土台の security_groups.tf）",
       re.search(r'data "terraform_remote_state" "graph"[\s\S]*?backend\s*=\s*"local"', tf, re.S) is not None
       and '"${path.module}/../graph/terraform.tfstate"' in tf
       and all(re.search(r'try\(data\.terraform_remote_state\.graph\.outputs\.' + o + r',\s*""\)', tf) for o in ("cluster_endpoint", "cluster_resource_id")))
@@ -59,7 +59,7 @@ check("graph が無いときは「terraform/pipeline/graph を先に apply す�
 check("stream が無いときは「terraform/pipeline/stream を先に apply する」と出る",
       re.search(r'precondition\s*\{[\s\S]*?msk_cluster_arn\s*!=\s*""[\s\S]*?terraform/pipeline/stream を先に apply する', tf, re.S) is not None)
 # main / stream の outputs.tf に本当にその output があるか
-for root, outs in (("base/core", ("vpc_id", "runtime_subnet_ids", "internal_security_group_id", "opensearch_vpc_endpoint_id", "kb_bucket_name")),
+for root, outs in (("base/core", ("vpc_id", "runtime_subnet_ids", "security_group_ids", "opensearch_vpc_endpoint_id", "kb_bucket_name")),
                    ("pipeline/stream", ("msk_cluster_arn", "bootstrap_brokers")),
                    ("pipeline/graph", ("cluster_endpoint", "cluster_resource_id"))):
     with open(os.path.join(ROOT, "terraform", root, "outputs.tf"), encoding="utf-8") as f:
@@ -67,21 +67,78 @@ for root, outs in (("base/core", ("vpc_id", "runtime_subnet_ids", "internal_secu
     for out in outs:
         check(f"terraform/{root} に output {out} がある", re.search(r'^output "' + out + r'"', other, re.M) is not None)
 
-# ---- ネットワーク（SG は土台の internal 1 つを全部で共有。2026-09-28 から AWS の API は土台のインターフェース型エンドポイントを通し、NAT Gateway は無い）
+# ---- ネットワーク（SG はワークロードごとに土台の security_groups.tf にあり、ルールはそこの通信の表から作る。2026-09-29。
+#      AWS の API は土台のインターフェース型エンドポイントを通し、NAT Gateway は無い）
 _core = "".join(open(os.path.join(ROOT, "terraform", "base", "core", n), encoding="utf-8").read() for n in sorted(os.listdir(os.path.join(ROOT, "terraform", "base", "core"))) if n.endswith(".tf"))
-check("analytics は SG もインターフェース型エンドポイントも作らない（S3 Tables / events / aps / logs の API は土台のエンドポイントを通る）",
+_sg_tf = open(os.path.join(ROOT, "terraform", "base", "core", "security_groups.tf"), encoding="utf-8").read()
+check("analytics は SG も SG のルールもインターフェース型エンドポイントも作らない（S3 Tables / events / aps / logs の API は土台のエンドポイントを通る）",
       'resource "aws_security_group"' not in tf and 'resource "aws_vpc_endpoint"' not in tf and "aws_vpc_security_group_" not in tf
       and not any(k in tf for k in ("msk_sg_id", "neptune_sg_id", "emr_self", "msk_from_emr", "endpoints_from_emr")))
-check("EMR のアプリケーションは土台の internal SG を使う",
-      re.search(r'network_configuration\s*\{[\s\S]*?security_group_ids\s*=\s*\[local\.internal_sg_id\]', tf, re.S) is not None
-      and re.search(r'internal_sg_id\s*=\s*data\.terraform_remote_state\.main\.outputs\.internal_security_group_id', tf) is not None)
-check("土台の internal SG は VPC の CIDR から全部受け（EMR Serverless は 0.0.0.0/0 の inbound を拒否する）、外へは全部出す",
-      re.search(r'resource "aws_vpc_security_group_ingress_rule" "internal_from_vpc"[\s\S]*?security_group_id\s*=\s*aws_security_group\.internal\.id[\s\S]*?ip_protocol\s*=\s*"-1"[\s\S]*?cidr_ipv4\s*=\s*var\.vpc_cidr', _core, re.S) is not None
-      and re.search(r'resource "aws_vpc_security_group_egress_rule" "internal_all"[\s\S]*?ip_protocol\s*=\s*"-1"[\s\S]*?cidr_ipv4\s*=\s*"0\.0\.0\.0/0"', _core, re.S) is not None
-      and "0.0.0.0/0" not in re.search(r'resource "aws_vpc_security_group_ingress_rule" "internal_from_vpc" \{(.*?)\n\}', _core, re.S).group(1))
-check("土台の endpoints SG は internal からの 443 だけ受け、外へ出さない（インターフェース型と OpenSearch Serverless の VPC エンドポイント用）",
-      re.search(r'"endpoints_from_internal"[\s\S]*?security_group_id\s*=\s*aws_security_group\.endpoints\.id[\s\S]*?from_port\s*=\s*443[\s\S]*?referenced_security_group_id\s*=\s*aws_security_group\.internal\.id', _core, re.S) is not None
-      and _core.count('resource "aws_security_group"') == 2)
+check("EMR / Grafana / Splunk は土台の spark / grafana / splunk の SG を使う",
+      re.search(r'network_configuration\s*\{[\s\S]*?security_group_ids\s*=\s*\[local\.spark_sg_id\]', tf, re.S) is not None
+      and "security_groups  = [local.grafana_sg_id]" in tf and "security_groups  = [local.splunk_sg_id]" in tf
+      and all(re.search(k + r'_sg_id\s*=\s*try\(data\.terraform_remote_state\.main\.outputs\.security_group_ids\["' + k + r'"\], ""\)', tf) for k in ("spark", "grafana", "splunk")))
+
+_sg_keys = re.search(r'security_groups = \{(.*?)\n  \}', _sg_tf, re.S)
+_sg_keys = set(re.findall(r'^\s+(\w+)\s+=\s+"', _sg_keys.group(1), re.M)) if _sg_keys else set()
+SG_KEYS = {"web", "lab", "telegraf", "telegraf_nlb", "msk", "spark", "grafana", "splunk", "neptune", "lambda", "workflow", "runtime"}
+check(f"土台の SG はワークロードごとの 12 個と endpoints（{sorted(_sg_keys)}）",
+      _sg_keys == SG_KEYS and re.findall(r'resource "aws_security_group" "(\w+)"', _core) == ["workload", "endpoints"]
+      and re.search(r'resource "aws_security_group" "workload" \{\n\s*for_each = local\.security_groups', _sg_tf) is not None)
+# 通信の表を読む（from = sg の行は aws_api_clients に展開する）
+_clients = re.search(r'aws_api_clients = \[([^\]]*)\]', _sg_tf)
+_clients = re.findall(r'"(\w+)"', _clients.group(1)) if _clients else []
+_flows = set()
+for _m in re.finditer(r'\{ from = ("?\w+"?), to = "(\w+)", protocol = "(\w+)", port = (\d+)(?:, to_port = (\d+))?(?:, only = "(\w+)")?, why = "([^"]*)" \}', _sg_tf):
+    for _from in (_clients if _m.group(1) == "sg" else [_m.group(1).strip('"')]):
+        _flows.add((_from, _m.group(2), _m.group(3), int(_m.group(4)), int(_m.group(5) or _m.group(4)), _m.group(6) or ""))
+EXPECTED_FLOWS = {(c, t, "tcp", 443, 443, "") for c in ("web", "lab", "telegraf", "spark", "grafana", "splunk", "lambda", "workflow", "runtime") for t in ("endpoints", "s3")} | {
+    *((c, "neptune", "tcp", 8182, 8182, "") for c in ("web", "runtime", "spark", "lambda", "workflow")),
+    ("web", "grafana", "tcp", 3000, 3000, ""), ("web", "splunk", "tcp", 8000, 8000, ""), ("web", "workflow", "tcp", 8233, 8233, ""),
+    ("telegraf", "msk", "tcp", 9098, 9098, ""), ("spark", "msk", "tcp", 9098, 9098, ""), ("msk", "msk", "tcp", 9092, 9098, ""),
+    ("spark", "spark", "tcp", 0, 65535, ""), ("spark", "splunk", "tcp", 8088, 8088, ""),
+    ("telegraf_nlb", "telegraf", "udp", 1162, 1162, ""), ("telegraf_nlb", "telegraf", "udp", 5140, 5140, ""), ("telegraf_nlb", "telegraf", "tcp", 8080, 8080, ""),
+    ("lab_mgmt", "telegraf_nlb", "udp", 162, 162, ""), ("lab_mgmt", "telegraf_nlb", "udp", 5140, 5140, ""),
+    ("lab", "telegraf_nlb", "udp", 162, 162, "egress"), ("lab", "telegraf_nlb", "udp", 5140, 5140, "egress"),
+    ("telegraf", "lab_mgmt", "udp", 161, 161, ""), ("telegraf", "lab_mgmt", "tcp", 57400, 57400, ""),
+    ("telegraf", "lab", "udp", 161, 161, "ingress"), ("telegraf", "lab", "tcp", 57400, 57400, "ingress"),
+}
+check(f"通信の表は決めた流れだけ（多い: {sorted(_flows - EXPECTED_FLOWS)} 足りない: {sorted(EXPECTED_FLOWS - _flows)}）",
+      _flows == EXPECTED_FLOWS and _sg_tf.count("{ from = ") == len(EXPECTED_FLOWS) - 2 * len(_clients) + 2)
+check("Temporal の gRPC 7233（workflow）と Splunk の管理 API 8089（splunk）は開けず、CIDR のルールは lab の管理ネットワークと endpoints の送信なしだけ（EMR Serverless は 0.0.0.0/0 の inbound を拒否する）",
+      not any(t == "workflow" and p <= 7233 <= q or t == "splunk" and p <= 8089 <= q for _, t, _, p, q, _ in _flows)
+      and sorted(re.findall(r'cidr_ipv4\s*=\s*(.+)', _sg_tf)) == sorted(['each.value.to == "lab_mgmt" ? local.lab_mgmt_cidr : null', 'each.value.from == "lab_mgmt" ? local.lab_mgmt_cidr : null', '"127.0.0.1/32"'])
+      and "var.vpc_cidr" not in _sg_tf and "cidr_ipv6" not in _sg_tf)
+check("ルールは表から for_each で作る。送信は from の SG、受信は to の SG で、相手は SG の参照・S3 のプレフィックスリスト・lab の管理ネットワークのどれか 1 つ",
+      re.search(r'resource "aws_vpc_security_group_egress_rule" "flow" \{\n\s*for_each = \{ for k, r in local\.sg_rules : k => r if contains\(local\.sg_keys, r\.from\) && r\.only != "ingress" \}', _sg_tf) is not None
+      and re.search(r'resource "aws_vpc_security_group_ingress_rule" "flow" \{\n\s*for_each = \{ for k, r in local\.sg_rules : k => r if contains\(local\.sg_keys, r\.to\) && r\.only != "egress" \}', _sg_tf) is not None
+      and 'prefix_list_id               = each.value.to == "s3" ? data.aws_ec2_managed_prefix_list.s3.id : null' in _sg_tf
+      and 'name = "com.amazonaws.${var.region}.s3"' in _sg_tf
+      and _core.count("resource \"aws_vpc_security_group_") == 3)
+_lab_locals = open(os.path.join(ROOT, "terraform", "pipeline", "lab", "locals.tf"), encoding="utf-8").read()
+_lab_sh = open(os.path.join(ROOT, "lab", "lab.sh"), encoding="utf-8").read()
+_mgmt = re.search(r'lab_mgmt_cidr = "([^"]+)"', _sg_tf)
+check("土台の lab_mgmt_cidr は terraform/pipeline/lab の mgmt_cidr と lab.sh の MGMT と同じ",
+      _mgmt is not None and f'mgmt_cidr = "{_mgmt.group(1)}"' in _lab_locals and re.search(r'^MGMT=' + re.escape(_mgmt.group(1)) + r'$', _lab_sh, re.M) is not None)
+check("土台の endpoints SG は表の 443 だけ受け、外へ出さない（インターフェース型と OpenSearch Serverless の VPC エンドポイント用）",
+      re.search(r'"endpoints_none"[\s\S]*?security_group_id\s*=\s*aws_security_group\.endpoints\.id[\s\S]*?cidr_ipv4\s*=\s*"127\.0\.0\.1/32"', _sg_tf, re.S) is not None
+      and not any(t == "endpoints" and (p, q) != (443, 443) for _, t, _, p, q, _ in _flows)
+      and not any(f == "endpoints" for f, *_ in _flows))
+check("土台の output security_group_ids は SG のキーと endpoints の map", re.search(r'output "security_group_ids" \{[\s\S]*?value\s*=\s*local\.sg_ids', _core) is not None
+      and 'sg_ids  = merge({ for k, sg in aws_security_group.workload : k => sg.id }, { endpoints = aws_security_group.endpoints.id })' in _sg_tf
+      and "internal_security_group_id" not in _core)
+
+_fl = open(os.path.join(ROOT, "terraform", "base", "core", "flow_logs.tf"), encoding="utf-8").read()
+check("VPC フローログ: 土台の VPC の全通信を 60 秒の集約で CloudWatch Logs へ。ロググループは /<prefix>/vpc-flow-logs で保持期間つき",
+      re.search(r'resource "aws_flow_log" "vpc" \{[\s\S]*?vpc_id\s*=\s*aws_vpc\.this\.id[\s\S]*?traffic_type\s*=\s*"ALL"[\s\S]*?log_destination_type\s*=\s*"cloud-watch-logs"'
+                r'[\s\S]*?log_destination\s*=\s*aws_cloudwatch_log_group\.flow_logs\.arn[\s\S]*?max_aggregation_interval\s*=\s*60', _fl) is not None
+      and 'name              = "/${local.name_prefix}/vpc-flow-logs"' in _fl and "retention_in_days = var.flow_log_retention_days" in _fl
+      and re.search(r'output "flow_log_group_name" \{[\s\S]*?aws_cloudwatch_log_group\.flow_logs\.name', _core) is not None
+      and _core.count('resource "aws_flow_log"') == 1)
+check("VPC フローログのロール: 信頼は自アカウントの vpc-flow-log だけ、書けるのはそのロググループだけで CreateLogGroup は無く、閉域の Deny は付けない",
+      re.search(r'Principal = \{ Service = "vpc-flow-logs\.amazonaws\.com" \}[\s\S]*?"aws:SourceAccount" = local\.account_id[\s\S]*?"aws:SourceArn" = "arn:\$\{local\.partition\}:ec2:\$\{var\.region\}:\$\{local\.account_id\}:vpc-flow-log/\*"', _fl) is not None
+      and 'Resource = "${aws_cloudwatch_log_group.flow_logs.arn}:*"' in _fl and '"logs:CreateLogGroup"' not in _fl
+      and "aws_iam_role.flow_logs" not in open(os.path.join(ROOT, "terraform", "base", "core", "perimeter.tf"), encoding="utf-8").read())
 
 # ---- S3 Tables のテーブル（列はスクリプトと同じでなければ append が落ちる）
 TABLE_COLUMNS = ["ts", "topic", "measurement", "agent_host", "host", "tags_json", "fields_json", "ingested_at"]
@@ -160,7 +217,7 @@ check("HEC の token は SSM の SecureString /<prefix>/splunk/hec-token（変�
       and re.search(r'splunk_token_parameter_arn\s*=\s*"arn:\$\{local\.partition\}:ssm:\$\{var\.region\}:\$\{local\.account_id\}:parameter\$\{local\.splunk_token_parameter\}"', tf) is not None
       and re.search(r'Sid\s*=\s*"SplunkHecToken"[\s\S]*?"ssm:GetParameter"[\s\S]*?local\.splunk_token_parameter_arn[\s\S]*?if local\.sink_splunk', tf, re.S) is not None)
 check("Terraform は token の値を読まない（data aws_ssm_parameter が無い）", 'data "aws_ssm_parameter"' not in tf)
-check("HEC のポートごとのエグレスは無い（internal SG は全部出せる。ECS の Splunk は VPC の中）",
+check("HEC のポートごとのエグレスは analytics に無い（spark から splunk の 8088 は土台の通信の表。ECS の Splunk は VPC の中）",
       "splunk_hec_port" not in tf and "emr_splunk" not in tf)
 check("OpenSearch Serverless は TIMESERIES のコレクション <prefix>-logs（count で作る）",
       re.search(r'resource "aws_opensearchserverless_collection" "logs"[\s\S]*?count\s*=\s*local\.sink_opensearch \? 1 : 0[\s\S]*?type\s*=\s*"TIMESERIES"', tf, re.S) is not None
@@ -235,7 +292,7 @@ check("DynamoDB を使わない（異常の「いま」は Neptune、履歴は S
 check("runtime role は Neptune の Gremlin の読み書きと、既定のバスに events:PutEvents",
       re.search(r'Sid\s*=\s*"NeptuneAnomalies"[\s\S]*?"neptune-db:ReadDataViaQuery", "neptune-db:WriteDataViaQuery"[\s\S]*?neptune-db:\$\{var\.region\}:\$\{local\.account_id\}:\$\{local\.neptune_resource_id\}/\*', tf) is not None
       and re.search(r'"events:PutEvents"[\s\S]*?Resource = local\.event_bus_arn', tf) is not None)
-check("EMR と Neptune の間に SG のルールは無い（同じ internal SG。2026-09-26）", "emr_neptune" not in tf and "neptune_from_emr" not in tf)
+check("EMR と Neptune の間の SG のルールは analytics に無い（spark から neptune の 8182 は土台の通信の表）", "emr_neptune" not in tf and "neptune_from_emr" not in tf)
 _aec = next(ast.literal_eval(n.value) for n in tree.body if isinstance(n, ast.Assign) and getattr(n.targets[0], "id", "") == "ANOMALY_EVENT_COLUMNS")
 _rules_tree = ast.parse(open(os.path.join(ROOT, "workflow", "rules.py"), encoding="utf-8").read())
 _pec = next(ast.literal_eval(n.value) for n in _rules_tree.body if isinstance(n, ast.Assign) and getattr(n.targets[0], "id", "") == "PROPOSAL_EVENT_COLUMNS")
