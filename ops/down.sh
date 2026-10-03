@@ -3,7 +3,7 @@
 # state（terraform/<ルート>/terraform.tfstate）にリソースが載っているルートだけを消す。作っていないルートは飛ばす。
 #
 # 使い方（展開したフォルダの直下で。先に AWS CLI の認証を通しておく。IAM ユーザーなら長期キーのまま打つ）:
-#   ops/down.sh              # 全部消す（workflow → analytics → graph → stream → lab → agent → base/core → ecr → Runtime のロググループ → ops/up.sh が作った SSM のパラメータ）。KEEP_ECR=0 と同じ
+#   ops/down.sh              # 全部消す（workflow → analytics → nautobot → graph → stream → lab → agent → base/core → ecr → Runtime のロググループ → ops/up.sh が作った SSM のパラメータ）。KEEP_ECR=0 と同じ
 #   KEEP_ECR=1 ops/down.sh   # ECR（イメージ）だけ残す。翌日の ops/up.sh でビルドを飛ばせる（保管料は月数円）
 #
 # ops/up.sh と同じ deploy.env（DEPLOY_ENV_FILE=<パス> で別のファイル）を読む。環境変数はファイルより優先。
@@ -152,7 +152,7 @@ echo "ACCOUNT_ID=$ACCOUNT_ID"
 tf_use_cli_credentials
 AGENT_VARS=()
 
-log "1. workflow → analytics → graph → stream（workflow は analytics と graph を、analytics は stream の Kafka を読むので、この順）"
+log "1. workflow → analytics → nautobot → graph → stream（workflow は analytics と graph を、analytics は stream の Kafka を、nautobot は graph と stream を読むので、この順）"
 # EMR Serverless のアプリケーションは、ジョブが動いているか STARTED のままだと destroy が落ちる。先にジョブを止め、アプリケーションを止める
 if has_resources pipeline/analytics; then
   APP_ID=$(tf pipeline/analytics output -raw application_id 2>/dev/null || true)
@@ -182,6 +182,8 @@ fi
 # workflow の worker_image_tag は必須変数だが destroy では使われないので、何でもよい値を渡す
 destroy_lambda_root workflow "$PREFIX-tools" -var "worker_image_tag=${IMAGE_TAG:-destroy}"
 destroy_root pipeline/analytics
+# Nautobot（ECS と RDS）。RDS は最後のスナップショット無しで消すので、Nautobot で編集した内容は残らない（5〜10 分）
+destroy_root pipeline/nautobot
 destroy_lambda_root pipeline/graph "$PREFIX-graph-status"
 # stream の snmp_agents / gnmi_targets も必須変数だが destroy では使われないので、形だけ合う値を渡す
 destroy_root pipeline/stream -var 'snmp_agents="udp://0.0.0.0:161"' -var 'gnmi_targets="0.0.0.0:57400"'
@@ -269,7 +271,7 @@ for g in $LOG_GROUPS; do
   aws logs delete-log-group --region "$REGION" --log-group-name "$g" 2>/dev/null && echo "$g: 消した" || echo "$g: 無い"
 done
 
-log "5-2. ops/up.sh が作った SSM のパラメータ（Grafana / Splunk の admin のパスワード、ECS の Splunk の HEC の token）"
+log "5-2. ops/up.sh が作った SSM のパラメータ（Grafana / Splunk / Nautobot の admin のパスワード、ECS の Splunk の HEC の token、Nautobot の SECRET_KEY と DB のパスワード など）"
 # Terraform の state に値を載せないよう ops/up.sh が作ったもので、Terraform の管理外。タグ ManagedBy=ops/up.sh の付いたものだけ消す
 # （手で入れたパラメータは消さない）。値は読まない
 SSM_PARAMS=$(aws ssm describe-parameters --region "$REGION" \
@@ -278,6 +280,10 @@ SSM_PARAMS=$(aws ssm describe-parameters --region "$REGION" \
 SSM_PARAMS=$(printf '%s\n' $SSM_PARAMS | grep -v '^None$' || true)
 if [ -z "$SSM_PARAMS" ]; then echo "/$PREFIX/（ManagedBy=ops/up.sh）: 無い"; fi
 for n in $SSM_PARAMS; do
+  # nautobot が消えなかったときは、その secrets を残す（RDS のパスワードを Terraform が destroy でも読むので、消すと打ち直しても消せなくなる）
+  case "$n" in "/$PREFIX/nautobot/"*)
+    case " $FAILED_ROOTS " in *" pipeline/nautobot "*) echo "$n: 残す（terraform/pipeline/nautobot が消えなかったので、次の ops/down.sh で消す）"; continue ;; esac ;;
+  esac
   aws ssm delete-parameter --region "$REGION" --name "$n" 2>/dev/null && echo "$n: 消した" || echo "$n: 無い"
 done
 

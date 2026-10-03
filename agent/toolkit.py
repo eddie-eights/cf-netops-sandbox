@@ -7,10 +7,11 @@
   Param                 「環境変数が先、無ければ SSM」の設定値（Neptune の接続先・Gateway の URL・Runtime の ARN）
   jst()                 epoch 秒を日本時間の文字列に（proposals.py）
 
-このファイルは 4 か所で動く。AgentCore Runtime のコンテナ（agent/Dockerfile）、tools Lambda の zip
+このファイルは 5 か所で動く。AgentCore Runtime のコンテナ（agent/Dockerfile）、tools Lambda の zip
 （terraform/workflow/gateway.tf の archive_file）、Web の EC2（terraform/base/core の出力 upload_web_command）、
-status Lambda の zip（terraform/pipeline/graph/sync.tf の archive_file。graph.py 経由で使う）。
-agent/ のモジュールを増やしたら、この 4 か所の一覧にも足す。zip に入れ忘れると apply も plan も通ったまま、
+status Lambda の zip（terraform/pipeline/graph/sync.tf の archive_file。graph.py 経由で使う）、
+Nautobot のコンテナ（nautobot/Dockerfile。Job が graph.py 経由で使う。ops/up.sh の nautobot_context が集める）。
+agent/ のモジュールを増やしたら、この 5 か所の一覧にも足す。zip に入れ忘れると apply も plan も通ったまま、
 実行時に ModuleNotFoundError で初めて分かる（tests/test_sync.py と tests/test_workflow.py が zip の中身を見ている）。
 """
 

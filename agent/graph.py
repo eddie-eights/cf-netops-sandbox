@@ -18,6 +18,7 @@ status は物理層と同じ動的な状態で、gNMI の検知（bgp_down / isi
 
 status（UP / DOWN / ALARM）は動的な状態で、Grafana / Splunk のアラート（firing / resolved。SNS のトピック）を受けた graph/status_handler.py（terraform/pipeline/graph の Lambda）が
 set_status() で書く。無ければ UP。seed() で入れ直すと消える（静的な構成だけを入れる）。
+Nautobot を正にしているとき（terraform/pipeline/nautobot）は、Nautobot の Job が sync_physical() で物理層だけを差分で合わせる（status と上の層は残る）。
 
 トポロジに無い機器やインタフェースの異常は捨てずに「未登録」の頂点（property registered=false。機器は role=unknown）として残し、
 set_status() の戻り値に unregistered を付ける（Lambda が WARNING でログに出す。登録漏れの印）。登録済みの頂点は registered を持たない。
@@ -236,6 +237,98 @@ def seed_layers(layers: dict, known_ids: set | None = None) -> dict:
     if skipped:
         out["skipped_edges"] = skipped
     return out
+
+
+def _diff_props(cur: dict, new: dict, keys, single: bool = True) -> str:
+    """cur（elementMap の 1 件）を new に合わせる Gremlin の続き。変わった値は上書き（頂点は single。辺に cardinality は無い）、
+    無くなった値（None / ""）は property ごと drop。同じなら空文字"""
+    out = ""
+    for k in keys:
+        v = new.get(k)
+        if v is None or v == "":
+            if cur.get(k) is not None:
+                out += f".sideEffect(properties({_q(k)}).drop())"
+        elif cur.get(k) != v:
+            out += f".property({'single,' if single else ''}{_q(k)},{_q(v)})"
+    return out
+
+
+def sync_physical(devices: list[dict], links: list[dict]) -> dict:
+    """物理層（機器・インタフェース・回線）を、渡した一覧に差分で合わせる。Nautobot の Job（nautobot/jobs）が、Nautobot を変えるたびに呼ぶ。
+    devices / links の形は seed() と同じ。seed() と違って消して入れ直さないので、残る頂点と辺の status（アラートが付けた動的な状態）と、
+    上の層（IP 層 / EVPN・BGP 層。lab の定義から seed_layers() で入れたもの）の頂点と辺はそのまま残る。
+      - 一覧に無い登録済みの機器・インタフェース・回線は消す（機器を消すと付いていた辺も消える）
+      - 一覧にあって Neptune に無いものは足す。未登録の頂点（検知が先に来たもの）は置き換え、UP でない status を引き継ぐ（seed() と同じ）
+      - どちらにもあるものは、変わった property だけ single で上書きし、無くなった値は property ごと消す
+    一覧に入らない未登録の頂点は残す。戻り値は count() に added / updated / removed（書いた要素の数）を足したもの。
+    回線の端の機器が一覧に無いなどで張れなかった回線は skipped に理由を並べる"""
+    want = {"device": {d["device_id"]: d for d in devices}, "interface": {}}
+    for d in devices:
+        for i in d.get("interfaces") or []:
+            if i.get("name"):
+                want["interface"][_if_id(d["device_id"], i["name"])] = {
+                    "device_id": d["device_id"], "name": i["name"], "address": i.get("address"), "lag": i.get("lag") or ""}
+    want_links = {}
+    for l in links:
+        a, a_if, b, b_if = l["a"], l["a_if"], l["b"], l["b_if"]
+        if a > b:
+            a, a_if, b, b_if = b, b_if, a, a_if
+        want_links[(a, b, a_if)] = {"b_if": b_if, "kind": l.get("kind") or "l2", "role": l.get("role") or "",
+                                    "bandwidth_mbps": int(l["bandwidth_mbps"]) if l.get("bandwidth_mbps") else None}
+    current = {m.get("id"): m for m in query("g.V().hasLabel('device','interface').elementMap()")}
+    edges = query("g.E().hasLabel('link').elementMap()")
+    stats = {"added": 0, "updated": 0, "removed": 0}
+    gone, carry = set(), []   # gone = 消した / 作り直した機器（付いていた辺も一緒に消えている）
+    for label, keys in (("device", DEVICE_KEYS[:-1]), ("interface", IF_KEYS[:-1])):
+        for vid, m in current.items():
+            if m.get("label") == label and vid not in want[label] and m.get("registered") is not False:
+                query(f"g.V({_q(vid)}).drop()")
+                stats["removed"] += 1
+                if label == "device":
+                    gone.add(vid)
+        for vid, w in want[label].items():
+            m = current.get(vid)
+            if m is not None and m.get("label") == label and m.get("registered") is not False:
+                diff = _diff_props(m, w, keys)
+                if diff:
+                    query(f"g.V({_q(vid)}){diff}.id()")
+                    stats["updated"] += 1
+                continue
+            if m is not None:   # 未登録の頂点は置き換える
+                query(f"g.V({_q(vid)}).drop()")
+                carry.append((vid, "", m.get("status")) if label == "device" else (w["device_id"], w["name"], m.get("status")))
+                if label == "device":
+                    gone.add(vid)
+            query(f"g.addV({_q(label)}).property(id,{_q(vid)}){_props(w, keys)}")
+            stats["added"] += 1
+    kept = set()
+    for m in edges:
+        a, b = m.get("OUT", {}).get("id"), m.get("IN", {}).get("id")
+        if a in gone or b in gone:
+            continue
+        key = (a, b, m.get("a_if"))
+        if key not in want_links or key in kept:   # 一覧に無い回線と、同じ回線の 2 本目
+            query(f"g.E({_q(m.get('id'))}).drop()")
+            stats["removed"] += 1
+            continue
+        kept.add(key)
+        diff = _diff_props(m, want_links[key], LINK_KEYS[1:-1], single=False)
+        if diff:
+            query(f"g.E({_q(m.get('id'))}){diff}.id()")
+            stats["updated"] += 1
+    skipped = []
+    for (a, b, a_if), w in want_links.items():
+        if (a, b, a_if) in kept:
+            continue
+        r = add_link(a, a_if, b, w["b_if"], w["kind"], w["role"], w["bandwidth_mbps"])
+        if "error" in r:
+            skipped.append(r["error"])
+        else:
+            stats["added"] += 1
+    for dev, ifn, st in carry:
+        if st and st != "UP":
+            set_status(dev, ifn, st)
+    return {**count(), **stats, **({"skipped": skipped} if skipped else {})}
 
 
 def _registered(vid: str) -> list:

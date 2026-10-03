@@ -2,6 +2,7 @@
 
 元データはエージェントと同じ topology.py（Neptune があればそこから、無ければ data/ の静的データ）。
 Neptune のときだけリンクの追加・削除と静的データからの投入ができる。lab（terraform/pipeline/lab）には触らない。
+Nautobot（terraform/pipeline/nautobot）があるあいだは Nautobot が物理層の正なので、ここからは編集させない（Nautobot の Job が上書きする）。
 app.py が画面を組むのに要る選択肢は can_edit() / device_choices() / link_choices() で渡す。
 """
 
@@ -14,6 +15,7 @@ from botocore.exceptions import BotoCoreError, ClientError
 from config import log
 
 import graph  # config が sys.path を通したあとで読む（agent/graph.py）
+import toolkit
 import topology
 
 ROLE_ORDER = topology.ROLE_ORDER
@@ -21,9 +23,26 @@ ROLE_LABEL = {"upstream": "上流 VM", "leafsw": "Leaf-SW（上流側）", "spin
 DOWN_COLOR = "#c62828"
 
 
+# terraform/pipeline/nautobot が SSM の <PARAM_PREFIX>/nautobot/url に置く。あれば Nautobot が機器と回線の正
+NAUTOBOT_URL = toolkit.Param("NAUTOBOT_URL", "nautobot/url")
+NAUTOBOT_MSG = "機器と回線は Nautobot で編集します（Nautobot の Job が Neptune の物理層と Telegraf の機器の一覧に反映する）。この画面からは編集できません。"
+
+
+def nautobot_managed() -> bool:
+    """Nautobot が配備されている（物理層は Nautobot の Job が合わせるので、ここで変えても次の同期で戻る）"""
+    return bool(NAUTOBOT_URL.value())
+
+
 def can_edit() -> bool:
-    """Neptune が配備されていれば編集できる（未配備なら編集のボタンを押せなくする）"""
-    return graph.configured()
+    """Neptune が配備されていて、Nautobot が無ければ編集できる（それ以外は編集のボタンを押せなくする）"""
+    return graph.configured() and not nautobot_managed()
+
+
+def edit_note() -> str:
+    """編集の欄の頭に出す案内。編集できるなら空"""
+    if not graph.configured():
+        return "Neptune は未配備。terraform/pipeline/graph を apply して Web を再起動すると使えます。"
+    return NAUTOBOT_MSG if nautobot_managed() else ""
 
 
 def device_choices() -> list:
@@ -187,11 +206,15 @@ def _graph_call(fn, *args, a="", b=""):
 
 
 def seed_graph(a, b):
+    if nautobot_managed():   # ボタンは押せなくしてあるが、画面を開いたあとに Nautobot ができた場合もここで止める
+        return NAUTOBOT_MSG, *refresh_topology(a, b)
     return _graph_call(lambda: graph.seed(*topology.load_static(), topology.load_static_layers()), a=a, b=b)
 
 
 def add_link(a, a_if, b, b_if, kind, role, bw):
     a, a_if, b, b_if = (str(x or "").strip() for x in (a, a_if, b, b_if))
+    if nautobot_managed():
+        return NAUTOBOT_MSG, *refresh_topology(a, b)
     if not (a and b):
         return "機器 A と機器 B を選んでください", *refresh_topology(a, b)
     if a == b:
@@ -203,6 +226,8 @@ def add_link(a, a_if, b, b_if, kind, role, bw):
 
 def remove_link(sel, a, b):
     """sel は削除用 Dropdown の値 "a|a_if|b"（topology.link_choices）"""
+    if nautobot_managed():
+        return NAUTOBOT_MSG, *refresh_topology(a, b)
     if not sel or str(sel).count("|") != 2:
         return "削除するリンクを一覧から選んでください", *refresh_topology(a, b)
     la, a_if, lb = str(sel).split("|", 2)

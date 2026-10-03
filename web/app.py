@@ -38,8 +38,8 @@ with gr.Blocks(title=f"{TITLE} チャット") as demo:
         topo_table = gr.Dataframe(tv.device_table(), interactive=False, label="機器")
         layer_table = gr.Dataframe(tv.layer_table(), interactive=False, label="IP 層と EVPN・BGP 層（IS-IS の隣接 / iBGP EVPN のセッション / EVI / Ethernet Segment。下の層の ID で物理層とつながる。gNMI の検知で DOWN になる）")
         topo_refresh = gr.Button("再読み込み")
-        with gr.Accordion("Neptune で編集（terraform/pipeline/graph がある間だけ）", open=False):
-            edit_msg = gr.Markdown("" if tv.can_edit() else "Neptune は未配備。terraform/pipeline/graph を apply して Web を再起動すると使えます。")
+        with gr.Accordion("Neptune で編集（terraform/pipeline/graph がある間だけ。Nautobot があれば Nautobot で編集する）", open=False):
+            edit_msg = gr.Markdown(tv.edit_note())
             gr.Markdown("**静的データを投入** = Neptune の中身をいったん全部消して、`agent/data/` の 8 台・12 本（と IP 層・EVPN 層）に戻す（初回と、編集をやり直したいとき）。"
                         "機器の追加・削除はこの画面にはないので `agent/data/` を直して投入し直す。リンクは下で 1 本ずつ足す・消す。"
                         "変えた内容はエージェントの次の質問から効く。")

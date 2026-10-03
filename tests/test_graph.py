@@ -188,6 +188,54 @@ state.update(answer={"has('registered',false).elementMap()": [], "hasLabel('inte
 r = graph.seed_layers({"vertices": [{"id": "x#bgp#1", "label": "bgp_session", "device_id": "x"}], "edges": [{"label": "over", "from": "x#bgp#1", "to": "x#eth0.0"}]})
 check("seed_layers は片端の無い辺を張らずに skipped_edges に数える", r.get("skipped_edges") == 1 and not any(q.startswith("g.addE") for q in state["queries"]))
 
+# ---- 差分の同期（Nautobot の Job が呼ぶ。status と上の層は触らない）
+cur_v = [{"id": "a-ce-01", "label": "device", "hostname": "a-ce-01", "site": "a", "role": "leaf", "asn": 65001, "mgmt_ip": "203.0.113.11", "enabled": True, "status": "DOWN"},
+         {"id": "old-ce-01", "label": "device", "hostname": "old-ce-01", "site": "a", "role": "leaf", "enabled": False},
+         {"id": "new-ce-01", "label": "device", "registered": False, "role": "unknown", "status": "ALARM"},
+         {"id": "zz-ce-09", "label": "device", "registered": False, "role": "unknown", "status": "ALARM"},
+         {"id": "a-ce-01#eth1", "label": "interface", "device_id": "a-ce-01", "name": "eth1", "address": "172.16.1.2", "status": "DOWN"},
+         {"id": "a-ce-01#eth2", "label": "interface", "device_id": "a-ce-01", "name": "eth2"},
+         {"id": "old-ce-01#eth1", "label": "interface", "device_id": "old-ce-01", "name": "eth1"}]
+cur_e = [{"id": "e1", "label": "link", "OUT": {"id": "a-ce-01"}, "IN": {"id": "b-ce-01"}, "a_if": "eth1", "b_if": "eth1", "kind": "l2", "role": "primary", "bandwidth_mbps": 1000, "status": "DOWN"},
+         {"id": "e2", "label": "link", "OUT": {"id": "a-ce-01"}, "IN": {"id": "b-ce-01"}, "a_if": "eth2", "b_if": "eth2", "kind": "l2"},
+         {"id": "e3", "label": "link", "OUT": {"id": "a-ce-01"}, "IN": {"id": "old-ce-01"}, "a_if": "eth3", "b_if": "eth1", "kind": "l2"}]
+sync_devs = [{"device_id": "a-ce-01", "hostname": "a-ce-01", "site": "a", "role": "spine", "asn": None, "mgmt_ip": "203.0.113.11", "enabled": True,
+              "interfaces": [{"name": "eth1", "address": "172.16.1.2", "lag": ""}, {"name": "eth9", "address": "", "lag": "bond0"}]},
+             {"device_id": "new-ce-01", "hostname": "new-ce-01", "site": "a", "role": "leaf", "asn": None, "mgmt_ip": "", "enabled": False, "interfaces": []}]
+sync_links = [{"a": "b-ce-01", "a_if": "eth1", "b": "a-ce-01", "b_if": "eth1", "kind": "l2", "role": None, "bandwidth_mbps": 25000},
+              {"a": "a-ce-01", "a_if": "eth9", "b": "new-ce-01", "b_if": "eth1", "kind": "fabric", "role": None, "bandwidth_mbps": None}]
+state.update(answer={"g.V().hasLabel('device','interface').elementMap()": cur_v, "g.E().hasLabel('link').elementMap()": cur_e,
+                     "outE('link')": [0], "inE('link')": [0], "coalesce(": [True], "drop()": [], "addV": [], "addE": [], ".id()": ["x"], "count()": [1]}, queries=[])
+r = graph.sync_physical(sync_devs, sync_links)
+qs = state["queries"]
+check("sync_physical は今の頂点と辺を 1 回ずつ読み、全部を消す drop は送らない",
+      qs[:2] == ["g.V().hasLabel('device','interface').elementMap()", "g.E().hasLabel('link').elementMap()"]
+      and not any(q.startswith("g.V().hasLabel") and q.endswith(".drop()") for q in qs))
+check("一覧に無い登録済みの機器・インタフェースと、一覧に無い回線は消す（未登録の頂点 zz-ce-09 と、機器ごと消えた辺 e3 には触らない）",
+      all(q in qs for q in ("g.V('old-ce-01').drop()", "g.V('a-ce-01#eth2').drop()", "g.V('old-ce-01#eth1').drop()", "g.E('e2').drop()"))
+      and not any("'zz-ce-09'" in q or "'e3'" in q for q in qs))
+check("残る機器は変わった property だけ single で上書きし、無くなった値は property ごと消す（status は書かない）",
+      "g.V('a-ce-01').property(single,'role','spine').sideEffect(properties('asn').drop()).id()" in qs
+      and not any(q.startswith("g.V('a-ce-01#eth1')") for q in qs))
+check("残る回線は a < b に直して突き合わせ、変わった property だけ書く（辺に single は付けない。status は残る）",
+      "g.E('e1').sideEffect(properties('role').drop()).property('bandwidth_mbps',25000).id()" in qs)
+check("未登録の頂点が一覧にあれば置き換えて UP でない status を引き継ぎ、新しい IF と回線を足す",
+      qs.index("g.V('new-ce-01').drop()") < qs.index("g.addV('device').property(id,'new-ce-01').property('hostname','new-ce-01').property('site','a').property('role','leaf').property('enabled',false)")
+      and "g.addV('interface').property(id,'a-ce-01#eth9').property('device_id','a-ce-01').property('name','eth9').property('lag','bond0')" in qs
+      and "g.addE('link').from(__.V('a-ce-01')).to(__.V('new-ce-01')).property('a_if','eth9').property('b_if','eth1').property('kind','fabric')" in qs
+      and qs.index("g.V('new-ce-01').property(single,'status','ALARM').coalesce(values('registered'),constant(true))") > max(i for i, q in enumerate(qs) if q.startswith("g.add")))
+check("戻り値は count() に足した数・変えた数・消した数", r["added"] == 3 and r["updated"] == 2 and r["removed"] == 4 and r["devices"] == 1 and "skipped" not in r)
+state["queries"] = []
+same_v = [{"id": "a-ce-01", "label": "device", "hostname": "a-ce-01", "site": "a", "role": "spine", "mgmt_ip": "203.0.113.11", "enabled": True, "status": "DOWN"},
+          {"id": "a-ce-01#eth1", "label": "interface", "device_id": "a-ce-01", "name": "eth1", "address": "172.16.1.2"}]
+state["answer"].update({"g.V().hasLabel('device','interface').elementMap()": same_v, "g.E().hasLabel('link').elementMap()": []})
+r = graph.sync_physical([{**sync_devs[0], "interfaces": sync_devs[0]["interfaces"][:1]}], [])
+check("同じ内容なら何も書かない（読む 2 本と count だけ）", r["added"] == r["updated"] == r["removed"] == 0
+      and not any(x in q for q in state["queries"] for x in ("drop()", "addV", "addE", ".property(")))
+state.update(answer={"g.V().hasLabel('device','interface').elementMap()": [], "g.E().hasLabel('link').elementMap()": [], "addV": [], "count()": [0]}, queries=[])
+r = graph.sync_physical([], [{"a": "x", "a_if": "e", "b": "y", "b_if": "e"}])
+check("端の機器が無い回線は張らずに skipped に理由を出す", r["added"] == 0 and len(r["skipped"]) == 1 and "機器が無い" in r["skipped"][0])
+
 # ---- 動的な状態（graph/status_handler.py が呼ぶ）
 state.update(answer={"outE('link')": [1], "inE('link')": [0], "coalesce(": [True]}, queries=[])
 r = graph.set_status("dc1-leaf-01", "eth1", "down")

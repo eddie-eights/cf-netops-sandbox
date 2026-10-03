@@ -265,7 +265,49 @@ ops/sync-graph.sh --dry-run    # 作った JSON を出すだけ
 - 状態は Lambda `<prefix>-graph-status` が書く（SNS のトピック `<prefix>-alerts` を購読する。`firing` で落とし、`resolved` で戻す）。`link_down` なら回線の辺に `DOWN` / `UP`、`bgp_down` / `isis_down`（gNMI）なら上の層の頂点 `bgp_session` / `isis_adjacency` に `DOWN` / `UP`、ほかの trap なら機器に `ALARM` / `UP`（`UP` に戻すのは機器が `ALARM` のときだけ。IF の分からない linkDown の `DOWN` は残す）。
 - link 以外の trap には「直った」の知らせが無いので、その機器の最後の trap から 10 分で `resolved` にする（Splunk の保存済みサーチ `netops_trap_clear` が 1 分おきに見る）。coldStart / warmStart は異常にしない。調査ワークフローを起こすのは `link_down` だけ。
 - 入れ直すと状態は全部 `UP` に戻る（上の層も入れ直す。`ops/sync-graph.sh --replace`）。
+- `NAUTOBOT=1` のあいだは物理層の正は Nautobot（下の「Nautobot」）。Web の「トポロジ」タブからの編集は止まり、`--replace` は lab の定義で上書きするので、Nautobot で足したものは Job を打つまで Neptune から消える。
 - トポロジに無い機器やインタフェースの異常は捨てず、「未登録」の頂点（`registered=false`、機器は `role=unknown`）として残す。Web の図では橙の点線の枠、表の「監視」は「未登録」になる。Lambda のログには WARNING で `UNREGISTERED` が出る。lab に足した機器なら `ops/sync-graph.sh --replace` で登録すると置き換わり、`UP` でない状態は引き継ぐ。
+
+## Nautobot（機器の一覧とケーブルの正）
+
+`NAUTOBOT=1` で Nautobot 3.2.6 を立てる（`terraform/pipeline/nautobot`。既定は作らない）。機器・インタフェース・ケーブルを Nautobot で変えると、Nautobot の Job が次の 2 つに反映する。
+
+```mermaid
+flowchart LR
+  U["Nautobot の画面<br/>機器 / Service / ケーブル"] -->|"JobHook（変更のたび）<br/>または手で Job"| J["Job<br/>nautobot/jobs/netops_jobs.py"]
+  J -->|"SSM の一覧を書き換え<br/>ECS のサービスを作り直す"| T["Telegraf dialin<br/>gNMI / SNMP を取りにいく"]
+  J -->|"Gremlin（差分）"| N["Neptune の物理層<br/>device / interface / 回線"]
+```
+
+| Nautobot | 反映先 |
+|---|---|
+| Device に Service `gnmi`（tcp）がある | Telegraf の gNMI の購読先 `<primary IPv4>:<ポート>`（SSM `/<prefix>/telegraf-dialin/nautobot/gnmi-targets`） |
+| Device に Service `snmp`（udp）がある | Telegraf の SNMP のポーリング先 `udp://<primary IPv4>:<ポート>`（同 `snmp-agents`。使うのは `SNMP_POLL=1` のとき） |
+| Device（名前、Location、Role、primary IPv4、custom field `asn`）と Interface（名前、最初の IP、LAG の親） | Neptune の `device` / `interface`。Service がどちらかあれば「監視」 |
+| Cable（両端が Interface。custom field `link_role` / `bandwidth_mbps`） | Neptune の回線。種類（fabric / l2 / lag）は両端の Role と LAG から決める |
+
+- 構成は ECS Fargate（ARM 2 vCPU / 4 GB）の 1 タスクに web（uWSGI）・Celery worker（Job を回す）・Redis の 3 コンテナと、RDS の PostgreSQL（`db.t4g.micro`）。SG は `<prefix>-nautobot` / `<prefix>-nautobot-db`。LB は無く、Web の EC2 を踏み台にしたポートフォワードで開く。
+- シークレット（Django の SECRET_KEY、admin のパスワード、DB のパスワード）は `ops/up.sh` が SSM の SecureString `/<prefix>/nautobot/{secret-key,admin-password,db-password}` に乱数で作る。タスクは ECS の secrets で受け、RDS には Terraform の write-only の引数で渡す（state に載らない）。
+- 最初の起動で、DB が空なら lab の定義（イメージに入れた `lab_seed.json`）から機器・インタフェース・IP・Service・ケーブルを入れ、Job 2 つ（「Telegraf と Neptune に同期」「変更のたびに…」）と JobHook `netops-sync` を有効にして 1 回同期する（`nautobot/netops/bootstrap.py`。2 回目からは足りないものだけ）。
+- Telegraf の一覧は、変わったときだけ書き換えて取りにいく側のサービスを作り直す（購読が数十秒切れる）。Service を持つ機器が 1 台も無くなる変更は書かない（Telegraf が起動できなくなるので、警告だけ）。
+- Neptune へは `agent/graph.py` の `sync_physical()` が Gremlin で差分を書く。`status`（アラートが書く）と IP 層・EVPN/BGP 層は触らない。IP 層から上は Nautobot に無いので、lab の定義からだけ入る（`ops/sync-graph.sh`）。
+- JobHook は Device / Interface / Cable / IPAddress / Service / Location / Role の作成・変更・削除で出る。IP をインタフェースに付け替えただけのように JobHook が出ない変更のあとは、画面の Jobs → 「Telegraf と Neptune に同期」を手で打つ。
+- JobHook は、変更した人に Job を実行する権限が無いと出ない（管理者は出る）。権限を絞ったユーザーを作るなら、Job `netops_jobs.SyncOnChange` の実行も許す。
+- 機器が 1 台も無いときは Neptune を触らない（空で合わせると物理層が全部消えるため。seed が失敗したときも起動時の同期を飛ばす）。全部消したいときは `ops/sync-graph.sh --replace` で入れ直す。
+- 機器の名前を変えると、Neptune では「前の名前の機器を消して新しい名前の機器を足す」になり、その機器の `status` と IP 層より上へのつながりは消える（名前が頂点の ID のため）。上の層は `ops/sync-graph.sh --replace` で入れ直す。
+- 機器の status（Planned / Decommissioning など）は見ない。Nautobot にある機器は全部映る。Module に付いた Interface のケーブルは回線にしない。
+- 一括で変えると変更 1 件ごとに Job が 1 本ずつ順に走り、途中の状態で一覧が変わるたびに Telegraf の取りにいく側が作り直される。大きく変えるときは JobHook `netops-sync` を止めてから変え、最後に手で Job を打つ（JobHook は次の起動で有効に戻る）。
+- admin のパスワードは起動のたびに SSM の値へ戻る（画面で変えても残らない）。
+- stream を作り直して一覧の持ち主を変えたとき（`dialin_targets_from_nautobot` を手で変えた apply）は、nautobot のルートも apply し直す。そのままだと Job が `ParameterNotFound` で失敗する（`ops/up.sh` は両方をそろえる）。
+- `ops/down.sh` で DB ごと消える。Nautobot で編集した内容は残らない。
+- デバッグ用の EC2 は Nautobot を使わない（lab の定義の一覧のまま）。
+
+```bash
+terraform -chdir=terraform/pipeline/nautobot output -raw port_forward_command; echo   # 打って http://localhost:8081/ （ユーザー admin）
+terraform -chdir=terraform/pipeline/nautobot output -raw password_command; echo       # admin のパスワード
+terraform -chdir=terraform/pipeline/nautobot output -raw exec_command; echo           # web のコンテナに入る（nautobot-server nbshell など）
+aws logs tail /ecs/<prefix>-nautobot --follow                                            # web/ が起動と bootstrap、worker/ が Job
+```
 
 ## lab を変える
 

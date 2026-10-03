@@ -37,3 +37,13 @@ output "splunk_repository_url" {
   description = "ops/up.sh builds splunk/ (splunk/splunk plus the netops_alerts app, amd64 only) and pushes it here as <Splunk version>-<hash of splunk/> (step 2, SINK_SPLUNK=1). terraform/pipeline/analytics runs it on ECS."
   value       = aws_ecr_repository.pipeline["splunk"].repository_url
 }
+
+output "nautobot_repository_url" {
+  description = "ops/up.sh builds nautobot/ (networktocode/nautobot plus the NetOps jobs, arm64) and pushes it here as <Nautobot version>-<hash of the build context> (step 2, NAUTOBOT=1). terraform/pipeline/nautobot runs it on ECS."
+  value       = aws_ecr_repository.pipeline["nautobot"].repository_url
+}
+
+output "redis_repository_url" {
+  description = "Push redis:<REDIS_TAG of ops/up.sh> (arm64) here with the same tag (step 2, NAUTOBOT=1). The Redis sidecar of the Nautobot task (cache and Celery broker)."
+  value       = aws_ecr_repository.pipeline["redis"].repository_url
+}

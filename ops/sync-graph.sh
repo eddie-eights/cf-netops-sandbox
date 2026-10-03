@@ -7,6 +7,9 @@
 #   ops/sync-graph.sh --replace  # 入っていても入れ直す（Web で編集した内容と、アラートで付いた status は消えて lab の定義に戻る）
 #   ops/sync-graph.sh --dry-run  # Neptune には触らず、lab から作ったトポロジ（JSON）を出すだけ
 #
+# NAUTOBOT=1（terraform/pipeline/nautobot）のあいだは物理層の正は Nautobot。--replace は lab の定義で上書きするので、Nautobot で足した機器と回線は
+# Neptune から消える（Nautobot の Job「Telegraf と Neptune に同期」を打てば戻る。IP 層と EVPN・BGP 層は Nautobot に無いので lab からだけ入る）。
+#
 # terraform/base/core（Web の EC2）と terraform/pipeline/graph（Neptune）が出来ていることが前提。Web の EC2 の上で ops/seed_graph.py を SSM Run Command で動かす。
 set -uo pipefail
 

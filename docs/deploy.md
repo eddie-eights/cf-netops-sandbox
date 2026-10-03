@@ -22,6 +22,7 @@
 | `SINK_S3` / `SINK_OPENSEARCH` / `SINK_PROMETHEUS` | Spark の格納先。既定は 3 つとも `1`。`0` にするとリソースごと作らない。`SINK_SPLUNK` と合わせて全部 `0` は止まる。`SINK_PROMETHEUS=0` にすると Grafana のアラート（`link_down`）も無くなる |
 | `SINK_SPLUNK` | 4 本目の格納先。`1` で Spark が全トピックを Splunk の HTTP Event Collector（HEC）に送る。既定 `0`。analytics の ECS に Splunk Enterprise（公式イメージ `splunk/splunk:10.4.3` に検知のアプリ `netops_alerts` を足したもの、試用ライセンス。Fargate x86 2 vCPU / 4 GB、エフェメラルストレージ 40 GiB）を立て、Spark は VPC の中の `https://splunk.<prefix>.internal:8088` に送る（自己署名なので検証しない）。起動時に Splunk のライセンスと Splunk General Terms に同意する。admin のパスワードと HEC の token は `ops/up.sh` が SSM の SecureString に乱数で作る。index はタスクと一緒に消える（検証用）。trap と gNMI（BGP / IS-IS）のアラートも Splunk が出す（[pipeline.md](pipeline.md) の「アラート」）。+$0.12/h。`SPLUNK_INDEX`（空なら token の既定）も読む。AWS の外の Splunk へ NAT Gateway で送る道（`SPLUNK_HEC_URL`）は 2026-09-28 にやめた（書いてあると `ops/up.sh` が止まる） |
 | `GRAFANA` | Grafana OSS（analytics の ECS。Fargate ARM 0.5 vCPU / 1 GB。+$0.02/h）で Prometheus（AMP、SigV4）と OpenSearch Serverless を見る。既定 `1`。`SINK_PROMETHEUS` か `SINK_OPENSEARCH` があるときだけ作る。`SINK_PROMETHEUS=1` なら `link_down` のアラートを SNS へ出す（[pipeline.md](pipeline.md) の「アラート」）。ルールが見るのは SNMP のポーリングの値なので、発火するのは `SNMP_POLL=1` のときだけ（`0` のときは送り手に数えず、`sns` のエンドポイントも足さない）。Amazon Managed Grafana はサインインに IAM Identity Center か SAML が要り、このアカウントには Organizations も Identity Center も無いので使えない |
+| `NAUTOBOT` | Nautobot 3.2.6（`terraform/pipeline/nautobot`。ECS Fargate ARM 2 vCPU / 4 GB の 1 タスクに web・Celery worker・Redis、RDS の PostgreSQL `db.t4g.micro`。+$0.13/h と `ecs` のエンドポイント $0.014/h）。既定 `0`。`PIPELINE=1` と、stream か graph の少なくとも片方が要る。`1` にすると機器の一覧とケーブルの正が Nautobot になり、Nautobot の Job が Telegraf の取りにいく側の一覧（SSM）と Neptune の物理層（Gremlin）に反映する（[pipeline.md](pipeline.md) の「Nautobot」）。SECRET_KEY・admin と DB のパスワードは `ops/up.sh` が SSM の SecureString に作る。デバッグ用の EC2 は使わない |
 | `SYSLOG_STANDARD` | stream の Telegraf（ECS）が受ける機器の syslog の形式。`RFC3164`（既定。本番の Cisco IOS の BSD 形式）か `RFC5424`（lab の SR Linux が送る形式。`ops/lab-common.sh` の `LAB_SYSLOG_STANDARD`）。それ以外は止まる。既定のままだと lab の機器のログの項目が崩れる（`ops/up.sh` が注意を出す）ので、lab のログまで見るなら `RFC5424`。変えて打ち直すと Telegraf のタスクが入れ替わる。デバッグ用の EC2 の Telegraf はこの値によらず RFC5424 |
 | `SNMP_POLL` | stream の Telegraf（ECS）で SNMP をポーリングするか。既定 `0` で、SNMP は trap だけ受ける（gNMI と syslog は変わらない）。`1` で 10 秒ごとに ifTable を取って `metrics` トピックに出す（stream の変数 `snmp_poll` → タスクの環境変数 `SNMP_POLL`）。`0` のままだと、Grafana のアラートルール `link_down`、Grafana の IF のグラフ、エージェントが見る IF のメトリクスは空になる（IF の up / down は `SINK_SPLUNK=1` で trap から知らせる。どちらも無いと `ops/up.sh` が注意を出す）。変えて打ち直すと Telegraf のタスクが入れ替わる。デバッグ用の EC2 の Telegraf も既定は `0`（`sudo SNMP_POLL=1 lab telegraf run` で起こし直す） |
 | `LAB_DEBUG` | 2026-10-04 から使わない。書いてあれば `ops/up.sh` が注意を出すだけ。デバッグ用の EC2 は `ops/lab-debug.sh up` / `down` で作る・消す（`ops/up.sh` / `ops/down.sh` とは別。[pipeline.md](pipeline.md) の「デバッグ用の EC2」） |
@@ -56,6 +57,7 @@
 | 7-2b | lab の EC2 で `lab forward` を打ち、Telegraf のタスク（取りにいく側）のサブネットから SNMP のポーリング（`SNMP_POLL=1` のとき）と gNMI の購読を通し、trap / syslog を Telegraf の NLB へ DNAT する |
 | 7-2c | Telegraf の ECS のサービス 2 つ（受ける側と取りにいく側）が安定するのを待つ（最大 10 分。落ちても止まらず、見るところを出す） |
 | 7-3 | graph を待ち、Neptune が空ならトポロジを入れる（アラートの送り手より先に、`status` の Lambda とトポロジを用意する） |
+| 7-3c | `NAUTOBOT=1` のとき。SSM に Nautobot のシークレット 3 つを作り（無いときだけ）、`terraform/pipeline/nautobot`（RDS に 5〜10 分）。サービスが安定するのを待つ（初回は DB の migrate で 5〜10 分。最大 20 分。落ちても止まらず、見るところを出す）。起動時に lab の定義を Nautobot に入れ（空のときだけ）、Job と JobHook を有効にして 1 回同期する |
 | 7-4 | `terraform/pipeline/analytics`（`SINK_SPLUNK=1` なら、Splunk のアラートが IP を機器名に直す device map を lab の定義から作って渡す）。先に Grafana / ECS の Splunk の admin のパスワードと HEC の token を SSM の SecureString に作る（無いときだけ。値は出さない） |
 | 7-4b | ECS の Splunk がヘルスチェックで HEALTHY になるのを待つ（最大 20 分。Spark のジョブは起動してすぐ HEC に送るので） |
 | 7-5 | Spark のジョブが動いていなければ起こす |
@@ -63,7 +65,7 @@
 | 8-5 | `terraform/workflow`。Temporal UI を開くコマンドを表示 |
 | 8-6 | Web を再起動 |
 | 9 | Runtime のロググループの保持を 7 日にする |
-| 10 | `start_session_command`、lab と Telegraf（取りにいく側）に入るコマンド、Grafana / Splunk のポートフォワードとパスワードを見るコマンドを表示し、ポートフォワーディングを開く（`Ctrl+C` で閉じる） |
+| 10 | `start_session_command`、lab と Telegraf（取りにいく側）に入るコマンド、Grafana / Splunk / Nautobot のポートフォワードとパスワードを見るコマンドを表示し、ポートフォワーディングを開く（`Ctrl+C` で閉じる） |
 
 - スクリプトの中は `-auto-approve`。できているものは飛ばすので、落ちたら打ち直せばよい。
 - 途中で落ちたときは、裏の graph の apply が終わるまで待ってから止まる。その間ターミナルを閉じない。
@@ -74,10 +76,11 @@ state にリソースが載っているルートだけを、この順に消す�
 
 ```mermaid
 flowchart LR
-  A["workflow"] --> B["analytics<br/>Spark のジョブを cancel"] --> C["graph"] --> D["stream"] --> E["lab"] --> F["agent"] --> G["base/core"] --> H["base/ecr"] --> I["Runtime の<br/>ロググループ"] --> J["SSM のパラメータ<br/>ManagedBy=ops/up.sh"]
+  A["workflow"] --> B["analytics<br/>Spark のジョブを cancel"] --> N["nautobot<br/>RDS ごと"] --> C["graph"] --> D["stream"] --> E["lab"] --> F["agent"] --> G["base/core"] --> H["base/ecr"] --> I["Runtime の<br/>ロググループ"] --> J["SSM のパラメータ<br/>ManagedBy=ops/up.sh"]
 ```
 
-- 手順 5-2 で、`ops/up.sh` が作った SSM のパラメータ（`/<prefix>/` の下でタグ `ManagedBy=ops/up.sh` のもの。Grafana / Splunk の admin のパスワードと Splunk の HEC の token）を消す。手で入れたパラメータは消さない。
+- 手順 5-2 で、`ops/up.sh` が作った SSM のパラメータ（`/<prefix>/` の下でタグ `ManagedBy=ops/up.sh` のもの。Grafana / Splunk / Nautobot の admin のパスワード、Splunk の HEC の token、Nautobot の SECRET_KEY と DB のパスワード）を消す。手で入れたパラメータは消さない。nautobot のルートが消えなかったときは Nautobot の分だけ残す（Terraform が destroy でも DB のパスワードを読むので。打ち直せば消える）。
+- Nautobot の RDS は最後のスナップショットを取らずに消す。Nautobot で編集した内容は残らない（次の `ops/up.sh` でまた lab の定義から入る）。
 - 最後に `Project=<prefix>` のタグが残っているものを出す。何も出なければ全部消えている。
 - デバッグ用の EC2（CloudFormation の `<prefix>-lab-debug`）は消さない。`ops/lab-debug.sh down` で消す（同じ `Project` タグなので、残っていれば上の一覧に出る）。
 - **Runtime の ENI は最大 8 時間残る。**その間は VPC、サブネット、Runtime の SG（`<prefix>-runtime`）を残して他を消す。時間をおいて打ち直す。

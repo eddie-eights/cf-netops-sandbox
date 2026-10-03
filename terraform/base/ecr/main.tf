@@ -1,5 +1,5 @@
 # ECR repositories of nwc-poc. The agent image, the two lab images (srlinux / multitool),
-# the two workflow images (worker / temporal) and the three ECS images of the pipeline (telegraf / grafana / splunk) go here.
+# the two workflow images (worker / temporal) and the five ECS images of the pipeline (telegraf / grafana / splunk / nautobot / redis) go here.
 # ops/up.sh pushes them in step 2.
 # force_delete = true so that `terraform destroy` removes the repositories together with their images (daily ops/down.sh).
 
@@ -12,8 +12,9 @@ locals {
 locals {
   lab_repositories      = var.create_lab_repositories ? toset(["srlinux", "multitool"]) : toset([])
   workflow_repositories = var.create_workflow_repositories ? toset(["worker", "temporal"]) : toset([])
-  # ECS で動かすパイプラインの 3 つ（Telegraf は pipeline/stream、Grafana と Splunk は pipeline/analytics）。リポジトリに時間課金は無いので、いつも作る
-  pipeline_repositories = toset(["telegraf", "grafana", "splunk"])
+  # ECS で動かすパイプラインの 5 つ（Telegraf は pipeline/stream、Grafana と Splunk は pipeline/analytics、Nautobot とその Redis は pipeline/nautobot）。
+  # リポジトリに時間課金は無いので、いつも作る
+  pipeline_repositories = toset(["telegraf", "grafana", "splunk", "nautobot", "redis"])
 }
 
 resource "aws_ecr_repository" "agent" {

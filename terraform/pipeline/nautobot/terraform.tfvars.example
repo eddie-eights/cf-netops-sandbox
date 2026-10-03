@@ -1,0 +1,18 @@
+# Copy to terraform.tfvars only when the defaults are not right. Every value except owner has a default in variables.tf.
+# ops/up.sh passes owner and nautobot_image_tag with -var. terraform/base/ecr and terraform/base/core must be applied first
+# (this root reads their state files), and so must terraform/pipeline/stream and terraform/pipeline/graph when they are used.
+# owner is the name of the person who deploys this copy and is REQUIRED: it has no default, so terraform asks for it
+# unless you uncomment the line below (with your own name), export TF_VAR_owner or pass -var owner=<name>.
+# Resource names and the Project tag become <owner>-nwc-poc (up to 14 lowercase letters, digits and single hyphens),
+# so several people can share one AWS account.
+#
+# region      = "ap-northeast-1"
+# owner       = "yamada"
+#
+# nautobot_image_tag  = "3.2.6"
+# redis_image_tag     = "7.4.2-alpine"
+# task_cpu            = 2048
+# task_memory         = 4096
+# db_instance_class   = "db.t4g.micro"
+# db_engine_version   = "17"
+# deletion_protection = false

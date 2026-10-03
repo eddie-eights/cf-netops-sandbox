@@ -63,7 +63,12 @@ trap と syslog では性能の時系列は取れない（届くのはイベン�
 
 Kafka の出力（5 トピック）と health はどちらにもある。Starlark を取りにいく側に置くのは、変える前の `lab_*` を Kafka に載せないので gNMI の入力と同じタスクにいる必要があるから。デバッグ用の EC2 は既定の `all`（両方を 1 つの Telegraf で）。
 
-取りにいく側は機器の一覧（`GNMI_TARGETS` / `SNMP_AGENTS`）を持つ。いまは `ops/up.sh` が lab の定義から作って stream の変数で渡す（変われば取りにいく側のタスクだけが入れ替わる）。本番で機器の一覧をどこから持つか（Nautobot などから作るか）は未決定。
+取りにいく側は機器の一覧（`GNMI_TARGETS` / `SNMP_AGENTS`）を持つ。一覧は SSM のパラメータ（`/<prefix>/telegraf-dialin/{lab|nautobot}/{gnmi-targets|snmp-agents}`）に置き、タスクは起動時に ECS の secrets として受ける。持ち主は 2 通り。
+
+- 既定（`NAUTOBOT=0`）: `ops/up.sh` が lab の定義から作って stream の変数で渡し、Terraform が `…/lab/*` に書く（変われば取りにいく側のタスクだけが入れ替わる）
+- `NAUTOBOT=1`: Nautobot の Job が `…/nautobot/*` を書き換えて、取りにいく側のサービスを作り直す。Terraform は最初の値（lab の一覧）だけ書く。くわしくは [pipeline.md](pipeline.md) の「Nautobot」
+
+デバッグ用の EC2 は Nautobot を使わず、lab の定義の一覧のまま。
 
 ## セッションと上限（一般的な解釈で調べた。2026-10-04）
 

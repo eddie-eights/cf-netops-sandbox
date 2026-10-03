@@ -58,6 +58,12 @@
 #   SNMP_POLL=1             stream の Telegraf で SNMP もポーリングする（10 秒ごとに ifTable → metrics トピック）。既定 0 で、SNMP は trap だけ受ける。
 #                           Grafana のアラートルール link_down と IF のグラフ、エージェントの IF のメトリクスはこのポーリングを見るので、0 では空になる
 #                           （IF の up / down は SINK_SPLUNK=1 の Splunk が trap から link_down を出す）。stream の変数 snmp_poll に渡す
+#   NAUTOBOT=1              PIPELINE=1 で Nautobot（terraform/pipeline/nautobot。ECS Fargate の web + Celery worker + Redis と、RDS の PostgreSQL。+$0.13/h と ecs のエンドポイント）を作る（既定 0）。
+#                           機器の一覧とケーブルの正を Nautobot にする。最初だけ lab の定義から入り、あとは Nautobot で機器・Service（gnmi / snmp）・ケーブルを変えるたびに、
+#                           Job が Telegraf の取りにいく側（dialin）の機器の一覧（SSM）を書き換えてサービスを作り直し、Neptune の物理層を Gremlin で合わせる。
+#                           stream か graph の少なくとも片方が要る。管理者のパスワード・SECRET_KEY・DB のパスワードは SSM の SecureString に作る（値は出さない）。
+#                           web の EC2 を踏み台にした SSM のポートフォワードで開く（コマンドは最後に出る）。ops/down.sh で DB ごと消える（編集した内容は残らない）。
+#                           デバッグ用の EC2（ops/lab-debug.sh）は Nautobot を使わず、今までどおり lab の定義の一覧
 #   SKIP_GRAPH=1            PIPELINE=1 で graph（Neptune）を作らない。「トポロジ」は使えず、アラートが届いても status を書く先が無い
 #   IMAGE_TAG               エージェント（WORKFLOW=1 ではワーカーも）のイメージのタグ。既定 v1。ECR にそのタグが無いときだけ PC の docker buildx でビルドして push する（タグは上書きできない）
 #   VPC_CIDR                terraform/base/core の vpc_cidr（社内と重なるとき）
@@ -69,7 +75,7 @@
 #   NO_PORTFORWARD=1        ポートフォワーディングを開かずに終わる
 #   TF_VERBOSE=1            terraform の出力を全部画面に出す（既定は進みと結果だけ。全文は ops/logs/tf-<ルート>-apply.log）
 #   AWS_PROFILE / AWS_CA_BUNDLE  AWS CLI と terraform がそのまま読む
-# AGENT / PIPELINE / WORKFLOW / CREATE_KB / SKIP_* / SINK_* / GRAFANA / SNMP_POLL / NO_PORTFORWARD / NETWORK_PERIMETER / ENDPOINTS_MULTI_AZ は 1 / 0 のほか true / false、yes / no でも書ける（ops/down.sh の KEEP_ECR は 1 か 0 だけ）。
+# AGENT / PIPELINE / WORKFLOW / CREATE_KB / SKIP_* / SINK_* / GRAFANA / NAUTOBOT / SNMP_POLL / NO_PORTFORWARD / NETWORK_PERIMETER / ENDPOINTS_MULTI_AZ は 1 / 0 のほか true / false、yes / no でも書ける（ops/down.sh の KEEP_ECR は 1 か 0 だけ）。
 #
 # 利用者への権限は人に渡す作業なので入れていない（docs/deploy.md の「利用者に画面を渡す」）。
 set -euo pipefail
@@ -83,6 +89,9 @@ REGION=ap-northeast-1
 . "$(dirname "$0")/lab-common.sh"
 GRAFANA_VERSION=13.2.2
 SPLUNK_VERSION=10.4.3   # splunk/splunk は amd64 だけ（ECS のタスクは X86_64）
+# Nautobot と、同じタスクで動かす Redis。nautobot/Dockerfile の ARG と terraform/pipeline/nautobot の redis_image_tag の既定値に合わせてある
+NAUTOBOT_VERSION=3.2.6
+REDIS_TAG=7.4.2-alpine
 # analytics の Spark ジョブに足す jar（Maven Central。2026-09-17 に 6 本とも取れることを確認）。EMR Serverless 7.13.0 の Spark 3.5.6 に合わせてある。
 # terraform/pipeline/analytics の emr_release_label を変えるときは spark-sql-kafka とその依存（kafka-clients / commons-pool2 は spark-sql-kafka の pom の版）も変える
 JARS_DIR=jars
@@ -233,6 +242,15 @@ with open(path, "w", encoding="utf-8") as f:
   [ "$rc" -eq 0 ] || die "SSM に $name を作れなかった（上のエラー）"
   echo "$name を作った（値は出さない）"
 }
+nautobot_context() {  # nautobot_context <空のディレクトリ>  Nautobot のイメージのビルドの context を集める（nautobot/Dockerfile の頭の説明）
+  # nautobot/ の中身に、Neptune へ Gremlin で書く agent/graph.py と agent/toolkit.py、最初の seed にする lab の定義を足す。
+  # タグはこのディレクトリの中身から作る（dir_tag）ので、graph.py や lab の定義を変えてもイメージが作り直される
+  cp -R nautobot/. "$1/" && cp agent/graph.py agent/toolkit.py "$1/" || return 1
+  find "$1" -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null
+  find "$1" -name .DS_Store -delete 2>/dev/null
+  "${PY[@]}" lab/lab_topology.py lab >"$1/lab_seed.json"
+}
+NAUTOBOT_CTX=""
 GRAPH_PID=""
 GRAPH_LOG=ops/logs/graph-apply.log
 on_exit() {  # 途中で止まっても、バックグラウンドの graph の apply は終わるまで待つ（打ち直したときに state のロックでぶつからないように）
@@ -241,6 +259,7 @@ on_exit() {  # 途中で止まっても、バックグラウンドの graph の 
     wait "$GRAPH_PID" || true
   fi
   if [ -n "$TF_AWS_CONFIG" ]; then rm -f "$TF_AWS_CONFIG"; fi
+  if [ -n "$NAUTOBOT_CTX" ]; then rm -rf -- "$NAUTOBOT_CTX"; fi
 }
 trap on_exit EXIT
 
@@ -302,6 +321,14 @@ if [ -n "$PIPELINE" ]; then
 else
   SKIP_LAB=1; SKIP_STREAM=1; SKIP_ANALYTICS=1; SKIP_GRAPH=1
 fi
+# Nautobot（terraform/pipeline/nautobot）。Job の書き先（Telegraf の dialin の一覧 = stream、Neptune の物理層 = graph）が少なくとも片方要る
+flag_value NAUTOBOT
+if [ -n "$NAUTOBOT" ]; then
+  [ -n "$PIPELINE" ] || die "NAUTOBOT は PIPELINE が要る（Nautobot の Job が書くのは stream の Telegraf の機器の一覧と graph の Neptune）。PIPELINE=1 にする。まだ何も作っていない"
+  if [ -n "$SKIP_STREAM" ] && [ -n "$SKIP_GRAPH" ]; then
+    die "NAUTOBOT は stream か graph の少なくとも片方が要る（どちらも無いと Job の書き先が無い）。SKIP_STREAM か SKIP_GRAPH を外す。まだ何も作っていない"
+  fi
+fi
 # Grafana（analytics の ECS）は Prometheus か OpenSearch の格納先があるときだけ意味がある
 GRAFANA="${GRAFANA:-1}"; flag_value GRAFANA
 if [ -n "$SKIP_ANALYTICS" ] || { [ -z "$SINK_PROMETHEUS" ] && [ -z "$SINK_OPENSEARCH" ]; }; then GRAFANA=""; fi
@@ -334,8 +361,8 @@ if command -v python3 >/dev/null; then PY=(python3)
 elif command -v uv >/dev/null; then PY=(uv run --python 3.13 python)
 else die "python3 も uv も無い（docs/setup.md「Terraform を打つ PC 側」）"; fi
 if [ -z "$SKIP_LAB" ] || [ -z "$SKIP_ANALYTICS" ]; then command -v curl >/dev/null || die "curl が無い（lab の containerlab の rpm と analytics の jar を取るのに使う。sudo apt install curl）"; fi
-# docker はイメージ（agent / lab の 2 つ / telegraf / grafana / splunk / worker / temporal）を ECR に置くときだけ要る。土台だけなら要らない
-NEED_DOCKER="$AGENT$WORKFLOW$GRAFANA$SPLUNK_ON_ECS"; if [ -z "$SKIP_LAB" ] || [ -z "$SKIP_STREAM" ]; then NEED_DOCKER=1; fi
+# docker はイメージ（agent / lab の 2 つ / telegraf / grafana / splunk / nautobot / redis / worker / temporal）を ECR に置くときだけ要る。土台だけなら要らない
+NEED_DOCKER="$AGENT$WORKFLOW$GRAFANA$SPLUNK_ON_ECS$NAUTOBOT"; if [ -z "$SKIP_LAB" ] || [ -z "$SKIP_STREAM" ]; then NEED_DOCKER=1; fi
 if [ -n "$NEED_DOCKER" ]; then
   command -v docker >/dev/null || die "docker が無い（イメージのビルドに使う。docs/setup.md「Terraform を打つ PC 側」）"
   docker buildx version >/dev/null 2>&1 || die "docker buildx が無い（Ubuntu の docker.io には入っていない。docs/setup.md「Terraform を打つ PC 側」）"
@@ -367,11 +394,12 @@ if [ -z "$SKIP_LAB" ]; then ROOTS="$ROOTS pipeline/lab"; fi
 if [ -z "$SKIP_STREAM" ]; then ROOTS="$ROOTS pipeline/stream"; fi
 if [ -z "$SKIP_ANALYTICS" ]; then ROOTS="$ROOTS pipeline/analytics"; fi
 if [ -z "$SKIP_GRAPH" ]; then ROOTS="$ROOTS pipeline/graph"; fi
+if [ -n "$NAUTOBOT" ]; then ROOTS="$ROOTS pipeline/nautobot"; fi
 if [ -n "$WORKFLOW" ]; then ROOTS="$ROOTS workflow"; fi
 echo "ACCOUNT_ID=$ACCOUNT_ID"
 echo "CALLER_ARN=$CALLER_ARN"
 echo "IMAGE_TAG=$IMAGE_TAG"
-echo "AGENT=${AGENT:-0} PIPELINE=${PIPELINE:-0} WORKFLOW=${WORKFLOW:-0} CREATE_KB=${CREATE_KB:-0}"
+echo "AGENT=${AGENT:-0} PIPELINE=${PIPELINE:-0} WORKFLOW=${WORKFLOW:-0} CREATE_KB=${CREATE_KB:-0} NAUTOBOT=${NAUTOBOT:-0}"
 echo "作るルート: $ROOTS"
 # インターフェース型エンドポイント（terraform/base/core の var.interface_endpoints）。ルートが呼ぶ AWS の API ごとに 1 本。
 # 手順 3 で、今回作らなくても state にリソースが残っているルートの分を足す（外すとそのルートの呼び出しがどこにも出られず接続のタイムアウトになる）
@@ -392,6 +420,8 @@ endpoints_for() {  # endpoints_for <ルート>  そのルートが呼ぶ AWS の
     pipeline/stream) add_endpoints ecr.api ecr.dkr logs ;;
     # Spark: S3 Tables の API、ドライバのログ（MSK は VPC の中で、S3 は gateway）
     pipeline/analytics) add_endpoints s3tables logs ;;
+    # Nautobot（ECS）: イメージとログ。Job が Telegraf の dialin のサービスを作り直すのに ecs の API を呼ぶ（SSM は土台の分。RDS と Neptune は VPC の中）
+    pipeline/nautobot) add_endpoints ecr.api ecr.dkr logs ecs ;;
     # ワーカー: SQS（アラートは SNS → SQS で届く。SNS からの配信はエンドポイントを通らない）、S3 Tables（修復案の証跡）、ECR、ログ、Runtime、Gateway
     workflow) add_endpoints sqs s3tables ecr.api ecr.dkr logs bedrock-agentcore bedrock-agentcore.gateway ;;
   esac
@@ -423,6 +453,7 @@ echo "インターフェース型エンドポイント（$(endpoint_count) 本 �
 #   + GRAFANA なら 2（Fargate ARM 0.5 vCPU / 1 GB で 2.5）
 #   + SINK_SPLUNK なら 12（ECS の Splunk。Fargate x86 2 vCPU / 4 GB で 12.3。エフェメラルストレージの 20 GB 超えの分は 0.3 未満。
 #     Grafana と Splunk の単価も公表単価からで、Price List API では確かめていない）、
+# nautobot = 13（Fargate ARM 2 vCPU / 4 GB のタスク 1 つ 9.9 + RDS の db.t4g.micro 2.5 と gp3 20 GB 0.4。公表単価からで、Price List API では確かめていない）、
 # workflow = 5（Fargate ARM 1 vCPU / 2 GB のタスク 1 つ。Gateway と Lambda と SQS と S3 Tables への追記は使った分だけ。単価は 2026-09-17 に確認）。
 # ここを変えたら README の「作るもの」と docs/deploy.md の金額も変える
 COST_CENTS=2
@@ -441,6 +472,7 @@ if [ -z "$SKIP_ANALYTICS" ]; then
   if [ -n "$GRAFANA" ]; then COST_CENTS=$((COST_CENTS + 2)); fi
   if [ -n "$SPLUNK_ON_ECS" ]; then COST_CENTS=$((COST_CENTS + 12)); fi
 fi
+if [ -n "$NAUTOBOT" ]; then COST_CENTS=$((COST_CENTS + 13)); fi
 if [ -n "$WORKFLOW" ]; then COST_CENTS=$((COST_CENTS + 5)); fi
 if { [ -n "$AGENT" ] && [ -n "$CREATE_KB" ]; } || { [ -z "$SKIP_ANALYTICS" ] && [ -n "$SINK_OPENSEARCH" ]; }; then COST_CENTS=$((COST_CENTS + 3)); fi
 COST_NOTE=$(printf '待機だけで約 $%d.%02d/h（約 %d 円/h。チャットの分は別）の時間課金。使い終わったら当日中に ops/down.sh を打つ' \
@@ -474,9 +506,9 @@ TEMPORAL_TAG=1.9.1   # terraform/workflow の temporal_image_tag の既定値。
 
 # ---- 2. イメージ ----------------------------------------------------------------
 log "2. イメージ（ECR に無いタグだけ作る）"
-NEED_AGENT=""; NEED_LAB=""; NEED_WORKER=""; NEED_TEMPORAL=""; NEED_TELEGRAF=""; NEED_GRAFANA=""; NEED_SPLUNK=""
+NEED_AGENT=""; NEED_LAB=""; NEED_WORKER=""; NEED_TEMPORAL=""; NEED_TELEGRAF=""; NEED_GRAFANA=""; NEED_SPLUNK=""; NEED_NAUTOBOT=""; NEED_REDIS=""
 # telegraf / grafana / splunk は Dockerfile のあるディレクトリの中身からタグを作る（中身を変えれば次の ops/up.sh が作り直す）
-TELEGRAF_TAG=""; GRAFANA_TAG=""; SPLUNK_TAG=""
+TELEGRAF_TAG=""; GRAFANA_TAG=""; SPLUNK_TAG=""; NAUTOBOT_TAG=""
 if [ -n "$AGENT" ]; then
   if ecr_has "$PREFIX-agent" "$IMAGE_TAG"; then echo "agent:$IMAGE_TAG はある（作り直すなら IMAGE_TAG を変える）"; else NEED_AGENT=1; fi
 fi
@@ -500,13 +532,22 @@ if [ -n "$SPLUNK_ON_ECS" ]; then
   SPLUNK_TAG=$(dir_tag "$SPLUNK_VERSION" splunk) || die "splunk/ のタグを作れなかった"
   if ecr_has "$PREFIX-splunk" "$SPLUNK_TAG"; then echo "splunk:$SPLUNK_TAG はある"; else NEED_SPLUNK=1; fi
 fi
-if [ -z "$NEED_AGENT$NEED_LAB$NEED_WORKER$NEED_TEMPORAL$NEED_TELEGRAF$NEED_GRAFANA$NEED_SPLUNK" ]; then
+if [ -n "$NAUTOBOT" ]; then
+  NAUTOBOT_CTX=$(mktemp -d "${TMPDIR:-/tmp}/$PREFIX-nautobot.XXXXXX") || die "一時ディレクトリを作れない（TMPDIR）"
+  nautobot_context "$NAUTOBOT_CTX" || die "Nautobot のイメージの材料（nautobot/ と agent/graph.py・toolkit.py と lab の定義）を集められなかった"
+  NAUTOBOT_TAG=$(dir_tag "$NAUTOBOT_VERSION" "$NAUTOBOT_CTX") || die "nautobot/ のタグを作れなかった"
+  if ecr_has "$PREFIX-nautobot" "$NAUTOBOT_TAG"; then echo "nautobot:$NAUTOBOT_TAG はある"; else NEED_NAUTOBOT=1; fi
+  if ecr_has "$PREFIX-redis" "$REDIS_TAG"; then echo "redis:$REDIS_TAG はある"; else NEED_REDIS=1; fi
+fi
+if [ -z "$NEED_AGENT$NEED_LAB$NEED_WORKER$NEED_TEMPORAL$NEED_TELEGRAF$NEED_GRAFANA$NEED_SPLUNK$NEED_NAUTOBOT$NEED_REDIS" ]; then
   echo "作るイメージは無い"
 else
   docker info >/dev/null 2>&1 || die "dockerd に接続できない（WSL なら sudo service docker start。docs/setup.md「Terraform を打つ PC 側」）"
-  # agent / worker / grafana は RUN があるので、x86_64 の PC では QEMU（binfmt）が要る（lab のイメージは上流の arm64 をミラーするだけで、
+  # agent / worker / grafana / nautobot は RUN があるので、x86_64 の PC では QEMU（binfmt）が要る（lab のイメージは上流の arm64 をミラーするだけで、
   # telegraf は COPY だけ。splunk も COPY だけで amd64 なので、arm64 の PC（Apple シリコン）でもエミュレーション無しで作れる）
-  if [ -n "$NEED_AGENT$NEED_WORKER$NEED_GRAFANA" ] && ! docker buildx ls | grep -q 'linux/arm64'; then
+  # 出力は変数で受けてから探す（grep -q が先に閉じると docker が SIGPIPE で落ち、pipefail で「無い」扱いになることがある）
+  BUILDX_LS=$(docker buildx ls 2>/dev/null || true)
+  if [ -n "$NEED_AGENT$NEED_WORKER$NEED_GRAFANA$NEED_NAUTOBOT" ] && ! grep -q 'linux/arm64' <<<"$BUILDX_LS"; then
     die "docker buildx ls の Platforms に linux/arm64 が無い（docs/setup.md「WSL2（Ubuntu）」の binfmt の行）"
   fi
   aws ecr get-login-password --region "$REGION" | docker login --username AWS --password-stdin "$REG"
@@ -538,6 +579,14 @@ else
     # Fargate は VPC の中から ECR しか引けず、タスクは Splunkbase にも出られないので、アプリはビルドのときに入れる
     docker buildx build --platform linux/amd64 --build-arg "SPLUNK_VERSION=$SPLUNK_VERSION" -t "$REG/$PREFIX-splunk:$SPLUNK_TAG" --push splunk/
   fi
+  if [ -n "$NEED_NAUTOBOT" ]; then
+    # Nautobot の公式イメージ（arm64。約 1 GB）に boto3 と Job（nautobot/jobs）と対応付け（nautobot/netops + agent/graph.py）と最初の seed を足す
+    docker buildx build --platform linux/arm64 --build-arg "NAUTOBOT_VERSION=$NAUTOBOT_VERSION" -t "$REG/$PREFIX-nautobot:$NAUTOBOT_TAG" --push "$NAUTOBOT_CTX"
+  fi
+  if [ -n "$NEED_REDIS" ]; then
+    # Nautobot のタスクの中で動かす Redis（キャッシュと Celery のブローカー）。Fargate は VPC の中から ECR しか引けないのでミラーする
+    mirror_image "redis:$REDIS_TAG" "$REG/$PREFIX-redis:$REDIS_TAG" || die "redis のイメージを ECR に置けなかった"
+  fi
 fi
 
 # ---- 3. 本体 --------------------------------------------------------------------
@@ -558,7 +607,7 @@ for r in agent pipeline/analytics; do
 done
 if [ -n "$NEED_AOSS" ]; then MAIN_VARS+=(-var create_opensearch_endpoint=true); fi
 # 今回作らないルートでも、state にリソースが残っていればそのエンドポイントを残す
-for r in agent pipeline/lab pipeline/stream pipeline/analytics workflow; do
+for r in agent pipeline/lab pipeline/stream pipeline/analytics pipeline/nautobot workflow; do
   case " $ROOTS " in *" $r "*) continue ;; esac
   if [ -f "terraform/$r/terraform.tfstate" ]; then
     tf_init "$r"
@@ -742,8 +791,22 @@ if [ -z "$SKIP_STREAM" ]; then
   ensure_fixed_secret "/$PREFIX/telegraf-dialin/gnmi-username" "$LAB_GNMI_USERNAME" "gNMI username of the Telegraf dial-in task (created by ops/up.sh with the containerlab default)"
   ensure_fixed_secret "/$PREFIX/telegraf-dialin/gnmi-password" "$LAB_GNMI_PASSWORD" "gNMI password of the Telegraf dial-in task (created by ops/up.sh with the containerlab default)"
   ensure_fixed_secret "/$PREFIX/telegraf-dialin/snmp-community" "$LAB_SNMP_COMMUNITY" "SNMP community of the Telegraf dial-in task (created by ops/up.sh with the containerlab default)"
+  # NAUTOBOT=1 なら、取りにいく側の一覧は Nautobot の Job が書き換える SSM のパラメータ（…/telegraf-dialin/nautobot/*）から受ける。
+  # 最初の値だけ上の lab の一覧（Nautobot の最初の seed も lab なので同じ）。今回 NAUTOBOT=0 でも Nautobot が残っていればそのままにする
+  # （lab の側に戻すと Job の書き先のパラメータが消える）
+  DIALIN_FROM_NAUTOBOT=false
+  if [ -n "$NAUTOBOT" ]; then
+    DIALIN_FROM_NAUTOBOT=true
+  elif [ -f terraform/pipeline/nautobot/terraform.tfstate ]; then
+    tf_init pipeline/nautobot
+    if has_resources pipeline/nautobot; then
+      echo "NAUTOBOT=0 だが terraform/pipeline/nautobot が残っているので、取りにいく側の一覧は Nautobot からのままにする"
+      DIALIN_FROM_NAUTOBOT=true
+    fi
+  fi
+  if [ "$DIALIN_FROM_NAUTOBOT" = true ]; then echo "Telegraf の取りにいく側の機器の一覧: Nautobot の Job が書く（上の一覧は最初の値）"; fi
   tf_apply pipeline/stream -var "telegraf_image_tag=$TELEGRAF_TAG" -var "snmp_agents=$SNMP_AGENTS" -var "gnmi_targets=$GNMI_TARGETS" \
-    -var "syslog_standard=$SYSLOG_STANDARD" -var "snmp_poll=$SNMP_POLL_TF"
+    -var "syslog_standard=$SYSLOG_STANDARD" -var "snmp_poll=$SNMP_POLL_TF" -var "dialin_targets_from_nautobot=$DIALIN_FROM_NAUTOBOT"
 fi
 
 # ---- 7-2. lab と Telegraf の中を確かめる ------------------------------------------------
@@ -796,6 +859,29 @@ if [ -n "$GRAPH_PID" ]; then
   # Web と同じ環境変数と依存で動かして Neptune に入れる。コマンドに記号を入れないよう、スクリプトもトポロジも base64 で渡す
   LAB_TOPOLOGY_B64=$("${PY[@]}" lab/lab_topology.py lab | base64 | tr -d '\n') || die "lab/lab_topology.py が lab の定義を読めなかった"
   run_on_instance "$INSTANCE_ID" "echo $(base64 < ops/seed_graph.py | tr -d '\n') | base64 -d | NAME_PREFIX=$PREFIX LAB_TOPOLOGY_B64=$LAB_TOPOLOGY_B64 /usr/bin/python3.13 -"
+fi
+
+# ---- 7-3c. Nautobot -----------------------------------------------------------------
+# stream（dialin の一覧の SSM パラメータとサービス）と graph（Neptune）の state を読むので、その 2 つの後。Neptune には 7-3b で lab の全層が入っていて、
+# Nautobot の Job は物理層だけを Nautobot に合わせる（最初は Nautobot も lab から入るので差分は無い）
+NAUTOBOT_WARN=""
+if [ -n "$NAUTOBOT" ]; then
+  log "7-3c. Nautobot（terraform/pipeline/nautobot。RDS の作成に 5〜10 分、初回の起動（DB の migrate）に 5〜10 分）"
+  # Django の SECRET_KEY・画面の管理者のパスワード・RDS のマスターユーザーのパスワードは SSM に乱数で作る（Terraform の state に載せない）
+  ensure_secret "/$PREFIX/nautobot/secret-key" password "Nautobot SECRET_KEY (created by ops/up.sh)"
+  ensure_secret "/$PREFIX/nautobot/admin-password" password "Nautobot admin password (created by ops/up.sh)"
+  ensure_secret "/$PREFIX/nautobot/db-password" password "Nautobot database password (created by ops/up.sh)"
+  tf_apply pipeline/nautobot -var "nautobot_image_tag=$NAUTOBOT_TAG" -var "redis_image_tag=$REDIS_TAG"
+  echo "Nautobot の Job の書き先: $(tf pipeline/nautobot output -json sync_targets)"
+  NB_CLUSTER=$(tf pipeline/nautobot output -raw cluster_name); NB_SERVICE=$(tf pipeline/nautobot output -raw service_name)
+  # services-stable は 1 回で最大 10 分。初回は migrate のあいだタスクが RUNNING にならない（worker が web の HEALTHY を待つ）ので 2 回まで待つ
+  if aws ecs wait services-stable --region "$REGION" --cluster "$NB_CLUSTER" --services "$NB_SERVICE" 2>/dev/null \
+    || aws ecs wait services-stable --region "$REGION" --cluster "$NB_CLUSTER" --services "$NB_SERVICE"; then
+    echo "Nautobot は動いている（ログ: aws logs tail --region $REGION $(tf pipeline/nautobot output -raw log_group_name) --follow。起動時の seed と同期は web/ のストリームの bootstrap の行）"
+  else
+    NAUTOBOT_WARN="Nautobot のサービスが 20 分たっても安定しない。$(tf pipeline/nautobot output -raw list_tasks_command) とロググループ $(tf pipeline/nautobot output -raw log_group_name) を見る（docs/troubleshooting.md）"
+    printf '\033[1;33m%s\033[0m\n' "$NAUTOBOT_WARN"
+  fi
 fi
 
 # ---- 7-4. analytics ------------------------------------------------------------------
@@ -888,8 +974,8 @@ if [ -z "$SKIP_ANALYTICS" ]; then
 fi
 
 # ---- 8-3. Web ---------------------------------------------------------------------
-if [ -z "$SKIP_STREAM" ] || [ -z "$SKIP_GRAPH" ]; then
-  log "8-3. Web を再起動する（起動時に SSM から Neptune のエンドポイントを読むため）"
+if [ -z "$SKIP_STREAM" ] || [ -z "$SKIP_GRAPH" ] || [ -n "$NAUTOBOT" ]; then
+  log "8-3. Web を再起動する（起動時に SSM から Neptune のエンドポイントと Nautobot の有無を読むため）"
   run_on_instance "$INSTANCE_ID" "systemctl restart $PREFIX-web.service; $WEB_ACTIVE"
   echo "Web が動いている"
 fi
@@ -948,7 +1034,13 @@ if [ -n "$SPLUNK_ON_ECS" ]; then
   tf pipeline/analytics output -raw splunk_port_forward_command; echo
   tf pipeline/analytics output -raw splunk_password_command; echo
 fi
+if [ -n "$NAUTOBOT" ]; then
+  echo "Nautobot（http://localhost:8081/ 。ユーザー admin）を開くポートフォワード（web の EC2 を踏み台にする）と admin のパスワード:"
+  tf pipeline/nautobot output -raw port_forward_command; echo
+  tf pipeline/nautobot output -raw password_command; echo
+fi
 if [ -n "$LAB_WARN" ]; then printf '\033[1;33m%s\033[0m\n' "$LAB_WARN"; fi
+if [ -n "$NAUTOBOT_WARN" ]; then printf '\033[1;33m%s\033[0m\n' "$NAUTOBOT_WARN"; fi
 printf '\033[1;33m%s\033[0m\n' "$COST_NOTE"
 if [ -n "$NO_PORTFORWARD" ]; then exit 0; fi
 log "10. ポートフォワーディング（http://localhost:$LOCAL_PORT/ 。Ctrl+C で閉じる）"
