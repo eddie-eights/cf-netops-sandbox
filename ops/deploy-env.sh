@@ -1,4 +1,4 @@
-# ops/up.sh と ops/down.sh と ops/lab-debug.sh が読み込む（単独では打たない）。deploy.env（ops/up.sh と ops/down.sh の設定）を読む関数を定義する。
+# ops/up.sh と ops/down.sh と ops/lab-debug.sh が読み込む（単独では打たない）。deploy.env（ops/up.sh と ops/down.sh の設定。ops/lab-debug.sh は OWNER と NETWORK_PERIMETER だけ使う）を読む関数を定義する。
 # 呼ぶ側で log / die を定義し、展開したフォルダの直下に cd してから load_deploy_env を呼ぶ。
 #
 # ファイルはシェルとして実行しない（source しない）。1 行に 1 つの「キー=値」だけを読む:
@@ -15,6 +15,7 @@
 # 読めるキー（意味は deploy.env.example）。OWNER だけ必須で、ほかは任意。これ以外のキーが書いてあれば止まる。
 # ADMIN_ARN・OPENSEARCH_CACERT_FILE・SPLUNK_SKIP_TLS_VERIFY は 2026-09-28 から使わない。前の deploy.env で止まらないよう読むだけ読み、ops/up.sh が注意を出す。
 # SPLUNK_HEC_URL も同日から使わない（書いてあれば ops/up.sh が止まる。黙って ECS の Splunk に替えないため）
+# LAB_DEBUG は 2026-10-04 から使わない（デバッグ用の EC2 は ops/lab-debug.sh だけで作る・消す）。読むだけ読み、ops/up.sh が注意を出す
 DEPLOY_ENV_KEYS="OWNER PIPELINE AGENT WORKFLOW CREATE_KB SKIP_LAB SKIP_STREAM SKIP_ANALYTICS SKIP_GRAPH SINK_S3 SINK_OPENSEARCH SINK_PROMETHEUS
 SINK_SPLUNK SPLUNK_HEC_URL SPLUNK_INDEX SPLUNK_SKIP_TLS_VERIFY GRAFANA LAB_DEBUG SYSLOG_STANDARD IMAGE_TAG ADMIN_ARN
 VPC_CIDR NETWORK_PERIMETER ENDPOINTS_MULTI_AZ OPENSEARCH_CACERT_FILE LOCAL_PORT NO_PORTFORWARD KEEP_ECR TF_VERBOSE AWS_PROFILE AWS_CA_BUNDLE"

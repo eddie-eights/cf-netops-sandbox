@@ -51,11 +51,9 @@
 #   GRAFANA=0               analytics に Grafana OSS（ECS。Prometheus と OpenSearch を見る。+$0.02/h）を作らない（既定 1。SINK_PROMETHEUS か SINK_OPENSEARCH があるときだけ作る）。
 #                           SINK_PROMETHEUS があればアラートルール（IF の ifOperStatus → link_down）も入り、SNS へ出す（grafana/provisioning/alerting）。
 #                           web の EC2 を踏み台にした SSM のポートフォワードで開く（コマンドは最後に出る）
-#   LAB_DEBUG=1             デバッグ用の EC2（lab + Telegraf を 1 台。出力は標準出力）を CloudFormation で作る（既定 0。+$0.09/h + ECR のエンドポイント）。
-#                           最後に ops/lab-debug.sh up を呼ぶ。PIPELINE とは独立（MSK / ECS を作らずに機器と Telegraf の設定を確かめる）
 #   SYSLOG_STANDARD         stream の Telegraf が受ける機器の syslog の形式。RFC3164（既定。本番の Cisco IOS の BSD 形式）か RFC5424。
 #                           lab の SR Linux は RFC 5424 で送る（ops/lab-common.sh の LAB_SYSLOG_STANDARD）ので、lab のログの項目まで見るなら RFC5424。
-#                           デバッグ用の EC2 の Telegraf は lab 専用なので、この値によらず lab/lab.sh の LOG_STANDARD（RFC5424）
+#                           デバッグ用の EC2（ops/lab-debug.sh。up.sh とは別に作る）の Telegraf はこの値を使わず、lab/lab.sh の LOG_STANDARD（RFC5424）
 #   SKIP_GRAPH=1            PIPELINE=1 で graph（Neptune）を作らない。「トポロジ」は使えず、アラートが届いても status を書く先が無い
 #   IMAGE_TAG               エージェント（WORKFLOW=1 ではワーカーも）のイメージのタグ。既定 v1。ECR にそのタグが無いときだけ PC の docker buildx でビルドして push する（タグは上書きできない）
 #   VPC_CIDR                terraform/base/core の vpc_cidr（社内と重なるとき）
@@ -65,7 +63,7 @@
 #   NO_PORTFORWARD=1        ポートフォワーディングを開かずに終わる
 #   TF_VERBOSE=1            terraform の出力を全部画面に出す（既定は進みと結果だけ。全文は ops/logs/tf-<ルート>-apply.log）
 #   AWS_PROFILE / AWS_CA_BUNDLE  AWS CLI と terraform がそのまま読む
-# AGENT / PIPELINE / WORKFLOW / CREATE_KB / SKIP_* / SINK_* / GRAFANA / LAB_DEBUG / NO_PORTFORWARD / NETWORK_PERIMETER / ENDPOINTS_MULTI_AZ は 1 / 0 のほか true / false、yes / no でも書ける（ops/down.sh の KEEP_ECR は 1 か 0 だけ）。
+# AGENT / PIPELINE / WORKFLOW / CREATE_KB / SKIP_* / SINK_* / GRAFANA / NO_PORTFORWARD / NETWORK_PERIMETER / ENDPOINTS_MULTI_AZ は 1 / 0 のほか true / false、yes / no でも書ける（ops/down.sh の KEEP_ECR は 1 か 0 だけ）。
 #
 # 利用者への権限は人に渡す作業なので入れていない（docs/deploy.md の「利用者に画面を渡す」）。
 set -euo pipefail
@@ -240,7 +238,7 @@ if [ -n "$SINK_SPLUNK" ]; then SINKS="$SINKS${SINKS:+,}splunk"; fi
 SPLUNK_ON_ECS="$SINK_SPLUNK"
 [ -n "$SINKS" ] || die "SINK_S3 / SINK_OPENSEARCH / SINK_PROMETHEUS / SINK_SPLUNK が全部 0。Spark のジョブは格納先が 1 つ以上要る。analytics ごと要らないなら SKIP_ANALYTICS=1。まだ何も作っていない"
 SINKS_TF="\"$(printf '%s' "$SINKS" | sed 's/,/","/g')\""
-flag_value SKIP_LAB; flag_value SKIP_STREAM; flag_value SKIP_ANALYTICS; flag_value SKIP_GRAPH; flag_value NO_PORTFORWARD; flag_value LAB_DEBUG
+flag_value SKIP_LAB; flag_value SKIP_STREAM; flag_value SKIP_ANALYTICS; flag_value SKIP_GRAPH; flag_value NO_PORTFORWARD
 # stream の Telegraf の syslog の形式。既定は本番の Cisco に合わせた RFC3164（stream の変数の既定と同じ）
 SYSLOG_STANDARD="${SYSLOG_STANDARD:-RFC3164}"
 case "$SYSLOG_STANDARD" in RFC3164 | RFC5424) ;; *) die "SYSLOG_STANDARD は RFC3164 か RFC5424（大文字）: $SYSLOG_STANDARD。まだ何も作っていない" ;; esac
@@ -299,9 +297,9 @@ command -v terraform >/dev/null || die "terraform が無い（docs/setup.md「Te
 if command -v python3 >/dev/null; then PY=(python3)
 elif command -v uv >/dev/null; then PY=(uv run --python 3.13 python)
 else die "python3 も uv も無い（docs/setup.md「Terraform を打つ PC 側」）"; fi
-if [ -z "$SKIP_LAB" ] || [ -z "$SKIP_ANALYTICS" ] || [ -n "$LAB_DEBUG" ]; then command -v curl >/dev/null || die "curl が無い（lab の containerlab の rpm と analytics の jar を取るのに使う。sudo apt install curl）"; fi
+if [ -z "$SKIP_LAB" ] || [ -z "$SKIP_ANALYTICS" ]; then command -v curl >/dev/null || die "curl が無い（lab の containerlab の rpm と analytics の jar を取るのに使う。sudo apt install curl）"; fi
 # docker はイメージ（agent / lab の 2 つ / telegraf / grafana / splunk / worker / temporal）を ECR に置くときだけ要る。土台だけなら要らない
-NEED_DOCKER="$AGENT$WORKFLOW$GRAFANA$SPLUNK_ON_ECS$LAB_DEBUG"; if [ -z "$SKIP_LAB" ] || [ -z "$SKIP_STREAM" ]; then NEED_DOCKER=1; fi
+NEED_DOCKER="$AGENT$WORKFLOW$GRAFANA$SPLUNK_ON_ECS"; if [ -z "$SKIP_LAB" ] || [ -z "$SKIP_STREAM" ]; then NEED_DOCKER=1; fi
 if [ -n "$NEED_DOCKER" ]; then
   command -v docker >/dev/null || die "docker が無い（イメージのビルドに使う。docs/setup.md「Terraform を打つ PC 側」）"
   docker buildx version >/dev/null 2>&1 || die "docker buildx が無い（Ubuntu の docker.io には入っていない。docs/setup.md「Terraform を打つ PC 側」）"
@@ -324,6 +322,8 @@ esac
 for k in ADMIN_ARN OPENSEARCH_CACERT_FILE SPLUNK_SKIP_TLS_VERIFY; do
   if [ -n "${!k:-}" ]; then echo "注意: $k は 2026-09-28 から使わない（deploy.env から消してよい）"; fi
 done
+# デバッグ用の EC2 は 2026-10-04 から ops/up.sh / ops/down.sh で作らない（ops/lab-debug.sh up / down だけで扱う CloudFormation のスタック）
+case "${LAB_DEBUG:-}" in ''|0|false|no) ;; *) echo "注意: LAB_DEBUG は使わない。デバッグ用の EC2 は ops/lab-debug.sh up / down で作る・消す（deploy.env から消してよい）" ;; esac
 tf_use_cli_credentials
 ROOTS="base/ecr base/core"
 if [ -n "$AGENT" ]; then ROOTS="$ROOTS agent"; fi
@@ -366,7 +366,6 @@ if [ -n "$AGENT" ] && [ -n "$CREATE_KB" ]; then add_endpoints bedrock-agent-runt
 if [ -z "$SKIP_ANALYTICS" ] && [ -n "$SINK_PROMETHEUS" ]; then add_endpoints aps-workspaces; fi   # remote write とツールと Grafana の query
 if [ -n "$GRAFANA$SPLUNK_ON_ECS" ]; then add_endpoints ecr.api ecr.dkr; fi   # analytics の ECS（Grafana / Splunk）のイメージ。secrets は ssm
 if [ -n "$GRAFANA_ALERTS$SPLUNK_ON_ECS" ]; then add_endpoints sns; fi   # Grafana / Splunk のタスクがアラートを SNS のトピックへ publish する
-if [ -n "${LAB_DEBUG:-}" ]; then add_endpoints ecr.api ecr.dkr; fi   # デバッグ用の EC2（ops/lab-debug.sh。CloudFormation）は lab と Telegraf のイメージを ECR から引く
 endpoint_count() { set -- $ENDPOINTS; echo $#; }
 if [ -n "$ENDPOINTS_MULTI_AZ" ]; then ENDPOINT_AZS=2; else ENDPOINT_AZS=1; fi
 echo "インターフェース型エンドポイント（$(endpoint_count) 本 × ${ENDPOINT_AZS} AZ）: $ENDPOINTS"
@@ -394,7 +393,6 @@ COST_CENTS=2
 COST_CENTS=$((COST_CENTS + ($(endpoint_count) * 14 * ENDPOINT_AZS + 5) / 10))
 if [ -n "$AGENT" ] && [ -n "$CREATE_KB" ]; then COST_CENTS=$((COST_CENTS + 33)); fi
 if [ -z "$SKIP_LAB" ]; then COST_CENTS=$((COST_CENTS + 9)); fi
-if [ -n "$LAB_DEBUG" ]; then COST_CENTS=$((COST_CENTS + 9)); fi   # デバッグ用の EC2（lab と同じ t4g.xlarge）
 if [ -z "$SKIP_GRAPH" ]; then COST_CENTS=$((COST_CENTS + 14)); fi
 if [ -z "$SKIP_STREAM" ]; then
   # MSK は kafka.m5.large × 2 で 0.542（Kafka 4 は t3.small を受け付けない。2026-09-18）
@@ -535,17 +533,6 @@ for pair in 'agent aws_bedrockagent_knowledge_base\.' 'pipeline/analytics aws_pr
     case "$pair" in agent*) add_endpoints bedrock-agent-runtime ;; *prometheus*) add_endpoints aps-workspaces ;; *) add_endpoints ecr.api ecr.dkr sns ;; esac
   fi
 done
-# デバッグ用の EC2（CloudFormation のスタック。ops/lab-debug.sh）が残っていれば、そのイメージの分を残す
-# 読めない（認証切れなど）ときは止まる（無いと扱うと、残っている EC2 のエンドポイントを外してしまう）
-if [ -z "$LAB_DEBUG" ]; then
-  LAB_DEBUG_STACK=$(cfn_stack_status "$PREFIX-lab-debug") || die "デバッグ用の EC2 のスタック（$PREFIX-lab-debug）の有無が読めない（上の出力）。まだ土台は変えていない"
-else
-  LAB_DEBUG_STACK=""
-fi
-if [ -n "$LAB_DEBUG_STACK" ]; then
-  add_endpoints ecr.api ecr.dkr
-  echo "デバッグ用の EC2（$PREFIX-lab-debug）が残っているので、ECR のエンドポイントを残す"
-fi
 MAIN_VARS+=(-var "interface_endpoints=[\"$(printf '%s' "$ENDPOINTS" | sed 's/ /","/g')\"]")
 MAIN_VARS+=(-var "network_perimeter=$([ -n "$NETWORK_PERIMETER" ] && echo true || echo false)")
 MAIN_VARS+=(-var "endpoints_multi_az=$([ -n "$ENDPOINTS_MULTI_AZ" ] && echo true || echo false)")
@@ -870,13 +857,6 @@ if [ -n "$WORKFLOW" ]; then
   echo "Web が動いている"
 fi
 
-# ---- 8-7. デバッグ用の EC2（LAB_DEBUG）-----------------------------------------------------
-# terraform ではなく CloudFormation（cloudformation/lab-debug.yaml）。作るのも消すのも 1 コマンドにするため、中身は ops/lab-debug.sh
-if [ -n "$LAB_DEBUG" ]; then
-  log "8-7. デバッグ用の EC2（ops/lab-debug.sh up。CloudFormation のスタック $PREFIX-lab-debug）"
-  ops/lab-debug.sh up || LAB_WARN="${LAB_WARN:+$LAB_WARN / }デバッグ用の EC2 を作れなかった（上の出力。ops/lab-debug.sh up で打ち直す）"
-fi
-
 # ---- 9. Runtime のロググループ -------------------------------------------------------
 # AgentCore が最初の呼び出しで作るもので、Terraform の管理外。保持期間とタグだけ付け、ops/down.sh が消す
 if [ -n "$AGENT" ]; then
@@ -910,10 +890,6 @@ if [ -n "$SPLUNK_ON_ECS" ]; then
   echo "Splunk（http://localhost:8000/ 。ユーザー admin）を開くポートフォワード（web の EC2 を踏み台にする）と admin のパスワード:"
   tf pipeline/analytics output -raw splunk_port_forward_command; echo
   tf pipeline/analytics output -raw splunk_password_command; echo
-fi
-if [ -n "$LAB_DEBUG" ]; then
-  echo "デバッグ用の EC2 に入るコマンド（中で sudo lab telegraf logs -f）:"
-  ops/lab-debug.sh status 2>/dev/null | tail -n 1 || true
 fi
 if [ -n "$LAB_WARN" ]; then printf '\033[1;33m%s\033[0m\n' "$LAB_WARN"; fi
 printf '\033[1;33m%s\033[0m\n' "$COST_NOTE"

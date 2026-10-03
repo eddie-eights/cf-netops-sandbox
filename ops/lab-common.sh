@@ -1,5 +1,5 @@
 # lab の材料（イメージの版・containerlab の rpm・S3 に置く lab/）。ops/up.sh（terraform/pipeline/lab と stream の Telegraf）と
-# ops/lab-debug.sh（cloudformation/lab-debug.yaml のデバッグ用の EC2）が source する。版と作り方をここ 1 か所にして、2 つの EC2 がずれないようにする。
+# ops/lab-debug.sh（cloudformation/lab-debug.yaml のデバッグ用の EC2。up.sh とは別のスタックで、バケットと ECR もスタックが持つ）が source する。版と作り方をここ 1 か所にして、2 つの EC2 がずれないようにする。
 # 呼ぶ側が REGION と PY（python の起動の配列）を先に決めておく。
 #
 # SRLINUX_TAG / MULTITOOL_TAG / CONTAINERLAB_VERSION は terraform/pipeline/lab の変数の既定値（*_image_tag / containerlab_version）と
@@ -17,7 +17,7 @@ MULTITOOL_UPSTREAM=ghcr.io/srl-labs/network-multitool
 LAB_SYSLOG_STANDARD=RFC5424
 
 cfn_stack_status() {  # cfn_stack_status <スタック名>  状態を出す。無ければ空。読めない（認証切れ・スロットリングなど）なら理由を stderr に出して 1
-  # 「無い」と「読めない」を分ける（読めないのを無いと扱うと、down がスタックを残したまま土台を消しに行き、up が ECR のエンドポイントを外す）
+  # 「無い」と「読めない」を分ける（読めないのを無いと扱うと、ops/lab-debug.sh down が消さずに終わり、up が器を作り直そうとする）
   local out
   if out=$(aws cloudformation describe-stacks --region "$REGION" --stack-name "$1" --query 'Stacks[0].StackStatus' --output text 2>&1); then
     printf '%s\n' "$out"

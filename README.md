@@ -33,12 +33,13 @@ flowchart LR
 | `AGENT=1`（既定） | チャット（Runtime + ガードレール）。`CREATE_KB=1` で手順書の検索も | 約 $0.07/h（エンドポイント 5 本。ほかは質問ごとのモデル料金だけ。KB は +$0.37/h） |
 | `PIPELINE=1` | lab → Telegraf（ECS）→ MSK → Spark → S3 Tables / OpenSearch / Prometheus（`SINK_SPLUNK=1` で Splunk にも）、Grafana（`GRAFANA=1`。既定）と Splunk のアラート → SNS、Neptune のトポロジ（アラートで status が変わる） | 約 $1.40/h（ECS の Splunk は +$0.12/h） |
 | `WORKFLOW=1` | アラート（SNS → SQS）で Temporal を起こし、調査 → 承認 → 修復。AGENT と PIPELINE と、アラートの送り手（Grafana か Splunk）が要る | 約 $0.08/h |
-| `LAB_DEBUG=1` | デバッグ用の EC2（lab + Telegraf を 1 台。Telegraf の出力は標準出力）。MSK / ECS を作らずに機器と Telegraf の設定を確かめる。CloudFormation（`ops/lab-debug.sh`） | 約 $0.12/h（ECR のエンドポイント 2 本を含む） |
 
 インターフェース型エンドポイントは 1 本 $0.014/h（1 AZ。`ENDPOINTS_MULTI_AZ=1` で 2 AZ にすると倍）で、作る機能が呼ぶ API の分だけ `ops/up.sh` が選ぶ（上の金額に入れてある。同じサービスは機能をまたいで 1 本）。
 OpenSearch Serverless のコレクション（KB と logs）も公開せず、VPC エンドポイント 1 本（$0.03/h。両方作っても 1 本）からだけ届く。
 
-全部で約 $1.60/h（KB・Splunk・`LAB_DEBUG` を除く）。**1 か月置くと約 $1,170（約 18 万円）になるので、使い終わったら当日中に消す。**
+全部で約 $1.60/h（KB・Splunk を除く）。**1 か月置くと約 $1,170（約 18 万円）になるので、使い終わったら当日中に消す。**
+
+デバッグ用の EC2（lab + Telegraf を 1 台。Telegraf の出力は標準出力。MSK / ECS を作らずに機器と Telegraf の設定を確かめる）は `deploy.env` の機能ではなく、`ops/lab-debug.sh up` / `down` だけで作る・消す CloudFormation のスタック。自分の VPC・エンドポイント 4 本・バケット・ECR を持ち、`ops/up.sh` / `ops/down.sh` とは別（`ops/down.sh` では消えない）。待機は約 $0.15/h（[pipeline.md](docs/pipeline.md)）。
 
 ## 手順
 
@@ -83,7 +84,6 @@ ops/down.sh
 | `SKIP_LAB` / `SKIP_STREAM` / `SKIP_ANALYTICS` / `SKIP_GRAPH` | PIPELINE の一部を外す |
 | `IMAGE_TAG` | `agent/` や `workflow/` を変えたら `v2` などに上げる |
 | `SYSLOG_STANDARD` | stream の Telegraf が受ける syslog の形式。既定 `RFC3164`（本番の Cisco IOS）。lab の SR Linux のログまで見るなら `RFC5424` |
-| `LAB_DEBUG` | `1` でデバッグ用の EC2（lab と Telegraf を 1 台。`ops/lab-debug.sh up\|sync\|status\|down`） |
 | `KEEP_ECR` | `1` で `ops/down.sh` が ECR を残す |
 
 ほかのキーと、`ops/up.sh` / `ops/down.sh` が何をするかは [deploy.md](docs/deploy.md)。その回だけ変えるなら `PIPELINE=1 ops/up.sh` のように環境変数で渡す。
@@ -93,6 +93,7 @@ ops/down.sh
 - `terraform/<ルート>/terraform.tfstate` を消さない。消すと `ops/down.sh` が消せず、課金が残る。
 - up と down は同じ PC で打つ。
 - 機能を `0` に戻して打っても、前に作ったものは消えない。消すのは `ops/down.sh` だけ。
+- デバッグ用の EC2 を作ったなら `ops/lab-debug.sh down` も打つ（`ops/down.sh` は消さない）。
 
 ## ドキュメント
 
@@ -101,7 +102,7 @@ ops/down.sh
 | [architecture.md](docs/architecture.md) | 構成図（スライドは [architecture.pptx](docs/architecture.pptx)）、どのファイルがどこで動くか、名前とタグ、ログ |
 | [setup.md](docs/setup.md) | 前提（AWS の権限、ネットワーク、Mac / WSL2、社内 PC の CA） |
 | [deploy.md](docs/deploy.md) | `deploy.env` の全キー、`ops/up.sh` / `ops/down.sh` の中身、利用者に渡す権限、試す質問 |
-| [pipeline.md](docs/pipeline.md) | lab、Telegraf、デバッグ用の EC2（`LAB_DEBUG`）、Spark、Grafana と Splunk のアラート、Neptune のトポロジの使い方 |
+| [pipeline.md](docs/pipeline.md) | lab、Telegraf、デバッグ用の EC2（`ops/lab-debug.sh`）、Spark、Grafana と Splunk のアラート、Neptune のトポロジの使い方 |
 | [workflow.md](docs/workflow.md) | 承認の流れと Temporal UI |
 | [troubleshooting.md](docs/troubleshooting.md) | うまくいかないとき |
 | [development.md](docs/development.md) | 手元のテスト、変更するときの決まり、Web を手元で動かす |

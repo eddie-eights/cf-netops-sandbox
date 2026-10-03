@@ -324,21 +324,20 @@ PRI = ファシリティの番号 × 8 + 重要度
 
 | コマンド | すること |
 |---|---|
-| `LAB_DEBUG=1 ops/up.sh` | 土台に ECR のエンドポイント（ecr.api / ecr.dkr）を足し、最後に `ops/lab-debug.sh up` を呼ぶ |
 | `ops/lab-debug.sh up` | イメージと `lab/` を置き、スタックを作る・変える |
 | `ops/lab-debug.sh sync` | `lab/` を置き直して EC2 を再起動する |
 | `ops/lab-debug.sh status` | スタックと EC2 の状態 |
-| `ops/lab-debug.sh down` | スタックを消す（ECR のエンドポイントは残る。外すのは `LAB_DEBUG` 無しの `ops/up.sh` か `ops/down.sh`。`ops/down.sh` も土台より先にこれを消す） |
+| `ops/lab-debug.sh down` | スタックを消す（`ops/down.sh` では消えない。次の Q） |
 
 - EC2 の中では次のコマンドが使える。
   - `sudo lab telegraf logs -f`: Telegraf の出力（MSK に載るのと同じ JSON）
   - `sudo lab telegraf test` / `sudo lab telegraf gnmi`
-- 待機の費用は約 $0.12/h（EC2 $0.09/h と ECR のエンドポイント 2 本。エンドポイントは 1 AZ のとき。lab や stream がすでにあれば共用なので、増えるのは EC2 の分だけ）。
+- 待機の費用は約 $0.15/h（EC2 $0.09/h とエンドポイント 4 本。次の Q で自分の VPC を持つ形にしてから）。
 
 **共通化したところ**
 
 - 版とイメージの作り方は `ops/lab-common.sh` 1 か所にした。`up.sh` と `lab-debug.sh` の両方が読む。
-- EC2 の中の支度は `lab/setup.sh` 1 つ。terraform の user_data も CloudFormation の UserData も、env を書いてこれを呼ぶだけ。違うのは `TELEGRAF_IMAGE` が空か値があるかだけ。
+- EC2 の中の支度は `lab/setup.sh` 1 つ。terraform の user_data も CloudFormation の UserData も、env を書いてこれを呼ぶだけ。違うのは `TELEGRAF_IMAGE` が空か値があるか（と、次の Q からはイメージのリポジトリの名前）だけ。
 - Telegraf は stream の ECS と同じイメージと同じ `telegraf.conf.in` を使い、出力だけ `SINK=stdout` にする。
 - 機器は trap を 162 に送る。デバッグ用の EC2 では iptables の REDIRECT で Telegraf の 1162 へ回す。
 - `tests/test_lab_debug.py` が次の一致を確かめる。
@@ -359,6 +358,32 @@ PRI = ファシリティの番号 × 8 + 重要度
   - `SINK=stdout` では `KAFKA_BROKERS` も MSK の IAM 用の `aws_config` も要らない。
   - `tg render`（設定を作るだけ）を足した。
 - 影響: `telegraf/` の中身が変わったのでイメージのタグ（ディレクトリのハッシュ）が変わる。次の `ops/up.sh` でビルドし直し、ECS のタスクが入れ替わる。
+
+### Q. デバッグ用の EC2 は ops/up.sh や ops/down.sh とは別にして。CloudFormation だけで運用したい
+
+**A. スタックだけで閉じる形にした（2026-10-04）。** `ops/up.sh` / `ops/down.sh` はもうデバッグ用の EC2 を作らない・消さない・見ない。扱うのは `ops/lab-debug.sh` だけ。
+
+**前の形で困ること**
+
+- 土台（`terraform/base/core`）の VPC・サブネット・バケットと、`ops/up.sh` が足す ECR のエンドポイントを借りていた。
+- なので先に `ops/up.sh` が要り、`ops/down.sh` で土台を消すときはスタックを先に消す必要があった。
+
+**今の形**
+
+| スタックが持つもの | 中身 |
+|---|---|
+| VPC | 既定 `10.20.0.0/24`、1 AZ・1 サブネット。IGW も NAT も無い閉域。どこともつながないので土台と CIDR が重なってよい |
+| エンドポイント | ssm / ssmmessages（SSM で入る）、ecr.api / ecr.dkr（イメージを引く）の 4 本と、S3 の gateway（無料） |
+| バケット | `<接頭辞>-lab-debug-<アカウント>`。`lab/` だけを置く |
+| ECR | `<接頭辞>-debug-lab-srlinux` / `-debug-lab-multitool` / `-debug-telegraf`。スタックを消すとイメージごと消える |
+| ロール | 前と同じ権限。`NETWORK_PERIMETER` のときは VPC の外からの呼び出しを拒む Deny を、この VPC に向けて持つ |
+
+- `ops/lab-debug.sh up` の初回は、EC2 の無い器を先に作り、イメージと `lab/` を置いてから EC2 を作る（置く前に EC2 を起こしても引けないため）。
+- `ops/lab-debug.sh down` はバケットを空にしてからスタックを消す。
+- `deploy.env` の `LAB_DEBUG` は使わない。残っていれば `ops/up.sh` が注意を出すだけ。
+- 代わりに増えたもの:
+  - 待機の費用: 約 $0.12/h → 約 $0.15/h（エンドポイントを土台と共用しなくなった）
+  - 初回の push: SR Linux（約 1 GB）を別のリポジトリにもう一度置く
 
 ---
 

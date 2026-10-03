@@ -15,7 +15,7 @@
   - IAM ロールの作成と `iam:CreateServiceLinkedRole`
   - `aoss:*`
   - ガードレールの作成。`guardrail-profile/apac.guardrail.v1:0` への `bedrock:CreateGuardrail` も要る
-  - `LAB_DEBUG=1` のときは CloudFormation のスタック（`<prefix>-lab-debug`）の作成と、名前付きの IAM ロール・インスタンスプロファイル（`CAPABILITY_NAMED_IAM`。`iam:CreateRole` / `iam:CreateInstanceProfile` / `iam:PassRole`）
+  - デバッグ用の EC2（`ops/lab-debug.sh`）を作るなら CloudFormation のスタック（`<prefix>-lab-debug`）の作成と、その中の VPC・エンドポイント・S3・ECR、名前付きの IAM ロール・インスタンスプロファイル（`CAPABILITY_NAMED_IAM`。`iam:CreateRole` / `iam:CreateInstanceProfile` / `iam:PassRole`）
 - **OpenSearch Serverless のコレクション（KB と logs）は公開しない。**ネットワークポリシーは `terraform/base/core` の VPC エンドポイント 1 本（2 つのコレクションで共用）だけを通し、KB はそれに加えて Bedrock のサービス（`bedrock.amazonaws.com`）を通す。エンドポイントを通らない接続は公開側からの扱いになるので、VPC の中からでもエンドポイントが無ければ届かない。KB のベクトルインデックスは VPC の中の Lambda が作り、apply する人の PC は OpenSearch につながない（データアクセスポリシーにも人は入らない。apply と destroy を別の人が打ってもよい）。
 - ガードレールの判定は、東京以外の APAC のリージョン（大阪、ソウル、ムンバイ、シンガポール、シドニー）で行われることがある。データを国内に留める決まりがあるなら使えない。
 - Session Manager の設定で KMS の暗号化を必須にしているなら、インスタンスロールへの `kms:Decrypt` が別に要る（この Terraform には入れていない。`kms` のエンドポイントも NAT Gateway も無いので、`kms` の API へは届かない。そのときは `kms` のエンドポイントを足す）。
@@ -28,7 +28,7 @@ AWS CLI v2 と Session Manager plugin を入れる。PC から `ssm.ap-northeast
 
 ## Terraform を打つ PC 側
 
-- AWS CLI v2、Terraform 1.11 以上、Docker buildx（arm64）、Session Manager plugin、uv、curl（lab・analytics・`LAB_DEBUG` のときに containerlab の rpm と jar を取る）。
+- AWS CLI v2、Terraform 1.11 以上、Docker buildx（arm64）、Session Manager plugin、uv、curl（lab・analytics・デバッグ用の EC2 のときに containerlab の rpm と jar を取る）。
 - `registry.terraform.io` に 443 で届くこと（OpenSearch Serverless には PC からつながない）。
 - イメージをビルドするので、インターネットに出られること。`SINK_SPLUNK=1`（ECS に立てる既定の形）では Docker Hub から `splunk/splunk` の amd64 のイメージ（約 2〜3 GB）を引き、検知のアプリを足して ECR に push する。
 - x86_64 の PC では、agent / worker / Grafana のビルドに QEMU（binfmt）が要る（下の WSL2 の `binfmt` の行。Telegraf と Splunk は COPY だけなので要らない）。

@@ -20,7 +20,9 @@
 | destroy が `provider["registry.terraform.io/opensearch-project/opensearch"]` で止まる | 2026-09-28 より前に作った agent の state（`opensearch_index.kb` 入り）。コミット f7b1688 の `terraform/agent` で destroy する |
 | 手順 0 の後に「2026-09-29 より前の SG（internal）が残っている」で止まる | SG をワークロードごとに分ける前の state。まだ何も作っていない。先に `ops/down.sh` を打つ（Runtime の ENI が残るあいだは VPC・サブネット・`internal` が残るので、時間をおいて打ち直す） |
 | `terraform apply` が「state に security_group_ids が無い」（Resource postcondition failed）で止まる | 土台（`terraform/base/core`）が SG をワークロードごとに分ける前の state。`ops/up.sh` を通さずにルートを直接 apply したときに出る。先に `ops/down.sh` を打ってから `ops/up.sh` |
-| `ops/lab-debug.sh` が「VPC に ecr.api / ecr.dkr のエンドポイントが無い」で止まる | `deploy.env` に `LAB_DEBUG=1` を書いて `ops/up.sh` を打つ（土台にエンドポイントを足してから最後に `lab-debug.sh up` を呼ぶ） |
+| `ops/lab-debug.sh up` が「前の形（土台の VPC を使う）のまま」で止まる | 2026-10-04 より前に作ったスタック。`ops/lab-debug.sh down` のあと `up`（今はスタックが自分の VPC を持つ） |
+| 2026-10-04 より前のデバッグ用の EC2 が残ったまま `ops/down.sh` で土台（base/core）が消えない（`DeleteConflict` / `DependencyViolation`） | 前の形のスタックは土台のサブネット・SG・境界ポリシーを使っていて、今の `ops/down.sh` はそれを消さない。`ops/lab-debug.sh down` のあと `ops/down.sh` を打ち直す（`ops/up.sh` もそのスタック向けの ECR のエンドポイントを外すので、先に消しておく） |
+| `ops/up.sh` が「注意: LAB_DEBUG は使わない」と出す | `deploy.env` から `LAB_DEBUG` の行を消す。デバッグ用の EC2 は `ops/lab-debug.sh up` / `down` |
 | `ops/lab-debug.sh` が「… が ROLLBACK_COMPLETE」（ROLLBACK_FAILED / DELETE_FAILED）で止まる | 原因は `aws cloudformation describe-stack-events --stack-name <prefix>-lab-debug`。`ops/lab-debug.sh down` のあと `up` |
 | ビルドの `pip install` が `CERTIFICATE_VERIFY_FAILED` | 社内 CA の差し替え。`ReadTimeoutError` は QEMU が遅いだけなので打ち直す |
 
@@ -89,5 +91,6 @@ Web のログは Web の EC2 で `sudo journalctl -u <prefix>-web -n 100`、起�
 | 症状 | 原因と直し方 |
 |---|---|
 | `DependencyViolation`（SG / サブネット） | Runtime の ENI が残っている（最大 8 時間）。時間をおいて `ops/down.sh` を打ち直す |
-| `ops/down.sh` が「NG: デバッグ用の EC2 のスタックが消えなかった」 | `ops/lab-debug.sh down` を打ち直す（残りの一覧には `cloudformation:<prefix>-lab-debug` と出る） |
+| `ops/down.sh` の最後の一覧に `<prefix>-lab-debug` の VPC やバケットが出る | デバッグ用の EC2 のスタック。`ops/down.sh` は消さないので `ops/lab-debug.sh down` |
+| `ops/lab-debug.sh down` が「… を空にできなかった」/「消えなかった」 | 打ち直す。原因は `aws cloudformation describe-stack-events --region ap-northeast-1 --stack-name <prefix>-lab-debug` |
 | `ops/down.sh` の最後に残りが出る | 上と同じなら待つ。それ以外は get-resources で `Project=<prefix>` を探して手で消す |

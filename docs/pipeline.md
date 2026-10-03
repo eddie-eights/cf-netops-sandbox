@@ -117,17 +117,16 @@ aws logs tail --region ap-northeast-1 "$(terraform -chdir=terraform/pipeline/str
 
 ## デバッグ用の EC2（lab + Telegraf を 1 台）
 
-MSK / ECS / NLB を作らずに、機器の設定（`lab/`）と Telegraf の設定（`telegraf/`）を確かめる EC2。terraform ではなく CloudFormation のスタック `<prefix>-lab-debug`（[cloudformation/lab-debug.yaml](../cloudformation/lab-debug.yaml)）で、作るのも消すのも [ops/lab-debug.sh](../ops/lab-debug.sh) の 1 コマンド。`PIPELINE` とは独立で、lab の EC2 と並べて立ててもよい（管理ネットワーク `203.0.113.0/24` は EC2 の中だけにある）。待機は約 $0.09/h（t4g.xlarge）と ECR のエンドポイント 2 本。
+MSK / ECS / NLB を作らずに、機器の設定（`lab/`）と Telegraf の設定（`telegraf/`）を確かめる EC2。terraform ではなく CloudFormation のスタック `<prefix>-lab-debug`（[cloudformation/lab-debug.yaml](../cloudformation/lab-debug.yaml)）で、作るのも消すのも [ops/lab-debug.sh](../ops/lab-debug.sh) の 1 コマンド。**`ops/up.sh` / `ops/down.sh` とは別**（2026-10-04 から）: スタックが自分の VPC（閉域。既定 `10.20.0.0/24`）、エンドポイント 4 本（ssm / ssmmessages / ecr.api / ecr.dkr）と S3 の gateway、バケット、ECR のリポジトリ 3 つを持つので、`ops/up.sh` で何も作っていなくても立ち、`ops/down.sh` では消えない。lab の EC2 と並べて立ててもよい（管理ネットワーク `203.0.113.0/24` は EC2 の中だけにある）。待機は約 $0.15/h（t4g.xlarge 約 $0.09/h とエンドポイント 4 本 $0.056/h）。要るのは AWS CLI・docker buildx・curl・python3 か uv と、`deploy.env` の `OWNER`（`NETWORK_PERIMETER` も見る）。
 
 ```bash
-LAB_DEBUG=1 ops/up.sh          # 土台に ecr.api / ecr.dkr のエンドポイントを足し、最後に ops/lab-debug.sh up を呼ぶ（deploy.env に LAB_DEBUG=1 でもよい）
-ops/lab-debug.sh up            # 土台ができていれば、これだけでもよい（イメージと lab/ を置き、スタックを作る・変える）
+ops/lab-debug.sh up            # 初回は器（VPC・エンドポイント・バケット・ECR）を作り、イメージと lab/ を置いてから EC2 を作る。2 回目からは変わったところだけ
 ops/lab-debug.sh status        # スタックと EC2 の状態。最後の行が SSM で入るコマンド
 ops/lab-debug.sh sync          # lab/ を置き直して EC2 を再起動する（lab/ を変えたとき）
-ops/lab-debug.sh down          # スタックを消す（ops/down.sh も土台より先にこれを呼ぶ）
+ops/lab-debug.sh down          # バケットを空にしてスタックを消す（ECR はイメージごと消える。ops/down.sh は呼ばない）
 ```
 
-- 中身は lab の EC2 と同じ: 版とイメージ（ECR のミラー）と S3 の `lab/` の置き方は `ops/lab-common.sh`、EC2 の中の支度は `lab/setup.sh`（起動のたびに S3 の `lab/` を置き直して流す）。UserData は terraform の user_data と同じ形で、違うのは `TELEGRAF_IMAGE` があることだけ。パラメータの既定値・ロールの権限・IMDS の設定が terraform/pipeline/lab とずれていないことは `tests/test_lab_debug.py` が見る。
+- 中身は lab の EC2 と同じ: 版とイメージ（ECR のミラー）と S3 の `lab/` の置き方は `ops/lab-common.sh`、EC2 の中の支度は `lab/setup.sh`（起動のたびに S3 の `lab/` を置き直して流す）。UserData は terraform の user_data と同じ形で、違うのはイメージのリポジトリの名前（`-debug-` が付く）と `TELEGRAF_IMAGE` があることだけ。パラメータの既定値・ロールの権限・IMDS の設定が terraform/pipeline/lab とずれていないことは `tests/test_lab_debug.py` が見る。
 - Telegraf は stream の ECS と同じイメージ（同じ `telegraf/telegraf.conf.in`）を docker の host ネットワークで動かし、出力だけを標準出力（`SINK=stdout`。MSK に載るのと同じ JSON）にする。ポーリング先と gNMI の相手は stream と同じく `lab/lab_topology.py` から作る。機器は trap を `162/udp` に送るので、`lab forward` が iptables の REDIRECT で Telegraf の `1162/udp` へ向ける（syslog は `5140/udp` でそのまま受ける）。
 - 入ったら `sudo lab status` / `sudo lab check` などは lab の EC2 と同じ。Telegraf は次のコマンド。
 
@@ -140,6 +139,8 @@ ops/lab-debug.sh down          # スタックを消す（ops/down.sh も土台�
 
 - `telegraf/` を変えたら `ops/lab-debug.sh up`（タグが変わるのでイメージを作り直し、スタックの UserData が変わって EC2 が止まって起きる）。`lab/` だけなら `ops/lab-debug.sh sync`。
 - スタックが `ROLLBACK_COMPLETE` などで止まったら `ops/lab-debug.sh down` してから `up`。原因は `aws cloudformation describe-stack-events --region ap-northeast-1 --stack-name <prefix>-lab-debug`。
+- イメージは土台の ECR（`<prefix>-lab-*` / `<prefix>-telegraf`）と別のリポジトリ（`<prefix>-debug-lab-srlinux` / `-debug-lab-multitool` / `-debug-telegraf`）に置く。SR Linux（約 1 GB）は `ops/up.sh` で置いてあっても、初回の `up` でもう一度 push する。
+- 境界の Deny（`NETWORK_PERIMETER`）は IAM 側だけ（ロールのインライン。terraform/base/core の `perimeter.tf` と同じ Action と条件をこの VPC に向ける）。バケット側は暗号化されていない経路を拒むだけ（中身は公開のソフトと lab の設定）。
 
 ## Grafana と Splunk を開く
 

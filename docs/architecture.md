@@ -58,9 +58,9 @@ AWS の API へは全部 VPC エンドポイントから行き、この VPC を�
 
 | 層 | 何をする | どこ |
 |---|---|---|
-| 経路 | インターフェース型エンドポイント（private DNS）。`ops/up.sh` が機能から選ぶ: 土台 ssm / ssmmessages、AGENT は bedrock-runtime / bedrock-agentcore / ecr.api / ecr.dkr / logs（KB で bedrock-agent-runtime）、lab は ecr、stream は ecr.api / ecr.dkr / logs（Telegraf の ECS）、LAB_DEBUG（デバッグ用の EC2）は ecr.api / ecr.dkr（スタックが残っていれば外さない）、analytics は s3tables / logs（Prometheus で aps-workspaces、Grafana か ECS の Splunk で ecr.api / ecr.dkr、Grafana のアラートか ECS の Splunk で sns）、WORKFLOW は sqs / s3tables / bedrock-agentcore(.gateway) など。S3 は gateway 型（無料）、OpenSearch Serverless は専用の 1 本 | `terraform/base/core/endpoints.tf` |
+| 経路 | インターフェース型エンドポイント（private DNS）。`ops/up.sh` が機能から選ぶ: 土台 ssm / ssmmessages、AGENT は bedrock-runtime / bedrock-agentcore / ecr.api / ecr.dkr / logs（KB で bedrock-agent-runtime）、lab は ecr、stream は ecr.api / ecr.dkr / logs（Telegraf の ECS）、analytics は s3tables / logs（Prometheus で aps-workspaces、Grafana か ECS の Splunk で ecr.api / ecr.dkr、Grafana のアラートか ECS の Splunk で sns）、WORKFLOW は sqs / s3tables / bedrock-agentcore(.gateway) など。S3 は gateway 型（無料）、OpenSearch Serverless は専用の 1 本 | `terraform/base/core/endpoints.tf` |
 | エンドポイントポリシー | このアカウントのプリンシパルだけ（盗んだ他のアカウントの鍵で VPC から持ち出す経路を塞ぐ）。S3 の gateway は付けない（dnf と ECR のレイヤーが止まる） | 同上 |
-| IAM の Deny | ワークロードのロール全部（Web、Runtime、lab、デバッグ用の EC2（CloudFormation の `<prefix>-lab-debug`）、EMR、ECS（Temporal / Telegraf / Grafana / Splunk）、tools Lambda）に `<prefix>-network-perimeter` を付ける。s3 / s3tables / sqs / sns / ssm / bedrock / aps / AgentCore の呼び出しで `aws:SourceVpc` がこの VPC でなければ拒む | `terraform/base/core/perimeter.tf`、各ルートの attachment、`cloudformation/lab-debug.yaml` |
+| IAM の Deny | ワークロードのロール全部（Web、Runtime、lab、EMR、ECS（Temporal / Telegraf / Grafana / Splunk）、tools Lambda）に `<prefix>-network-perimeter` を付ける。s3 / s3tables / sqs / sns / ssm / bedrock / aps / AgentCore の呼び出しで `aws:SourceVpc` がこの VPC でなければ拒む。デバッグ用の EC2（CloudFormation の `<prefix>-lab-debug`）のロールは同じ Action と条件の Deny を自分のスタックの VPC に向けてインラインで持つ | `terraform/base/core/perimeter.tf`、各ルートの attachment、`cloudformation/lab-debug.yaml` |
 | リソースポリシーの Deny | バケット、S3 Tables のテーブルバケット、SNS のトピック（`sns:Publish`）、SQS（本体と DLQ）、AgentCore の Runtime と Gateway。同じ条件で、どのプリンシパルからでも VPC の外なら拒む | `bucket.tf`、`alerts.tf`、`pipeline/analytics/tables.tf`、`workflow/events.tf`、`workflow/gateway.tf`、`agent/runtime.tf` |
 
 - **拒まないもの**: apply した人（`terraform` を打つ PC は VPC の外なので。PoC の割り切り）、AWS のサービス自身（`aws:PrincipalIsAWSService`）とサービスが代わりに呼ぶもの（`aws:ViaAWSService`。SNS → SQS / Lambda、Bedrock → S3 など）、KB のロール `<prefix>-kb`（取り込みは Bedrock のサービス側で動く）。
@@ -135,7 +135,7 @@ terraform/
 └── workflow/      WORKFLOW=1  Temporal on ECS / Gateway（MCP）/ SQS（SNS の購読）
 ```
 
-デバッグ用の EC2（`LAB_DEBUG=1`。lab + Telegraf を 1 台）だけは terraform ではなく CloudFormation の `cloudformation/lab-debug.yaml`（スタック `<prefix>-lab-debug`。`ops/lab-debug.sh` が作って消す）。土台（base/core）のサブネット・SG・バケットを使う。
+デバッグ用の EC2（lab + Telegraf を 1 台）だけは terraform ではなく CloudFormation の `cloudformation/lab-debug.yaml`（スタック `<prefix>-lab-debug`）。作るのも消すのも `ops/lab-debug.sh up` / `down` だけで、`ops/up.sh` / `ops/down.sh` は触らない（2026-10-04 から）。土台（base/core）は使わず、自分の VPC（既定 `10.20.0.0/24`。どこともつながないので base/core と重なってよい。IGW / NAT は無い）、インターフェース型エンドポイント 4 本（ssm / ssmmessages / ecr.api / ecr.dkr）と S3 の gateway、バケット `<prefix>-lab-debug-<アカウント>`、ECR のリポジトリ 3 つ（`<prefix>-debug-lab-srlinux` / `-lab-multitool` / `-telegraf`。スタックと一緒に消える）を持つ。
 
 1 ディレクトリ = 1 state。state は各ルートの `terraform.tfstate`（ローカル）。変数を変えたいときは `terraform.tfvars.example` を `terraform.tfvars` に写す。
 

@@ -1,4 +1,5 @@
 """デバッグ用の EC2（cloudformation/lab-debug.yaml。lab + Telegraf を 1 台）が terraform/pipeline/lab と stream の Telegraf からずれていないかを見る。
+- 独立: スタックが VPC・エンドポイント・バケット・ECR を持ち、ops/up.sh / ops/down.sh は触らない（2026-10-04 ユーザー決定。ops/lab-debug.sh だけで扱う）
 - 版: CloudFormation のパラメータの既定値 = terraform/pipeline/lab の変数の既定値 = ops/lab-common.sh（ops/up.sh と ops/lab-debug.sh が source する）
 - EC2 の中: どちらの user_data も env を書いて S3 の lab/ を置き直し、lab/setup.sh を exec するだけ（TELEGRAF_IMAGE の値だけが違う）
 - ロール: terraform/pipeline/lab/iam.tf と同じ Sid と Action（ECR は Telegraf のリポジトリも読む）
@@ -83,7 +84,7 @@ check("イメージの作り方（ミラー・Telegraf のビルド・lab/ の�
 _pass = re.findall(r'"(\w+)=\$', dbg.split("--parameter-overrides")[1].split("--tags")[0])
 check("lab-debug.sh は既定値の無いパラメータと版を全部渡す（版は lab-common.sh から）",
       {k for k, v in params.items() if "Default" not in v} <= set(_pass)
-      and {"ContainerlabVersion", "SrlinuxImageTag", "MultitoolImageTag", "TelegrafImageTag", "PerimeterPolicyArn"} <= set(_pass)
+      and {"ContainerlabVersion", "SrlinuxImageTag", "MultitoolImageTag", "TelegrafImageTag", "CreateInstance", "NetworkPerimeter"} <= set(_pass)
       and set(_pass) <= set(params))
 
 # ---- ロール（iam.tf と同じ Sid と Action）
@@ -98,14 +99,77 @@ def as_list(v):
 check("ロールの Sid は iam.tf と同じ（TelegrafAddress は stream の NLB を読む forward 用なので、デバッグ用の EC2 には要らない）",
       set(stmts) == set(tf_sids) - {"TelegrafAddress"} and "ssm:GetParameter" not in str(stmts))
 check("Sid ごとの Action は iam.tf と同じ", all(as_list(stmts[s]["Action"]) == tf_actions(s) for s in stmts))
-check("ECR は lab のリポジトリと stream の Telegraf のリポジトリだけを読む",
-      [r["Fn::Sub"].rsplit(":", 1)[1] for r in stmts["EcrPull"]["Resource"]] == ["repository/${NamePrefix}-lab-*", "repository/${NamePrefix}-telegraf"])
-check("S3 は lab/ だけ（GetObject と prefix 付きの ListBucket）",
-      stmts["S3Read"]["Resource"]["Fn::Sub"].endswith("${BucketName}/lab/*") and stmts["S3List"]["Condition"] == {"StringLike": {"s3:prefix": "lab/*"}})
-check("SSM のマネージドポリシーと、NETWORK_PERIMETER のときだけ境界の Deny を付ける（iam.tf と同じ）",
-      role["ManagedPolicyArns"][0]["Fn::Sub"].endswith("policy/AmazonSSMManagedInstanceCore")
-      and role["ManagedPolicyArns"][1] == {"Fn::If": ["HasPerimeter", {"Ref": "PerimeterPolicyArn"}, {"Ref": "AWS::NoValue"}]}
-      and "AmazonSSMManagedInstanceCore" in iam_tf and "count = local.perimeter_policy_arn != \"\" ? 1 : 0" in iam_tf)
+repos = {k: v["Properties"] for k, v in res.items() if v["Type"] == "AWS::ECR::Repository"}
+check("ECR はこのスタックのリポジトリ 3 つ（lab の 2 つと Telegraf）だけを読む",
+      stmts["EcrPull"]["Resource"] == [{"Fn::GetAtt": f"{k}.Arn"} for k in ("SrlinuxRepository", "MultitoolRepository", "TelegrafRepository")])
+check("S3 は このスタックのバケットの lab/ だけ（GetObject と prefix 付きの ListBucket）",
+      stmts["S3Read"]["Resource"] == {"Fn::Sub": "${Bucket.Arn}/lab/*"} and stmts["S3List"]["Resource"] == {"Fn::GetAtt": "Bucket.Arn"}
+      and stmts["S3List"]["Condition"] == {"StringLike": {"s3:prefix": "lab/*"}})
+_perim = role["Policies"][1]["Fn::If"]
+_deny = _perim[1]["PolicyDocument"]["Statement"][0]
+_tf_perim = read("terraform", "base", "core", "perimeter.tf")
+check("SSM のマネージドポリシーと、NetworkPerimeter のときだけ境界の Deny（perimeter.tf と同じ Action と条件。SourceVpc はこのスタックの VPC）",
+      role["ManagedPolicyArns"] == [{"Fn::Sub": "arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore"}]
+      and _perim[0] == "HasPerimeter" and _perim[2] == {"Ref": "AWS::NoValue"}
+      and _deny["Effect"] == "Deny" and _deny["Resource"] == "*"
+      and _deny["Action"] == re.findall(r'"([\w-]+:[\w*]+)"', _tf_perim.split("perimeter_denied_actions = [")[1].split("]")[0])
+      and _deny["Condition"] == {"StringNotEqualsIfExists": {"aws:SourceVpc": {"Ref": "Vpc"}, "aws:CalledViaLast": "s3tables.amazonaws.com"},
+                                 "BoolIfExists": {"aws:ViaAWSService": "false"}}
+      and '"aws:SourceVpc" = aws_vpc.this.id, "aws:CalledViaLast" = "s3tables.amazonaws.com"' in _tf_perim
+      and 'BoolIfExists            = { "aws:ViaAWSService" = "false" }' in _tf_perim
+      and "AmazonSSMManagedInstanceCore" in iam_tf)
+
+# ---- このスタックだけで閉じる（土台 terraform/base/core を使わない）
+check("パラメータに土台から受け取るもの（サブネット・SG・バケット・境界ポリシー）が無い",
+      not {"SubnetId", "SecurityGroupId", "BucketName", "PerimeterPolicyArn"} & set(params)
+      and not re.search(r"ImportValue|base/core の output", read("cloudformation", "lab-debug.yaml")))
+check("VPC はインターネットへの経路を持たない（IGW / NAT / 0.0.0.0/0 の経路が無く、サブネットはパブリック IP を付けない）",
+      not any(v["Type"] in ("AWS::EC2::InternetGateway", "AWS::EC2::NatGateway", "AWS::EC2::Route", "AWS::EC2::EgressOnlyInternetGateway") for v in res.values())
+      and res["Subnet"]["Properties"]["MapPublicIpOnLaunch"] is False
+      and res["Vpc"]["Properties"]["EnableDnsSupport"] is True and res["Vpc"]["Properties"]["EnableDnsHostnames"] is True)
+_eps = {v["Properties"]["ServiceName"]["Fn::Sub"].rsplit(".", 1)[-1] if not v["Properties"]["ServiceName"]["Fn::Sub"].endswith(("ecr.api", "ecr.dkr"))
+        else v["Properties"]["ServiceName"]["Fn::Sub"].split("${AWS::Region}.")[1]: v["Properties"]
+        for v in res.values() if v["Type"] == "AWS::EC2::VPCEndpoint"}
+check("エンドポイントは S3（gateway）と SSM で入る 2 本と ECR の 2 本だけ",
+      set(_eps) == {"s3", "ssm", "ssmmessages", "ecr.api", "ecr.dkr"} and _eps["s3"]["VpcEndpointType"] == "Gateway"
+      and "PolicyDocument" not in _eps["s3"])
+check("インターフェース型はどれも private DNS を有効にし、ポリシーは endpoints.tf と同じ「このアカウントのプリンシパルだけ」",
+      all(_eps[k]["VpcEndpointType"] == "Interface" and _eps[k]["PrivateDnsEnabled"] is True
+          and _eps[k]["SecurityGroupIds"] == [{"Ref": "EndpointSecurityGroup"}]
+          and _eps[k]["PolicyDocument"]["Statement"] == [{"Sid": "OwnAccountOnly", "Effect": "Allow", "Principal": "*", "Action": "*", "Resource": "*",
+                                                          "Condition": {"StringEquals": {"aws:PrincipalAccount": {"Ref": "AWS::AccountId"}}}}]
+          for k in ("ssm", "ssmmessages", "ecr.api", "ecr.dkr")))
+_isg, _esg = res["InstanceSecurityGroup"]["Properties"], res["EndpointSecurityGroup"]["Properties"]
+check("EC2 の SG は受信無し・送信 443 だけ。エンドポイントの SG は EC2 の SG からの 443 だけ受ける",
+      "SecurityGroupIngress" not in _isg and [(r["IpProtocol"], r["FromPort"], r["ToPort"]) for r in _isg["SecurityGroupEgress"]] == [("tcp", 443, 443)]
+      and [(r["FromPort"], r["SourceSecurityGroupId"]) for r in _esg["SecurityGroupIngress"]] == [(443, {"Ref": "InstanceSecurityGroup"})])
+check("ECR のリポジトリはタグを上書きできず、スタックを消すとイメージごと消える（base/ecr の <接頭辞>-lab-* と別の名前）",
+      {k: r["RepositoryName"]["Fn::Sub"] for k, r in repos.items()}
+      == {"SrlinuxRepository": "${NamePrefix}-debug-lab-srlinux", "MultitoolRepository": "${NamePrefix}-debug-lab-multitool",
+          "TelegrafRepository": "${NamePrefix}-debug-telegraf"}
+      and all(r["ImageTagMutability"] == "IMMUTABLE" and r["EmptyOnDelete"] is True and r["ImageScanningConfiguration"] == {"ScanOnPush": True}
+              for r in repos.values()))
+_bkt = res["Bucket"]["Properties"]
+check("バケットは <接頭辞>-lab-debug-<アカウント>で、公開を全部止めて暗号化し、暗号化されていない経路を拒む",
+      _bkt["BucketName"] == {"Fn::Sub": "${NamePrefix}-lab-debug-${AWS::AccountId}"}
+      and all(_bkt["PublicAccessBlockConfiguration"].values()) and len(_bkt["PublicAccessBlockConfiguration"]) == 4
+      and res["BucketPolicy"]["Properties"]["PolicyDocument"]["Statement"][0]["Sid"] == "DenyInsecureTransport")
+check("lab-debug.sh のバケットとリポジトリの名前はテンプレートと同じ作り方（down は Outputs を読まずに空にできる）",
+      'BUCKET="$PREFIX-lab-debug-$ACCOUNT_ID"' in dbg and 'REPO_PREFIX="$PREFIX-debug"' in dbg
+      and cfn["Outputs"]["RepositoryPrefix"]["Value"]["Fn::Sub"].endswith("/${NamePrefix}-debug")
+      and 'mirror_lab_images "$REG" "$REPO_PREFIX"' in dbg and 'build_telegraf "$REG/$REPO_PREFIX-telegraf:$TELEGRAF_TAG"' in dbg)
+check("EC2 は CreateInstance=true のときだけ作り、そのときは TelegrafImageTag が要る（Rules）。エンドポイントができてから起こす",
+      res["Instance"]["Condition"] == "HasInstance" and cfn["Conditions"]["HasInstance"] == {"Fn::Equals": [{"Ref": "CreateInstance"}, "true"]}
+      and cfn["Rules"]["TelegrafTagWithInstance"]["Assertions"][0]["Assert"] == {"Fn::Not": [{"Fn::Equals": [{"Ref": "TelegrafImageTag"}, ""]}]}
+      and {"SsmEndpoint", "SsmMessagesEndpoint", "EcrApiEndpoint", "EcrDkrEndpoint", "S3Endpoint", "SubnetRouteTable"} <= set(res["Instance"]["DependsOn"])
+      and all(cfn["Outputs"][k]["Condition"] == "HasInstance" for k in ("InstanceId", "StartSessionCommand")))
+_up_case = dbg.split("\n  up)\n")[1]
+check("lab-debug.sh up は初回に EC2 の無い器を作り、イメージと lab/ を置いてから EC2 を作る",
+      _up_case.index("deploy false") < _up_case.index("mirror_lab_images") < _up_case.index('upload_lab "$BUCKET"') < _up_case.index('deploy true "$TELEGRAF_TAG"'))
+_down_case = dbg.split("\n  down)\n")[1].split(";;")[0]
+check("lab-debug.sh down はバケットを空にしてからスタックを消し、消えるのを待つ",
+      _down_case.index('aws s3 rm --only-show-errors --recursive "s3://$BUCKET"') < _down_case.index("delete-stack")
+      < _down_case.index("wait stack-delete-complete"))
 
 # ---- EC2（instance.tf と同じ守り）
 inst = res["Instance"]["Properties"]
@@ -122,18 +186,19 @@ check("Project と owner のタグ（Terraform の default_tags と同じ）を 
 
 # ---- UserData（tftpl と同じ形）
 ud = inst["UserData"]["Fn::Base64"]["Fn::Sub"]
-TF2CFN = {"name_prefix": "NamePrefix", "region": "AWS::Region", "account_id": "AWS::AccountId", "bucket": "BucketName",
+TF2CFN = {"name_prefix": "NamePrefix", "region": "AWS::Region", "account_id": "AWS::AccountId", "bucket": "Bucket",
           "containerlab_version": "ContainerlabVersion", "srlinux_image_tag": "SrlinuxImageTag",
           "multitool_image_tag": "MultitoolImageTag", "auto_start_lab": "AutoStartLab"}
-def body(s):  # コメントと、2 つで違ってよい行（TELEGRAF_IMAGE と、案内のコマンド名）を外す
-    s = re.sub(r"\$\{(\w+)\}", lambda m: "${" + TF2CFN.get(m.group(1), m.group(1)) + "}", s)
+def body(s):  # コメントと、2 つで違ってよい行（TELEGRAF_IMAGE と、案内のコマンド名）を外し、リポジトリの名前（-debug- が付く）をそろえる
+    s = re.sub(r"\$\{(\w+)\}", lambda m: "${" + TF2CFN.get(m.group(1), m.group(1)) + "}", s).replace("${NamePrefix}-debug-lab-", "${NamePrefix}-lab-")
     return [l for l in s.strip().splitlines()
             if not (l.startswith("# ") or l.startswith("TELEGRAF_IMAGE=") or "is not in s3://" in l)]
-check("UserData は terraform の user_data（tftpl）と、変数の置き換えと TELEGRAF_IMAGE の行のほかは同じ", body(tftpl) == body(ud))
-check("UserData の ${…} はパラメータか疑似パラメータだけ（シェルの変数は $LAB と書く）",
-      all(v in params or v.startswith("AWS::") for v in re.findall(r"\$\{([\w:]+)\}", ud)))
-check("TELEGRAF_IMAGE は lab の EC2 では空、デバッグ用の EC2 では stream と同じリポジトリ（<接頭辞>-telegraf）",
-      "\nTELEGRAF_IMAGE=\n" in tftpl and "\nTELEGRAF_IMAGE=${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${NamePrefix}-telegraf:${TelegrafImageTag}\n" in ud)
+check("UserData は terraform の user_data（tftpl）と、変数の置き換えとリポジトリの名前と TELEGRAF_IMAGE の行のほかは同じ",
+      body(tftpl) == body(ud) and "/${NamePrefix}-debug-lab-srlinux:${SrlinuxImageTag}\n" in ud and "/${NamePrefix}-debug-lab-multitool:${MultitoolImageTag}\n" in ud)
+check("UserData の ${…} はパラメータか疑似パラメータかこのスタックのバケットだけ（シェルの変数は $LAB と書く）",
+      all(v in params or v.startswith("AWS::") or v == "Bucket" for v in re.findall(r"\$\{([\w:]+)\}", ud)))
+check("TELEGRAF_IMAGE は lab の EC2 では空、デバッグ用の EC2 ではこのスタックのリポジトリ（<接頭辞>-debug-telegraf。stream と同じ作り方のイメージ）",
+      "\nTELEGRAF_IMAGE=\n" in tftpl and "\nTELEGRAF_IMAGE=${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${NamePrefix}-debug-telegraf:${TelegrafImageTag}\n" in ud)
 env_keys = re.findall(r"^(\w+)=", tftpl.split("<<'__ENV__'")[1].split("__ENV__")[0], re.M)
 check("env のキーは 2 つの user_data と setup.sh の頭の一覧で同じ",
       env_keys == re.findall(r"^(\w+)=", ud.split("<<'__ENV__'")[1].split("__ENV__")[0], re.M)
@@ -141,7 +206,7 @@ check("env のキーは 2 つの user_data と setup.sh の頭の一覧で同じ
 check("どちらも起動のたびに流し（cloud-config の always）、lab/ を置き直して setup.sh を exec する",
       all("- [scripts-user, always]" in s and "exec bash $LAB/src/setup.sh" in s and "aws s3 sync --delete" in s for s in (tftpl, ud)))
 check("lab/ の置き場は upload_lab の宛先と同じ（s3://<バケット>/lab/）",
-      'aws s3 sync --only-show-errors lab/ "s3://$1/lab/"' in common and "s3://${bucket}/lab/ $LAB/src/" in tftpl and "s3://${BucketName}/lab/ $LAB/src/" in ud)
+      'aws s3 sync --only-show-errors lab/ "s3://$1/lab/"' in common and "s3://${bucket}/lab/ $LAB/src/" in tftpl and "s3://${Bucket}/lab/ $LAB/src/" in ud)
 check("setup.sh は TELEGRAF_IMAGE があるときだけ Telegraf のユニットを作り、無ければ消す（lab の EC2 には残さない）",
       re.search(r'if \[ -n "\$\{TELEGRAF_IMAGE:-\}" \]; then\n\s*cat > "\$TG_UNIT"[\s\S]*?ExecStart=\$SRC/lab\.sh telegraf run[\s\S]*?else\n\s*systemctl disable --now[\s\S]*?rm -f "\$TG_UNIT"', setup) is not None)
 check("setup.sh は lab のユニットを tftpl の前の版と同じ中身で作る（lab.sh up / down、20 分待つ）",
@@ -201,27 +266,21 @@ check("lab.sh の forward は TELEGRAF_IMAGE があれば SSM の NLB を見ず�
 check("lab.sh pull は TELEGRAF_IMAGE があるときだけ Telegraf も引く",
       'for i in "$SRLINUX_IMAGE" "$MULTITOOL_IMAGE" ${TELEGRAF_IMAGE:+"$TELEGRAF_IMAGE"}; do docker pull -q "$i"; done' in lab_sh)
 
-# ---- ops: LAB_DEBUG のつながり
-keys = read("ops", "deploy-env.sh").split('DEPLOY_ENV_KEYS="')[1].split('"')[0].split()
-check("deploy.env の LAB_DEBUG（deploy-env.sh のキーと deploy.env.example の行）", "LAB_DEBUG" in keys
-      and re.search(r"^#LAB_DEBUG=1$", read("deploy.env.example"), re.M) is not None and "flag_value LAB_DEBUG" in up)
+# ---- ops: up.sh / down.sh とは別（2026-10-04 ユーザー決定）
+def _code(src):  # コメント行と echo の案内を外した、実際に動く行
+    return "\n".join(l for l in src.splitlines() if not l.lstrip().startswith("#") and "echo " not in l)
+check("ops/up.sh / ops/down.sh はデバッグ用の EC2 を作らない・消さない・見ない",
+      not any(w in _code(src) for src in (up, down) for w in ("lab-debug.sh", "lab-debug\"", "cfn_stack_status", "cloudformation", "LAB_DEBUG_STACK", "flag_value LAB_DEBUG")))
+check("LAB_DEBUG は使わない。deploy.env に残っていれば up.sh が注意を出すだけ（deploy.env.example には無い）",
+      "LAB_DEBUG" not in read("deploy.env.example")
+      and re.search(r'case "\$\{LAB_DEBUG:-\}" in \'\'\|0\|false\|no\) ;; \*\) echo "注意: LAB_DEBUG は使わない。[^"]*ops/lab-debug\.sh up / down', up) is not None)
 _epblk = up[up.index('ENDPOINTS=""'):up.index('echo "インターフェース型エンドポイント')]
 def _endpoints(roots, **env):
     r = subprocess.run(["bash", "-c", f'ROOTS="{roots}"\n' + _epblk + 'echo "OUT: $ENDPOINTS"'],
                        capture_output=True, text=True, env={"PATH": os.environ["PATH"], **env})
     return r.stdout.strip().splitlines()[-1]
-check("LAB_DEBUG=1 は土台だけでも ECR のエンドポイント（ecr.api / ecr.dkr）を足す。lab-debug.sh は無ければ止まる",
-      _endpoints("base/ecr base/core", LAB_DEBUG="1") == "OUT: ssm ssmmessages ecr.api ecr.dkr"
-      and _endpoints("base/ecr base/core") == "OUT: ssm ssmmessages"
-      and "com.amazonaws.$REGION.ecr.api,com.amazonaws.$REGION.ecr.dkr" in dbg)
-check("LAB_DEBUG が無くてもスタックが残っていれば、ECR のエンドポイントを外さない",
-      re.search(r'LAB_DEBUG_STACK=\$\(cfn_stack_status "\$PREFIX-lab-debug"\) \|\| die [^\n]*\n(?:[^\n]*\n){3}if \[ -n "\$LAB_DEBUG_STACK" \]; then\n\s*add_endpoints ecr\.api ecr\.dkr', up) is not None
-      and up.index('cfn_stack_status "$PREFIX-lab-debug"') < up.index('MAIN_VARS+=(-var "interface_endpoints=[')
-      and 'case "$out" in *"does not exist"*) return 0 ;; esac' in common)
-check("up.sh は LAB_DEBUG のとき最後に ops/lab-debug.sh up を呼び、費用に 9 セント足す",
-      'ops/lab-debug.sh up ||' in up and 'if [ -n "$LAB_DEBUG" ]; then COST_CENTS=$((COST_CENTS + 9)); fi' in up)
-check("down.sh はスタックを土台（base/core）より先に消し、消えなければ覚えて先へ進む",
-      down.index("ops/lab-debug.sh down") < down.index('log "3-2. 土台') and 'FAILED_ROOTS="$FAILED_ROOTS cloudformation:$PREFIX-lab-debug"' in down)
+check("土台だけなら up.sh は ECR のエンドポイントを作らない（LAB_DEBUG=1 が残っていても。デバッグ用の EC2 は自分の VPC のを使う）",
+      _endpoints("base/ecr base/core", LAB_DEBUG="1") == "OUT: ssm ssmmessages" == _endpoints("base/ecr base/core"))
 def _stack_status(aws_out, aws_rc):
     """cfn_stack_status を、決まった出力と終了コードを返す偽の aws で打つ。(stdout, stderr, 終了コード)"""
     with tempfile.TemporaryDirectory() as d:
@@ -235,7 +294,7 @@ def _stack_status(aws_out, aws_rc):
 _ok, _gone, _err = (_stack_status("CREATE_COMPLETE", 0),
                     _stack_status("An error occurred (ValidationError) when calling the DescribeStacks operation: Stack with id x-lab-debug does not exist", 254),
                     _stack_status("An error occurred (ExpiredToken) when calling the DescribeStacks operation: token expired", 254))
-check("cfn_stack_status は「無い」（空・0）と「読めない」（認証切れなど。1）を分ける（読めないのを無いと扱うと down がスタックを残して土台を消しに行く）",
+check("cfn_stack_status は「無い」（空・0）と「読めない」（認証切れなど。1）を分ける（読めないのを無いと扱うと、lab-debug.sh down が消さずに終わり、up が器を作り直そうとする）",
       _ok == ("CREATE_COMPLETE", "", 0) and _gone == ("", "", 0) and _err[0] == "" and _err[2] == 1 and "ExpiredToken" in _err[1]
       and "s=$(stack_status)" in dbg and '"$(stack_status)"' not in dbg)
 check("スタック名は <接頭辞>-lab-debug で、ロールとインスタンスプロファイルは lab の EC2（<接頭辞>-lab）と別の名前",
