@@ -1,6 +1,6 @@
 # lab の SR Linux の収容回線数の代替（docs/collection.md の「収容回線数の代替」）を機器ごとに数える aggregators.starlark。
 # 入力は telegraf.conf.in の 2 つめの inputs.gnmi の lab_subif_type（/interface[name=*]/subinterface[index=*]/type）と
-# lab_if_oper（/interface[name=*]/oper-state）。どちらも 30 秒の sample で、IF やサブ IF ごとに別々の metric で届くので、
+# lab_if_oper（/interface[name=*]/oper-state）。どちらも 1 分の sample で、IF やサブ IF ごとに別々の metric で届くので、
 # 機器（source タグ）ごとに覚えて period ごとに 1 つ出す:
 #   circuits  tags source  fields active（type bridged のサブ IF を持つ IF の数）/ up（そのうち oper-state が up）/
 #                                 capacity（物理ポート ethernet-* の数。SR Linux は未使用のポートも状態に出す）/ used_pct（active / capacity）

@@ -11,7 +11,7 @@
 #       （+ SNMP_POLL=1 なら SNMP を 10 秒ごとにポーリング。ifTable）→ MSK（IAM 認証、TLS）
 #   metrics トピック: 共通の形（仮）の device_cpu / device_memory / if_stats / sessions / circuits（lab では gNMI の lab_* を変換したもの。下の
 #                     processors.starlark と aggregators.starlark）と、SNMP_POLL=1 のときだけ interface（ifName / ifOperStatus / ifInErrors ...）と system
-#   gnmi    トピック: bgp_neighbor（session_state。on_change）/ isis_interface（oper_state。on_change）/ evpn_es / mac_table（30 秒ごと）
+#   gnmi    トピック: bgp_neighbor（session_state。on_change）/ isis_interface（oper_state。on_change）/ evpn_es / mac_table（1 分ごと）
 #   mdt     トピック: inputs.cisco_telemetry_mdt が受けたもの（measurement は sensor path。共通の形への変換はまだ無い）
 #   traps   トピック: snmp_trap（linkDown / linkUp）
 #   logs    トピック: device_log（機器の syslog。BGP の隣接の up / down など。lab/srlinux/*.cli の remote-server）
@@ -120,13 +120,13 @@
     name = "evpn_es"
     path = "/system/network-instance/protocols/evpn/ethernet-segments/bgp-instance[id=1]/ethernet-segment[name=*]/oper-state"
     subscription_mode = "sample"
-    sample_interval = "30s"
+    sample_interval = "60s"
   # mac_table は MAC の一覧（どの端末がどこにいるか）。数（セッション数の代替）は下の 2 つめの inputs.gnmi の lab_*_mac_active
   [[inputs.gnmi.subscription]]
     name = "mac_table"
     path = "/network-instance[name=*]/bridge-table/mac-table/mac[address=*]"
     subscription_mode = "sample"
-    sample_interval = "30s"
+    sample_interval = "60s"
 
 # ---- gNMI（lab の性能メトリクス。measurement は lab_*。Kafka には載せず、下の processors.starlark（lab_gnmi.star）と
 # aggregators.starlark（lab_circuits.star）が共通の形（仮）の device_cpu / device_memory / if_stats / sessions / circuits に変えて metrics トピックへ）。
@@ -149,63 +149,63 @@
     name = "lab_cpu"
     path = "/platform/control[slot=*]/cpu[index=*]/total/instant"
     subscription_mode = "sample"
-    sample_interval = "30s"
+    sample_interval = "60s"
   # メモリ（physical / free / reserved / utilization）
   [[inputs.gnmi.subscription]]
     name = "lab_memory"
     path = "/platform/control[slot=*]/memory"
     subscription_mode = "sample"
-    sample_interval = "30s"
+    sample_interval = "60s"
   # IF（物理ポートと lag）のカウンタ。帯域使用率は octets の差分と速度で、ドロップは discarded-packets、エラーは error-packets
   [[inputs.gnmi.subscription]]
     name = "lab_if_counters"
     path = "/interface[name=*]/statistics"
     subscription_mode = "sample"
-    sample_interval = "30s"
+    sample_interval = "60s"
   # 速度。物理ポートは port-speed（10G などの enum）、lag は lag-speed（Mbps）。lab_gnmi.star が覚えて if_stats の speed_bps に付ける
   [[inputs.gnmi.subscription]]
     name = "lab_port_speed"
     path = "/interface[name=*]/ethernet/port-speed"
     subscription_mode = "sample"
-    sample_interval = "30s"
+    sample_interval = "60s"
   [[inputs.gnmi.subscription]]
     name = "lab_lag_speed"
     path = "/interface[name=*]/lag/lag-speed"
     subscription_mode = "sample"
-    sample_interval = "30s"
+    sample_interval = "60s"
   # セッション数の代替: mac-vrf ごとの MAC の数と上限（maximum-entries、既定 250。warning-threshold-pct、既定 95）
   [[inputs.gnmi.subscription]]
     name = "lab_ni_mac_active"
     path = "/network-instance[name=*]/bridge-table/statistics/active-entries"
     subscription_mode = "sample"
-    sample_interval = "30s"
+    sample_interval = "60s"
   [[inputs.gnmi.subscription]]
     name = "lab_ni_mac_limit"
     path = "/network-instance[name=*]/bridge-table/mac-limit"
     subscription_mode = "sample"
-    sample_interval = "30s"
+    sample_interval = "60s"
   # 同じものをサブ IF ごとに（どこが食っているか）
   [[inputs.gnmi.subscription]]
     name = "lab_subif_mac_active"
     path = "/interface[name=*]/subinterface[index=*]/bridge-table/statistics/active-entries"
     subscription_mode = "sample"
-    sample_interval = "30s"
+    sample_interval = "60s"
   [[inputs.gnmi.subscription]]
     name = "lab_subif_mac_limit"
     path = "/interface[name=*]/subinterface[index=*]/bridge-table/mac-limit"
     subscription_mode = "sample"
-    sample_interval = "30s"
+    sample_interval = "60s"
   # 収容回線数の代替: サブ IF の type（bridged を数える）と IF の oper-state。lab_circuits.star が機器ごとに数える
   [[inputs.gnmi.subscription]]
     name = "lab_subif_type"
     path = "/interface[name=*]/subinterface[index=*]/type"
     subscription_mode = "sample"
-    sample_interval = "30s"
+    sample_interval = "60s"
   [[inputs.gnmi.subscription]]
     name = "lab_if_oper"
     path = "/interface[name=*]/oper-state"
     subscription_mode = "sample"
-    sample_interval = "30s"
+    sample_interval = "60s"
 
 # ---- 本番の Cisco の MDT（model-driven telemetry）の dial-out を受ける（docs/collection.md の方針）。機器 → NLB の 57000/tcp → ここ。
 # 機器側は telemetry の destination をこの NLB の 57000 に、protocol を grpc（TLS なし）にする想定（本番の機種と版が分かってから確かめる）。
@@ -251,11 +251,11 @@
   namepass = ["lab_cpu", "lab_memory", "lab_if_counters", "lab_port_speed", "lab_lag_speed", "lab_ni_mac_active", "lab_ni_mac_limit", "lab_subif_mac_active", "lab_subif_mac_limit"]
   script = "/etc/telegraf/lab_gnmi.star"
 
-# ---- 収容回線数の代替（circuits）を機器ごとに数える。説明は lab_circuits.star の頭。period は gNMI の sample_interval と同じ 30 秒で、
+# ---- 収容回線数の代替（circuits）を機器ごとに数える。説明は lab_circuits.star の頭。period は gNMI の sample_interval と同じ 1 分で、
 # 機器の時刻で付いた metric が period の始まりより前でも落とさないよう grace を付ける。元の lab_subif_type / lab_if_oper は流さない
 [[aggregators.starlark]]
   namepass = ["lab_subif_type", "lab_if_oper"]
-  period = "30s"
+  period = "60s"
   grace = "60s"
   drop_original = true
   script = "/etc/telegraf/lab_circuits.star"

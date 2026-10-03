@@ -135,8 +135,8 @@ gNMI の購読は Telegraf から取りにいくので、lab では Telegraf の
 | `sessions` | `source`、`kind`（lab は `mac`）、`scope`（`network_instance` / `subinterface`）、`owner` | `active`、`limit`、`warning_pct`、`used_pct`（上限が分かっているときだけ） |
 | `circuits` | `source` | `active`（お客さま向けの IF の数）、`up`（そのうち up）、`capacity`（物理ポートの数）、`used_pct` |
 
-- 上限（`limit`）と速度は、届いた値を Telegraf の中で覚えて次の値に付ける（購読の間隔が同じ 30 秒なので、最初の 1 回は付かないことがある）。
-- `circuits` は IF とサブ IF の値を 30 秒ごとにまとめて機器ごとに 1 つ出す。3 回続けて届かなかった IF は数えない（Telegraf は gNMI の delete を載せない）。
+- 上限（`limit`）と速度は、届いた値を Telegraf の中で覚えて次の値に付ける（購読の間隔が同じ 1 分なので、最初の 1 回は付かないことがある）。
+- `circuits` は IF とサブ IF の値を 1 分ごとにまとめて機器ごとに 1 つ出す。3 回続けて届かなかった IF は数えない（Telegraf は gNMI の delete を載せない）。
 
 ## 未決定事項
 
