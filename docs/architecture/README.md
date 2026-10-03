@@ -4,7 +4,7 @@
 
 `<prefix>` は `deploy.env` の `OWNER` から作る接頭辞 `<owner>-nwc-poc`。
 
-スライドの構成図は [architecture.pptx](../architecture.pptx)。1 枚目は通信の流れ、2 枚目は本番を想定した 2 AZ の配置（PoC は単一 AZ。違いはスライドの注記）。
+スライドの構成図は [architecture.pptx](../architecture.pptx)。5 枚で、全体像、① 〜 ③ 収集から格納まで、④ 〜 ⑤ 検知から修復まで、Nautobot 連携、どこで何が動くか（配置と閉域）の順。
 
 構成の説明は terraform のルートに合わせて 4 つに分けてある。
 
@@ -40,6 +40,7 @@
 | `telegraf/` | Telegraf の `Dockerfile`、設定（`telegraf.conf.in`）と `tg`（stream の ECS のタスクで動く。デバッグ用の EC2 でも docker で `SINK=stdout`） |
 | `grafana/` | Grafana の `Dockerfile` と provisioning（データソース、ダッシュボード、アラート（`alerting/netops.yaml`）。analytics の ECS のタスクで動く） |
 | `splunk/` | Splunk の `Dockerfile`（公式イメージ + 検知のアプリ）と、アプリ `netops_alerts`（保存済みサーチと、SNS へ publish するアラートアクション。analytics の ECS のタスクで動く） |
+| `nautobot/` | Nautobot の `Dockerfile`（公式イメージ + boto3）、Job（`jobs/netops_jobs.py`）と、その中身（`netops/`。対応付け `nb_map.py`、同期 `nb_sync.py`、起動時の `bootstrap.py`）。`NAUTOBOT=1` のとき ECS で動く |
 | `graph/` | アラート（SNS）を受けて Neptune の `status` を書く Lambda |
 | `kb-docs/` | ナレッジベースに入れる手順書 |
 | `ops/` | `up.sh` / `down.sh` / `check.sh` など |
