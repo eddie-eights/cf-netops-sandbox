@@ -2,6 +2,11 @@
 # タスク定義の環境変数で __KAFKA_BROKERS__ / __AWS_REGION__ / __SNMP_AGENTS__ / __GNMI_TARGETS__ を埋めて /tmp/telegraf.conf に書く。
 # 出力は「>>> sink <名前>」〜「<<< sink <名前>」の区間のうち SINK（kafka = MSK。既定 / stdout = 標準出力。デバッグ用の EC2）の 1 つだけを残す。
 # SNMP のポーリング（「>>> snmp_poll」〜「<<< snmp_poll」の区間）は SNMP_POLL=1 のときだけ残す。既定（0）は消して、SNMP は trap だけ受ける。
+# 入力は役割で 2 つに分ける（「>>> role <名前>」〜「<<< role <名前>」の区間。telegraf.sh の TELEGRAF_ROLE）:
+#   dial_in   こちらから取りにいく。gNMI の購読・SNMP のポーリングと、lab の gNMI を共通の形に変える Starlark。stream の ECS の telegraf-poll（1 タスク）
+#   dial_out  機器から送ってくるものを受ける。trap・syslog・MDT。stream の ECS の telegraf（NLB の後ろ。台数を増やしても同じものを 2 回書かない）
+#   all       両方（既定。デバッグ用の EC2 は 1 つの Telegraf で両方やる）
+# 取りにいく入力はタスクを増やすとその数だけ同じ値を MSK に書くので、受ける側と分けて dial_in だけを 1 つに保つ。出力と agent はどちらも同じ。
 # ブローカーは terraform/pipeline/stream が MSK から直接渡す。ポーリング先（inputs.snmp の agents）と gNMI の購読先（inputs.gnmi の addresses）は
 # ops/up.sh が lab の定義から作って terraform/pipeline/stream の変数に渡す
 #（lab/lab_topology.py --snmp-agents / --gnmi-targets。機器の一覧を lab の定義 1 か所にするため、ここに IP を書かない）。
@@ -35,6 +40,7 @@
   omit_hostname = true
   snmp_translator = "gosmi"
 
+# >>> role dial_in（telegraf.sh render が TELEGRAF_ROLE=dial_out のとき消す）
 # >>> snmp_poll（telegraf.sh render が SNMP_POLL=1 のときだけ残す。既定は消す）
 # ---- ポーリング。agents は監視対象（CE）の管理 IP（SR Linux の mgmt0。SNMP v2c の community public は containerlab が全ノードに入れる）。lab の EC2 を経由する（上の注記）
 # 止めると Grafana のルール link_down（ifOperStatus を見る）は発火しない。IF の up / down は trap（Splunk の保存済みサーチ。SINK_SPLUNK=1）で見る
@@ -86,7 +92,7 @@
 
 # ---- gNMI は lab 用。本番の Cisco は MDT の dial-out で機器から送らせる方針（docs/collection.md。受け口は下の inputs.cisco_telemetry_mdt）だが、
 # lab の SR Linux は MDT を話さないので、ここから gNMI（dial-in）で取りにいく。性能メトリクスは 2 つめの inputs.gnmi で取り、本番と同じ共通の形に変換する。
-# 取りにいく入力なので、これがあるあいだ Telegraf は 1 タスク。
+# 取りにいく入力なので、これを持つ telegraf-poll（TELEGRAF_ROLE=dial_in）は 1 タスク。
 # ---- gNMI（SR Linux の状態を購読。SNMP には無い BGP / IS-IS / EVPN の層）。containerlab が全ノードで 57400（TLS、自己署名）を開け、
 # ユーザーは containerlab が入れる既定（admin / NokiaSrl1!。lab だけの公開既定値で、実機の値ではない。実機なら SSM から埋める）。
 # source タグは購読先のアドレス（機器の管理 IP。Splunk のアラートアクションがこれと device map で機器名を引く）。パスの鍵（peer-address など）はタグになる。
@@ -207,6 +213,23 @@
     subscription_mode = "sample"
     sample_interval = "60s"
 
+# ---- lab の gNMI（lab_*）を共通の形（仮）に変える。説明は lab_gnmi.star の頭。lab_subif_type / lab_if_oper は下の aggregators.starlark が受ける。
+# 元の値を取る inputs.gnmi と同じタスクに置く（Kafka には lab_* を載せないので、別のタスクでは変換できない）
+[[processors.starlark]]
+  namepass = ["lab_cpu", "lab_memory", "lab_if_counters", "lab_port_speed", "lab_lag_speed", "lab_ni_mac_active", "lab_ni_mac_limit", "lab_subif_mac_active", "lab_subif_mac_limit"]
+  script = "/etc/telegraf/lab_gnmi.star"
+
+# ---- 収容回線数の代替（circuits）を機器ごとに数える。説明は lab_circuits.star の頭。period は gNMI の sample_interval と同じ 1 分で、
+# 機器の時刻で付いた metric が period の始まりより前でも落とさないよう grace を付ける。元の lab_subif_type / lab_if_oper は流さない
+[[aggregators.starlark]]
+  namepass = ["lab_subif_type", "lab_if_oper"]
+  period = "60s"
+  grace = "60s"
+  drop_original = true
+  script = "/etc/telegraf/lab_circuits.star"
+# <<< role dial_in
+
+# >>> role dial_out（telegraf.sh render が TELEGRAF_ROLE=dial_in のとき消す）
 # ---- 本番の Cisco の MDT（model-driven telemetry）の dial-out を受ける（docs/collection.md の方針）。機器 → NLB の 57000/tcp → ここ。
 # 機器側は telemetry の destination をこの NLB の 57000 に、protocol を grpc（TLS なし）にする想定（本番の機種と版が分かってから確かめる）。
 # source タグは機器が名乗る node_id、measurement は sensor path（エンコーディングのパス）。共通の形への変換はまだ無いので、生のまま mdt トピックへ。
@@ -245,24 +268,11 @@
   [[processors.rename.replace]]
     tag = "hostname"
     dest = "sysName"
-
-# ---- lab の gNMI（lab_*）を共通の形（仮）に変える。説明は lab_gnmi.star の頭。lab_subif_type / lab_if_oper は下の aggregators.starlark が受ける
-[[processors.starlark]]
-  namepass = ["lab_cpu", "lab_memory", "lab_if_counters", "lab_port_speed", "lab_lag_speed", "lab_ni_mac_active", "lab_ni_mac_limit", "lab_subif_mac_active", "lab_subif_mac_limit"]
-  script = "/etc/telegraf/lab_gnmi.star"
-
-# ---- 収容回線数の代替（circuits）を機器ごとに数える。説明は lab_circuits.star の頭。period は gNMI の sample_interval と同じ 1 分で、
-# 機器の時刻で付いた metric が period の始まりより前でも落とさないよう grace を付ける。元の lab_subif_type / lab_if_oper は流さない
-[[aggregators.starlark]]
-  namepass = ["lab_subif_type", "lab_if_oper"]
-  period = "60s"
-  grace = "60s"
-  drop_original = true
-  script = "/etc/telegraf/lab_circuits.star"
+# <<< role dial_out
 
 # >>> sink kafka（telegraf.sh render が SINK で片方だけ残す。既定 kafka）
 # ---- MSK へ。トピックは metric 名で分ける（snmp_trap → traps、device_log → logs、gNMI の 4 つ → gnmi、共通の形と SNMP のポーリング → metrics、
-# MDT → mdt（collector タグ））。lab_* の変換前の値はどれにも載せない
+# MDT → mdt（collector タグ））。lab_* の変換前の値はどれにも載せない。役割に関わらず 5 つとも置く（来ないトピックの出力は何も書かない）
 # sasl_aws_msk_iam_profile: Telegraf 1.40.0 は profile か role + session のどちらかを書かないと
 # 「both role and session must be set」で落ち、インスタンスプロファイルだけでは起動しない（2026-09-18 に EC2 で確認。plugins/common/kafka/sasl_aws_iam_msk.go）。
 # telegraf.sh render が region だけの [default] を /tmp/aws_config に書き、鍵が無いので SDK がタスクロール（ECS のコンテナの認証情報）に落ちる
@@ -342,7 +352,7 @@
   json_timestamp_units = "1s"
 # <<< sink stdout
 
-# ---- 生きているかの口。NLB のヘルスチェック（terraform/pipeline/stream の telegraf.tf。HTTP 8080）がここを見る。
+# ---- 生きているかの口。NLB のヘルスチェック（terraform/pipeline/stream の telegraf.tf。HTTP 8080。dial_out のタスク）がここを見る。
 # 条件を書かないので、Telegraf が動いていれば 200 を返す。metric は system だけ通す（全部を流し込まない）。
 # ポーリングを止めている（SNMP_POLL=0。既定）と system は来ないが、何も届いていない間は default_status（200）を返すので、ヘルスチェックは通る
 [[outputs.health]]

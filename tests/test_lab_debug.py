@@ -277,15 +277,41 @@ check("SNMP_AGENTS を見るのは SNMP_POLL=1 のときだけ（無いか形が
       render("stdout", SNMP_AGENTS="")[0] is not None and render("stdout", SNMP_AGENTS="bad")[0] is not None
       and render("stdout", SNMP_POLL="1", SNMP_AGENTS="")[0] is None and render("stdout", SNMP_POLL="1", SNMP_AGENTS="bad")[0] is None
       and render("stdout", SNMP_POLL="0")[0] is not None and render("stdout", SNMP_POLL="yes")[0] is None and render("stdout", SNMP_POLL="true")[0] is None)
-def _tg_test(**extra):  # 描いた設定に inputs.snmp が無ければ、telegraf を呼ぶ前に分かる言葉で止まる（手元に telegraf は無くてよい）
+def _tg_test(cmd="test", **extra):  # 描いた設定に入力が無ければ、telegraf を呼ぶ前に分かる言葉で止まる（手元に telegraf は無くてよい）
     with tempfile.TemporaryDirectory() as d:
         env = {"PATH": os.environ["PATH"], "TELEGRAF_TEMPLATE": os.path.join(ROOT, "telegraf", "telegraf.conf.in"),
                "TELEGRAF_CONF": os.path.join(d, "telegraf.conf"), "AWS_REGION": "ap-northeast-1", "SINK": "stdout",
                "GNMI_TARGETS": '"203.0.113.11:57400"', **extra}
-        return subprocess.run(["bash", os.path.join(ROOT, "telegraf", "telegraf.sh"), "test"], capture_output=True, text=True, env=env)
+        return subprocess.run(["bash", os.path.join(ROOT, "telegraf", "telegraf.sh"), cmd], capture_output=True, text=True, env=env)
 _t = _tg_test()
 check("tg test はポーリングを止めている（SNMP_POLL=0）と、SNMP_POLL=1 で起こし直すよう言って止まる",
       _t.returncode == 1 and "SNMP_POLL=1" in _t.stderr and "telegraf: command not found" not in _t.stderr)
+
+# 役割（TELEGRAF_ROLE）: stream の ECS は受ける側（dial_out）と取りにいく側（dial_in）の 2 タスク。既定 all（デバッグ用の EC2）は両方（2026-10-04 ユーザー決定）
+_roles = re.findall(r"^# >>> role (\w+)", tpl, re.M)
+_dial_in_blk = tpl.split("# >>> role dial_in", 1)[1].split("# <<< role dial_in", 1)[0] if "# >>> role dial_in" in tpl else ""
+check("telegraf.conf.in の役割の区間は telegraf.sh の ROLES と同じ名前で対になり、snmp_poll の区間は dial_in の中にある",
+      sorted(_roles) == sorted(re.findall(r"^# <<< role (\w+)", tpl, re.M)) == sorted(re.search(r'^ROLES="([^"]*)"', tg_sh, re.M).group(1).split())
+      and "# >>> snmp_poll" in _dial_in_blk and "# <<< snmp_poll" in _dial_in_blk
+      and sh_const(tg_sh, "TELEGRAF_ROLE") == "${TELEGRAF_ROLE:-all}")
+_out_conf, _out_log, _ = render(None, KAFKA_BROKERS="b-1.example:9098,b-2.example:9098", TELEGRAF_ROLE="dial_out", GNMI_TARGETS="", SNMP_AGENTS="")
+_in_conf, _in_log, _ = render(None, KAFKA_BROKERS="b-1.example:9098,b-2.example:9098", TELEGRAF_ROLE="dial_in", SNMP_POLL="1")
+check("TELEGRAF_ROLE=dial_out は trap / syslog / MDT と syslog の rename だけ（gNMI・SNMP のポーリング・Starlark は無く、GNMI_TARGETS / SNMP_AGENTS は要らない）",
+      _out_conf is not None and sorted(_out_conf["inputs"]) == ["cisco_telemetry_mdt", "snmp_trap", "syslog"]
+      and list(_out_conf["processors"]) == ["rename"] and "aggregators" not in _out_conf
+      and "role: dial_out" in _out_log and "mdt: 57000/tcp" in _out_log and "gnmi:" not in _out_log)
+check("TELEGRAF_ROLE=dial_in は gNMI 2 つ・SNMP のポーリング（SNMP_POLL=1 のとき）・Starlark だけ（trap / syslog / MDT の受け口は無い）",
+      _in_conf is not None and sorted(_in_conf["inputs"]) == ["gnmi", "snmp"] and len(_in_conf["inputs"]["gnmi"]) == 2
+      and list(_in_conf["processors"]) == ["starlark"] and list(_in_conf["aggregators"]) == ["starlark"]
+      and "role: dial_in" in _in_log and "trap:" not in _in_log and "mdt:" not in _in_log
+      and render(None, KAFKA_BROKERS="b-1.example:9098,b-2.example:9098", TELEGRAF_ROLE="dial_in", GNMI_TARGETS="")[0] is None)
+check("どの役割でも出力（Kafka の 5 つと health）は同じ。知らない TELEGRAF_ROLE は描かずに止まる。既定（all）は両方の入力を持つ",
+      all(c["outputs"] == kafka["outputs"] and c["agent"] == kafka["agent"] for c in (_out_conf, _in_conf))
+      and render("stdout", TELEGRAF_ROLE="dial-in")[0] is None and render("stdout", TELEGRAF_ROLE="")[0] is not None
+      and "role: all" in out and {"snmp_trap", "syslog", "cisco_telemetry_mdt", "gnmi"} <= set(stdout_conf["inputs"]))
+_tg_out = [_tg_test(c, TELEGRAF_ROLE="dial_out", GNMI_TARGETS="") for c in ("test", "gnmi")]
+check("受ける側（dial_out）のタスクで tg test / tg gnmi を打つと、取りにいく側（telegraf-poll）で打つよう言って止まる",
+      all(r.returncode == 1 and "telegraf-poll" in r.stderr and "telegraf: command not found" not in r.stderr for r in _tg_out))
 
 # ---- lab.sh: この EC2 の Telegraf
 check("trap のポートは lab.sh と telegraf.sh で同じ（機器は 162 に送り、デバッグ用の EC2 は REDIRECT で Telegraf の待つポートへ）",

@@ -16,7 +16,7 @@
 | `WORKFLOW` | Temporal での調査と修復。`AGENT=1` と `PIPELINE=1` が要り、`SKIP_LAB` / `SKIP_STREAM` / `SKIP_ANALYTICS` / `SKIP_GRAPH` とは一緒に書けない。ワークフローを起こすのはアラートなので、送り手も要る（`SINK_SPLUNK=1` か、`GRAFANA=1` と `SINK_PROMETHEUS=1` の既定のまま `SNMP_POLL=1`。どちらも無いと `ops/up.sh` が止まる。`SNMP_POLL` が既定の `0` だと Grafana のルールは発火しないので、既定のままの `WORKFLOW=1` は止まる） |
 | `CREATE_KB` | ナレッジベース（+$0.37/h。OpenSearch Serverless の VPC エンドポイント $0.03（`SINK_OPENSEARCH` の logs と共用）と bedrock-agent-runtime のエンドポイント $0.014 を含む）。`AGENT=1` のとき |
 | `SKIP_LAB` | lab を作らない（-$0.17/h）。`SKIP_STREAM=1` も要る |
-| `SKIP_STREAM` | stream（MSK と Telegraf の ECS）を作らない（-$1.17/h）。analytics も外れる |
+| `SKIP_STREAM` | stream（MSK と Telegraf の ECS）を作らない（-$1.18/h）。analytics も外れる |
 | `SKIP_ANALYTICS` | analytics を作らない（-$0.56/h。KB を作るなら OpenSearch Serverless の VPC エンドポイントは残るので -$0.53/h。Grafana の分を含む）。Grafana と Splunk（アラートの送り手）も無くなる |
 | `SKIP_GRAPH` | Neptune を作らない（-$0.14/h）。トポロジは静的データになる（アラートで `status` が変わらない） |
 | `SINK_S3` / `SINK_OPENSEARCH` / `SINK_PROMETHEUS` | Spark の格納先。既定は 3 つとも `1`。`0` にするとリソースごと作らない。`SINK_SPLUNK` と合わせて全部 `0` は止まる。`SINK_PROMETHEUS=0` にすると Grafana のアラート（`link_down`）も無くなる |
@@ -52,9 +52,9 @@
 | 4 | Web の部品を S3 に置く。`CREATE_KB=1` なら手順書を取り込む。Web を再起動 |
 | 5 | 5-1 で containerlab の rpm と `lab/`、5-2 で Spark の jar 6 本と `spark/snmp_sinks.py` を S3 に置く |
 | 6 | `terraform/pipeline/lab` |
-| 7 | `terraform/pipeline/stream`（MSK に 20〜30 分。Telegraf の ECS と内部 NLB も。ポーリング先と gNMI の相手は lab の定義から作って変数で渡す。ポーリング先は `SNMP_POLL=0` でも渡す（Telegraf が使うのは `SNMP_POLL=1` のときだけ）） |
-| 7-2b | lab の EC2 で `lab forward` を打ち、Telegraf のタスクのサブネットから SNMP のポーリング（`SNMP_POLL=1` のとき）と gNMI の購読を通し、trap / syslog を Telegraf の NLB へ DNAT する |
-| 7-2c | Telegraf の ECS のサービスが安定するのを待つ（最大 10 分。落ちても止まらず、見るところを出す） |
+| 7 | `terraform/pipeline/stream`（MSK に 20〜30 分。Telegraf の ECS（受ける側と取りにいく側の 2 サービス）と内部 NLB も。ポーリング先と gNMI の相手は lab の定義から作って変数で渡す。ポーリング先は `SNMP_POLL=0` でも渡す（Telegraf が使うのは `SNMP_POLL=1` のときだけ）） |
+| 7-2b | lab の EC2 で `lab forward` を打ち、Telegraf のタスク（取りにいく側）のサブネットから SNMP のポーリング（`SNMP_POLL=1` のとき）と gNMI の購読を通し、trap / syslog を Telegraf の NLB へ DNAT する |
+| 7-2c | Telegraf の ECS のサービス 2 つ（受ける側と取りにいく側）が安定するのを待つ（最大 10 分。落ちても止まらず、見るところを出す） |
 | 7-3 | graph を待ち、Neptune が空ならトポロジを入れる（アラートの送り手より先に、`status` の Lambda とトポロジを用意する） |
 | 7-4 | `terraform/pipeline/analytics`（`SINK_SPLUNK=1` なら、Splunk のアラートが IP を機器名に直す device map を lab の定義から作って渡す）。先に Grafana / ECS の Splunk の admin のパスワードと HEC の token を SSM の SecureString に作る（無いときだけ。値は出さない） |
 | 7-4b | ECS の Splunk がヘルスチェックで HEALTHY になるのを待つ（最大 20 分。Spark のジョブは起動してすぐ HEC に送るので） |
@@ -63,7 +63,7 @@
 | 8-5 | `terraform/workflow`。Temporal UI を開くコマンドを表示 |
 | 8-6 | Web を再起動 |
 | 9 | Runtime のロググループの保持を 7 日にする |
-| 10 | `start_session_command`、lab と Telegraf に入るコマンド、Grafana / Splunk のポートフォワードとパスワードを見るコマンドを表示し、ポートフォワーディングを開く（`Ctrl+C` で閉じる） |
+| 10 | `start_session_command`、lab と Telegraf（取りにいく側）に入るコマンド、Grafana / Splunk のポートフォワードとパスワードを見るコマンドを表示し、ポートフォワーディングを開く（`Ctrl+C` で閉じる） |
 
 - スクリプトの中は `-auto-approve`。できているものは飛ばすので、落ちたら打ち直せばよい。
 - 途中で落ちたときは、裏の graph の apply が終わるまで待ってから止まる。その間ターミナルを閉じない。

@@ -33,7 +33,7 @@ trap と syslog では性能の時系列は取れない（届くのはイベン�
 
 ```
 機器 ─ trap 162/udp ────────┐
-     ─ syslog 5140/udp ─────┼─→ NLB ─→ Telegraf（何台でもよい）─→ MSK
+     ─ syslog 5140/udp ─────┼─→ NLB ─→ Telegraf の受ける側（何台でもよい）─→ MSK
      ─ MDT dial-out（TCP）──┘          inputs.cisco_telemetry_mdt
 ```
 
@@ -42,7 +42,7 @@ trap と syslog では性能の時系列は取れない（届くのはイベン�
 **選んだ理由: Telegraf を増やしやすい。**
 
 - 機器から送ってくるもの（trap・syslog・MDT）は、NLB が 1 つのタスクにだけ渡すので、タスクを増やしても重複しない。
-- Telegraf から取りにいくもの（SNMP のポーリング、gNMI の購読）は、タスクごとに同じ機器へ取りにいくので、増やすと MSK に同じデータが何回も入る。いまタスクを 1 つに固定している（[telegraf.tf](../terraform/pipeline/stream/telegraf.tf) の `desired_count = 1` と `deployment_maximum_percent = 100`）のはこのため。
+- Telegraf から取りにいくもの（SNMP のポーリング、gNMI の購読）は、タスクごとに同じ機器へ取りにいくので、増やすと MSK に同じデータが何回も入る。取りにいく側のサービス（`<prefix>-telegraf-poll`）だけを 1 タスクに固定している（[telegraf.tf](../terraform/pipeline/stream/telegraf.tf) の `desired_count = 1` と `deployment_maximum_percent = 100`）のはこのため（下の「Telegraf を受ける側と取りにいく側に分けた」）。
 - 集める側から機器への通信（161/udp や gNMI の TCP）を本番で開けてもらえるか分からないので、機器 → 集める側の向きだけで済むほうが安全。
 
 **MDT で取れる性能メトリクス:** MDT は機器の運用データ（oper の YANG モデル）を周期（periodic）か変化時（on-change）で送るので、性能の時系列も送れる。どのモデルが使えるかは機種と版で変わる。IOS XE を仮定した例（本番では未確認）:
@@ -54,7 +54,16 @@ trap と syslog では性能の時系列は取れない（届くのはイベン�
 | 帯域・ドロップ・エラー（IF と Port-channel） | `Cisco-IOS-XE-interfaces-oper`（`statistics` の octets / discards / errors、`speed`） |
 | セッション・上限 | 機能ごとに別のモデル（下の「セッションと上限」） |
 
-**Telegraf が 1 つのままになる条件:** SNMP のポーリング（`SNMP_POLL=1`）か gNMI の購読が Telegraf に残っている間は、タスクを増やせない。増やすなら、これらを別のサービス（1 タスク）に分けるか、やめる。
+**Telegraf を受ける側と取りにいく側に分けた（2026-10-04 ユーザー決定）:** stream の ECS は同じイメージで 2 つのサービスを動かし、役割はタスクの環境変数 `TELEGRAF_ROLE`（`telegraf/telegraf.sh` が `telegraf.conf.in` の `# >>> role …` の区間を残すか消す）で分ける。
+
+| サービス | `TELEGRAF_ROLE` | 入力 | 数 | SG |
+|---|---|---|---|---|
+| `<prefix>-telegraf` | `dial_out` | trap・syslog・MDT（NLB の後ろ） | 増やしてよい（いまは 1。入れ替えは新しいタスクが立ってから古いものを止める） | `telegraf`（NLB から受けるだけ） |
+| `<prefix>-telegraf-poll` | `dial_in` | gNMI の購読、SNMP のポーリング（`SNMP_POLL=1`）、lab の値を共通の形に変える Starlark | 1 に固定（入れ替えは古いものを止めてから。そのあいだ購読が数十秒切れる） | `telegraf_poll`（受けない。機器の 161/udp・57400/tcp へ出る） |
+
+Kafka の出力（5 トピック）と health はどちらにもある。Starlark を取りにいく側に置くのは、変える前の `lab_*` を Kafka に載せないので gNMI の入力と同じタスクにいる必要があるから。デバッグ用の EC2 は既定の `all`（両方を 1 つの Telegraf で）。
+
+取りにいく側は機器の一覧（`GNMI_TARGETS` / `SNMP_AGENTS`）を持つ。いまは `ops/up.sh` が lab の定義から作って stream の変数で渡す（変われば取りにいく側のタスクだけが入れ替わる）。本番で機器の一覧をどこから持つか（Nautobot などから作るか）は未決定。
 
 ## セッションと上限（一般的な解釈で調べた。2026-10-04）
 
@@ -85,7 +94,7 @@ trap と syslog では性能の時系列は取れない（届くのはイベン�
 ## lab（SR Linux）での取り方
 
 **lab からは MDT は取れない。** SR Linux は Cisco MDT を話さない（送れるのは gNMI だけ）。lab では Telegraf から gNMI（dial-in、57400/tcp）で購読し、Telegraf の中で本番と同じ共通の形（下の「共通の形（仮）」）に変換する（`telegraf/lab_gnmi.star` と `telegraf/lab_circuits.star`。2026-10-04 に作った。lab の実機では未確認）。本番の受け口（`inputs.cisco_telemetry_mdt`）の経路は lab では通らない。
-gNMI の購読は Telegraf から取りにいくので、lab では Telegraf のタスクを 1 つから増やせない（上の「Telegraf が 1 つのままになる条件」）。
+gNMI の購読は Telegraf から取りにいくので、lab の値は取りにいく側のタスク（1 つに固定）から来る（上の「Telegraf を受ける側と取りにいく側に分けた」）。
 
 **lab のセッション数と収容回線数は本番の値の代替。** lab の機器には BNG・FW・NAT・IPsec が無いので、本番と同じ役割（今の数・上限・どこが食っているか）を持つ値で代える。エージェントが本番と同じ要素で判断できるかを要素ごとに比べ、揃わない要素は下に書いた（SR Linux 26.7.2 の YANG（[nokia/srlinux-yang-models](https://github.com/nokia/srlinux-yang-models) の `v26.7.2`）で確かめた。`telegraf.conf.in` の 2 つめの `inputs.gnmi`（`lab_*`）で購読しているが、lab の実機で値が出るかは未確認）。
 

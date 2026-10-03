@@ -234,6 +234,23 @@ check("lab と stream は SG も SG のルールも作らない（ポーリン�
       all('resource "aws_security_group"' not in t and "aws_vpc_security_group_" not in t
           for t in (_lab_tg, lab_locals, stream_tg, _access, _read("terraform", "pipeline", "stream", "msk.tf"), _read("terraform", "pipeline", "lab", "instance.tf")))
       and 'security_groups = [local.telegraf_nlb_sg_id]' in stream_tg and 'security_groups  = [local.telegraf_sg_id]' in stream_tg)
+_td = {k: m.group(0) for k in ("telegraf", "telegraf_poll") if (m := re.search(r'resource "aws_ecs_task_definition" "' + k + r'" \{[\s\S]*?^\}', stream_tg, re.M))}
+_svc = {k: m.group(0) for k in ("telegraf", "telegraf_poll") if (m := re.search(r'resource "aws_ecs_service" "' + k + r'" \{[\s\S]*?^\}', stream_tg, re.M))}
+check("Telegraf は受ける側（dial_out。NLB の後ろ、SG telegraf）と取りにいく側（dial_in。1 タスク固定、NLB なし、SG telegraf_poll）の 2 サービス（2026-10-04 ユーザー決定）",
+      len(_td) == 2 and len(_svc) == 2
+      and '{ name = "TELEGRAF_ROLE", value = "dial_out" }' in _td["telegraf"] and '{ name = "TELEGRAF_ROLE", value = "dial_in" }' in _td["telegraf_poll"]
+      and "portMappings = [" in _td["telegraf"] and "portMappings = [" not in _td["telegraf_poll"]
+      and all(v not in _td["telegraf"] for v in ("SNMP_AGENTS", "GNMI_TARGETS", "SNMP_POLL"))
+      and all(v in _td["telegraf_poll"] for v in ("SNMP_AGENTS", "GNMI_TARGETS", "SNMP_POLL")) and "SYSLOG_STANDARD" not in _td["telegraf_poll"]
+      and 'awslogs-stream-prefix = "dial-out"' in _td["telegraf"] and 'awslogs-stream-prefix = "dial-in"' in _td["telegraf_poll"]
+      and "load_balancer" in _svc["telegraf"] and "load_balancer" not in _svc["telegraf_poll"]
+      and "security_groups  = [local.telegraf_poll_sg_id]" in _svc["telegraf_poll"]
+      # 購読を二重にしない: 入れ替えでも 1 タスクを超えない
+      and re.search(r"desired_count\s+= 1\b", _svc["telegraf_poll"]) is not None
+      and "deployment_minimum_healthy_percent = 0" in _svc["telegraf_poll"] and "deployment_maximum_percent         = 100" in _svc["telegraf_poll"]
+      and "enable_execute_command = true" in _svc["telegraf_poll"]
+      and re.search(r'telegraf_poll_sg_id\s*=\s*try\(data\.terraform_remote_state\.main\.outputs\.security_group_ids\["telegraf_poll"\], ""\)', _read("terraform", "pipeline", "stream", "locals.tf")) is not None
+      and '"$TG_SERVICE" "$TG_POLL_SERVICE"' in _up and "telegraf_poll_list_tasks_command" in _up)
 _down = _read("ops", "down.sh")
 check("down.sh は stream の必須変数（snmp_agents / gnmi_targets）に形だけ合う値を渡して destroy する（telegraf.sh の形の検査と同じ）",
       re.search(r"destroy_root pipeline/stream -var 'snmp_agents=\"udp://[0-9.]+:161\"' -var 'gnmi_targets=\"[0-9.]+:57400\"'", _down) is not None)

@@ -25,11 +25,11 @@ flowchart LR
 ```
 
 - lab は Web やエージェントとはつながっていない。使うのは SNMP とログの発生源としてだけ。
-- Telegraf は stream の ECS（Fargate ARM64、0.25 vCPU / 0.5 GB）の 1 タスクで動き、内部 NLB の後ろにいる（`terraform/pipeline/stream/telegraf.tf`。2026-09-28 に terraform/pipeline/lab の Telegraf 用の EC2 から移した）。イメージは `telegraf/Dockerfile`（公式の `telegraf:1.40.0` に `telegraf.conf.in` と `tg` を入れたもの）で、`ops/up.sh` が ECR の `<prefix>-telegraf:<版>-<ディレクトリのハッシュ 12 文字>` に作る。ポーリング先と gNMI の購読先は `ops/up.sh` が lab の定義から作って stream の変数 `snmp_agents` / `gnmi_targets` に渡し、タスクの環境変数 `SNMP_AGENTS` / `GNMI_TARGETS` になる。MSK のブローカーは環境変数 `KAFKA_BROKERS`。起動時に `tg run` が設定を埋める。
+- Telegraf は stream の ECS（Fargate ARM64、0.25 vCPU / 0.5 GB）で、同じイメージを 2 つのサービスで動かす（`terraform/pipeline/stream/telegraf.tf`。2026-09-28 に terraform/pipeline/lab の Telegraf 用の EC2 から移し、2026-10-04 に 2 つに分けた）。受ける側（`<prefix>-telegraf`、`TELEGRAF_ROLE=dial_out`）は内部 NLB の後ろで trap・syslog・MDT を受け、取りにいく側（`<prefix>-telegraf-poll`、`TELEGRAF_ROLE=dial_in`、1 タスク固定、NLB なし）は gNMI の購読と SNMP のポーリングをする（[collection.md](collection.md) の「Telegraf を受ける側と取りにいく側に分けた」）。イメージは `telegraf/Dockerfile`（公式の `telegraf:1.40.0` に `telegraf.conf.in` と `tg` を入れたもの）で、`ops/up.sh` が ECR の `<prefix>-telegraf:<版>-<ディレクトリのハッシュ 12 文字>` に作る。ポーリング先と gNMI の購読先は `ops/up.sh` が lab の定義から作って stream の変数 `snmp_agents` / `gnmi_targets` に渡し、取りにいく側のタスクの環境変数 `SNMP_AGENTS` / `GNMI_TARGETS` になる。MSK のブローカーは環境変数 `KAFKA_BROKERS`。起動時に `tg run` が設定を埋める。
 - **SNMP のポーリングは既定で止めてあり、SNMP は trap だけ受ける**（2026-10-04 から）。`deploy.env` の `SNMP_POLL=1` で `ops/up.sh` が stream の変数 `snmp_poll = true` を渡し、タスクの環境変数 `SNMP_POLL=1` で `tg run` が `telegraf.conf.in` の `>>> snmp_poll` の区間（`inputs.snmp`。10 秒ごとに ifTable）を残す。`0`（既定）はその区間ごと消すので、`SNMP_AGENTS` は渡っても使わない。止めているあいだは `metrics` トピックにポーリングの行（measurement `system` / `interface`）が載らず（lab の gNMI を変えた共通の形は載る）、S3 Tables の `snmp_metrics` のポーリングの行、Grafana のダッシュボード「netops / SNMP metrics」、Grafana のアラートルール `link_down`、エージェントの `query_metrics`（`interface_ifOperStatus` など）は空のまま。IF の up / down は trap（`SINK_SPLUNK=1` の Splunk）で知る。gNMI と syslog はこの値によらず受ける。
 - ポーリングが二重にならないよう、作り直すときは古いタスクを止めてから新しいタスクを立てる。
 - lab は Spine-Leaf（EVPN-VXLAN）。上流側の Leaf-SW 2 台と アクセス側の Leaf 2 台が Spine 2 台とフルメッシュ（fabric。IS-IS）、上流 VM は Leaf-SW の組へ、アクセス側 VM は Leaf の組へ LAG（EVPN マルチホーミング）で 2 本ずつ。機器の定義は `lab/gen_lab.py` が作る（[lab を変える](#lab-を変える)）。SR-MPLS は SR Linux のコンテナが `ixr6e` / `ixr10e` + ライセンスを要るので、ライセンスが届くまで license 不要の `ixr-d2l` で EVPN-VXLAN にしている。
-- 機器は lab の EC2 の中の docker network（`203.0.113.0/24`）にいる。Telegraf のタスクからの SNMP のポーリング（`161/udp`。`SNMP_POLL=1` のときだけ）と gNMI の購読（`57400/tcp`）は VPC のルートで lab の EC2 を通り（タスクの IP は作り直すたびに変わるので、送り元はタスクのサブネットの CIDR（SSM `/<prefix>/telegraf-source-cidr`）で通す）、trap（`162/udp`）と syslog（`5140/udp`）は機器が lab の EC2（`203.0.113.1`）へ送り、lab の EC2 が Telegraf の NLB の IP（SSM `/<prefix>/telegraf-address`）へ DNAT する。NLB は trap をタスクの `1162/udp` へ、syslog を `5140/udp` へ渡す（UDP なので送り元の IP はそのまま）。この 4 つは lab の EC2 で `sudo lab forward` が張る（`lab up` が毎回呼び、`ops/up.sh` も手順 7-2b で打つ。lab の変数 `forward_to_telegraf`）。
+- 機器は lab の EC2 の中の docker network（`203.0.113.0/24`）にいる。Telegraf の取りにいく側のタスクからの SNMP のポーリング（`161/udp`。`SNMP_POLL=1` のときだけ）と gNMI の購読（`57400/tcp`）は VPC のルートで lab の EC2 を通り（タスクの IP は作り直すたびに変わるので、送り元はタスクのサブネットの CIDR（SSM `/<prefix>/telegraf-source-cidr`）で通す）、trap（`162/udp`）と syslog（`5140/udp`）は機器が lab の EC2（`203.0.113.1`）へ送り、lab の EC2 が Telegraf の NLB の IP（SSM `/<prefix>/telegraf-address`）へ DNAT する。NLB は trap をタスクの `1162/udp` へ、syslog を `5140/udp` へ渡す（UDP なので送り元の IP はそのまま）。この 4 つは lab の EC2 で `sudo lab forward` が張る（`lab up` が毎回呼び、`ops/up.sh` も手順 7-2b で打つ。lab の変数 `forward_to_telegraf`）。
 - gNMI（Telegraf の `inputs.gnmi`）は BGP の `session-state` と IS-IS の IF の `oper-state`（隣接そのもの（`interface/adjacency`）は落ちると down を経ずに消え、Telegraf は gNMI の delete を載せないので取らない）を on_change で、EVPN の ethernet-segment の `oper-state` と MAC テーブルを 1 分おきに取り、トピック `gnmi` に出す。2 つめの `inputs.gnmi`（購読名 `lab_*`、1 分おき）は CPU・メモリ・IF のカウンタと速度・MAC テーブルの数と上限・サブ IF の種類と IF の状態を取り、`telegraf/lab_gnmi.star` と `lab_circuits.star` が共通の形（`device_cpu` / `device_memory` / `if_stats` / `sessions` / `circuits`。[collection.md](collection.md) の「共通の形（仮）」）に変えてトピック `metrics` に出す（1 つめと分けるのは、SR Linux が知らないパスが 1 つでもあると購読ごと断るため）。本番の Cisco の MDT は `inputs.cisco_telemetry_mdt`（57000/tcp）で受けてトピック `mdt` に出す（`MDT_SOURCE_CIDRS` が空のあいだは何も届かない）。Splunk の保存済みサーチ `netops_gnmi` はここから `bgp_down`（相手の IP が対象）と `isis_down`（サブインタフェースが対象）を出す（`SINK_SPLUNK=1` のとき。下の「アラート」）。
 - Spark は起動時に、読むトピック（`metrics` / `gnmi` / `mdt` / `traps` / `logs`）のうち無いものを作る（`snmp_sinks.py` の `ensure_topics`。EMR のロールに `kafka-cluster:CreateTopic`）。MSK の `auto.create.topics.enable=true` は書き込みのときにしか効かず、Telegraf が最初の trap / syslog を出すまで `traps` / `logs` が無い。無いトピックを購読するとジョブは offset 読みで落ちて、起こし直しの上限（1 時間 5 回）を使い切る（2026-09-27 に実測）。
 - メトリクスとログの履歴の正本は S3 Tables（`snmp_metrics`）。Spark は格納先へ流すだけで、異常の検知はしない（2026-10-02 にやめた）。検知は Grafana と Splunk のアラートで、SNS のトピック `<prefix>-alerts` に出す（下の「アラート」）。Neptune の頂点 `anomaly`、S3 Tables の `anomaly_events`、Web の「異常一覧」、エージェントの `list_anomalies` は無くなり、障害の履歴の置き場は決めていない（[data-stores.md](data-stores.md)）。
@@ -95,10 +95,10 @@ terraform -chdir=terraform/pipeline/lab output -raw stop_command; echo
 
 ## Telegraf に入る
 
-ECS Exec で入る（PC に AWS CLI v2 と Session Manager plugin が要る）。`telegraf_exec_command` の `TASK_ID` を、タスクの ARN の最後の部分に置き換えて打つ。
+ECS Exec で入る（PC に AWS CLI v2 と Session Manager plugin が要る）。`tg test` / `tg gnmi` は取りにいく側（`<prefix>-telegraf-poll`）のタスクで打つ（受ける側で打つと「telegraf-poll で打つ」と出て終わる）。`telegraf_exec_command` の `TASK_ID` を、取りにいく側のタスクの ARN の最後の部分に置き換えて打つ。
 
 ```bash
-terraform -chdir=terraform/pipeline/stream output -raw telegraf_list_tasks_command; echo   # 打つとタスクの ARN が出る
+terraform -chdir=terraform/pipeline/stream output -raw telegraf_poll_list_tasks_command; echo   # 打つと取りにいく側のタスクの ARN が出る（受ける側は telegraf_list_tasks_command）
 terraform -chdir=terraform/pipeline/stream output -raw telegraf_exec_command; echo         # TASK_ID を置き換えて打つ（既定は tg gnmi）
 ```
 
@@ -107,13 +107,13 @@ terraform -chdir=terraform/pipeline/stream output -raw telegraf_exec_command; ec
 | `tg test` | SNMP のポーリングを 1 回だけまわして画面に出す（MSK には送らない）。`SNMP_POLL=1` のタスクだけ。既定（`0`）では「SNMP のポーリングは止めてある」と出して終わる |
 | `tg gnmi` | gNMI の購読を 20 秒だけ受けて画面に出す（MSK には送らない。BGP / IS-IS の行が出れば届いている） |
 
-- ログは CloudWatch Logs の `/ecs/<prefix>-telegraf`（出力 `telegraf_log_group_name`）。起動時に `/tmp/telegraf.conf を作った（sink: kafka / brokers: … / snmp poll: off / … / syslog: 5140/udp RFC3164）` が出る（`snmp poll` は `SNMP_POLL=1` ならポーリング先、最後は `SYSLOG_STANDARD` の値）。
+- ログは CloudWatch Logs の `/ecs/<prefix>-telegraf`（出力 `telegraf_log_group_name`。2 つのサービスで共有し、ストリームは受ける側が `dial-out/…`、取りにいく側が `dial-in/…`）。起動時に、受ける側は `/tmp/telegraf.conf を作った（role: dial_out / sink: kafka / brokers: … / trap: 1162/udp / syslog: 5140/udp RFC3164 / mdt: 57000/tcp）`、取りにいく側は `（role: dial_in / sink: kafka / brokers: … / snmp poll: off / gnmi: …）` が出る（`snmp poll` は `SNMP_POLL=1` ならポーリング先、`syslog` の最後は `SYSLOG_STANDARD` の値）。
 
 ```bash
 aws logs tail --region ap-northeast-1 "$(terraform -chdir=terraform/pipeline/stream output -raw telegraf_log_group_name)" --since 10m --follow
 ```
 
-- 以前の `sudo tg status` / `logs` / `restart` は無い（systemd が無い）。作り直すのは `ops/up.sh`（設定かポーリング先か `SNMP_POLL` が変わるとタスクが作り直される）か、`aws ecs update-service --force-new-deployment`。
+- 以前の `sudo tg status` / `logs` / `restart` は無い（systemd が無い）。作り直すのは `ops/up.sh`（イメージが変わると両方、ポーリング先・購読先か `SNMP_POLL` が変わると取りにいく側、`SYSLOG_STANDARD` が変わると受ける側のタスクが作り直される）か、`aws ecs update-service --force-new-deployment`（サービスごと）。
 - 設定のテンプレートは `telegraf/telegraf.conf.in`。変えたときは下の「変えたとき」。
 - `tg gnmi` / `tg test` で機器に届かない、trap が来ない、ログが来ないときは、lab の EC2 で `sudo lab forward-status` を見る（規則が無ければ `sudo lab forward`）。
 
@@ -288,7 +288,7 @@ uv run python lab/lab_topology.py lab --layers > agent/data/layers.json
 | `grafana/`（provisioning。ダッシュボードとアラート） | `ops/up.sh` を打つ（同じく手順 2 がイメージを作り直し、手順 7-4 の analytics の apply がタスクを入れ替える） |
 | `splunk/`（保存済みサーチ、アラートアクション） | `ops/up.sh` を打つ（同じ。Splunk の index はタスクと一緒に消えるので、入れ替えの前のイベントは検索できなくなる） |
 | `spark/snmp_sinks.py` | `ops/up.sh` を打つ（手順 7-5 がハッシュの違いを見て、動いているジョブを止めて起こし直す）。手で止めるコマンドは下 |
-| lab の機器や回線 | 上のあと `ops/sync-graph.sh --replace`。監視する機器を足したら `ops/up.sh`（stream の変数 `snmp_agents` / `gnmi_targets` が変わるので Telegraf のタスクが作り直される。device map は Splunk のタスクの環境変数なので、変われば手順 7-4 の apply が Splunk のタスクを入れ替える） |
+| lab の機器や回線 | 上のあと `ops/sync-graph.sh --replace`。監視する機器を足したら `ops/up.sh`（stream の変数 `snmp_agents` / `gnmi_targets` が変わるので Telegraf の取りにいく側のタスクが作り直される。device map は Splunk のタスクの環境変数なので、変われば手順 7-4 の apply が Splunk のタスクを入れ替える） |
 
 ジョブを止めるコマンド（`$APP_ID` と `$JOB_RUN_ID` は上の「Spark を確かめる」で入れる）:
 

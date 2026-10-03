@@ -1,9 +1,13 @@
 # ---------------------------------------------------------------- Telegraf (ECS on Fargate + internal NLB)
-# 機器の SNMP のポーリング・gNMI の購読・trap・syslog・MDT を受けて MSK に書く Telegraf を、Fargate のタスク 1 つで動かす（2026-09-28 まで terraform/pipeline/lab の EC2）。
+# 機器の SNMP のポーリング・gNMI の購読・trap・syslog・MDT を受けて MSK に書く Telegraf を、Fargate で動かす（2026-09-28 まで terraform/pipeline/lab の EC2）。
+# 同じイメージのタスクを役割（telegraf/telegraf.sh の TELEGRAF_ROLE）で 2 つのサービスに分ける（2026-10-04 ユーザー決定）:
+#   telegraf       dial_out。機器から送ってくる trap・syslog・MDT を NLB の後ろで受ける。機器の一覧を持たず、台数を増やしても同じものを 2 回書かない
+#   telegraf-poll  dial_in。gNMI の購読と SNMP のポーリングでこちらから取りにいく（lab の gNMI の変換もここ）。機器の一覧（gnmi_targets / snmp_agents）を持ち、
+#                  2 つ立てると同じ機器から 2 回取って MSK に 2 回書くので 1 つ。NLB には付けない
 # イメージは telegraf/Dockerfile（公式の telegraf に設定のテンプレートと入口を足したもの）で、ops/up.sh が ECR の <接頭辞>-telegraf に置く。
 # lab の管理ネットワーク（203.0.113.0/24）は lab の EC2 の中の docker network なので、terraform/pipeline/lab（forward_to_telegraf）が VPC のルートと
 # lab.sh forward で届ける:
-#   ポーリング  タスク → 機器の SNMP（161/udp）と gNMI（57400/tcp）。送り元はタスクの IP で、作り直すたびに変わるので、lab.sh forward は
+#   ポーリング  telegraf-poll → 機器の SNMP（161/udp）と gNMI（57400/tcp）。送り元はタスクの IP で、作り直すたびに変わるので、lab.sh forward は
 #               タスクのサブネットの CIDR（SSM の /<接頭辞>/telegraf-source-cidr）で通す
 #   trap        機器 → lab の EC2 の 162/udp → DNAT → 下の NLB の 162 → タスクの 1162（非 root は 1024 未満で待てない）
 #   syslog      機器 → lab の EC2 の 5140/udp → DNAT → NLB の 5140 → タスクの 5140
@@ -11,11 +15,11 @@
 # タスクの IP は作り直すと変わるので、DNAT の宛先は変わらない NLB の IP にする（SSM の /<接頭辞>/telegraf-address）。
 # NLB は UDP の送り元の IP を残す（UDP のターゲットは client IP preservation が既定で、Spark とエージェントは送り元の IP で機器を引く）。
 # MDT（TCP）は残さない（IP のターゲットの既定）。機器は MDT の中で node_id を名乗るので、送り元の IP は要らない。
-# SG は NLB（telegraf_nlb）とタスク（telegraf）で別々で、ルールは terraform/base/core の security_groups.tf の通信の表にある:
-#   NLB   管理ネットワークの CIDR から udp 162 / 5140 を、mdt_source_cidrs（土台の変数。既定は空）から tcp 57000 を受け（送り元が機器の管理 IP のまま）、
-#         タスクの SG へ udp 1162 / 5140、tcp 57000 と tcp 8080（ヘルスチェック）を送る
-#   タスク NLB の SG から受け（送り元の IP が残っても、NLB の SG を参照したルールで通る）、MSK の 9098・管理ネットワークの udp 161 / tcp 57400・
-#         エンドポイントと S3 の 443 へ送る
+# SG は NLB（telegraf_nlb）と 2 つのタスク（telegraf / telegraf_poll）で別々で、ルールは terraform/base/core の security_groups.tf の通信の表にある:
+#   NLB            管理ネットワークの CIDR から udp 162 / 5140 を、mdt_source_cidrs（土台の変数。既定は空）から tcp 57000 を受け（送り元が機器の管理 IP のまま）、
+#                  telegraf の SG へ udp 1162 / 5140、tcp 57000 と tcp 8080（ヘルスチェック）を送る
+#   telegraf       NLB の SG から受け（送り元の IP が残っても、NLB の SG を参照したルールで通る）、MSK の 9098・エンドポイントと S3 の 443 へ送る
+#   telegraf_poll  何も受けない。管理ネットワークの udp 161 / tcp 57400・MSK の 9098・エンドポイントと S3 の 443 へ送る
 
 locals {
   telegraf_repository_url = try(data.terraform_remote_state.ecr.outputs.telegraf_repository_url, "")
@@ -109,7 +113,7 @@ resource "aws_ssm_parameter" "telegraf_source_cidr" {
   name        = "/${local.name_prefix}/telegraf-source-cidr"
   type        = "String"
   value       = data.aws_subnet.telegraf.cidr_block
-  description = "CIDR of the subnet of the Telegraf task (its IP changes on every replacement). Read by lab.sh forward on the lab EC2 (SNMP / gNMI polling source)."
+  description = "CIDR of the subnet of the Telegraf poller task (its IP changes on every replacement). Read by lab.sh forward on the lab EC2 (SNMP / gNMI polling source)."
 }
 
 # ---------------------------------------------------------------- ECS
@@ -127,6 +131,8 @@ resource "aws_cloudwatch_log_group" "telegraf" {
   retention_in_days = var.log_retention_days
 }
 
+# ECS Exec（tg test / tg gnmi）を使うので readonlyRootFilesystem は付けない（ECS Exec が対応していない）。telegraf.sh が書くのは /tmp だけ。
+# どちらのタスクも同じイメージ・同じロール・同じロググループで、ログのストリームの頭（dial-out / dial-in）で見分ける
 resource "aws_ecs_task_definition" "telegraf" {
   family                   = "${local.name_prefix}-telegraf"
   requires_compatibilities = ["FARGATE"]
@@ -141,7 +147,6 @@ resource "aws_ecs_task_definition" "telegraf" {
     cpu_architecture        = "ARM64"
   }
 
-  # ECS Exec（tg test / tg gnmi）を使うので readonlyRootFilesystem は付けない（ECS Exec が対応していない）。telegraf.sh が書くのは /tmp だけ
   container_definitions = jsonencode([
     {
       name      = "telegraf"
@@ -154,19 +159,17 @@ resource "aws_ecs_task_definition" "telegraf" {
         { containerPort = 8080, protocol = "tcp" },  # outputs.health（NLB のヘルスチェック）
       ]
       environment = [
+        { name = "TELEGRAF_ROLE", value = "dial_out" },
         { name = "AWS_REGION", value = var.region },
         { name = "KAFKA_BROKERS", value = aws_msk_cluster.stream.bootstrap_brokers_sasl_iam },
-        { name = "SNMP_AGENTS", value = var.snmp_agents },
-        { name = "GNMI_TARGETS", value = var.gnmi_targets },
         { name = "SYSLOG_STANDARD", value = var.syslog_standard },
-        { name = "SNMP_POLL", value = var.snmp_poll ? "1" : "0" },
       ]
       logConfiguration = {
         logDriver = "awslogs"
         options = {
           awslogs-group         = aws_cloudwatch_log_group.telegraf.name
           awslogs-region        = var.region
-          awslogs-stream-prefix = "telegraf"
+          awslogs-stream-prefix = "dial-out"
         }
       }
     },
@@ -180,20 +183,68 @@ resource "aws_ecs_task_definition" "telegraf" {
   }
 }
 
+resource "aws_ecs_task_definition" "telegraf_poll" {
+  family                   = "${local.name_prefix}-telegraf-poll"
+  requires_compatibilities = ["FARGATE"]
+  network_mode             = "awsvpc"
+  cpu                      = var.telegraf_task_cpu
+  memory                   = var.telegraf_task_memory
+  execution_role_arn       = aws_iam_role.telegraf_execution.arn
+  task_role_arn            = aws_iam_role.telegraf_task.arn
+
+  runtime_platform {
+    operating_system_family = "LINUX"
+    cpu_architecture        = "ARM64"
+  }
+
+  # 受け口は無い（portMappings なし。outputs.health の 8080 は開くが、見る NLB は無い）
+  container_definitions = jsonencode([
+    {
+      name      = "telegraf"
+      image     = local.telegraf_image
+      essential = true
+      environment = [
+        { name = "TELEGRAF_ROLE", value = "dial_in" },
+        { name = "AWS_REGION", value = var.region },
+        { name = "KAFKA_BROKERS", value = aws_msk_cluster.stream.bootstrap_brokers_sasl_iam },
+        { name = "SNMP_AGENTS", value = var.snmp_agents },
+        { name = "GNMI_TARGETS", value = var.gnmi_targets },
+        { name = "SNMP_POLL", value = var.snmp_poll ? "1" : "0" },
+      ]
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          awslogs-group         = aws_cloudwatch_log_group.telegraf.name
+          awslogs-region        = var.region
+          awslogs-stream-prefix = "dial-in"
+        }
+      }
+    },
+  ])
+
+  lifecycle {
+    precondition {
+      condition     = local.telegraf_repository_url != ""
+      error_message = "terraform/base/ecr の state から telegraf_repository_url が読めない。terraform/base/ecr を先に apply する（ops/up.sh の手順 1）。"
+    }
+  }
+}
+
+# 受ける側（dial_out）。NLB の後ろ
 resource "aws_ecs_service" "telegraf" {
   name            = "${local.name_prefix}-telegraf"
   cluster         = aws_ecs_cluster.telegraf.id
   task_definition = aws_ecs_task_definition.telegraf.arn
-  desired_count   = 1
-  launch_type     = "FARGATE"
+  # 機器から送ってくるものだけなので、増やしても同じものを 2 回書かない（NLB が振り分ける）。PoC は 1 つ
+  desired_count = 1
+  launch_type   = "FARGATE"
 
-  # aws ecs execute-command でタスクの中に入れる（tg test / tg gnmi。コマンドは output telegraf_exec_command）
+  # aws ecs execute-command でタスクの中に入れる（設定を見る程度。tg test / tg gnmi は telegraf-poll で打つ）
   enable_execute_command = true
 
-  # 2 つ同時に立てない（同じ機器を 2 回ポーリングして MSK に 2 回書かない）。取りにいく入力（SNMP のポーリング、gNMI の購読）があるあいだは 1 つ。
-  # gNMI は lab（SR Linux は MDT を送れない）のためのもので、本番の Cisco は MDT の dial-out で送らせる方針（docs/collection.md）
-  deployment_minimum_healthy_percent = 0
-  deployment_maximum_percent         = 100
+  # 新しいタスクが NLB のヘルスチェックを通ってから古いタスクを外す（入れ替えのあいだも trap と syslog を落とさない）
+  deployment_minimum_healthy_percent = 100
+  deployment_maximum_percent         = 200
 
   health_check_grace_period_seconds = 60
 
@@ -214,6 +265,34 @@ resource "aws_ecs_service" "telegraf" {
 
   depends_on = [
     aws_lb_listener.telegraf,
+    aws_iam_role_policy.telegraf_task,
+    aws_iam_role_policy_attachment.telegraf_execution,
+  ]
+}
+
+# 取りにいく側（dial_in）。NLB に付けない
+resource "aws_ecs_service" "telegraf_poll" {
+  name            = "${local.name_prefix}-telegraf-poll"
+  cluster         = aws_ecs_cluster.telegraf.id
+  task_definition = aws_ecs_task_definition.telegraf_poll.arn
+  desired_count   = 1
+  launch_type     = "FARGATE"
+
+  # aws ecs execute-command でタスクの中に入れる（tg test / tg gnmi。コマンドは output telegraf_exec_command）
+  enable_execute_command = true
+
+  # 2 つ同時に立てない（同じ機器を 2 回ポーリング・購読して MSK に 2 回書かない）。入れ替えでは古いタスクを止めてから新しいタスクを起こす。
+  # gNMI は lab（SR Linux は MDT を送れない）のためのもので、本番の Cisco は MDT の dial-out で送らせる方針（docs/collection.md）
+  deployment_minimum_healthy_percent = 0
+  deployment_maximum_percent         = 100
+
+  network_configuration {
+    subnets          = [local.telegraf_subnet_id]
+    security_groups  = [local.telegraf_poll_sg_id]
+    assign_public_ip = false
+  }
+
+  depends_on = [
     aws_iam_role_policy.telegraf_task,
     aws_iam_role_policy_attachment.telegraf_execution,
   ]

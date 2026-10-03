@@ -7,7 +7,7 @@
 ## AWS 側
 
 - **VPC は `terraform/base/core` が作る。**既定は `10.0.0.0/16` に `/24` のプライベートサブネット 2 つ（`apne1-az1` / `apne1-az4`）。インターネットへの経路は無い（NAT Gateway も IGW もパブリックサブネットも作らない。外から入る経路も無い）。社内のネットワークと重なるなら `deploy.env` の `VPC_CIDR` を変える（`/16`〜`/24`）。
-- **SG はワークロードごとに 1 つ（12 個）と、VPC エンドポイント用の `endpoints`。**全部 `terraform/base/core` の `security_groups.tf` が作り、ルールはそこの通信の表から作る。表に無い通信は VPC の中でも通らない（送信も絞る）。表は [architecture/core.md](architecture/core.md) の「SG」。VPC の全 ENI の通信は VPC フローログ（ロググループ `/<prefix>/vpc-flow-logs`、保存 7 日）に残る。
+- **SG はワークロードごとに 1 つ（13 個）と、VPC エンドポイント用の `endpoints`。**全部 `terraform/base/core` の `security_groups.tf` が作り、ルールはそこの通信の表から作る。表に無い通信は VPC の中でも通らない（送信も絞る）。表は [architecture/core.md](architecture/core.md) の「SG」。VPC の全 ENI の通信は VPC フローログ（ロググループ `/<prefix>/vpc-flow-logs`、保存 7 日）に残る。
 - AWS の API（SSM / ECR / CloudWatch Logs / Bedrock / AgentCore / S3 Tables / SNS / SQS / Prometheus）へはインターフェース型エンドポイントで届き、VPC の外からの呼び出しは Deny で拒む（[architecture/core.md](architecture/core.md) の「閉域」）。ほかに S3 の Gateway 型（無料。ポリシーは付けない）と、KB か logs のコレクションを作るときの OpenSearch Serverless の 1 本（2 AZ で約 $0.03/h）。エンドポイントの無い API へは届かない（NAT Gateway が無いので Deny より先に接続のタイムアウトになる）。
 - 組織の SCP で `aws:SourceVpc` の Deny をすでに掛けているなら、この Terraform の Deny と重なっても害は無い。逆に VPC エンドポイントの作成を SCP で止めていると、手順 3 で落ちる。
 - 使うモデル: Nova 2 Lite（`jp.amazon.nova-2-lite-v1:0`）、Titan Text Embeddings V2、Rerank（`amazon.rerank-v1:0`）。どれも Amazon のモデルなので Marketplace の購読は要らない。SCP や IAM でモデルを絞っているなら、この 3 つを許可する。

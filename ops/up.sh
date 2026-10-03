@@ -389,8 +389,8 @@ echo "インターフェース型エンドポイント（$(endpoint_count) 本 �
 #   + CREATE_KB なら 33（OpenSearch Serverless の OCU）、
 # OpenSearch Serverless の VPC エンドポイント = 3（1.4 × 2 AZ。公表単価からで Price List API では確かめていない。
 #   KB と logs のコレクションを公開しないために作り、両方で 1 本を共用する。NEED_AOSS のときだけ）、
-# lab = 17（EC2 の t4g.xlarge 17.28。2026-10-04 に公開の料金ファイルで確認。それまでの 9 は t4g.large の単価だった）、graph = 14、stream = 57 + Telegraf 4（Fargate ARM 0.25 vCPU / 0.5 GB で 1.2 と内部 NLB 2.43。
-#   2026-09-28 から。どちらも公表単価からで、Price List API では確かめていない）、
+# lab = 17（EC2 の t4g.xlarge 17.28。2026-10-04 に公開の料金ファイルで確認。それまでの 9 は t4g.large の単価だった）、graph = 14、stream = 57 + Telegraf 5（Fargate ARM 0.25 vCPU / 0.5 GB で 1.2 のタスクが 2 つ（受ける側と取りにいく側。2026-10-04 に分けた）と内部 NLB 2.43。
+#   NLB は 2026-09-28 から。どちらも公表単価からで、Price List API では確かめていない）、
 # analytics = 14（ストリーミングのジョブが動いている間の EMR Serverless の 2 vCPU。単価は 2026-09-17 に確認。
 #   S3 Tables のテーブルは無料）
 #   + SINK_PROMETHEUS は 0（取り込みのサンプル課金は別）
@@ -409,7 +409,7 @@ if [ -z "$SKIP_GRAPH" ]; then COST_CENTS=$((COST_CENTS + 14)); fi
 if [ -z "$SKIP_STREAM" ]; then
   # MSK は kafka.m5.large × 2 で 0.542（Kafka 4 は t3.small を受け付けない。2026-09-18）
   COST_CENTS=$((COST_CENTS + 57))
-  COST_CENTS=$((COST_CENTS + 4))   # Telegraf（Fargate と NLB）
+  COST_CENTS=$((COST_CENTS + 5))   # Telegraf（Fargate のタスク 2 つと NLB）
 fi
 if [ -z "$SKIP_ANALYTICS" ]; then
   COST_CENTS=$((COST_CENTS + 14))
@@ -733,12 +733,13 @@ if [ -n "$LAB_INSTANCE_ID" ]; then
   fi
 fi
 if [ -z "$SKIP_STREAM" ]; then
-  log "7-2c. Telegraf の ECS のサービスが安定するのを待つ（イメージの取得と NLB のヘルスチェック。1〜3 分）"
+  log "7-2c. Telegraf の ECS のサービス 2 つ（受ける側と取りにいく側）が安定するのを待つ（イメージの取得と NLB のヘルスチェック。1〜3 分）"
   TG_CLUSTER=$(tf pipeline/stream output -raw telegraf_cluster_name); TG_SERVICE=$(tf pipeline/stream output -raw telegraf_service_name)
-  if aws ecs wait services-stable --region "$REGION" --cluster "$TG_CLUSTER" --services "$TG_SERVICE"; then
-    echo "Telegraf は動いている（ログ: aws logs tail --region $REGION $(tf pipeline/stream output -raw telegraf_log_group_name) --follow）"
+  TG_POLL_SERVICE=$(tf pipeline/stream output -raw telegraf_poll_service_name)
+  if aws ecs wait services-stable --region "$REGION" --cluster "$TG_CLUSTER" --services "$TG_SERVICE" "$TG_POLL_SERVICE"; then
+    echo "Telegraf は動いている（ログ: aws logs tail --region $REGION $(tf pipeline/stream output -raw telegraf_log_group_name) --follow。ストリームは受ける側が dial-out/、取りにいく側が dial-in/）"
   else
-    printf '\033[1;33m%s\033[0m\n' "Telegraf のサービスが 10 分たっても安定しない。$(tf pipeline/stream output -raw telegraf_list_tasks_command) とロググループ $(tf pipeline/stream output -raw telegraf_log_group_name) を見る（docs/troubleshooting.md）"
+    printf '\033[1;33m%s\033[0m\n' "Telegraf のサービスが 10 分たっても安定しない。受ける側は $(tf pipeline/stream output -raw telegraf_list_tasks_command)、取りにいく側は $(tf pipeline/stream output -raw telegraf_poll_list_tasks_command) とロググループ $(tf pipeline/stream output -raw telegraf_log_group_name) を見る（docs/troubleshooting.md）"
   fi
 fi
 
@@ -898,7 +899,8 @@ if [ -n "$LAB_INSTANCE_ID" ]; then
   tf pipeline/lab output -raw start_session_command; echo
 fi
 if [ -z "$SKIP_STREAM" ]; then
-  echo "Telegraf（ECS）に入るコマンド（中で tg gnmi。SNMP_POLL=1 なら tg test でポーリングも見られる）:"
+  echo "Telegraf（ECS の取りにいく側）に入るコマンド（TASK_ID は下の 1 行目で出る ARN の最後。中で tg gnmi。SNMP_POLL=1 なら tg test でポーリングも見られる）:"
+  tf pipeline/stream output -raw telegraf_poll_list_tasks_command; echo
   tf pipeline/stream output -raw telegraf_exec_command; echo
 fi
 if [ -n "$GRAFANA" ]; then

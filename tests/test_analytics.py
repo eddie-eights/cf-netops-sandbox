@@ -79,8 +79,8 @@ check("EMR / Grafana / Splunk は土台の spark / grafana / splunk の SG を�
 
 _sg_keys = re.search(r'security_groups = \{(.*?)\n  \}', _sg_tf, re.S)
 _sg_keys = set(re.findall(r'^\s+(\w+)\s+=\s+"', _sg_keys.group(1), re.M)) if _sg_keys else set()
-SG_KEYS = {"web", "lab", "telegraf", "telegraf_nlb", "msk", "spark", "grafana", "splunk", "neptune", "lambda", "workflow", "runtime"}
-check(f"土台の SG はワークロードごとの 12 個と endpoints（{sorted(_sg_keys)}）",
+SG_KEYS = {"web", "lab", "telegraf", "telegraf_poll", "telegraf_nlb", "msk", "spark", "grafana", "splunk", "neptune", "lambda", "workflow", "runtime"}
+check(f"土台の SG はワークロードごとの 13 個と endpoints（{sorted(_sg_keys)}）",
       _sg_keys == SG_KEYS and re.findall(r'resource "aws_security_group" "(\w+)"', _core) == ["workload", "endpoints"]
       and re.search(r'resource "aws_security_group" "workload" \{\n\s*for_each = local\.security_groups', _sg_tf) is not None)
 # 通信の表を読む（from = sg の行は aws_api_clients に展開する）
@@ -90,16 +90,17 @@ _flows = set()
 for _m in re.finditer(r'\{ from = ("?\w+"?), to = "(\w+)", protocol = "(\w+)", port = (\d+)(?:, to_port = (\d+))?(?:, only = "(\w+)")?, why = "([^"]*)" \}', _sg_tf):
     for _from in (_clients if _m.group(1) == "sg" else [_m.group(1).strip('"')]):
         _flows.add((_from, _m.group(2), _m.group(3), int(_m.group(4)), int(_m.group(5) or _m.group(4)), _m.group(6) or ""))
-EXPECTED_FLOWS = {(c, t, "tcp", 443, 443, "") for c in ("web", "lab", "telegraf", "spark", "grafana", "splunk", "lambda", "workflow", "runtime") for t in ("endpoints", "s3")} | {
+EXPECTED_FLOWS = {(c, t, "tcp", 443, 443, "") for c in ("web", "lab", "telegraf", "telegraf_poll", "spark", "grafana", "splunk", "lambda", "workflow", "runtime") for t in ("endpoints", "s3")} | {
     *((c, "neptune", "tcp", 8182, 8182, "") for c in ("web", "runtime", "lambda", "workflow")),   # spark は 2026-10-02 に外した（検知をやめた）
     ("web", "grafana", "tcp", 3000, 3000, ""), ("web", "splunk", "tcp", 8000, 8000, ""), ("web", "workflow", "tcp", 8233, 8233, ""),
-    ("telegraf", "msk", "tcp", 9098, 9098, ""), ("spark", "msk", "tcp", 9098, 9098, ""), ("msk", "msk", "tcp", 9092, 9098, ""),
+    ("telegraf", "msk", "tcp", 9098, 9098, ""), ("telegraf_poll", "msk", "tcp", 9098, 9098, ""), ("spark", "msk", "tcp", 9098, 9098, ""), ("msk", "msk", "tcp", 9092, 9098, ""),
     ("spark", "spark", "tcp", 0, 65535, ""), ("spark", "splunk", "tcp", 8088, 8088, ""),
     ("telegraf_nlb", "telegraf", "udp", 1162, 1162, ""), ("telegraf_nlb", "telegraf", "udp", 5140, 5140, ""), ("telegraf_nlb", "telegraf", "tcp", 57000, 57000, ""), ("telegraf_nlb", "telegraf", "tcp", 8080, 8080, ""),
     ("lab_mgmt", "telegraf_nlb", "udp", 162, 162, ""), ("lab_mgmt", "telegraf_nlb", "udp", 5140, 5140, ""),
     ("lab", "telegraf_nlb", "udp", 162, 162, "egress"), ("lab", "telegraf_nlb", "udp", 5140, 5140, "egress"),
-    ("telegraf", "lab_mgmt", "udp", 161, 161, ""), ("telegraf", "lab_mgmt", "tcp", 57400, 57400, ""),
-    ("telegraf", "lab", "udp", 161, 161, "ingress"), ("telegraf", "lab", "tcp", 57400, 57400, "ingress"),
+    # ポーリングと gNMI は取りにいく側（telegraf_poll）だけ。受ける側（telegraf）は機器へ出ない（2026-10-04 に分けた）
+    ("telegraf_poll", "lab_mgmt", "udp", 161, 161, ""), ("telegraf_poll", "lab_mgmt", "tcp", 57400, 57400, ""),
+    ("telegraf_poll", "lab", "udp", 161, 161, "ingress"), ("telegraf_poll", "lab", "tcp", 57400, 57400, "ingress"),
 }
 check(f"通信の表は決めた流れだけ（多い: {sorted(_flows - EXPECTED_FLOWS)} 足りない: {sorted(EXPECTED_FLOWS - _flows)}）",
       _flows == EXPECTED_FLOWS and _sg_tf.count("{ from = ") == len(EXPECTED_FLOWS) - 2 * len(_clients) + 2 + 1)
