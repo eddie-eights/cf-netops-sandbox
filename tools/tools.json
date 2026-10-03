@@ -78,27 +78,6 @@
     }
   },
   {
-    "name": "list_anomalies",
-    "description": "監視で見つかった異常の一覧（機器、種別 link_down / bgp_down / isis_down / trap、対象（インタフェース。bgp_down は相手の IP）、発生時刻、最後に確認した時刻、解消時刻、poll / trap / gnmi のどれで見つけたか）。「今の異常は」「どこが落ちている」と聞かれたら status=open で呼ぶ。「これまでの異常は」「過去に何があった」「履歴」と聞かれたら status=all（解消済みも含む）で呼ぶ。解消済みだけなら status=resolved。",
-    "inputSchema": {
-      "type": "object",
-      "properties": {
-        "status": {
-          "type": "string",
-          "description": "open（未解消、既定）／ resolved（解消済み）／ all（両方を新しい順に）"
-        },
-        "limit": {
-          "type": "integer",
-          "description": "件数の上限（既定 20、最大 100）"
-        },
-        "device_id": {
-          "type": "string",
-          "description": "機器名（例 dc1-leaf-01）で絞る。空なら全機器"
-        }
-      }
-    }
-  },
-  {
     "name": "search_logs",
     "description": "監視ログ（SNMP trap など）を機器名で検索する。異常の原因を調べるとき、その機器で直前に何が起きたかを見るのに使う。",
     "inputSchema": {

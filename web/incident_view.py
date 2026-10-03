@@ -1,8 +1,8 @@
-"""「異常一覧」タブと「承認」タブの中身。どちらも Neptune の頂点を読む（承認タブは status も書き戻す）。
+"""「承認」タブの中身。Neptune の頂点を読み、status を書き戻す。
 
-  異常一覧  terraform/pipeline/analytics の Spark が書いた anomaly の頂点（anomalies.py）
   承認      terraform/workflow のワーカーが書いた proposal の頂点（proposals.py）。承認・却下はここから書き戻す。履歴は S3 Tables の proposal_events（ワーカーが書く）
 
+「異常一覧」タブ（Spark が書いた anomaly の頂点）は 2026-10-02 にやめた。いまの異常はトポロジのタブの状態、アラートの履歴は Grafana / Splunk で見る。
 未配備のときは list_* が error を返すので、その文言をそのまま画面に出す。
 """
 
@@ -13,10 +13,8 @@ import pandas as pd
 
 import config  # noqa: F401 - sys.path と TOPOLOGY_DATA_DIR を通すために先に読む
 
-import anomalies
 import proposals
 
-ANOMALY_COLS = ["機器", "種別", "対象", "状態", "発生", "最終確認", "解消", "経路"]
 PROPOSAL_COLS = ["proposal_id", "状態", "機器", "種別", "対象", "原因", "処置", "コマンド", "理由", "作成", "更新", "決めた人", "結果"]
 
 # 表は列が多く、原因・理由は長い文なので折り返す。幅は %（Gradio 5 の column_widths）。表で切れる分は下の「詳細」に全文を出す
@@ -24,7 +22,6 @@ PROPOSAL_WIDTHS = ["14%", "6%", "7%", "7%", "5%", "16%", "6%", "9%", "16%", "7%"
 
 
 # 状態の日本語。変えるのは画面の表示だけで、Neptune・証跡・ワーカー・ツールの値（open / pending など）はそのまま
-ANOMALY_STATUS_JA = {"open": "未解消", "resolved": "解消済み"}
 PROPOSAL_STATUS_JA = {
     "pending": "承認待ち", "approved": "承認済み（修復待ち）", "applied": "修復した（確認中）", "verified": "復旧を確認",
     "failed": "失敗", "rejected": "却下", "expired": "期限切れ", "obsolete": "不要（先に解消）", "all": "すべて",
@@ -38,16 +35,6 @@ def status_choices(ja: dict) -> list:
 
 def _ja(ja: dict, status: str) -> str:
     return ja.get(status, status)
-
-
-# ---------------------------------------------------------------- 異常一覧
-def anomaly_table(status: str = "open"):
-    r = anomalies.list_anomalies(status=status, limit=100)
-    rows = [{"機器": a.get("device_id", ""), "種別": a.get("kind", ""), "対象": a.get("target", ""), "状態": _ja(ANOMALY_STATUS_JA, a.get("status", "")),
-             "発生": a.get("first_seen_jst", ""), "最終確認": a.get("last_seen_jst", ""), "解消": a.get("resolved_at_jst", ""),
-             "経路": a.get("source", "")} for a in r.get("anomalies", [])]
-    msg = r["error"] if r.get("error") else f"{r.get('count', 0)} 件（{_ja(ANOMALY_STATUS_JA, status)}）"
-    return msg, pd.DataFrame(rows, columns=ANOMALY_COLS)
 
 
 # ---------------------------------------------------------------- 承認（WORKFLOW）

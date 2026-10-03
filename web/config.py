@@ -1,7 +1,7 @@
 """Web の下ごしらえ。環境変数を読み、エージェントのモジュールを import できる状態にする。
 
 web/ の他のモジュール（chat.py / topology_view.py / incident_view.py / app.py）は、
-agent/ のモジュール（topology・anomalies・graph・proposals・toolkit）より先にこのファイルを import する。
+agent/ のモジュール（topology・graph・proposals・toolkit）より先にこのファイルを import する。
 sys.path と TOPOLOGY_DATA_DIR をここで決めているので、順番が逆だと静的データの場所が変わる。
 """
 

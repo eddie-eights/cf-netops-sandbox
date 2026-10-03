@@ -1,11 +1,11 @@
-"""エージェントのツール（topology.py / anomalies.py / evidence.py / proposals.py）が共有する小物。
+"""エージェントのツール（topology.py / evidence.py / proposals.py）が共有する小物。
 
 同じコードが何本ものファイルに写してあったのを 1 か所に集めたもの。中身は 4 つ:
 
   runner()              TOOLS（ツール名 → 関数）から run_tool を作る。4 モジュールが同じものを持っていた
   client() / session()  boto3 のクライアントとセッションをプロセスに 1 つだけ作って使い回す
   Param                 「環境変数が先、無ければ SSM」の設定値（Neptune の接続先・Gateway の URL・Runtime の ARN）
-  jst()                 epoch 秒を日本時間の文字列に（anomalies.py と proposals.py）
+  jst()                 epoch 秒を日本時間の文字列に（proposals.py）
 
 このファイルは 4 か所で動く。AgentCore Runtime のコンテナ（agent/Dockerfile）、tools Lambda の zip
 （terraform/workflow/gateway.tf の archive_file）、Web の EC2（terraform/base/core の出力 upload_web_command）、

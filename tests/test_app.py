@@ -1,5 +1,5 @@
 """agent/app.py の模擬テスト。boto3 と bedrock_agentcore を差し替えて、AWS に触れずに流れを確かめる。"""
-import importlib.util, os, sys, types
+import importlib.util, os, re, sys, types
 
 # 引数が無ければ agent/app.py を読む。実行は uv run python tests/test_app.py（docs/development.md「手元で確かめる」）
 APP_PATH = sys.argv[1] if len(sys.argv) > 1 else os.path.join(os.path.dirname(__file__), "..", "agent", "app.py")
@@ -94,7 +94,7 @@ r = app.invoke({"prompt": "%BGP-5-ADJCHANGE が出た"})
 rk = state["calls"][0][1]; ck = state["calls"][1][1]
 check("RERANK_MODEL_ARN が無ければリランクなしで HYBRID と件数だけ渡す", rk["retrievalConfiguration"]["vectorSearchConfiguration"] == {"numberOfResults": 3, "overrideSearchType": "HYBRID"} and rk["knowledgeBaseId"] == "KB12345678")
 check("Converse に guardrailConfig", ck["guardrailConfig"] == {"guardrailIdentifier": "gr123", "guardrailVersion": "1"})
-check("Converse にトポロジの 5 ツール + 異常一覧 + 証拠の 3 ツール + 修復案の履歴", [t["toolSpec"]["name"] for t in ck["toolConfig"]["tools"]] == ["list_devices", "neighbors", "blast_radius", "topology_graph", "layers", "list_anomalies", "search_logs", "query_metrics", "query_history", "list_proposals"])
+check("Converse にトポロジの 5 ツール + 証拠の 3 ツール + 修復案の履歴（異常一覧 list_anomalies は 2026-10-02 にやめた）", [t["toolSpec"]["name"] for t in ck["toolConfig"]["tools"]] == ["list_devices", "neighbors", "blast_radius", "topology_graph", "layers", "search_logs", "query_metrics", "query_history", "list_proposals"])
 last = ck["messages"][-1]
 check("質問は guardContent、資料は text", last["content"][1] == {"guardContent": {"text": {"text": "%BGP-5-ADJCHANGE が出た"}}} and "<documents>" in last["content"][0]["text"] and 'source="interface-errors.md"' in last["content"][0]["text"])
 check("初回は messages 1 件", len(ck["messages"]) == 1)
@@ -181,16 +181,19 @@ lc = t.link_choices()
 check("link_choices は 12 本の (表示, a|a_if|b)", len(lc) == 12 and ("dc1-leaf-01 ethernet-1/1 - dc1-spine-01 ethernet-1/3  [fabric]", "dc1-leaf-01|ethernet-1/1|dc1-spine-01") in lc)
 check("VM との LACP は lag", ("dc1-host-01 eth1 - dc1-leaf-01 ethernet-1/3  [lag]", "dc1-host-01|eth1|dc1-leaf-01") in lc)
 check("link_choices の値は remove_link の引数に戻せる", all(v.count("|") == 2 and v.split("|")[0] < v.split("|")[2] for _, v in lc))
-a = app.anomalies
-check("異常一覧は Neptune 未設定なら error と空リスト", a.list_anomalies()["anomalies"] == [] and "terraform/pipeline/graph" in a.list_anomalies()["error"])
-check("app.run_tool は list_anomalies を anomalies に振る", "error" in app.run_tool("list_anomalies", {"status": "open"}) and app.run_tool("list_devices", {})["count"] == 8)
+# 異常の頂点（label anomaly）と list_anomalies は 2026-10-02 にやめた（Neptune はトポロジと修復案だけ。検知は Grafana / Splunk）
+check("異常一覧のモジュールとツールはもう無い（app.run_tool は unknown を返す）",
+      not hasattr(app, "anomalies") and "unknown" in app.run_tool("list_anomalies", {"status": "open"})["error"] and app.run_tool("list_devices", {})["count"] == 8)
 check("app.run_tool は layers を topology に振る", app.run_tool("layers", {"device_id": "dc1-leaf-01", "layer": "ip"})["count"] == 5)
-check("anomalies.run_tool の未知ツール", "unknown" in a.run_tool("nope", {})["error"])
 check("app.run_tool は list_proposals を proposals に振る（Neptune 未設定なので案内）", "terraform/workflow" in app.run_tool("list_proposals", {})["error"])
-# 過去の異常・修復履歴・状態に答えられるようにした（2026-09-18）
-check("list_anomalies は status=all と device_id を受ける", {"status", "limit", "device_id"} == set(a.TOOL_SPECS[0]["toolSpec"]["inputSchema"]["json"]["properties"]) and "all" in a.TOOL_SPECS[0]["toolSpec"]["description"])
-check("system prompt は過去 → status=all、履歴 → list_proposals、承認はしない、と言う",
-      "status=all" in app.SYSTEM_PROMPT and "list_proposals" in app.SYSTEM_PROMPT and "承認や却下はあなたにはできません" in app.SYSTEM_PROMPT)
+# 過去の経緯・修復履歴・状態に答えられるようにした（2026-09-18）。2026-10-02 から「いまの異常」は機器・回線・層の status で答える
+check("system prompt はいまの異常 → status、履歴 → list_proposals、アラートの履歴は Grafana / Splunk、承認はしない、と言う",
+      "status（UP 以外）" in app.SYSTEM_PROMPT and "list_proposals" in app.SYSTEM_PROMPT and "Grafana / Splunk" in app.SYSTEM_PROMPT
+      and "承認や却下はあなたにはできません" in app.SYSTEM_PROMPT and "list_anomalies" not in app.SYSTEM_PROMPT and "status=all" not in app.SYSTEM_PROMPT)
+# プロンプトに無いツール名を書くと、モデルは無いツールを呼ぼうとして unknown tool が返る（2026-10-02 に layers を list_layers と書いた）
+_tool_names = {s["toolSpec"]["name"] for s in app.TOOL_SPECS}
+_mentioned = set(re.findall(r"\b(?:list|query|search)_[a-z_]+\b|\b(?:neighbors|blast_radius|topology_graph|layers)\b", app.SYSTEM_PROMPT))
+check(f"system prompt に出てくるツール名は全部 TOOL_SPECS にある（無い: {sorted(_mentioned - _tool_names)}）", _mentioned and not (_mentioned - _tool_names))
 
 # ---- ツールの往復
 app.history.clear()

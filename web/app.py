@@ -4,9 +4,9 @@
   config.py         環境変数（.env / systemd）の読み出しと、agent/ のモジュールへのパス通し
   chat.py           「チャット」タブ。質問を AgentCore Runtime に送る
   topology_view.py  「トポロジ」タブ。SVG の図・機器の表・Neptune でのリンク編集
-  incident_view.py  「異常一覧」「承認」タブ。Neptune の anomaly / proposal の頂点
+  incident_view.py  「承認」タブ。Neptune の proposal の頂点
 
-agent/ の topology.py / anomalies.py / graph.py / proposals.py / toolkit.py をそのまま同じディレクトリに置いて import する
+agent/ の topology.py / graph.py / proposals.py / toolkit.py をそのまま同じディレクトリに置いて import する
 （terraform/base/core の出力 upload_web_command が web/*.py と一緒に S3 へ上げる）。
 依存（gradio / boto3 / pyyaml）は S3 に置いた wheel から入れる（terraform/base/core の user_data）。インターネットには出ない。
 """
@@ -72,16 +72,6 @@ with gr.Blocks(title=f"{TITLE} チャット") as demo:
             add_btn.click(tv.add_link, [la, lai, lb, lbi, lkind, lrole, lbw], edit_out)
             del_btn.click(tv.remove_link, [del_sel, la, lb], edit_out)
         topo_refresh.click(tv.refresh_topology, [la, lb], [topo_html, topo_table, layer_table, la, lb, del_sel])
-    with gr.Tab("異常一覧"):
-        with gr.Row():
-            an_status = gr.Radio(iv.status_choices(iv.ANOMALY_STATUS_JA), value="open", label="状態", scale=3)
-            an_refresh = gr.Button("更新", scale=1)
-        an_msg = gr.Markdown()
-        an_table = gr.Dataframe(pd.DataFrame(columns=iv.ANOMALY_COLS), interactive=False, wrap=True, label="異常（Spark が Neptune に書いたもの。開いた・閉じたの履歴は S3 Tables の anomaly_events）")
-        an_refresh.click(iv.anomaly_table, [an_status], [an_msg, an_table])
-        an_status.change(iv.anomaly_table, [an_status], [an_msg, an_table])
-        demo.load(iv.anomaly_table, [an_status], [an_msg, an_table])
-        gr.Markdown("lab で `lab failover` を打つと、SNMP ポーリング（10 秒）か trap（5 秒）で `link_down` が出ます。`lab heal-main` で「解消済み」に変わります。")
     with gr.Tab("承認"):
         with gr.Row():
             pr_status = gr.Radio(iv.status_choices(iv.PROPOSAL_STATUS_JA), value="pending", label="状態", scale=4)
@@ -113,11 +103,10 @@ with gr.Blocks(title=f"{TITLE} チャット") as demo:
         pr_id.change(lambda _: False, [pr_id], [pr_ok])
         pr_ok.change(iv.approve_button, [pr_ok, pr_who], [pr_approve])
         pr_who.change(iv.approve_button, [pr_ok, pr_who], [pr_approve])
-        # 30 秒ごとに描き直す（Spark の検知が 1 分、ワーカーの確認が 30 秒おきなので、ボタンを押さなくても追える。
-        # 読むのは Neptune のクエリ 3 回（トポロジ・異常・修復案）で、開いているブラウザの数だけ）。proposal_id の選択はそのまま残す
+        # 30 秒ごとに描き直す（アラートが status に届くまで 1 分前後、ワーカーの承認待ちが 30 秒おきなので、ボタンを押さなくても追える。
+        # 読むのは Neptune のクエリ 2 回（トポロジ・修復案）で、開いているブラウザの数だけ）。proposal_id の選択はそのまま残す
         ticker = gr.Timer(30)
         ticker.tick(tv.redraw_topology, None, [topo_html, topo_table, layer_table])
-        ticker.tick(iv.anomaly_table, [an_status], [an_msg, an_table])
         ticker.tick(lambda st: iv.proposal_table(st)[:2], [pr_status], [pr_msg, pr_table])
         pr_approve.click(lambda i, s, w, ok: iv.decide_proposal(i, "approved", s, w, ok), [pr_id, pr_status, pr_who, pr_ok],
                           [pr_result, pr_table, pr_id])
@@ -125,8 +114,9 @@ with gr.Blocks(title=f"{TITLE} チャット") as demo:
                           [pr_result, pr_table, pr_id])
         gr.Markdown("修復案は Temporal のワークフロー（terraform/workflow の ECS Fargate のワーカー）が出し、承認を待っています。"
                     "承認すると同じワークフローが lab EC2 で `sudo lab <コマンド>` を打ち（EC2 への入口は SSM Run Command。SSH は開けていない）、"
-                    "異常が解消するまで 30 秒おきに数回確かめて「復旧を確認」にします（戻らなければ「失敗」）。却下は何もしません。"
-                    "承認には名前と「詳細を読んだ」のチェックが要ります。打つ直前に異常がもう閉じていれば、打たずに「不要（先に解消）」にします。"
+                    "アラートの解消（resolved）が届いたら「復旧を確認」にします（verify_timeout_seconds のあいだに届かなければ「失敗」）。却下は何もしません。"
+                    "承認には名前と「詳細を読んだ」のチェックが要ります。打つ前にアラートが解消していれば、打たずに「不要（先に解消）」にします。"
+                    "いまの異常はトポロジのタブの状態（DOWN / ALARM）、アラートの履歴は Grafana / Splunk で見ます。"
                     "承認待ちのまま 2 時間（approval_timeout_minutes）で「期限切れ」になります。")
 
 if __name__ == "__main__":

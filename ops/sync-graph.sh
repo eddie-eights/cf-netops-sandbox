@@ -4,7 +4,7 @@
 #
 # 使い方（展開したフォルダの直下で。ops/up.sh と同じ deploy.env と AWS の認証情報）:
 #   ops/sync-graph.sh            # Neptune が空のときだけ入れる（初期ロード。入っていれば何もしない）
-#   ops/sync-graph.sh --replace  # 入っていても入れ直す（Web で編集した内容と、Spark の検知で付いた status は消えて lab の定義に戻る）
+#   ops/sync-graph.sh --replace  # 入っていても入れ直す（Web で編集した内容と、アラートで付いた status は消えて lab の定義に戻る）
 #   ops/sync-graph.sh --dry-run  # Neptune には触らず、lab から作ったトポロジ（JSON）を出すだけ
 #
 # terraform/base/core（Web の EC2）と terraform/pipeline/graph（Neptune）が出来ていることが前提。Web の EC2 の上で ops/seed_graph.py を SSM Run Command で動かす。

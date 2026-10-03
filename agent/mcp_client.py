@@ -1,7 +1,7 @@
 """AgentCore Gateway（MCP）のクライアント。Runtime から Gateway のツールを Converse の toolSpec として使う。
 
 Gateway の URL は環境変数 GATEWAY_URL、無ければ SSM の <PARAM_PREFIX>/gateway-url（terraform/workflow が書く）。
-どちらも無ければ空を返し、app.py はコンテナ内の関数（topology.py / anomalies.py）を使う。
+どちらも無ければ空を返し、app.py はコンテナ内の関数（topology.py / evidence.py / proposals.py）を使う。
 Gateway の認可は AWS_IAM なので、リクエストを SigV4（サービス名 bedrock-agentcore）で署名して JSON-RPC を POST する。
 Gateway のツール名は "<ターゲット名>___<ツール名>" なので、モデルには後ろの <ツール名> だけを見せ、呼ぶときに戻す。
 tools/list の結果は TTL 秒だけ持つ（質問のたびに Gateway を叩かない）。

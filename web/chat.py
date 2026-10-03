@@ -3,7 +3,7 @@
 セッション ID はブラウザのセッションごとに 1 つ（Runtime 側の会話履歴はこの ID で分かれる）。
 Runtime の ARN は環境変数 RUNTIME_ARN があればそれ、無ければ SSM の <PARAM_PREFIX>/runtime-arn
 （terraform/agent が書く）を 60 秒ごとに読む。どちらも無ければ agent が配備されていない
-（チャットだけ使えない。トポロジ・異常・承認のタブは動く）。
+（チャットだけ使えない。トポロジ・承認のタブは動く）。
 """
 
 import json

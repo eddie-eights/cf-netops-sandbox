@@ -16,7 +16,7 @@
   辺   over（上の層 → 下の層の頂点）、peer（IS-IS の隣接 / BGP のセッションの両端）、tunnel（同じ EVI 同士）、attach（EVI → LAG の IF）、segment（同じ ESI 同士）
 status は物理層と同じ動的な状態で、gNMI の検知（bgp_down / isis_down）を受けた graph/status_handler.py が set_layer_status() で書く。
 
-status（UP / DOWN / ALARM）は動的な状態で、Spark の検知（AnomalyOpened / AnomalyResolved）を受けた graph/status_handler.py（terraform/pipeline/graph の Lambda）が
+status（UP / DOWN / ALARM）は動的な状態で、Grafana / Splunk のアラート（firing / resolved。SNS のトピック）を受けた graph/status_handler.py（terraform/pipeline/graph の Lambda）が
 set_status() で書く。無ければ UP。seed() で入れ直すと消える（静的な構成だけを入れる）。
 
 トポロジに無い機器やインタフェースの異常は捨てずに「未登録」の頂点（property registered=false。機器は role=unknown）として残し、
@@ -357,9 +357,9 @@ def set_layer_status(device_id: str, kind: str, target: str, status: str = "DOWN
     return out
 
 
-# ---------------------------------------------------------------- 異常と修復案の頂点（2026-09-24 に DynamoDB から移した）
-# 異常（label anomaly）は Spark の detect（spark/snmp_sinks.py の NeptuneAnomalies）、修復案（label proposal）は terraform/workflow のワーカー
-# （workflow/awsio.py）が書く。トポロジの頂点とは辺でつながず、device_id で引く。ここは読むのと、承認タブの decide だけ（agent/proposals.py）
+# ---------------------------------------------------------------- 修復案の頂点（2026-09-24 に DynamoDB から移した）
+# 修復案（label proposal）は terraform/workflow のワーカー（workflow/awsio.py）が書く。トポロジの頂点とは辺でつながず、device_id で引く。
+# ここは読むのと、承認タブの decide だけ（agent/proposals.py）。異常（label anomaly）の頂点は 2026-10-02 にやめた（書いていた Spark の detect をなくした）
 def _record(m: dict, id_key: str) -> dict:
     """elementMap() の 1 件を、id を id_key（anomaly_id / proposal_id）に置き換えた dict に"""
     d = {k: v for k, v in m.items() if k not in ("id", "label")}
