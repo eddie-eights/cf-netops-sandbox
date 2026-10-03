@@ -18,8 +18,8 @@
 # desired_count      = 1
 # log_retention_days = 7
 #
-# poll_interval_seconds    = 60
 # approval_timeout_minutes = 120
-# verify_attempts          = 6
+# verify_timeout_seconds   = 300
+# hold_minutes             = 1440
 #
 # create_gateway = true

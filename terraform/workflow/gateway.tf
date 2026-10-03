@@ -1,8 +1,8 @@
 # ---------------------------------------------------------------- AgentCore Gateway (MCP) + tools Lambda
 # The chat runtime (agent/app.py) lists the tools through the gateway URL (SSM <prefix>/gateway-url) and calls them over MCP
-# instead of its built-in functions. The Lambda runs the same agent/topology.py, agent/anomalies.py, agent/evidence.py and
+# instead of its built-in functions. The Lambda runs the same agent/topology.py, agent/evidence.py and
 # agent/proposals.py inside the VPC (subnet a), so it reads Neptune (terraform/pipeline/graph), the logs collection and the metrics
-# workspace (terraform/pipeline/analytics). Anomalies and proposals are Neptune vertices too (labels anomaly / proposal, 2026-09-24).
+# workspace (terraform/pipeline/analytics). Proposals are Neptune vertices too (label proposal, 2026-09-24).
 # Without graph / analytics the topology comes from data/ and the evidence tools say so.
 
 locals {
@@ -15,7 +15,6 @@ locals {
     "../../tools/handler.py"         = "index.py"
     "../../agent/toolkit.py"         = "toolkit.py"
     "../../agent/topology.py"        = "topology.py"
-    "../../agent/anomalies.py"       = "anomalies.py"
     "../../agent/graph.py"           = "graph.py"
     "../../agent/evidence.py"        = "evidence.py"
     "../../agent/proposals.py"       = "proposals.py"
@@ -61,7 +60,7 @@ resource "aws_iam_role" "tools" {
   count = var.create_gateway ? 1 : 0
 
   name               = "${local.name_prefix}-tools"
-  description        = "Tools Lambda behind the MCP gateway - reads Neptune (topology, anomalies, proposals), the logs collection and the metrics workspace"
+  description        = "Tools Lambda behind the MCP gateway - reads Neptune (topology, proposals), the logs collection and the metrics workspace"
   assume_role_policy = data.aws_iam_policy_document.lambda_trust.json
 }
 
@@ -292,7 +291,7 @@ resource "aws_bedrockagentcore_gateway_target" "tools" {
   count = var.create_gateway ? 1 : 0
 
   name               = "tools"
-  description        = "Read only tools backed by the tools Lambda (topology, anomalies, proposals, logs, metrics)"
+  description        = "Read only tools backed by the tools Lambda (topology, proposals, logs, metrics)"
   gateway_identifier = aws_bedrockagentcore_gateway.tools[0].gateway_id
 
   credential_provider_configuration {

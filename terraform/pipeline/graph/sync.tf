@@ -1,9 +1,11 @@
-# ---------------------------------------------------------------- dynamic status: EventBridge (<prefix>.spark) -> Lambda -> Neptune
-# The Spark job of terraform/pipeline/analytics puts AnomalyOpened / AnomalyResolved on the default bus when a link goes down / comes back.
-# This rule sends both to a small Lambda in the VPC (graph/status_handler.py + agent/graph.py) that sets the property "status"
-# (DOWN / UP, ALARM for other traps) on the link edge or the device vertex. The web draws DOWN in red and the chat tools return it.
+# ---------------------------------------------------------------- dynamic status: SNS (<prefix>-alerts) -> Lambda -> Neptune
+# The Grafana alert rules and the Splunk saved searches of terraform/pipeline/analytics publish firing / resolved alerts to the SNS topic of
+# terraform/base/core (alerts.tf) when a link goes down / comes back. The subscription below sends them to a small Lambda in the VPC
+# (graph/status_handler.py + agent/graph.py + workflow/rules.py) that sets the property "status" (DOWN / UP, ALARM for other traps) on the
+# link edge or the device vertex. The web draws DOWN in red and the chat tools return it. Neptune holds the topology and this status only -
+# the alerts themselves are not stored here (2026-10-02; until then the Spark job put AnomalyOpened / AnomalyResolved on EventBridge).
 # The static topology itself comes from lab/ (ops/up.sh 7-3b and ops/sync-graph.sh seed it through the web EC2) - not from here.
-# Cost: the rule is free, the Lambda is a few invocations per anomaly (free tier), nothing else
+# Cost: the subscription is free, the Lambda is a few invocations per alert (free tier), nothing else
 # (Neptune is in the VPC; the Lambda service writes its logs without going through the VPC).
 
 data "archive_file" "status" {
@@ -25,6 +27,12 @@ data "archive_file" "status" {
   source {
     content  = file("${path.module}/../../../agent/toolkit.py")
     filename = "toolkit.py"
+  }
+
+  # アラートの JSON の読み方（alerts_from_message）は worker と同じものを使う。標準ライブラリしか読まない
+  source {
+    content  = file("${path.module}/../../../workflow/rules.py")
+    filename = "rules.py"
   }
 }
 
@@ -60,7 +68,7 @@ data "aws_iam_policy_document" "status" {
   }
 
   # status を書き換える property('status', ...) は既存の値の削除を伴うので、Neptune は DeleteDataViaQuery も要る
-  # （無いと ExecuteGremlinQuery が AccessDeniedException になり、検知がトポロジに反映されない。2026-09-18 実機）
+  # （無いと ExecuteGremlinQuery が AccessDeniedException になり、アラートがトポロジに反映されない。2026-09-18 実機）
   statement {
     sid       = "Gremlin"
     actions   = ["neptune-db:ReadDataViaQuery", "neptune-db:WriteDataViaQuery", "neptune-db:DeleteDataViaQuery", "neptune-db:GetQueryStatus"]
@@ -105,34 +113,26 @@ resource "aws_lambda_function" "status" {
   depends_on = [aws_cloudwatch_log_group.status, aws_iam_role_policy.status, aws_neptune_cluster_instance.graph]
 }
 
-resource "aws_cloudwatch_event_rule" "status" {
-  name        = "${local.name_prefix}-graph-status"
-  description = "AnomalyOpened / AnomalyResolved from the Spark job (terraform/pipeline/analytics) to the status Lambda"
-
-  event_pattern = jsonencode({
-    # Source は接頭辞ごとに変わる（terraform/pipeline/analytics の locals.event_source が Spark に --event-source で渡す値）。
-    # ここを netops.spark で固定すると、1 つの AWS アカウントを何人かで使ったとき他の人の異常でこの Lambda が動く
-    source        = ["${local.name_prefix}.spark"]
-    "detail-type" = ["AnomalyOpened", "AnomalyResolved"]
-  })
-}
-
-resource "aws_cloudwatch_event_target" "status" {
-  rule      = aws_cloudwatch_event_rule.status.name
-  target_id = "graph-status"
-  arn       = aws_lambda_function.status.arn
-
-  # 配信に失敗したら 3 回まで 5 分の間隔で試す（Lambda 側の失敗は Lambda の非同期呼び出しが 2 回まで再試行する）
-  retry_policy {
-    maximum_event_age_in_seconds = 900
-    maximum_retry_attempts       = 3
-  }
-}
-
+# SNS は Lambda を非同期で呼ぶ。Lambda の側の失敗は Lambda が 2 回まで再試行し、SNS の側の配信の失敗は SNS が再試行する
 resource "aws_lambda_permission" "status" {
-  statement_id  = "AllowEventBridge"
+  statement_id  = "AllowSns"
   action        = "lambda:InvokeFunction"
   function_name = aws_lambda_function.status.function_name
-  principal     = "events.amazonaws.com"
-  source_arn    = aws_cloudwatch_event_rule.status.arn
+  principal     = "sns.amazonaws.com"
+  source_arn    = local.alerts_topic_arn
+}
+
+resource "aws_sns_topic_subscription" "status" {
+  topic_arn = local.alerts_topic_arn
+  protocol  = "lambda"
+  endpoint  = aws_lambda_function.status.arn
+
+  depends_on = [aws_lambda_permission.status]
+
+  lifecycle {
+    precondition {
+      condition     = local.alerts_topic_arn != ""
+      error_message = "terraform/base/core の state から alerts_topic_arn が読めない（2026-10-02 より前の土台）。terraform/base/core を apply し直す（ops/up.sh）。"
+    }
+  }
 }

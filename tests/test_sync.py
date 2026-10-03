@@ -1,11 +1,12 @@
 """Neptune へのトポロジ同期の模擬テスト（AWS に触れない）。
 lab/lab_topology.py が lab の定義（splab.clab.yml.in + srlinux/*.cli。lab/gen_lab.py が作る）から作る機器・回線・上の層が agent/data の静的データと同じであること
-（PyYAML があるときと無いときの両方）、graph/status_handler.py が AnomalyOpened / AnomalyResolved を graph.set_status / set_layer_status に正しく写すこと、
+（PyYAML があるときと無いときの両方）、graph/status_handler.py が Grafana と Splunk のアラート（SNS。firing / resolved）を graph.set_status / set_layer_status に正しく写すこと、
 terraform/pipeline/graph の sync.tf がその配線を持つこと。実行は uv run --group dev python tests/test_sync.py"""
 import builtins, importlib.util, json, os, re, subprocess, sys, tempfile, types
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 sys.path.insert(0, os.path.join(ROOT, "agent"))
+sys.path.insert(0, os.path.join(ROOT, "workflow"))   # status Lambda の zip は workflow/rules.py を rules.py として同梱する
 passed = 0
 
 
@@ -154,30 +155,63 @@ layer_calls = []
 fake_graph.set_layer_status = lambda dev, kind, target, status="DOWN": (layer_calls.append((dev, kind, target, status)) or {"updated": 1})
 sys.modules["graph"] = fake_graph
 h = load("graph/status_handler.py", "status_handler")
-ev = lambda t, **d: {"detail-type": t, "source": "demo-poc.spark", "detail": d}
-h.handler(ev("AnomalyOpened", anomaly_id="dc1-leaf-01#link_down#eth1", device_id="dc1-leaf-01", kind="link_down", target="eth1"))
-check("AnomalyOpened の link_down は機器の IF の回線を DOWN", calls[-1] == ("dc1-leaf-01", "eth1", "DOWN"))
-h.handler(ev("AnomalyResolved", anomaly_id="dc1-leaf-01#link_down#eth1", device_id="dc1-leaf-01", kind="link_down", target="eth1"))
-check("AnomalyResolved は同じ回線を UP", calls[-1] == ("dc1-leaf-01", "eth1", "UP"))
-h.handler(ev("AnomalyOpened", device_id="dc1-leaf-01", kind="trap", target=".1.3.6.1.6.3.1.1.5.1"))
+def ev(status, source="grafana", **a):
+    """SNS が Lambda に渡すイベント（Records[].Sns.Message に共通の形の JSON）"""
+    return {"Records": [{"EventSource": "aws:sns", "Sns": {"Message": json.dumps({"source": source, "alerts": [dict(a, status=status)]})}}]}
+
+
+h.handler(ev("firing", device_id="dc1-leaf-01", kind="link_down", target="eth1"))
+check("firing の link_down は機器の IF の回線を DOWN", calls[-1] == ("dc1-leaf-01", "eth1", "DOWN"))
+h.handler(ev("resolved", device_id="dc1-leaf-01", kind="link_down", target="eth1"))
+check("resolved は同じ回線を UP", calls[-1] == ("dc1-leaf-01", "eth1", "UP"))
+h.handler(ev("firing", "splunk", device_id="dc1-leaf-01", kind="trap", target=".1.3.6.1.6.3.1.1.5.1"))
 check("それ以外の trap は機器を ALARM", calls[-1] == ("dc1-leaf-01", "", "ALARM"))
-h.handler(ev("AnomalyResolved", device_id="dc1-leaf-01", kind="trap", target="x"))
+h.handler(ev("resolved", "splunk", device_id="dc1-leaf-01", kind="trap", target="x"))
 check("trap の解消は機器が ALARM のときだけ UP（linkDown の DOWN は上書きしない）", calls[-1] == ("dc1-leaf-01", "", "UP", "ALARM"))
-h.handler(ev("AnomalyOpened", device_id="dc1-leaf-01", kind="link_down", target="?"))
+h.handler(ev("firing", "splunk", device_id="dc1-leaf-01", kind="link_down", target="?"))
 check("IF が分からない linkDown は機器に付ける", calls[-1] == ("dc1-leaf-01", "", "DOWN"))
 n = len(calls)
-h.handler(ev("AnomalyOpened", anomaly_id="dc1-leaf-01#bgp_down#10.255.0.1", device_id="dc1-leaf-01", kind="bgp_down", target="10.255.0.1"))
+h.handler(ev("firing", "splunk", device_id="dc1-leaf-01", kind="bgp_down", target="10.255.0.1"))
 check("bgp_down（gNMI）は BGP のセッションの頂点を set_layer_status で DOWN（set_status は呼ばない）", layer_calls[-1] == ("dc1-leaf-01", "bgp", "10.255.0.1", "DOWN") and len(calls) == n)
-h.handler(ev("AnomalyResolved", device_id="dc1-leaf-01", kind="bgp_down", target="10.255.0.1"))
+h.handler(ev("resolved", "splunk", device_id="dc1-leaf-01", kind="bgp_down", target="10.255.0.1"))
 check("bgp_down の解消は同じ頂点を UP", layer_calls[-1] == ("dc1-leaf-01", "bgp", "10.255.0.1", "UP"))
-h.handler(ev("AnomalyOpened", device_id="dc1-leaf-01", kind="isis_down", target="ethernet-1/1.0"))
+h.handler(ev("firing", "splunk", device_id="dc1-leaf-01", kind="isis_down", target="ethernet-1/1.0"))
 check("isis_down は IS-IS の隣接の頂点（target = サブインタフェース）", layer_calls[-1] == ("dc1-leaf-01", "isis", "ethernet-1/1.0", "DOWN"))
 m = len(layer_calls)
-check("target の無い bgp_down / isis_down は何もしない", "ignored" in h.handler(ev("AnomalyOpened", device_id="dc1-leaf-01", kind="isis_down", target="?"))
-      and "ignored" in h.handler(ev("AnomalyOpened", device_id="dc1-leaf-01", kind="bgp_down")) and len(layer_calls) == m and len(calls) == n)
+check("target の無い bgp_down / isis_down は何もしない",
+      "ignored" in h.apply({"status": "firing", "device_id": "dc1-leaf-01", "kind": "isis_down", "target": "?"})
+      and "ignored" in h.apply({"status": "firing", "device_id": "dc1-leaf-01", "kind": "bgp_down", "target": ""}) and len(layer_calls) == m and len(calls) == n)
+check("機器が無い・firing でも resolved でもない status は何もしない",
+      "ignored" in h.apply({"status": "firing", "device_id": "?", "kind": "link_down", "target": "eth1"})
+      and "ignored" in h.apply({"status": "firing", "device_id": "", "kind": "link_down", "target": "eth1"})
+      and "ignored" in h.apply({"status": "pending", "device_id": "dc1-leaf-01", "kind": "link_down", "target": "eth1"}) and len(calls) == n)
+# 機器名は受け手（rules.alerts_from_message）が短い小文字の名前に揃える。Grafana は sysName、Splunk は DEVICE_MAP を通した名前で来る
+h.handler(ev("firing", device_id="DC1-LEAF-02.lab.example", kind="link_down", target="ethernet-1/2"))
+check("機器名は FQDN でも大文字でも、短い小文字の名前で Neptune を引く", calls[-1] == ("dc1-leaf-02", "ethernet-1/2", "DOWN"))
 n = len(calls)
-check("機器が無い・知らない detail-type は何もしない", "ignored" in h.handler(ev("AnomalyOpened", device_id="?", kind="link_down", target="eth1"))
-      and "ignored" in h.handler(ev("Other", device_id="dc1-leaf-01")) and len(calls) == n)
+two = {"Records": [{"Sns": {"Message": json.dumps({"source": "grafana", "alerts": [
+    {"status": "firing", "device_id": "dc1-leaf-01", "kind": "link_down", "target": "eth1"},
+    {"status": "resolved", "device_id": "dc1-leaf-02", "kind": "link_down", "target": "eth2"}]})}},
+    {"Sns": {"Message": json.dumps({"source": "splunk", "alerts": [{"status": "firing", "device_id": "dc1-spine-01", "kind": "trap", "target": "x"}]})}}]}
+check("1 通に何件か入っていても、Records が何件あっても、全部を順に書く（Grafana はグループごとに 1 通）",
+      h.handler(two) == [{"updated": 1}] * 3 and calls[n:] == [("dc1-leaf-01", "eth1", "DOWN"), ("dc1-leaf-02", "eth2", "UP"), ("dc1-spine-01", "", "ALARM")])
+n = len(calls)
+check("読めないメッセージ（JSON でない・alerts が無い・Records が無い）は捨てて例外にしない（再試行しても読めない）",
+      h.handler({"Records": [{"Sns": {"Message": "not json"}}, {"Sns": {"Message": json.dumps({"source": "grafana"})}}, {}]}) == []
+      and h.handler({}) == [] and h.handler({"detail-type": "AnomalyOpened", "detail": {"device_id": "dc1-leaf-01", "kind": "link_down", "target": "eth1"}}) == []
+      and len(calls) == n)
+
+
+def _boom(*a, **k):
+    raise OSError("neptune unreachable")
+
+
+fake_graph.set_status = _boom
+try:
+    h.handler(ev("firing", device_id="dc1-leaf-01", kind="link_down", target="eth1")); raised = False
+except OSError:
+    raised = True
+check("Neptune に書けなければ例外で落とす（Lambda の非同期の再試行に任せる。書き込みは繰り返して害が無い）", raised)
 import logging
 class _Cap(logging.Handler):
     def __init__(self):
@@ -186,15 +220,15 @@ class _Cap(logging.Handler):
         self.records.append(record)
 cap = _Cap(); h.log.addHandler(cap)
 fake_graph.set_status = lambda dev, ifn="", status="DOWN", only_if="": (calls.append((dev, ifn, status) + ((only_if,) if only_if else ())) or {"updated": 0, "unregistered": True})
-h.handler(ev("AnomalyOpened", device_id="zz-ce-09", kind="link_down", target="eth1"))
+h.handler(ev("firing", device_id="zz-ce-09", kind="link_down", target="eth1"))
 check("未登録の機器・IF の異常は WARNING で UNREGISTERED をログに出す", calls[-1] == ("zz-ce-09", "eth1", "DOWN")
       and cap.records[-1].levelno == logging.WARNING and "UNREGISTERED" in cap.records[-1].getMessage())
 fake_graph.set_status = lambda dev, ifn="", status="DOWN", only_if="": (calls.append((dev, ifn, status) + ((only_if,) if only_if else ())) or {"updated": 1})
-h.handler(ev("AnomalyResolved", device_id="dc1-leaf-01", kind="link_down", target="eth1"))
-check("登録済みなら INFO", cap.records[-1].levelno == logging.INFO)
+h.handler(ev("resolved", device_id="dc1-leaf-01", kind="link_down", target="eth1"))
+check("登録済みなら INFO（どの送り手のどのアラートかをログに残す）", cap.records[-1].levelno == logging.INFO and '"source": "grafana"' in cap.records[-1].getMessage())
+h.handler({"Records": [{"Sns": {"Message": "not json"}}]})
+check("読めないメッセージは WARNING でログに出す", cap.records[-1].levelno == logging.WARNING and "読めない" in cap.records[-1].getMessage())
 h.log.removeHandler(cap)
-check("detail が JSON 文字列でも読む", h.handler({"detail-type": "AnomalyOpened", "detail": json.dumps({"device_id": "dc1-leaf-02", "kind": "link_down", "target": "eth2"})})
-      == {"updated": 1} and calls[-1] == ("dc1-leaf-02", "eth2", "DOWN"))
 
 # ---- terraform/pipeline/graph の配線
 tf = read("terraform", "pipeline", "graph", "sync.tf")
@@ -204,8 +238,19 @@ check("sync.tf は status_handler.py を index.py、agent/graph.py を graph.py 
 zipped = set(re.findall(r'filename = "(\w+)\.py"', tf))
 needed = {m for m in re.findall(r"^import (\w+)$", read("agent", "graph.py"), re.M) if os.path.exists(os.path.join(ROOT, "agent", m + ".py"))}
 check(f"status.zip は graph.py が import する agent/ のモジュールを全部入れる（足りない: {sorted(needed - zipped)}）", needed and not (needed - zipped))
-check("EventBridge のルールは <接頭辞>.spark の AnomalyOpened と AnomalyResolved（Source を接頭辞ごとに変えて他の人の異常を拾わない）",
-      re.search(r'source\s*=\s*\["\$\{local\.name_prefix\}\.spark"\]', tf) and '"detail-type" = ["AnomalyOpened", "AnomalyResolved"]' in tf)
+# status_handler.py と rules.py が import するのは、zip の中のモジュールと標準ライブラリだけ（Lambda の実行環境に無いものを読むと起動で落ちる）
+_imports = lambda text: set(re.findall(r"^(?:import|from) (\w+)", text, re.M))
+check("status.zip は workflow/rules.py を rules.py で入れ、status_handler.py と rules.py は zip の中と標準ライブラリしか import しない",
+      'workflow/rules.py")' in tf and "rules" in zipped
+      and _imports(read("graph", "status_handler.py")) - zipped <= {"json", "logging"}
+      and _imports(read("workflow", "rules.py")) <= {"json", "re", "datetime"})
+_loc = read("terraform", "pipeline", "graph", "locals.tf")
+check("EventBridge のルールは無く、土台（base/core）のトピック <接頭辞>-alerts を Lambda が購読する（接頭辞ごとのトピックなので他の人のアラートを拾わない）",
+      "aws_cloudwatch_event_" not in tf and "events.amazonaws.com" not in tf
+      and re.search(r'resource "aws_sns_topic_subscription" "status" \{\s*topic_arn = local\.alerts_topic_arn\s*protocol  = "lambda"\s*endpoint  = aws_lambda_function\.status\.arn', tf) is not None
+      and 'alerts_topic_arn = try(data.terraform_remote_state.main.outputs.alerts_topic_arn, "")' in _loc)
+check("古い土台（alerts_topic_arn の出力が無い）では、購読の precondition が plan を止める（空の ARN で apply して API のエラーにしない）",
+      'condition     = local.alerts_topic_arn != ""' in tf and "depends_on = [aws_lambda_permission.status]" in tf)
 check("Lambda は VPC の中で NEPTUNE_ENDPOINT を環境変数で持ち、ロググループは retention 付き",
       "vpc_config" in tf and "NEPTUNE_ENDPOINT = " in tf and "retention_in_days = var.log_retention_days" in tf)
 check("Lambda と Neptune は base/core の lambda / neptune の SG を使い、graph は SG もルールも作らない（lambda から neptune の 8182 は土台の通信の表。2026-09-29）",
@@ -215,6 +260,6 @@ check("Lambda と Neptune は base/core の lambda / neptune の SG を使い、
 # property('status', ...) は既存値の削除を伴うので Delete も要る（無いと AccessDenied で検知がトポロジに映らない。2026-09-18 実機）
 check("Lambda のロールは neptune-db の Read / Write / Delete（Gremlin だけ、他のサービスは持たない）",
       all(f'"neptune-db:{a}DataViaQuery"' in tf for a in ("Read", "Write", "Delete")) and "neptune-db:*" not in tf)
-check("EventBridge から Lambda を呼ぶ permission", 'principal     = "events.amazonaws.com"' in tf and "source_arn    = aws_cloudwatch_event_rule.status.arn" in tf)
+check("SNS から Lambda を呼ぶ permission（呼べるのは土台のトピックだけ）", 'principal     = "sns.amazonaws.com"' in tf and "source_arn    = local.alerts_topic_arn" in tf)
 check("variables.tf に log_retention_days", 'variable "log_retention_days"' in read("terraform", "pipeline", "graph", "variables.tf"))
 print(f"通過 {passed} / 失敗 0")

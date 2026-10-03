@@ -3,11 +3,11 @@
 worker.py のアクティビティは全部このファイルの関数を asyncio.to_thread で呼ぶ。
 Temporal のワークフロー（決定的でないといけない）から直接呼ぶものは 1 つも無い。
 
-  Neptune    異常の「いま」（label anomaly。Spark の detect が書く）を読み、修復案の「いま」（label proposal）を読み書きする
+  Neptune    修復案の「いま」（label proposal）を読み書きする（異常の頂点は 2026-10-02 にやめた。発生と解消は Temporal が持つ）
   S3 Tables  修復案の証跡（proposal_events）に追記する（PyIceberg。作成・承認・却下・適用・確認を 1 行ずつ）
   AgentCore  Runtime を invoke して原因分析を答えさせる
   SSM        lab EC2 に Run Command で 1 行打つ
-  SQS        Spark の検知（EventBridge → SQS）を long polling で受け取る
+  SQS        Grafana / Splunk のアラート（SNS → SQS）を long polling で受け取る
 
 以前は異常も修復案も DynamoDB だった（2026-09-24 に Neptune と S3 Tables に寄せた）。
 
@@ -21,7 +21,7 @@ import os
 import time
 import uuid
 
-ANOMALY_QUEUE_URL = os.environ.get("ANOMALY_QUEUE_URL", "")  # terraform/workflow の events.tf。空なら Neptune の open を polling
+ANOMALY_QUEUE_URL = os.environ.get("ANOMALY_QUEUE_URL", "")  # terraform/workflow の events.tf（SNS のトピックを購読するキュー）
 NEPTUNE_ENDPOINT = os.environ.get("NEPTUNE_ENDPOINT", "")    # host:8182（terraform/pipeline/graph）
 AUDIT_TABLE_BUCKET_ARN = os.environ.get("AUDIT_TABLE_BUCKET_ARN", "")  # terraform/pipeline/analytics の S3 Tables のバケット
 AUDIT_NAMESPACE = os.environ.get("AUDIT_NAMESPACE", "")
@@ -49,7 +49,7 @@ def _agent_config():
     return Config(read_timeout=150, connect_timeout=10, retries={"max_attempts": 1})
 
 
-# ---------------------------------------------------------------- Neptune（異常と修復案の「いま」）
+# ---------------------------------------------------------------- Neptune（修復案の「いま」）
 _ESCAPES = {"\\": "\\\\", "'": "\\'", "\n": "\\n", "\r": "\\r", "\t": "\\t"}
 
 
@@ -93,7 +93,7 @@ def gremlin(q: str) -> list:
 
 
 def _item(m: dict, key: str) -> dict:
-    """elementMap() の 1 件を、id を key（anomaly_id / proposal_id）に置き換えた dict にする"""
+    """elementMap() の 1 件を、id を key（proposal_id）に置き換えた dict にする"""
     d = {k: v for k, v in m.items() if k not in ("id", "label")}
     d[key] = m.get("id")
     return d
@@ -102,16 +102,6 @@ def _item(m: dict, key: str) -> dict:
 def _props(fields: dict) -> str:
     """property(single, …) の並び。Neptune の既定は set（同じ key に値が増える）なので single を付ける。None と空文字は書かない"""
     return "".join(f".property(single,{_q(k)},{_q(v)})" for k, v in fields.items() if v is not None and v != "")
-
-
-def list_open_anomalies(limit: int = 50) -> list:
-    return [_item(m, "anomaly_id") for m in gremlin(
-        f"g.V().hasLabel('anomaly').has('status','open').order().by('last_seen',desc).limit({int(limit)}).elementMap()")]
-
-
-def read_anomaly(anomaly_id: str) -> dict:
-    rows = gremlin(f"g.V({_q(anomaly_id)}).hasLabel('anomaly').elementMap()")
-    return _item(rows[0], "anomaly_id") if rows else {}
 
 
 def read_proposal(proposal_id: str) -> dict:
@@ -213,7 +203,7 @@ def run_on_lab(command: str, timeout: int = 120) -> tuple[str, str]:
     return "TimedOut", ""
 
 
-# ---------------------------------------------------------------- SQS（Spark の検知）
+# ---------------------------------------------------------------- SQS（Grafana / Splunk のアラート）
 def receive_messages() -> list:
     return _boto("sqs").receive_message(QueueUrl=ANOMALY_QUEUE_URL, MaxNumberOfMessages=10, WaitTimeSeconds=20).get("Messages", [])
 

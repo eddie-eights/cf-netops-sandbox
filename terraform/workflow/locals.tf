@@ -1,9 +1,10 @@
 # netops-poc - workflow root module (feature "workflow"). One ECS on Fargate task (ARM64, 1 vCPU / 2 GB) runs the Temporal dev server
-# and a Python worker in the VPC of terraform/base/core. The Spark job of terraform/pipeline/analytics puts an AnomalyOpened event on EventBridge
-# when it opens an anomaly; events.tf routes it to an SQS queue and the worker starts one workflow per anomaly. The workflow asks the
+# and a Python worker in the VPC of terraform/base/core. The Grafana alert rules and the Splunk saved searches of terraform/pipeline/analytics
+# publish alerts to the SNS topic of terraform/base/core; events.tf subscribes an SQS queue to it and the worker starts one workflow per anomaly
+# (and signals it when the alert resolves). The workflow asks the
 # chat runtime (AgentCore) for a cause and a fix (the runtime looks at Neptune / OpenSearch / Prometheus through the MCP tools),
 # writes a proposal to Neptune (label proposal) and one audit row per step to S3 Tables (proposal_events), waits for a human decision (web tab "承認"), applies the fix on the lab EC2 (terraform/pipeline/lab)
-# through SSM Run Command and checks that the anomaly resolved. Temporal runs on ECS now (EKS later - 2026-09-17 user decision).
+# through SSM Run Command and waits for the resolved alert. Temporal runs on ECS now (EKS later - 2026-09-17 user decision).
 # The AgentCore Gateway (MCP) exposes the agent tools through a Lambda in the VPC so the runtime can read Neptune, the logs
 # collection and the metrics workspace over MCP. Costs about 0.05 USD per hour while it exists (Fargate) - destroy it the same day.
 
@@ -17,7 +18,7 @@ data "aws_caller_identity" "current" {}
 data "aws_partition" "current" {}
 
 # VPC / サブネット / SG / ロール名は terraform/base/core、Runtime ARN は terraform/agent、lab EC2 は terraform/pipeline/lab、
-# Neptune（異常と修復案の「いま」）は terraform/pipeline/graph、証跡の S3 Tables と OpenSearch / Prometheus は terraform/pipeline/analytics の state から読む。
+# Neptune（修復案の「いま」）は terraform/pipeline/graph、証跡の S3 Tables と OpenSearch / Prometheus は terraform/pipeline/analytics の state から読む。
 # ワーカーは Neptune と証跡が無いと動かないので graph と analytics は必須（ecs.tf の precondition）
 data "terraform_remote_state" "main" {
   backend = "local"
@@ -89,6 +90,8 @@ locals {
   perimeter_policy_arn = try(data.terraform_remote_state.main.outputs.network_perimeter_policy_arn, "")
   # リソースポリシーの Deny から外すプリンシパル（デプロイする人と KB のロール）
   perimeter_exempt_principals = try(data.terraform_remote_state.main.outputs.perimeter_exempt_principals, [])
+  # アラートの SNS トピック（terraform/base/core の alerts.tf）。events.tf のキューが購読する。古い state なら空で、購読の precondition が止める
+  alerts_topic_arn = try(data.terraform_remote_state.main.outputs.alerts_topic_arn, "")
   # agent が無いとワークフローが原因を聞く先が無い。下の precondition で「agent を先に」と出す
   runtime_arn = try(data.terraform_remote_state.agent.outputs.agent_runtime_arn, "")
 
@@ -99,7 +102,7 @@ locals {
   # lab が無ければ Apply の段は打つ先が無い（ワーカーは proposal を failed にする）
   lab_instance_id = try(data.terraform_remote_state.lab.outputs.lab_instance_id, "")
 
-  # Neptune（異常と修復案の「いま」）。graph が無ければ空で、ecs.tf の precondition が「graph を先に」と出す
+  # Neptune（修復案の「いま」）。graph が無ければ空で、ecs.tf の precondition が「graph を先に」と出す
   neptune_resource_id = try(data.terraform_remote_state.graph.outputs.cluster_resource_id, "")
   neptune_host        = try(data.terraform_remote_state.graph.outputs.cluster_endpoint, "")
   neptune_endpoint    = local.neptune_host == "" ? "" : "${local.neptune_host}:8182"

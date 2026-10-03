@@ -45,7 +45,7 @@ resource "aws_iam_role_policy_attachment" "task_perimeter" {
 # ---------------------------------------------------------------- task role (the worker)
 resource "aws_iam_role" "task" {
   name               = "${local.name_prefix}-workflow-task"
-  description        = "Workflow worker - anomaly queue, Neptune (anomalies and proposals), proposal audit table (S3 Tables), chat runtime, SSM Run Command on the lab EC2, ECS Exec"
+  description        = "Workflow worker - alert queue, Neptune (proposals), proposal audit table (S3 Tables), chat runtime, SSM Run Command on the lab EC2, ECS Exec"
   assume_role_policy = data.aws_iam_policy_document.ecs_tasks_trust.json
 }
 
@@ -56,7 +56,7 @@ data "aws_iam_policy_document" "task" {
     resources = [aws_sqs_queue.anomalies.arn]
   }
 
-  # 異常の頂点を読み、修復案の頂点を読み書きする（workflow/awsio.py の gremlin）
+  # 修復案の頂点を読み書きする（workflow/awsio.py の gremlin）
   statement {
     sid = "Neptune"
     actions = [

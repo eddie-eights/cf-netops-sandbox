@@ -72,9 +72,9 @@ resource "aws_ecs_task_definition" "workflow" {
         { name = "PROPOSAL_EVENTS_TABLE", value = local.proposal_events_table_name },
         { name = "AGENT_RUNTIME_ARN", value = local.runtime_arn },
         { name = "LAB_INSTANCE_ID", value = local.lab_instance_id },
-        { name = "POLL_INTERVAL", value = tostring(var.poll_interval_seconds) },
         { name = "APPROVAL_TIMEOUT_MINUTES", value = tostring(var.approval_timeout_minutes) },
-        { name = "VERIFY_ATTEMPTS", value = tostring(var.verify_attempts) },
+        { name = "VERIFY_TIMEOUT", value = tostring(var.verify_timeout_seconds) },
+        { name = "HOLD_MINUTES", value = tostring(var.hold_minutes) },
       ]
       logConfiguration = {
         logDriver = "awslogs"
@@ -98,7 +98,7 @@ resource "aws_ecs_task_definition" "workflow" {
     }
     precondition {
       condition     = local.neptune_endpoint != "" && local.neptune_data_arn != ""
-      error_message = "terraform/pipeline/graph の state から cluster_endpoint / cluster_resource_id が読めない。異常と修復案の「いま」は Neptune にあるので、terraform/pipeline/graph を先に apply する（2026-09-24 から）。"
+      error_message = "terraform/pipeline/graph の state から cluster_endpoint / cluster_resource_id が読めない。修復案の「いま」は Neptune にあるので、terraform/pipeline/graph を先に apply する（2026-09-24 から）。"
     }
     precondition {
       condition     = local.audit_bucket_arn != "" && local.audit_namespace != "" && local.proposal_events_table_name != ""

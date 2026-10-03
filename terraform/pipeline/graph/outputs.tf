@@ -19,11 +19,11 @@ output "next_step" {
 }
 
 output "status_function_name" {
-  description = "Lambda that writes AnomalyOpened / AnomalyResolved into Neptune as the status property"
+  description = "Lambda that writes the firing / resolved alerts of the SNS topic into Neptune as the status property"
   value       = aws_lambda_function.status.function_name
 }
 
 output "status_log_group_name" {
-  description = "Log group of the status Lambda (one line per event: what it received and how many elements it updated)"
+  description = "Log group of the status Lambda (one line per alert: what it received and how many elements it updated)"
   value       = aws_cloudwatch_log_group.status.name
 }

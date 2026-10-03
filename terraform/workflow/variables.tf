@@ -70,22 +70,32 @@ variable "log_retention_days" {
 }
 
 # ---------------------------------------------------------------- workflow behaviour (worker environment)
-variable "poll_interval_seconds" {
-  description = "How often the worker lists the open anomalies in Neptune when it has no SQS queue (ANOMALY_QUEUE_URL empty). With the queue (default) the worker long-polls SQS instead and this is only the retry interval after an error."
-  type        = number
-  default     = 60
-}
-
 variable "approval_timeout_minutes" {
   description = "How long a proposal waits for a human decision before the workflow ends as expired."
   type        = number
   default     = 120
 }
 
-variable "verify_attempts" {
-  description = "How many times the workflow re-reads the anomaly after applying the fix (30 seconds apart) before giving up."
+variable "verify_timeout_seconds" {
+  description = "How long the workflow waits for the resolved alert (Grafana / Splunk -> SNS -> SQS -> signal) after applying the fix before it ends as failed. Must cover the poll interval, the alert evaluation interval and the notification grouping (about 2 minutes in total)."
   type        = number
-  default     = 6
+  default     = 300
+
+  validation {
+    condition     = var.verify_timeout_seconds >= 60
+    error_message = "verify_timeout_seconds must be at least 60."
+  }
+}
+
+variable "hold_minutes" {
+  description = "How long a workflow that ended as rejected / expired / failed stays open waiting for the resolved alert. While it is open, repeated firing alerts of the same anomaly do not start another investigation."
+  type        = number
+  default     = 1440
+
+  validation {
+    condition     = var.hold_minutes >= 0
+    error_message = "hold_minutes must be 0 or more."
+  }
 }
 
 # ---------------------------------------------------------------- gateway (MCP)

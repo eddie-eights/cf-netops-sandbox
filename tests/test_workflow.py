@@ -1,6 +1,7 @@
 """機能 WORKFLOW（terraform/workflow、workflow/（rules / awsio / worker）、agent/proposals.py、agent/mcp_client.py、tools/）の模擬テスト。
 AWS にも Temporal にも触れない。temporalio と boto3 を差し替えて 3 つのモジュールを読み、純粋な関数（プロンプト・JSON の読み取り・
-許可リスト・二重起動の判定 = rules）と AWS 呼び出しの形（awsio）、proposals.decide の条件、mcp_client の応答の読み取り、
+許可リスト・アラート（SNS → SQS）の読み取りと起こす判定 = rules）と AWS 呼び出しの形（awsio）、ワークフローと starter の振る舞い（worker）、
+proposals.decide の条件、mcp_client の応答の読み取り、
 tools.json と Python の TOOL_SPECS の一致、Terraform と ops スクリプトのつながりを見る。実行は python3 tests/test_workflow.py（依存は無い）。"""
 import ast, contextlib, json, os, re, sys, types
 
@@ -77,10 +78,16 @@ class WorkflowAlreadyStarted(Exception):
 t_exc = types.ModuleType("temporalio.exceptions")
 t_exc.WorkflowAlreadyStartedError = WorkflowAlreadyStarted; t_exc.ActivityError = ActivityError; t_exc.ApplicationError = ApplicationError
 t_worker = types.ModuleType("temporalio.worker"); t_worker.Worker = object
+class RPCError(Exception):
+    def __init__(self, msg="", status=None):
+        super().__init__(msg)
+        self.status = status
+t_service = types.ModuleType("temporalio.service"); t_service.RPCError = RPCError
+t_service.RPCStatusCode = types.SimpleNamespace(NOT_FOUND="NOT_FOUND", UNAVAILABLE="UNAVAILABLE")
 t_root = types.ModuleType("temporalio")
 sys.modules.update({"temporalio": t_root, "temporalio.activity": t_activity, "temporalio.workflow": t_workflow,
                     "temporalio.client": t_client, "temporalio.common": t_common, "temporalio.exceptions": t_exc,
-                    "temporalio.worker": t_worker})
+                    "temporalio.worker": t_worker, "temporalio.service": t_service})
 
 os.environ.update({"NEPTUNE_ENDPOINT": "nep:8182", "AUDIT_TABLE_BUCKET_ARN": "arn:aws:s3tables:ap-northeast-1:123456789012:bucket/audit",
                    "AUDIT_NAMESPACE": "netops", "AGENT_RUNTIME_ARN": "arn:aws:bedrock-agentcore:ap-northeast-1:123456789012:runtime/x",
@@ -93,16 +100,17 @@ import awsio  # noqa: E402 - 環境変数と AWS 呼び出し
 import rules  # noqa: E402 - 判断だけの純粋関数
 import proposals  # noqa: E402
 import mcp_client  # noqa: E402
-import anomalies  # noqa: E402
 import topology  # noqa: E402
 import evidence  # noqa: E402
 import handler  # noqa: E402
 
 # ---- workflow/rules.py の純粋な関数
-anomaly = {"anomaly_id": "hq-ce-01#link_down#eth1", "device_id": "hq-ce-01", "kind": "link_down", "target": "eth1", "status": "open",
-           "first_seen": 1700000000, "detail": "ifOperStatus down", "first_seen_jst": "2023-11-15 07:13:20"}
+# アラート 1 件（rules.alerts_from_message が SQS の本文から作る形）
+anomaly = {"anomaly_id": "hq-ce-01#link_down#eth1", "device_id": "hq-ce-01", "kind": "link_down", "target": "eth1", "status": "firing",
+           "first_seen": 1700000000, "detail": "ifOperStatus down", "source": "grafana"}
 prompt = rules.build_prompt(anomaly)
-check("プロンプトに機器・種別・対象が入る", all(s in prompt for s in ("hq-ce-01", "link_down", "eth1")))
+check("プロンプトに機器・種別・対象と、発生の時刻（JST）が入る",
+      all(s in prompt for s in ("hq-ce-01", "link_down", "eth1", "first_seen_jst=2023-11-15 07:13:20")) and rules.jst(0) == "" and rules.jst(None) == "")
 check("プロンプトは JSON 1 個を求め、action の 3 択を示す", '"action"' in prompt and "heal-main | check | none" in prompt)
 check("応答の中の JSON を拾う（前後に文があっても）",
       rules.parse_agent_json('確認しました。\n{"cause": "eth1 が down", "action": "heal-main", "reason": "主回線"}\n以上')
@@ -117,24 +125,48 @@ check("許可リストに無い処置は none でコマンド空（rm -rf / も 
       rules.normalize_action("rm -rf /") == ("none", "") and rules.normalize_action("fail-main") == ("none", "")
       and rules.normalize_action("") == ("none", ""))
 check("ALLOWED_ACTIONS は lab/lab.sh のサブコマンド", all(f"  {a})" in read("lab", "lab.sh") for a in rules.ALLOWED_ACTIONS))
-check("修復案が無ければ起こす", rules.should_start(anomaly, None) and rules.should_start(anomaly, {}))
-check("同じ first_seen の修復案があれば起こさない", not rules.should_start(anomaly, {"first_seen": 1700000000, "status": "verified"}))
-check("first_seen が違えば（別の発生）起こす", rules.should_start(anomaly, {"first_seen": 1600000000}))
-check("anomaly_id が無ければ起こさない", not rules.should_start({}, None))
-check("link_down 以外（trap など）は起こさない", not rules.should_start({**anomaly, "kind": "trap"}, None) and rules.START_KINDS == {"link_down"})
-check("resolved の異常は起こさない（status が無い古い行は open 扱い）",
-      not rules.should_start({**anomaly, "status": "resolved"}, None) and rules.should_start({k: v for k, v in anomaly.items() if k != "status"}, None))
-check("ワークフロー id と修復案の id は発生ごと（<anomaly_id>#<first_seen>）",
-      rules.workflow_id("a#b#c", 5) == "investigate-a#b#c#5" and rules.proposal_id("a#b#c", 5) == "a#b#c#5"
-      and rules.proposal_id("a#b#c", None) == "a#b#c#0" and rules.workflow_id("a#b#c", "7") == "investigate-a#b#c#7")
-check("event_from_message は (anomaly_id, first_seen) を読み、first_seen が読めなければ 0",
-      rules.event_from_message(json.dumps({"detail": {"anomaly_id": "r1#link_down#eth1", "first_seen": 1700000000}})) == ("r1#link_down#eth1", 1700000000)
-      and rules.event_from_message(json.dumps({"detail": json.dumps({"anomaly_id": "x", "first_seen": "12"})})) == ("x", 12)
-      and rules.event_from_message(json.dumps({"detail": {"anomaly_id": "x", "first_seen": "bad"}})) == ("x", 0)
-      and rules.event_from_message("garbage") == ("", 0))
+check("firing の link_down で、同じ発生の修復案が無ければ起こす", rules.should_start(anomaly, None) and rules.should_start(anomaly, {}))
+check("同じ発生の修復案がもうあれば起こさない（Grafana は同じ starts_at を repeat_interval ごとに送り直す）",
+      not rules.should_start(anomaly, {"first_seen": 1700000000, "status": "verified"}))
+check("anomaly_id が無ければ起こさない", not rules.should_start({}, None) and not rules.should_start({**anomaly, "anomaly_id": ""}, None))
+check("link_down 以外（trap / bgp_down / isis_down）は起こさない",
+      not any(rules.should_start({**anomaly, "kind": k}, None) for k in ("trap", "bgp_down", "isis_down")) and rules.START_KINDS == {"link_down"})
+check("resolved と、status の無いものは起こさない",
+      not rules.should_start({**anomaly, "status": "resolved"}, None) and not rules.should_start({k: v for k, v in anomaly.items() if k != "status"}, None))
+# ワークフローの id に発生の時刻を入れると、starts_at の違う Grafana と Splunk の同じ障害が別のワークフローになる
+check("ワークフロー id は異常ごと（investigate-<anomaly_id>）、修復案の id は発生ごと（<anomaly_id>#<first_seen>）",
+      rules.workflow_id("a#b#c") == "investigate-a#b#c" and rules.proposal_id("a#b#c", 5) == "a#b#c#5"
+      and rules.proposal_id("a#b#c", None) == "a#b#c#0" and rules.proposal_id("a#b#c", "7") == "a#b#c#7"
+      and rules.anomaly_id("r1", "link_down", "eth1") == "r1#link_down#eth1")
+_alert = {"status": "firing", "device_id": "hq-ce-01", "kind": "link_down", "target": "eth1", "detail": "ifOperStatus down", "starts_at": 1700000000}
+_body = json.dumps({"source": "grafana", "alerts": [_alert]})
+check("alerts_from_message は SNS に publish された JSON をアラートの list にする（anomaly_id = 機器#種類#対象、first_seen = starts_at）",
+      rules.alerts_from_message(_body) == [anomaly])
+check("SNS の封筒（raw message delivery でない配り方）でも中身を読む",
+      rules.alerts_from_message(json.dumps({"Type": "Notification", "Message": _body})) == [anomaly]
+      and rules.alerts_from_message(json.dumps({"Type": "Notification", "Message": "garbage"})) == [])
+check("読めない本文・alerts が list でない本文は []",
+      rules.alerts_from_message("garbage") == [] and rules.alerts_from_message("") == [] and rules.alerts_from_message("[1]") == []
+      and rules.alerts_from_message(json.dumps({"alerts": "x"})) == [] and rules.alerts_from_message(None) == [])
+_many = rules.alerts_from_message(json.dumps({"source": "splunk", "alerts": [
+    {**_alert, "device_id": "DC1-Leaf-01.example.net", "status": "RESOLVED", "starts_at": "1700000001.7"},
+    {**_alert, "device_id": "172.20.20.99", "kind": "trap", "target": ".1.3.6.1.4.1.1", "starts_at": None},
+    {**_alert, "device_id": ""}, {**_alert, "kind": ""}, {**_alert, "status": "pending"}, "x", {**_alert, "detail": "d" * 5000}]}), now=42)
+check("機器名は小文字の短い名前に（IPv4 はそのまま）、status は小文字に、starts_at が無ければ now、detail は 1000 字で切る",
+      [(a["device_id"], a["status"], a["first_seen"]) for a in _many]
+      == [("dc1-leaf-01", "resolved", 1700000001), ("172.20.20.99", "firing", 42), ("hq-ce-01", "firing", 1700000000)]
+      and _many[1]["anomaly_id"] == "172.20.20.99#trap#.1.3.6.1.4.1.1" and len(_many[2]["detail"]) == 1000
+      and all(a["source"] == "splunk" for a in _many))
+check("形の合わない要素（機器か種類が無い・status が firing / resolved でない・dict でない）は捨てる", len(_many) == 3)
+# 送り手 2 つ（Grafana のテンプレートと Splunk のアラートアクション）が同じ形で publish しているか
+_sns_py = read("splunk", "netops_alerts", "bin", "netops_sns.py")
+_gf_yaml = read("grafana", "provisioning", "alerting", "netops.yaml")
+check("Splunk のアラートアクションと Grafana のテンプレートは同じ 6 つの項目を出す",
+      all(f'"{k}"' in _sns_py and f'"{k}"' in _gf_yaml for k in ("status", "device_id", "kind", "target", "detail", "starts_at"))
+      and '"source": "splunk"' in _sns_py and '"source":"grafana"' in _gf_yaml.replace('": "', '":"'))
 # rules.py に boto3 / temporalio を持ち込むと、このテストも Temporal のサンドボックスも動かなくなる（分割の理由そのもの）
-check("rules.py は標準ライブラリ（json / re）しか読まない",
-      set(re.findall(r"^import (\w+)", read("workflow", "rules.py"), re.M)) == {"json", "re"})
+check("rules.py は標準ライブラリ（json / re / datetime）しか読まない",
+      set(re.findall(r"^(?:import|from) (\w+)", read("workflow", "rules.py"), re.M)) == {"json", "re", "datetime"})
 
 # ---- workflow/awsio.py の AWS 呼び出し（差し替えで記録）
 gq = lambda: [kw["gremlinQuery"] for n, op, kw in calls if op == "execute_gremlin_query"]
@@ -144,13 +176,14 @@ check("Gremlin の文字列は ' と \\ をエスケープし、改行・制御�
 check("GraphSON の型付き値（g:List / g:Map）を素の値に戻す",
       awsio._un({"@type": "g:List", "@value": [{"@type": "g:Map", "@value": ["a", {"@type": "g:Int64", "@value": 1}]}]}) == [{"a": 1}])
 calls.clear(); clients.clear()
-fake["execute_gremlin_query"] = {"result": {"data": [{"id": "a#b#c", "label": "anomaly", "status": "open", "first_seen": 1}]}}
-rows = awsio.list_open_anomalies()
-check("open の異常を Neptune（label anomaly）から last_seen の新しい順に読み、id を anomaly_id にする",
-      rows == [{"anomaly_id": "a#b#c", "status": "open", "first_seen": 1}]
-      and gq()[-1] == "g.V().hasLabel('anomaly').has('status','open').order().by('last_seen',desc).limit(50).elementMap()"
+fake["execute_gremlin_query"] = {"result": {"data": [{"id": "p1", "label": "proposal", "status": "pending", "first_seen": 1}]}}
+check("read_proposal は Neptune（label proposal）から 1 件読み、id を proposal_id にする",
+      awsio.read_proposal("p1") == {"proposal_id": "p1", "status": "pending", "first_seen": 1}
+      and gq()[-1] == "g.V('p1').hasLabel('proposal').elementMap()"
       and clients[-1][0] == "neptunedata" and clients[-1][1]["endpoint_url"] == "https://nep:8182")
-check("read_anomaly は 1 件、無ければ {}", awsio.read_anomaly("a#b#c")["anomaly_id"] == "a#b#c" and gq()[-1] == "g.V('a#b#c').hasLabel('anomaly').elementMap()")
+# Neptune はトポロジ（と修復案）だけにする（2026-10-02）。異常の「いま」は Temporal のワークフローとシグナルが持つ
+check("awsio は異常の頂点（label anomaly）を読まない",
+      not hasattr(awsio, "read_anomaly") and not hasattr(awsio, "list_open_anomalies") and "hasLabel('anomaly')" not in read("workflow", "awsio.py"))
 fake["execute_gremlin_query"] = {"result": {"data": []}}
 check("read_proposal は無ければ {}", awsio.read_proposal("p1") == {})
 calls.clear()
@@ -219,6 +252,17 @@ check("Runtime が error を返したら例外（Temporal が再試行する）"
 # 分割しても worker.py からは awsio / rules 経由で全部に届く（Temporal のサンドボックスを通すため imports_passed_through で囲む）
 check("worker.py は awsio / rules を imports_passed_through で読む",
       re.search(r"with workflow\.unsafe\.imports_passed_through\(\):\n\s*import awsio\n\s*import rules", read("workflow", "worker.py")) is not None)
+# 2026-10-02: パッチの切り出し位置を誤って定数とアクティビティがまるごと欠けた。temporalio を入れていない環境では import の確認が走らず気づけなかったので、形を見る
+check("worker.py に定数・アクティビティ 6 本・@workflow.defn の付いたワークフロー・シグナル 2 本・starter がそろっている",
+      [f.__name__ for f in worker.ACTIVITIES] == ["investigate", "put_proposal", "get_decision", "record_decision", "set_status", "apply_on_lab"]
+      and all(isinstance(getattr(worker, k), int) for k in ("APPROVAL_TIMEOUT_MINUTES", "VERIFY_TIMEOUT", "DECISION_POLL", "HOLD_MINUTES"))
+      and worker.HOLD_OUTCOMES == ("rejected", "expired", "failed") and worker.TASK_QUEUE and worker.TEMPORAL_ADDRESS == "localhost:7233"
+      and re.search(r"^@workflow\.defn\nclass InvestigateAnomaly:", read("workflow", "worker.py"), re.M) is not None
+      and read("workflow", "worker.py").count("@activity.defn\n") == 6
+      and len(re.findall(r"^    @workflow\.signal\n    def (decide|resolved)\(", read("workflow", "worker.py"), re.M)) == 2
+      and all(callable(getattr(worker, f)) for f in ("start_for", "resolve_for", "handle_message", "starter_queue", "starter", "connect", "main")))
+check("異常の頂点を見るアクティビティ（get_anomaly / still_open / anomaly_resolved）と、表を見る starter はもう無い",
+      not any(hasattr(worker, f) for f in ("get_anomaly", "still_open", "anomaly_resolved", "starter_table", "POLL_INTERVAL", "VERIFY_ATTEMPTS", "VERIFY_INTERVAL")))
 
 # ---- proposals.py（Neptune の label proposal。agent/graph.py の list_records / get_record / update_record 経由）
 calls.clear()
@@ -272,11 +316,13 @@ check("Gateway に無いツールの call はエラーの辞書", "error" in mcp
 
 # ---- tools.json と Python の TOOL_SPECS
 tools = json.loads(read("tools", "tools.json"))
-py_specs = {s["toolSpec"]["name"]: s["toolSpec"] for s in topology.TOOL_SPECS + anomalies.TOOL_SPECS + evidence.TOOL_SPECS + proposals.TOOL_SPECS}
-check("tools.json の 10 個は topology / anomalies / evidence / proposals の TOOL_SPECS と同じ名前", {t["name"] for t in tools} == set(py_specs) and len(tools) == 10)
+py_specs = {s["toolSpec"]["name"]: s["toolSpec"] for s in topology.TOOL_SPECS + evidence.TOOL_SPECS + proposals.TOOL_SPECS}
+check("tools.json の 9 個は topology / evidence / proposals の TOOL_SPECS と同じ名前（list_anomalies は 2026-10-02 にやめた）",
+      {t["name"] for t in tools} == set(py_specs) and len(tools) == 9 and "list_anomalies" not in py_specs
+      and not os.path.exists(os.path.join(ROOT, "agent", "anomalies.py")))
 check("evidence のツールは search_logs / query_metrics / query_history", {s["toolSpec"]["name"] for s in evidence.TOOL_SPECS} == {"search_logs", "query_metrics", "query_history"})
-check("handler は topology / anomalies / evidence / proposals のツールを名前で振り分ける",
-      "MODULES = (topology, anomalies, evidence, proposals)" in read("tools", "handler.py"))
+check("handler は topology / evidence / proposals のツールを名前で振り分ける",
+      "MODULES = (topology, evidence, proposals)" in read("tools", "handler.py"))
 for t in tools:
     js = py_specs[t["name"]]["inputSchema"]["json"]
     check(f"{t['name']} の引数と必須が Python と同じ",
@@ -317,7 +363,10 @@ check("graph の出力 cluster_endpoint / cluster_resource_id を読む（SG は
       all(f'output "{o}"' in graph_out and f"outputs.{o}" in tf for o in ("cluster_endpoint", "cluster_resource_id")) and "neptune_security_group_id" not in tf)
 check("analytics の出力（テーブルバケット・namespace・proposal_events）を読む",
       all(f'output "{o}"' in analytics_out and f"outputs.{o}" in tf for o in ("table_bucket_arn", "table_namespace", "proposal_events_table_name")))
-check("stream の state は読まない（異常の表は無くなり、異常は Neptune から読む）", "pipeline/stream/terraform.tfstate" not in tf)
+check("stream の state は読まない（異常はアラートとして SQS から届く）", "pipeline/stream/terraform.tfstate" not in tf)
+check("土台の出力 alerts_topic_arn を try で読み、無ければ購読の precondition で止まる（2026-10-02 より前の土台）",
+      'output "alerts_topic_arn"' in main_out and re.search(r'alerts_topic_arn = try\(data\.terraform_remote_state\.main\.outputs\.alerts_topic_arn, ""\)', tf) is not None
+      and 'condition     = local.alerts_topic_arn != ""' in tf)
 check("lab の出力 lab_instance_id がある", 'output "lab_instance_id"' in lab_out and "outputs.lab_instance_id" in tf)
 check("ecr の出力 worker_repository_url / temporal_repository_url がある",
       all(f'output "{o}"' in ecr_out and f"outputs.{o}" in tf for o in ("worker_repository_url", "temporal_repository_url")))
@@ -328,11 +377,16 @@ _temporal_ports = re.search(r'name\s*=\s*"temporal"[\s\S]*?portMappings\s*=\s*\[
 check("temporal コンテナの portMappings は UI の 8233 だけ（7233 は出さない。ワーカーは同じタスクの localhost）",
       _temporal_ports is not None and re.findall(r'containerPort\s*=\s*(\d+)', _temporal_ports.group(1)) == ["8233"] and "7233" not in _temporal_ports.group(1))
 check("worker は temporal の後に起き、localhost:7233 につなぐ", '"localhost:7233"' in tf and 'condition = "START"' in tf)
-for env in ("NEPTUNE_ENDPOINT", "AUDIT_TABLE_BUCKET_ARN", "AUDIT_NAMESPACE", "PROPOSAL_EVENTS_TABLE", "ANOMALY_QUEUE_URL", "AGENT_RUNTIME_ARN", "LAB_INSTANCE_ID", "POLL_INTERVAL", "APPROVAL_TIMEOUT_MINUTES", "VERIFY_ATTEMPTS", "PARAM_PREFIX"):
+for env in ("NEPTUNE_ENDPOINT", "AUDIT_TABLE_BUCKET_ARN", "AUDIT_NAMESPACE", "PROPOSAL_EVENTS_TABLE", "ANOMALY_QUEUE_URL", "AGENT_RUNTIME_ARN", "LAB_INSTANCE_ID", "APPROVAL_TIMEOUT_MINUTES", "VERIFY_TIMEOUT", "HOLD_MINUTES", "PARAM_PREFIX"):
     check(f"worker の環境変数 {env} を渡す", f'name = "{env}"' in tf or f'name  = "{env}"' in tf or re.search(rf'name\s*=\s*"{env}"', tf) is not None)
+# 渡した名前を worker が読んでいなければ、既定値のまま動いて気づけない
+_env_read = set(re.findall(r'os\.environ\.get\("(\w+)"', read("workflow", "worker.py") + read("workflow", "awsio.py")))
+_env_passed = set(re.findall(r'\{ name = "(\w+)", value', read("terraform", "workflow", "ecs.tf").split('name      = "worker"')[1]))
+check(f"worker のコンテナに渡す環境変数は全部 worker.py / awsio.py が読む（読まれない: {sorted(_env_passed - _env_read - {'PARAM_PREFIX'})}）",
+      _env_passed and not (_env_passed - _env_read - {"PARAM_PREFIX"}) and not ({"POLL_INTERVAL", "VERIFY_ATTEMPTS", "VERIFY_INTERVAL"} & _env_passed))
 check("タスクロールは Runtime の InvokeAgentRuntime と lab への ssm:SendCommand（AWS-RunShellScript だけ）",
       '"bedrock-agentcore:InvokeAgentRuntime"' in tf and '"ssm:SendCommand"' in tf and "document/AWS-RunShellScript" in tf)
-check("DynamoDB はもう使わない（異常・修復案の「いま」は Neptune、証跡は S3 Tables）",
+check("DynamoDB はもう使わない（修復案の「いま」は Neptune、証跡は S3 Tables）",
       "aws_dynamodb" not in tf and '"dynamodb:' not in tf and "ANOMALY_TABLE" not in tf and "PROPOSAL_TABLE" not in tf)
 task_doc = re.search(r'data "aws_iam_policy_document" "task" \{[\s\S]*?\n\}\n', tf)
 check("タスクロールは Neptune の読み書きと、証跡テーブルの PutTableData / UpdateTableMetadataLocation",
@@ -349,9 +403,10 @@ check("Runtime と Web のロールに Gateway の権限を足す", 'for_each = 
 check("修復案を決める専用の IAM（decide_access）はもう無い", "decide_access" not in tf)
 check("Gateway は AWS_IAM 認可の MCP で、2025-06-18 を話す", 'authorizer_type = "AWS_IAM"' in tf and 'protocol_type   = "MCP"' in tf and '"2025-06-18"' in tf)
 check("Gateway のターゲットは tools.json から inline schema を作る", 'jsondecode(file("${path.module}/../../tools/tools.json"))' in tf and 'dynamic "inline_payload"' in tf)
-check("tools Lambda は python3.13 arm64 で、handler.py / toolkit / topology / anomalies / proposals / graph / data を zip にする",
+check("tools Lambda は python3.13 arm64 で、handler.py / toolkit / topology / evidence / proposals / graph / data を zip にする（anomalies は入れない）",
       'runtime          = "python3.13"' in tf and 'architectures    = ["arm64"]' in tf
-      and all(f"../../{p}" in tf for p in ("tools/handler.py", "agent/toolkit.py", "agent/topology.py", "agent/anomalies.py", "agent/evidence.py", "agent/proposals.py", "agent/graph.py", "agent/data/topology.json", "agent/data/devices.yaml", "agent/data/layers.json")))
+      and all(f"../../{p}" in tf for p in ("tools/handler.py", "agent/toolkit.py", "agent/topology.py", "agent/evidence.py", "agent/proposals.py", "agent/graph.py", "agent/data/topology.json", "agent/data/devices.yaml", "agent/data/layers.json"))
+      and "agent/anomalies.py" not in tf)
 # 入れ忘れても apply も plan も通り、実行時に ModuleNotFoundError になる。だから「入っている」ではなく「足りていないものが無い」を見る:
 # zip に入れたモジュールが import する agent/ のモジュールが、全部 tools_files に並んでいるか
 zipped = set(re.findall(r'"\.\./\.\./agent/(\w+)\.py"', tf))
@@ -369,12 +424,16 @@ check("tools Lambda のロールの Neptune は読むだけ（WriteDataViaQuery 
       and "neptune-db:ReadDataViaQuery" in neptune_read.group(0))
 check("tools Lambda のロールに aoss:APIAccessAll と aps:QueryMetrics、コレクションの data access policy",
       '"aoss:APIAccessAll"' in tf and '"aps:QueryMetrics"' in tf and 'resource "aws_opensearchserverless_access_policy" "tools"' in tf)
-check("EventBridge のルールは <接頭辞>.spark / AnomalyOpened を SQS（anomalies）へ、DLQ は 5 回で",
-      re.search(r'resource "aws_cloudwatch_event_rule" "anomalies"[\s\S]*?source\s*=\s*\["\$\{local\.name_prefix\}\.spark"\][\s\S]*?"detail-type"\s*=\s*\["AnomalyOpened"\]', tf) is not None
+check("SQS（anomalies）は土台の SNS トピックを raw message delivery で購読し、DLQ は 5 回で（購読の配信失敗も同じ DLQ へ）",
+      re.search(r'resource "aws_sns_topic_subscription" "anomalies" \{[\s\S]*?topic_arn\s*=\s*local\.alerts_topic_arn[\s\S]*?protocol\s*=\s*"sqs"'
+                r'[\s\S]*?endpoint\s*=\s*aws_sqs_queue\.anomalies\.arn[\s\S]*?raw_message_delivery\s*=\s*true[\s\S]*?deadLetterTargetArn = aws_sqs_queue\.anomalies_dlq\.arn', tf) is not None
       and 'resource "aws_sqs_queue" "anomalies"' in tf and 'resource "aws_sqs_queue" "anomalies_dlq"' in tf
       and re.search(r'redrive_policy[\s\S]*?maxReceiveCount\s*=\s*5', tf) is not None
-      and 'resource "aws_cloudwatch_event_target" "anomalies"' in tf)
-check("キューのポリシーは events.amazonaws.com の SendMessage をそのルールに絞る", '"sqs:SendMessage"' in tf and "events.amazonaws.com" in tf and "aws_cloudwatch_event_rule.anomalies.arn" in tf)
+      and "depends_on = [aws_sqs_queue_policy.anomalies, aws_sqs_queue_policy.anomalies_dlq]" in tf)
+check("キュー 2 つのポリシーは sns.amazonaws.com の SendMessage をそのトピックに絞る",
+      tf.count('identifiers = ["sns.amazonaws.com"]') == 2 and tf.count("values   = [local.alerts_topic_arn]") == 2 and '"sqs:SendMessage"' in tf)
+check("EventBridge のルールはもう無い（Spark の検知と一緒にやめた。2026-10-02）",
+      "aws_cloudwatch_event_" not in tf and "events.amazonaws.com" not in tf and "AnomalyOpened" not in tf)
 check("タスクロールは SQS の ReceiveMessage / DeleteMessage", '"sqs:ReceiveMessage", "sqs:DeleteMessage"' in tf)
 check("workflow はエンドポイントを持たない（SQS / S3 Tables / AgentCore へは土台のインターフェース型エンドポイント。2026-09-28）", 'resource "aws_vpc_endpoint"' not in tf and "create_sqs_endpoint" not in tf)
 check("閉域: 実行ロール・タスクロール・tools Lambda に perimeter を付け、キュー 2 つと Gateway は VPC の外からの呼び出しを拒む",
@@ -382,7 +441,8 @@ check("閉域: 実行ロール・タスクロール・tools Lambda に perimeter
       and tf.count('sid         = "DenyOutsideVpc"') == 2 and "not_actions = local.sqs_policy_actions" in tf
       and re.search(r'resource "aws_bedrockagentcore_resource_policy" "gateway"[\s\S]*?"bedrock-agentcore:InvokeGateway"[\s\S]*?aws_bedrockagentcore_gateway\.tools\[0\]\.gateway_arn[\s\S]*?"aws:SourceVpc"', tf) is not None
       and all(v in tf for v in ('"aws:ViaAWSService"', '"aws:PrincipalIsAWSService"', "local.perimeter_exempt_principals")))
-check("output に anomaly_queue_url / anomaly_rule_name / tools_function_name", all(f'output "{o}"' in tf for o in ("anomaly_queue_url", "anomaly_rule_name", "tools_function_name")))
+check("output に anomaly_queue_url / anomaly_dlq_url / tools_function_name があり、anomaly_rule_name は無い",
+      all(f'output "{o}"' in tf for o in ("anomaly_queue_url", "anomaly_dlq_url", "tools_function_name")) and "anomaly_rule_name" not in tf)
 check("Gateway の URL を SSM の gateway-url に書く", '"${local.param_prefix}/gateway-url"' in tf)
 check("aws_iam_role の description は ASCII だけ",
       all(d.isascii() for d in re.findall(r'resource "aws_iam_role"[\s\S]*?description\s*=\s*"([^"]*)"', tf)))
@@ -412,6 +472,10 @@ check("app.py には行頭の import gradio がある（user_data の置き間�
       re.search(r"^import gradio as gr$", web, re.M) is not None
       and 'grep -q "^import gradio"' in read("terraform", "base", "core", "templates", "web_user_data.sh.tftpl"))
 incident = read("web", "incident_view.py")
+# 異常一覧のタブは 2026-10-02 にやめた（Neptune に異常の頂点を置かない。いまの異常はトポロジの状態と Grafana / Splunk で見る）
+check("Web のタブはチャット / トポロジ / 承認の 3 つ（異常一覧は無い）",
+      re.findall(r'gr\.Tab\("([^"]+)"\)', web) == ["チャット", "トポロジ", "承認"]
+      and "anomalies" not in web and "import anomalies" not in incident and "anomaly_table" not in incident)
 check("Web に「承認」タブがあり、名前と「読んだ」のチェックを添えて proposals.decide で approved / rejected を書く",
       'gr.Tab("承認")' in web and 'iv.decide_proposal(i, "approved", s, w, ok), [pr_id, pr_status, pr_who, pr_ok]' in web
       and 'iv.decide_proposal(i, "rejected", s, w, ok), [pr_id, pr_status, pr_who, pr_ok]' in web
@@ -437,18 +501,15 @@ check("deploy-env.sh の読めるキーは機能の 3 つ + CREATE_KB + TF_VERBO
       (lambda keys: all(k in keys for k in ("PIPELINE", "AGENT", "WORKFLOW", "CREATE_KB", "TF_VERBOSE"))
        and not any(k in keys for k in ("PHASE", "SINKS", "WITH_LAB", "WITH_STREAM")))(read("ops", "deploy-env.sh").split('DEPLOY_ENV_KEYS="')[1].split('"')[0].split())
       and not re.search(r'\bPHASE\b|\bWITH_LAB\b|\bWITH_STREAM\b', up))
-# ---- starter: SQS のメッセージから anomaly_id
-check("anomaly_id_from_message は detail が dict でも JSON 文字列でも読む",
-      rules.anomaly_id_from_message(json.dumps({"detail": {"anomaly_id": "r1#link_down#eth1"}})) == "r1#link_down#eth1"
-      and rules.anomaly_id_from_message(json.dumps({"detail": json.dumps({"anomaly_id": "r1#link_down#eth1"})})) == "r1#link_down#eth1")
-check("anomaly_id_from_message はごみを空にする",
-      rules.anomaly_id_from_message("garbage") == "" and rules.anomaly_id_from_message("[1]") == ""
-      and rules.anomaly_id_from_message(json.dumps({"detail": "x"})) == "" and rules.anomaly_id_from_message(json.dumps({"detail": {}})) == "")
-check("starter は ANOMALY_QUEUE_URL があれば SQS（20 秒の long polling）、無ければテーブルを見る",
-      all(hasattr(worker, f) for f in ("start_for", "starter_queue", "starter_table"))
-      and all(hasattr(awsio, f) for f in ("receive_messages", "delete_message"))
+check("up.sh の WORKFLOW=1 はアラートの送り手（Grafana のアラートか Splunk）が無ければ止まる",
+      re.search(r'if \[ -n "\$WORKFLOW" \] && \[ -z "\$GRAFANA_ALERTS\$SPLUNK_ON_ECS" \]; then\n\s*die "WORKFLOW はアラートの送り手が要る', up) is not None
+      and up.index('GRAFANA_ALERTS=') < up.index('[ -z "$GRAFANA_ALERTS$SPLUNK_ON_ECS" ]'))
+# ---- starter: SQS のメッセージ（SNS のトピックの購読）
+check("starter は SQS を 20 秒の long polling で待ち、ANOMALY_QUEUE_URL が無ければ起動で止まる（表を見る経路はもう無い）",
+      all(hasattr(awsio, f) for f in ("receive_messages", "delete_message"))
       and "WaitTimeSeconds=20" in read("workflow", "awsio.py")
-      and "starter_queue if awsio.ANOMALY_QUEUE_URL else starter_table" in read("workflow", "worker.py"))
+      and re.search(r'for k in \("ANOMALY_QUEUE_URL", "NEPTUNE_ENDPOINT", "AUDIT_TABLE_BUCKET_ARN", "AUDIT_NAMESPACE", "AGENT_RUNTIME_ARN"\):\n\s*if not getattr\(awsio, k\):\n\s*raise SystemExit',
+                    read("workflow", "worker.py")) is not None)
 check("up.sh は workflow ルートを足し、費用に 5 セント足す（Fargate だけ。sqs のエンドポイントは無くなった）", 'ROOTS="$ROOTS workflow"' in up and 'COST_CENTS=$((COST_CENTS + 5))' in up)
 check("up.sh は worker を buildx でビルドし、temporalio/temporal を ECR にミラーする",
       '--push workflow/' in up and 'docker pull --platform linux/arm64 "temporalio/temporal:$TEMPORAL_TAG"' in up and "$PREFIX-temporal:$TEMPORAL_TAG" in up)
@@ -559,88 +620,128 @@ check("Web の起動確認は is-active（落ちて再起動するまでの数�
 check("lab の状態の照合は 1 つの空白で区切った lab=active containers=N をそのまま探す（空白を 2 つ要る形だと合わない）",
       '*" lab=active containers=$LAB_NODES "*)' in up)
 
-# ---- ワーカーの振る舞い（2026-09-24 のレビュー: 発生ごとの id・承認のあいだに閉じた異常・apply の失敗・SQS の消し方）
+# ---- ワーカーの振る舞い（2026-09-24 のレビュー: 承認のあいだに閉じた異常・apply の失敗・SQS の消し方。
+#      2026-10-02 から異常の「いま」は Neptune でなくアラートで届く: 発生は入力の dict、解消はシグナル resolved）
 import asyncio, datetime, logging  # noqa: E402
-_saved = {k: getattr(awsio, k) for k in ("read_anomaly", "read_proposal", "write_proposal", "update_proposal", "append_proposal_events",
+_saved = {k: getattr(awsio, k) for k in ("read_proposal", "write_proposal", "update_proposal", "append_proposal_events",
                                          "receive_messages", "delete_message")}
 audited = []  # 証跡（proposal_events）に足した行
 awsio.append_proposal_events = lambda rows, columns: audited.extend(rows)
 FS = 1700000000
 AID = anomaly["anomaly_id"]
+PID = f"{AID}#{FS}"
 
-def run_wf(script, first_seen=FS):
-    """InvestigateAnomaly.run を、アクティビティを script（名前 → 返り値 / 例外 / 関数）に差し替えて回す。(結果, 呼んだアクティビティ)"""
-    seen = []
+def run_wf(script, resolve_when=None, signal=""):
+    """InvestigateAnomaly.run を、アクティビティを script（名前 → 返り値 / 例外 / 関数）に差し替えて回す。(結果, 呼んだアクティビティ, 待った timeout)。
+    resolve_when(名前, 引数) が真を返したアクティビティの直後に、解消のシグナル（resolved）を届ける。signal は走り出す前に届いている decide"""
+    seen, waits = [], []
+    wf = worker.InvestigateAnomaly()
     async def execute_activity(fn, *a, args=None, **opts):
         params = list(args) if args is not None else list(a)
         seen.append((fn.__name__, params, opts))
         r = script[fn.__name__]
         r = r(*params) if callable(r) else r
+        if resolve_when and resolve_when(fn.__name__, params):
+            wf.resolved("grafana")
         if isinstance(r, BaseException):
             raise r
         return r
     async def wait_condition(fn, timeout=None):
-        raise asyncio.TimeoutError
+        waits.append(timeout)
+        if not fn():
+            raise asyncio.TimeoutError
     t_workflow.execute_activity = execute_activity; t_workflow.wait_condition = wait_condition
-    t_workflow.now = datetime.datetime.now; t_workflow.info = lambda: types.SimpleNamespace(workflow_id="wf-1")
+    t_workflow.now = datetime.datetime.now; t_workflow.info = lambda: types.SimpleNamespace(workflow_id="wf-1", run_id="run-1")
     t_workflow.logger = logging.getLogger("wf")
-    worker.VERIFY_INTERVAL = 0
-    return asyncio.run(worker.InvestigateAnomaly().run(AID, first_seen)), seen
+    if signal:
+        wf.decide(signal)
+    return asyncio.run(wf.run(anomaly)), seen, waits
 
 finding = {"cause": "c", "action": "heal-main", "command": "sudo lab heal-main", "reason": "r", "agent_response": "{}"}
-base = {"get_anomaly": anomaly, "investigate": finding, "put_proposal": f"{AID}#{FS}", "get_decision": "approved",
-        "record_decision": lambda pid, d, via=False: d, "set_status": None, "still_open": True, "apply_on_lab": {"status": "Success", "output": "ok"}, "anomaly_resolved": True}
-res, seen = run_wf(base)
-names = [n for n, _, _ in seen]
-check("承認→打つ→閉じたら verified。確かめは同じ発生（anomaly_id + first_seen）で見る",
-      res == "verified" and names.index("still_open") < names.index("apply_on_lab")
-      and [p for n, p, _ in seen if n == "anomaly_resolved"][0] == [AID, FS] and [p for n, p, _ in seen if n == "still_open"][0] == [AID, FS])
+base = {"investigate": finding, "put_proposal": PID, "get_decision": "approved",
+        "record_decision": lambda pid, d, via=False: d, "set_status": None, "apply_on_lab": {"status": "Success", "output": "ok"}}
+VERIFY = datetime.timedelta(seconds=worker.VERIFY_TIMEOUT)
+HOLD = datetime.timedelta(seconds=worker.HOLD_MINUTES * 60)
+POLL = datetime.timedelta(seconds=worker.DECISION_POLL)
+applied = lambda n, p: n == "set_status" and p[1] == "applied"
+names = lambda seen: [n for n, _, _ in seen]
+statuses = lambda seen: [p[1] for n, p, _ in seen if n == "set_status"]
+
+res, seen, waits = run_wf(base, applied)
+check("承認→打つ→解消のシグナルが届いたら verified（待つのは VERIFY_TIMEOUT 秒まで。握り直しはしない）",
+      res == "verified" and names(seen) == ["investigate", "put_proposal", "get_decision", "record_decision", "apply_on_lab", "set_status", "set_status"]
+      and statuses(seen) == ["applied", "verified"] and waits == [POLL, VERIFY])
+check("investigate にはアラートの dict をそのまま渡し、put_proposal にはワークフローの id と実行の id も渡す",
+      seen[0][1] == [anomaly] and seen[1][1] == [anomaly, finding, "wf-1", "run-1"])
 check("investigate の start_to_close は 4 分（AgentCore の読み取り 150 秒 1 回分が収まる）",
       [o for n, _, o in seen if n == "investigate"][0]["start_to_close_timeout"] == datetime.timedelta(minutes=4))
-res, seen = run_wf({**base, "still_open": False})
-check("承認のあいだに異常が閉じていれば打たずに obsolete",
-      res == "obsolete" and "apply_on_lab" not in [n for n, _, _ in seen]
-      and [p[1] for n, p, _ in seen if n == "set_status"] == ["obsolete"])
-res, seen = run_wf({**base, "apply_on_lab": ActivityError("activity failed", cause=RuntimeError("SSM に届かない"))})
+check("apply_on_lab は 1 回しか打たない（maximum_attempts=1）",
+      [o for n, _, o in seen if n == "apply_on_lab"][0]["retry_policy"] == {"maximum_attempts": 1})
+res, seen, waits = run_wf(base)
+check("打ったあと VERIFY_TIMEOUT 秒のうちに解消のシグナルが来なければ failed を書き、そのあと解消を待って id を握る（HOLD_MINUTES 分まで）",
+      res == "failed" and statuses(seen) == ["applied", "failed"] and waits == [POLL, VERIFY, HOLD]
+      and "解消の通知が届かない" in [p for n, p, _ in seen if n == "set_status"][-1][2]["verify_note"])
+res, seen, waits = run_wf(base, lambda n, p: n == "put_proposal")
+check("承認を待つ前に解消していれば、判断を読まずに obsolete（握らない）",
+      res == "obsolete" and names(seen) == ["investigate", "put_proposal", "set_status"] and statuses(seen) == ["obsolete"] and waits == [])
+res, seen, waits = run_wf({**base, "get_decision": "pending"}, lambda n, p: n == "get_decision")
+check("承認を待つあいだに解消したら打たずに obsolete",
+      res == "obsolete" and "apply_on_lab" not in names(seen) and "record_decision" not in names(seen) and statuses(seen) == ["obsolete"] and HOLD not in waits)
+res, seen, waits = run_wf(base, lambda n, p: n == "record_decision")
+check("承認と同時に解消していれば、判断は証跡に残して打たずに obsolete",
+      res == "obsolete" and "apply_on_lab" not in names(seen) and "record_decision" in names(seen) and statuses(seen) == ["obsolete"] and HOLD not in waits)
+res, seen, waits = run_wf({**base, "apply_on_lab": ActivityError("activity failed", cause=RuntimeError("SSM に届かない"))})
 st = [p for n, p, _ in seen if n == "set_status"]
-check("apply_on_lab の失敗（ActivityError）はワークフローを落とさず failed を書く（approved のまま残さない）",
-      res == "failed" and st[-1][1] == "failed" and "SSM に届かない" in st[-1][2]["apply_output"] and "anomaly_resolved" not in [n for n, _, _ in seen])
-res, seen = run_wf({**base, "get_anomaly": {**anomaly, "status": "resolved"}})
-check("起こしたあとで閉じていれば調べずに obsolete", res == "obsolete" and [n for n, _, _ in seen] == ["get_anomaly"])
-res, seen = run_wf({**base, "get_anomaly": {**anomaly, "first_seen": FS + 60}})
-check("開き直して別の発生になっていれば調べずに obsolete", res == "obsolete" and [n for n, _, _ in seen] == ["get_anomaly"])
-res, seen = run_wf({**base, "get_decision": "rejected"})
-check("却下なら何もしない（判断は record_decision で証跡に残す）", res == "rejected" and "apply_on_lab" not in [n for n, _, _ in seen]
-      and "still_open" not in [n for n, _, _ in seen] and [p for n, p, _ in seen if n == "record_decision"] == [[f"{AID}#{FS}", "rejected", False]])
-res, seen = run_wf({**base, "record_decision": "rejected"})
+check("apply_on_lab の失敗（ActivityError）はワークフローを落とさず failed を書く（approved のまま残さない）。確かめは待たず、id は握る",
+      res == "failed" and st[-1][1] == "failed" and "SSM に届かない" in st[-1][2]["apply_output"] and VERIFY not in waits and waits[-1] == HOLD)
+res, seen, waits = run_wf({**base, "apply_on_lab": {"status": "Failed", "output": "exit 1"}})
+check("コマンドが失敗を返したときも failed（確かめは待たない）", res == "failed" and statuses(seen) == ["failed"] and VERIFY not in waits)
+res, seen, waits = run_wf({**base, "get_decision": "rejected"})
+check("却下なら何もしない（判断は record_decision で証跡に残す）。同じ異常の次の通知でもう一度調べないよう id は握る",
+      res == "rejected" and "apply_on_lab" not in names(seen) and "set_status" not in names(seen)
+      and [p for n, p, _ in seen if n == "record_decision"] == [[PID, "rejected", False]] and waits == [POLL, HOLD])
+res, seen, waits = run_wf({**base, "record_decision": "rejected"}, signal="approved")
 check("シグナルで approved が来ても、web が先に rejected を書いていれば（record_decision が返す方）打たない",
-      res == "rejected" and "apply_on_lab" not in [n for n, _, _ in seen])
+      res == "rejected" and "apply_on_lab" not in names(seen)
+      and [p for n, p, _ in seen if n == "record_decision"] == [[PID, "approved", True]] and "get_decision" not in names(seen))
+res, seen, waits = run_wf(base, applied, signal="approved")
+check("シグナル decide で決まれば頂点を見ずに進む（record_decision に via_signal = True）",
+      res == "verified" and "get_decision" not in names(seen) and [p for n, p, _ in seen if n == "record_decision"] == [[PID, "approved", True]])
 _timeout, worker.APPROVAL_TIMEOUT_MINUTES = worker.APPROVAL_TIMEOUT_MINUTES, 0  # 待たずに時間切れにする
-res, seen = run_wf({**base, "get_decision": "pending"})
+res, seen, waits = run_wf({**base, "get_decision": "pending"})
 worker.APPROVAL_TIMEOUT_MINUTES = _timeout
-check("時間切れは expired を書く（証跡は set_status が残す）", res == "expired" and [p[1] for n, p, _ in seen if n == "set_status"] == ["expired"])
+check("時間切れは expired を書く（証跡は set_status が残す）。id は握る", res == "expired" and statuses(seen) == ["expired"] and waits == [HOLD])
+res, seen, waits = run_wf({**base, "investigate": {**finding, "action": "none", "command": ""}}, applied)
+check("処置なし（action = none）は打たずに applied を書き、解消を待つ",
+      res == "verified" and "apply_on_lab" not in names(seen) and statuses(seen) == ["applied", "verified"]
+      and "処置なし" in [p for n, p, _ in seen if n == "set_status"][0][2]["apply_output"])
+_wf = worker.InvestigateAnomaly(); _wf.decide("bogus")
+check("シグナル decide は approved / rejected 以外を無視する", _wf._decision == "" and (_wf.decide("rejected") or _wf._decision == "rejected"))
 
 # アクティビティ（awsio を差し替え）
-awsio.read_anomaly = lambda aid: {**anomaly, "first_seen": FS + 60}
-check("anomaly_resolved は開き直して first_seen が変わったら「この発生は閉じた」", asyncio.run(worker.anomaly_resolved(AID, FS)) is True)
-check("still_open は first_seen が違えば False", asyncio.run(worker.still_open(AID, FS)) is False and asyncio.run(worker.still_open(AID, FS + 60)) is True)
-awsio.read_anomaly = lambda aid: anomaly
-check("anomaly_resolved は同じ発生が open なら False", asyncio.run(worker.anomaly_resolved(AID, FS)) is False)
 written = []
 awsio.write_proposal = lambda item, only_new=False: written.append((item, only_new)) or True
-pid = asyncio.run(worker.put_proposal(anomaly, finding, "wf-1"))
-check("put_proposal は <anomaly_id>#<first_seen> を only_new で書き、証跡に created を足す",
-      pid == f"{AID}#{FS}" and written[-1][0]["proposal_id"] == pid and written[-1][1] is True
+pid = asyncio.run(worker.put_proposal(anomaly, finding, "wf-1", "run-1"))
+check("put_proposal は <anomaly_id>#<first_seen> を only_new で書き、送り手と detail と実行の id を残して、証跡に created を足す",
+      pid == PID and written[-1][0]["proposal_id"] == pid and written[-1][1] is True
+      and written[-1][0]["workflow_id"] == "wf-1" and written[-1][0]["run_id"] == "run-1"
+      and written[-1][0]["source"] == "grafana" and written[-1][0]["detail"] == "ifOperStatus down" and written[-1][0]["status"] == "pending"
       and audited[-1]["event_id"] == f"{pid}#created" and audited[-1]["status"] == "pending" and audited[-1]["detail"] == "r")
 awsio.write_proposal = lambda item, only_new=False: False
-awsio.read_proposal = lambda p: {"proposal_id": p, "workflow_id": "wf-1", "status": "approved"}
-check("既にある修復案が自分の書いたもの（書けたあとで再試行）なら、それを使って進む", asyncio.run(worker.put_proposal(anomaly, finding, "wf-1")) == pid)
-awsio.read_proposal = lambda p: {"proposal_id": p, "workflow_id": "wf-other"}
-try:
-    asyncio.run(worker.put_proposal(anomaly, finding, "wf-1")); err = None
-except ApplicationError as e:
-    err = e
-check("別のワークフローの修復案なら再試行しない失敗（上書きしない）", err is not None and err.non_retryable)
+awsio.read_proposal = lambda p: {"proposal_id": p, "workflow_id": "wf-1", "run_id": "run-1", "status": "approved"}
+check("既にある修復案がこの実行の書いたもの（書けたあとで再試行）なら、それを使って進む", asyncio.run(worker.put_proposal(anomaly, finding, "wf-1", "run-1")) == pid)
+def _put_err(existing):
+    awsio.read_proposal = lambda p: {"proposal_id": p, **existing}
+    try:
+        asyncio.run(worker.put_proposal(anomaly, finding, "wf-1", "run-1"))
+    except ApplicationError as e:
+        return e
+    return None
+# ワークフローの id は異常ごとなので、同じ id でも前の実行が書いた修復案でありうる
+check("同じワークフロー id でも別の実行（run_id が違う）の修復案なら再試行しない失敗（上書きしない）",
+      (lambda e: e is not None and e.non_retryable)(_put_err({"workflow_id": "wf-1", "run_id": "run-0"})))
+check("別のワークフローの修復案なら再試行しない失敗（上書きしない）",
+      (lambda e: e is not None and e.non_retryable)(_put_err({"workflow_id": "wf-other", "run_id": "run-1"})))
 
 # 人の判断と状態の移り変わりは、頂点に書いたうえで証跡にも 1 行ずつ残す
 updated = []
@@ -661,38 +762,72 @@ check("set_status は頂点を書き、証跡に apply_output を detail とし�
       updated[-1] == (pid, {"status": "applied", "apply_output": "Success: ok"}, None)
       and audited[-1]["event_id"] == f"{pid}#applied" and audited[-1]["detail"] == "Success: ok")
 
-# starter（SQS のメッセージ 1 通ずつ）
+# starter（SQS のメッセージ 1 通ずつ。firing は起こす、resolved は走っているワークフローへシグナル）
 class FakeTemporal:
-    def __init__(self, exc=None):
-        self.exc, self.started = exc, []
-    async def start_workflow(self, fn, args=None, id=None, task_queue=None):
-        self.started.append((args, id))
+    def __init__(self, exc=None, sig_exc=None):
+        self.exc, self.sig_exc, self.started, self.signals = exc, sig_exc, [], []
+    async def start_workflow(self, fn, arg=None, id=None, task_queue=None):
+        self.started.append((arg, id))
         if self.exc:
             raise self.exc
-msg = lambda fs: json.dumps({"detail": {"anomaly_id": AID, "first_seen": fs}})
+    def get_workflow_handle(self, wid):
+        tc = self
+        class Handle:
+            async def signal(self, fn, arg=None):
+                tc.signals.append((wid, fn.__name__, arg))
+                if tc.sig_exc:
+                    raise tc.sig_exc
+        return Handle()
+def msg(status="firing", kind="link_down", fs=FS, source="grafana", n=1):
+    return json.dumps({"source": source, "alerts": [
+        {"status": status, "device_id": "hq-ce-01", "kind": kind, "target": f"eth{i + 1}", "detail": "ifOperStatus down", "starts_at": fs} for i in range(n)]})
+WID = f"investigate-{AID}"
 awsio.read_proposal = lambda p: {}
 tc = FakeTemporal()
-asyncio.run(worker.handle_message(tc, msg(FS)))
-check("メッセージの発生と表の発生が同じなら、その発生のワークフローを起こす",
-      tc.started == [([AID, FS], f"investigate-{AID}#{FS}")])
+asyncio.run(worker.handle_message(tc, msg()))
+check("firing の link_down は、異常ごとの id（investigate-<anomaly_id>）でワークフローを起こし、アラートの dict を渡す",
+      tc.started == [(anomaly, WID)] and tc.signals == [])
 tc = FakeTemporal()
-asyncio.run(worker.handle_message(tc, msg(FS - 60)))
+asyncio.run(worker.handle_message(tc, msg(source="splunk", n=2)))
+check("1 通に 2 件あれば 2 つ起こす（送り手も渡す）",
+      [i for _, i in tc.started] == [WID, f"investigate-hq-ce-01#link_down#eth2"] and tc.started[0][0]["source"] == "splunk")
+tc = FakeTemporal()
+for k in ("trap", "bgp_down", "isis_down"):
+    asyncio.run(worker.handle_message(tc, msg(kind=k)))
+    asyncio.run(worker.handle_message(tc, msg("resolved", kind=k)))
 asyncio.run(worker.handle_message(tc, "garbage"))
-awsio.read_anomaly = lambda aid: {}
-asyncio.run(worker.handle_message(tc, msg(FS)))
-check("古い発生・読めない本文・表に無い異常は起こさない（例外にもしない = 消す）", tc.started == [])
-awsio.read_anomaly = lambda aid: anomaly
+check("link_down 以外（trap / bgp_down / isis_down）と読めない本文は、起こさずシグナルも送らない（例外にもしない = 消す）",
+      tc.started == [] and tc.signals == [])
+looked = []
+awsio.read_proposal = lambda p: looked.append(p) or {"proposal_id": p, "first_seen": FS, "status": "failed"}
+tc = FakeTemporal()
+asyncio.run(worker.handle_message(tc, msg()))
+check("同じ発生（<anomaly_id>#<first_seen>）の修復案がもうあれば起こさない（閉じたあとで届いた、同じ starts_at の繰り返しの通知）",
+      tc.started == [] and looked == [PID])
+awsio.read_proposal = lambda p: {}
+tc = FakeTemporal()
+asyncio.run(worker.handle_message(tc, msg("resolved", source="splunk")))
+check("resolved はそのワークフローへシグナル resolved を送り、起こさない", tc.started == [] and tc.signals == [(WID, "resolved", "splunk")])
 deleted = []
-awsio.receive_messages = lambda: [{"Body": msg(FS), "ReceiptHandle": "r1"}]
 awsio.delete_message = lambda h: deleted.append(h)
+awsio.receive_messages = lambda: [{"Body": msg("resolved"), "ReceiptHandle": "r0"}]
+asyncio.run(worker.starter_queue(FakeTemporal(sig_exc=RPCError("workflow not found", t_service.RPCStatusCode.NOT_FOUND))))
+check("resolved の相手が走っていない（NOT_FOUND）のは普通のこと（link_down 以外・もう閉じた）なので消す", deleted == ["r0"])
+deleted.clear()
+asyncio.run(worker.starter_queue(FakeTemporal(sig_exc=RPCError("temporal に届かない", t_service.RPCStatusCode.UNAVAILABLE))))
+check("それ以外の RPC の失敗は消さずに残す（解消のシグナルを落とすと verify が時間切れで failed になる）", deleted == [])
+awsio.receive_messages = lambda: [{"Body": msg(), "ReceiptHandle": "r1"}]
 asyncio.run(worker.starter_queue(FakeTemporal(WorkflowAlreadyStarted())))
-check("もう起きている（WorkflowAlreadyStartedError = 同じ発生の重複配達）なら消す（残すと DLQ で本物の失敗と混ざる）", deleted == ["r1"])
+check("もう起きている（WorkflowAlreadyStartedError = 同じ異常の繰り返し・重複配達）なら消す（残すと DLQ で本物の失敗と混ざる）", deleted == ["r1"])
 deleted.clear()
 asyncio.run(worker.starter_queue(FakeTemporal(RuntimeError("temporal に届かない"))))
 check("それ以外の失敗は消さずに残す（可視性タイムアウトのあとで配り直し、5 回で DLQ）", deleted == [])
-awsio.read_anomaly = lambda aid: (_ for _ in ()).throw(OSError("Neptune に届かない"))
+awsio.read_proposal = lambda p: (_ for _ in ()).throw(OSError("Neptune に届かない"))
 asyncio.run(worker.starter_queue(FakeTemporal()))
 check("Neptune に届かないときも消さない", deleted == [])
+awsio.receive_messages = lambda: [{"Body": "garbage", "ReceiptHandle": "r2"}, {"Body": msg(kind="trap"), "ReceiptHandle": "r3"}]
+asyncio.run(worker.starter_queue(FakeTemporal()))
+check("読めない本文と、起こさない種類のアラートは消す", deleted == ["r2", "r3"])
 for k, v in _saved.items():
     setattr(awsio, k, v)
 
@@ -726,10 +861,9 @@ check("承認のチェックは承認ボタンの真上（同じ Column）にあ
       and "pr_ok.change(iv.approve_button, [pr_ok, pr_who], [pr_approve])" in web
       and "pr_who.change(iv.approve_button, [pr_ok, pr_who], [pr_approve])" in web)
 check("状態は表示だけ日本語で、ラジオの値・一覧に渡す値は英語のまま（Neptune の status と同じ）",
-      set(iv.PROPOSAL_STATUS_JA) == set(proposals.STATUSES) | {"all"} and set(iv.ANOMALY_STATUS_JA) == {"open", "resolved"}
+      set(iv.PROPOSAL_STATUS_JA) == set(proposals.STATUSES) | {"all"} and not hasattr(iv, "ANOMALY_STATUS_JA")
       and ("承認待ち", "pending") in iv.status_choices(iv.PROPOSAL_STATUS_JA)
       and "gr.Radio(iv.status_choices(iv.PROPOSAL_STATUS_JA), value=\"pending\"" in web
-      and "gr.Radio(iv.status_choices(iv.ANOMALY_STATUS_JA), value=\"open\"" in web
       and iv.proposal_table("pending")[0].endswith("件（承認待ち）") and iv.proposal_table("pending")[1][0]["状態"] == "承認待ち")
 check("承認は「読んだ」のチェックが無ければ書かない", iv.decide_proposal("p1", "approved", "pending", "yamada", False)[1:] == (nothing, nothing) and decided == [])
 check("proposal_id が空なら書かない", iv.decide_proposal("", "approved", "pending", "yamada", True)[1:] == (nothing, nothing) and decided == [])

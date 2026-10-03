@@ -9,13 +9,13 @@ output "service_name" {
 }
 
 output "anomaly_queue_url" {
-  description = "SQS queue the AnomalyOpened events land in (the worker long-polls it)"
+  description = "SQS queue the alerts of Grafana / Splunk land in through the SNS topic of terraform/base/core (the worker long-polls it)"
   value       = aws_sqs_queue.anomalies.url
 }
 
-output "anomaly_rule_name" {
-  description = "EventBridge rule that routes AnomalyOpened (source <prefix>.spark) to the queue"
-  value       = aws_cloudwatch_event_rule.anomalies.name
+output "anomaly_dlq_url" {
+  description = "Dead letter queue: messages the worker received 5 times without deleting, and messages SNS could not deliver to the queue"
+  value       = aws_sqs_queue.anomalies_dlq.url
 }
 
 output "tools_function_name" {
