@@ -11,7 +11,7 @@
 # ops/up.sh / ops/down.sh / terraform とは独立（2026-10-04 ユーザー決定: CloudFormation だけで扱う）。up.sh で何も作っていなくても動き、
 # down.sh はこれを消さない。VPC もエンドポイントもバケットも ECR もスタックが持つので、土台（terraform/base/core）は要らない。
 # terraform/pipeline/lab の EC2 とずれないよう、版とイメージと lab/ の置き方は ops/lab-common.sh、EC2 の中の支度は lab/setup.sh を共有する。
-# 待機の費用は約 $0.15/h（EC2 t4g.xlarge 約 $0.09/h + インターフェース型エンドポイント 4 本 $0.056/h）。使い終わったら down。
+# 待機の費用は約 $0.23/h（EC2 t4g.xlarge 約 $0.17/h + インターフェース型エンドポイント 4 本 $0.056/h）。使い終わったら down。
 set -euo pipefail
 
 REGION=ap-northeast-1
@@ -159,6 +159,6 @@ case "$CMD" in
 
     log "できた。デバッグ用の EC2 に入るコマンド（中で sudo lab status / sudo lab check / sudo lab telegraf logs -f / sudo lab telegraf test）:"
     stack_output StartSessionCommand
-    echo "使い終わったら ops/lab-debug.sh down（待機だけで約 \$0.15/h。ops/down.sh では消えない）"
+    echo "使い終わったら ops/lab-debug.sh down（待機だけで約 \$0.23/h。ops/down.sh では消えない）"
     ;;
 esac

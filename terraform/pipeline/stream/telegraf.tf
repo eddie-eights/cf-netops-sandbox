@@ -184,7 +184,8 @@ resource "aws_ecs_service" "telegraf" {
   # aws ecs execute-command でタスクの中に入れる（tg test / tg gnmi。コマンドは output telegraf_exec_command）
   enable_execute_command = true
 
-  # 2 つ同時に立てない（同じ機器を 2 回ポーリングして MSK に 2 回書かない）
+  # 2 つ同時に立てない（同じ機器を 2 回ポーリングして MSK に 2 回書かない）。取りにいく入力（SNMP のポーリング、gNMI の購読）があるあいだは 1 つ。
+  # gNMI は lab（SR Linux は MDT を送れない）のためのもので、本番の Cisco は MDT の dial-out で送らせる方針（docs/collection.md）
   deployment_minimum_healthy_percent = 0
   deployment_maximum_percent         = 100
 

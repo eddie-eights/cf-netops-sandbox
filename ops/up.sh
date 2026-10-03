@@ -387,7 +387,7 @@ echo "インターフェース型エンドポイント（$(endpoint_count) 本 �
 #   + CREATE_KB なら 33（OpenSearch Serverless の OCU）、
 # OpenSearch Serverless の VPC エンドポイント = 3（1.4 × 2 AZ。公表単価からで Price List API では確かめていない。
 #   KB と logs のコレクションを公開しないために作り、両方で 1 本を共用する。NEED_AOSS のときだけ）、
-# lab = 9、graph = 14、stream = 57 + Telegraf 4（Fargate ARM 0.25 vCPU / 0.5 GB で 1.2 と内部 NLB 2.43。
+# lab = 17（EC2 の t4g.xlarge 17.28。2026-10-04 に公開の料金ファイルで確認。それまでの 9 は t4g.large の単価だった）、graph = 14、stream = 57 + Telegraf 4（Fargate ARM 0.25 vCPU / 0.5 GB で 1.2 と内部 NLB 2.43。
 #   2026-09-28 から。どちらも公表単価からで、Price List API では確かめていない）、
 # analytics = 14（ストリーミングのジョブが動いている間の EMR Serverless の 2 vCPU。単価は 2026-09-17 に確認。
 #   S3 Tables のテーブルは無料）
@@ -402,7 +402,7 @@ echo "インターフェース型エンドポイント（$(endpoint_count) 本 �
 COST_CENTS=2
 COST_CENTS=$((COST_CENTS + ($(endpoint_count) * 14 * ENDPOINT_AZS + 5) / 10))
 if [ -n "$AGENT" ] && [ -n "$CREATE_KB" ]; then COST_CENTS=$((COST_CENTS + 33)); fi
-if [ -z "$SKIP_LAB" ]; then COST_CENTS=$((COST_CENTS + 9)); fi
+if [ -z "$SKIP_LAB" ]; then COST_CENTS=$((COST_CENTS + 17)); fi
 if [ -z "$SKIP_GRAPH" ]; then COST_CENTS=$((COST_CENTS + 14)); fi
 if [ -z "$SKIP_STREAM" ]; then
   # MSK は kafka.m5.large × 2 で 0.542（Kafka 4 は t3.small を受け付けない。2026-09-18）

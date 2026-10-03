@@ -77,7 +77,7 @@ stateDiagram-v2
 ## Temporal UI を開く
 
 UI（8233）はプライベートサブネットのタスクにあるので、Web の EC2 を踏み台にしてポートフォワーディングする。`ops/up.sh` の手順 8-5 が同じコマンドを表示する。
-8233 は土台の通信の表の `web` → `workflow` の 1 行で開いている（[architecture.md](architecture.md) の「SG」）。gRPC の 7233 はタスクの外に出さない（Temporal は `--ip 127.0.0.1` で待ち、UI だけを `--ui-ip 0.0.0.0` で出す。ワーカーは同じタスクの `localhost:7233`）。
+8233 は土台の通信の表の `web` → `workflow` の 1 行で開いている（[architecture/core.md](architecture/core.md) の「SG」）。gRPC の 7233 はタスクの外に出さない（Temporal は `--ip 127.0.0.1` で待ち、UI だけを `--ui-ip 0.0.0.0` で出す。ワーカーは同じタスクの `localhost:7233`）。
 
 ```bash
 INSTANCE_ID=$(terraform -chdir=terraform/base/core output -raw web_instance_id); echo "$INSTANCE_ID"

@@ -81,6 +81,8 @@
       oid = ".1.3.6.1.2.1.2.2.1.20"
 # <<< snmp_poll
 
+# ---- gNMI は lab 用。本番の Cisco は MDT の dial-out で機器から送らせる方針（docs/collection.md）だが、lab の SR Linux は MDT を話さないので
+# ここから gNMI（dial-in）で取りにいき、本番と同じ共通の形に変換する（変換はまだ無い）。取りにいく入力なので、これがあるあいだ Telegraf は 1 タスク。
 # ---- gNMI（SR Linux の状態を購読。SNMP には無い BGP / IS-IS / EVPN の層）。containerlab が全ノードで 57400（TLS、自己署名）を開け、
 # ユーザーは containerlab が入れる既定（admin / NokiaSrl1!。lab だけの公開既定値で、実機の値ではない。実機なら SSM から埋める）。
 # source タグは購読先のアドレス（機器の管理 IP。Splunk のアラートアクションがこれと device map で機器名を引く）。パスの鍵（peer-address など）はタグになる。
@@ -115,6 +117,10 @@
     path = "/system/network-instance/protocols/evpn/ethernet-segments/bgp-instance[id=1]/ethernet-segment[name=*]/oper-state"
     subscription_mode = "sample"
     sample_interval = "30s"
+  # mac_table は MAC の一覧（どの端末がどこにいるか）。lab ではセッション数（本番の NAT / FW / BNG の加入者）の代替を MAC テーブルの数
+  # （bridge-table/statistics/active-entries と mac-limit/maximum-entries。mac-vrf ごととサブ IF ごと）で、収容回線数の代替を
+  # type bridged のサブ IF を持つ IF の数で取る予定で、どちらもまだ購読していない。本番の値の代替であることと、揃わない要素（上限で断った数が無い、
+  # 当たったときの影響が違う、lab では値が動かない）は docs/collection.md の「lab（SR Linux）での取り方」
   [[inputs.gnmi.subscription]]
     name = "mac_table"
     path = "/network-instance[name=*]/bridge-table/mac-table/mac[address=*]"

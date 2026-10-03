@@ -15,7 +15,7 @@
 | `PIPELINE` | lab / stream / analytics / graph。既定 `0` |
 | `WORKFLOW` | Temporal での調査と修復。`AGENT=1` と `PIPELINE=1` が要り、`SKIP_LAB` / `SKIP_STREAM` / `SKIP_ANALYTICS` / `SKIP_GRAPH` とは一緒に書けない。ワークフローを起こすのはアラートなので、送り手も要る（`SINK_SPLUNK=1` か、`GRAFANA=1` と `SINK_PROMETHEUS=1` の既定のまま `SNMP_POLL=1`。どちらも無いと `ops/up.sh` が止まる。`SNMP_POLL` が既定の `0` だと Grafana のルールは発火しないので、既定のままの `WORKFLOW=1` は止まる） |
 | `CREATE_KB` | ナレッジベース（+$0.37/h。OpenSearch Serverless の VPC エンドポイント $0.03（`SINK_OPENSEARCH` の logs と共用）と bedrock-agent-runtime のエンドポイント $0.014 を含む）。`AGENT=1` のとき |
-| `SKIP_LAB` | lab を作らない（-$0.09/h）。`SKIP_STREAM=1` も要る |
+| `SKIP_LAB` | lab を作らない（-$0.17/h）。`SKIP_STREAM=1` も要る |
 | `SKIP_STREAM` | stream（MSK と Telegraf の ECS）を作らない（-$1.17/h）。analytics も外れる |
 | `SKIP_ANALYTICS` | analytics を作らない（-$0.56/h。KB を作るなら OpenSearch Serverless の VPC エンドポイントは残るので -$0.53/h。Grafana の分を含む）。Grafana と Splunk（アラートの送り手）も無くなる |
 | `SKIP_GRAPH` | Neptune を作らない（-$0.14/h）。トポロジは静的データになる（アラートで `status` が変わらない） |
@@ -29,7 +29,7 @@
 | `KEEP_ECR` | `1` で `ops/down.sh` が ECR を残す（保管料は月数円） |
 | `AWS_PROFILE` / `LOCAL_PORT` / `NO_PORTFORWARD` | プロファイル / PC 側のポート（既定 8080）/ ポートフォワーディングを開かない |
 | `VPC_CIDR` | VPC の CIDR（[setup.md](setup.md)） |
-| `NETWORK_PERIMETER` | VPC のエンドポイントを通らない AWS の API の呼び出しを拒む Deny（[architecture.md](architecture.md) の「閉域」）。既定 `1`。`0` は `AccessDenied` の切り分けのときだけ（エンドポイントは作ったまま、Deny だけを外す） |
+| `NETWORK_PERIMETER` | VPC のエンドポイントを通らない AWS の API の呼び出しを拒む Deny（[architecture/core.md](architecture/core.md) の「閉域」）。既定 `1`。`0` は `AccessDenied` の切り分けのときだけ（エンドポイントは作ったまま、Deny だけを外す） |
 | `ENDPOINTS_MULTI_AZ` | インターフェース型エンドポイントを 2 AZ に置く（本番の形。エンドポイントの費用が倍）。既定 `0` でサブネット a だけ（b のワークロードも private DNS で a の ENI に届く） |
 | `AWS_CA_BUNDLE` | 社内 PC の CA（[setup.md](setup.md)）。前にあった `OPENSEARCH_CACERT_FILE` と `ADMIN_ARN` は 2026-09-28 から使わない（書いてあっても止まらず、注意だけ出る） |
 | `TF_VERBOSE` | `1` で terraform の出力を全部出す。既定は要点だけで、全文は `ops/logs/tf-<ルート>-apply.log` |
