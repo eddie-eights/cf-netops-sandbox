@@ -115,3 +115,19 @@ variable "network_perimeter" {
   type        = bool
   default     = true
 }
+
+variable "mdt_source_cidrs" {
+  description = "CIDRs of the devices that send Cisco MDT dial-out to the Telegraf NLB (tcp 57000, terraform/pipeline/stream). Empty (default) opens it to nobody - the lab SR Linux cannot send MDT."
+  type        = list(string)
+  default     = []
+
+  validation {
+    # ホスト部が 0 でない書き方（10.1.2.3/16）は AWS がネットワークアドレスに直して差分が出続けるので拒む。同じ CIDR を 2 度書くとルールの鍵がぶつかるので拒む
+    condition     = alltrue([for c in var.mdt_source_cidrs : can(regex("^([0-9]{1,3}\\.){3}[0-9]{1,3}/([0-9]|[12][0-9]|3[0-2])$", c)) && try(cidrsubnet(c, 0, 0) == c, false)]) && length(distinct(var.mdt_source_cidrs)) == length(var.mdt_source_cidrs)
+    error_message = "mdt_source_cidrs は IPv4 の CIDR（ネットワークアドレス。10.0.0.0/8 など）の重複しない並び。"
+  }
+  validation {
+    condition     = !contains(var.mdt_source_cidrs, "0.0.0.0/0")
+    error_message = "mdt_source_cidrs に 0.0.0.0/0 は書かない（機器の管理ネットワークに絞る）。"
+  }
+}

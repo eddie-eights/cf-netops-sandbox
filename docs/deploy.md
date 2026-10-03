@@ -29,6 +29,7 @@
 | `KEEP_ECR` | `1` で `ops/down.sh` が ECR を残す（保管料は月数円） |
 | `AWS_PROFILE` / `LOCAL_PORT` / `NO_PORTFORWARD` | プロファイル / PC 側のポート（既定 8080）/ ポートフォワーディングを開かない |
 | `VPC_CIDR` | VPC の CIDR（[setup.md](setup.md)） |
+| `MDT_SOURCE_CIDRS` | Cisco の MDT（dial-out。tcp 57000）を Telegraf の NLB へ送ってよい機器の CIDR（カンマで）。既定は空で、どこからも受けない（[collection.md](collection.md)） |
 | `NETWORK_PERIMETER` | VPC のエンドポイントを通らない AWS の API の呼び出しを拒む Deny（[architecture/core.md](architecture/core.md) の「閉域」）。既定 `1`。`0` は `AccessDenied` の切り分けのときだけ（エンドポイントは作ったまま、Deny だけを外す） |
 | `ENDPOINTS_MULTI_AZ` | インターフェース型エンドポイントを 2 AZ に置く（本番の形。エンドポイントの費用が倍）。既定 `0` でサブネット a だけ（b のワークロードも private DNS で a の ENI に届く） |
 | `AWS_CA_BUNDLE` | 社内 PC の CA（[setup.md](setup.md)）。前にあった `OPENSEARCH_CACERT_FILE` と `ADMIN_ARN` は 2026-09-28 から使わない（書いてあっても止まらず、注意だけ出る） |

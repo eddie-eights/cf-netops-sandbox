@@ -5,7 +5,8 @@
 # 自分の SG を読んで付けるだけ（ルールは作らない）。SG とルールに時間課金は無いので、機能を作らないときもそろえて作る。
 # 相手の絞り込みは SG と IAM の両方で行う（MSK / Neptune は IAM 認証、S3 / ECR / Bedrock はロールのポリシーと perimeter.tf の VPC の外を拒む Deny）。
 # DNS（VPC の +2）・IMDS・ECS のタスクメタデータ・Time Sync は SG の対象外なので表に無い。インターネットからの受信は SG 以前に経路が無い（vpc.tf）。
-# EMR Serverless は 0.0.0.0/0 の受信ルールがある SG を拒むが、表に CIDR の受信は lab の管理ネットワークしか無い。
+# EMR Serverless は 0.0.0.0/0 の受信ルールがある SG を拒むが、表に CIDR の受信は lab の管理ネットワークと MDT の送り元（var.mdt_source_cidrs。
+# NLB の SG だけ。0.0.0.0/0 は変数の検査で拒む）しか無い。
 # 開けていないもの: Temporal の gRPC 7233（ワーカーは同じタスクの localhost。terraform/workflow の ecs.tf）、Splunk の管理 API 8089（外から使わない）。
 # 2026-09-26〜09-29 は全部で internal 1 つ（VPC の中は何でも受け、送信は自由）だった。その前（7c42b0f）はルートごとに SG とルールを持っていた。
 # SG の description は変えると作り直しになる（付いている ENI があると消えない）ので、変えるときは down してから
@@ -37,6 +38,7 @@ locals {
 
   # 通信の表。1 行が 1 つの流れで、from が送り、to が受ける（応答は SG の接続追跡で通るので書かない）。from / to は上の SG のキーか endpoints、
   # または SG でない相手の s3（S3 のマネージドプレフィックスリスト）と lab_mgmt（local.lab_mgmt_cidr）。
+  # 送り元が CIDR の行は from を "cidr:<CIDR>"（ルールの鍵を分けるため）にして cidr に CIDR を書く（受信だけ）。
   # 両端が SG なら from の送信ルールと to の受信ルールの 2 本、片方だけが SG ならその側の 1 本になる。
   # only = "egress" / "ingress" は片側だけを書く行。lab の EC2 が管理ネットワークとのあいだを転送する流れは、SG が見る IP が
   # lab の EC2 のものでなく機器の管理 IP なので、SG の参照が効く側（相手の ENI の IP が見える側）だけを SG で書き、反対側は lab_mgmt の CIDR で書く
@@ -70,6 +72,7 @@ locals {
       # NLB の送信ルールは転送とヘルスチェックの両方に効く
       { from = "telegraf_nlb", to = "telegraf", protocol = "udp", port = 1162, why = "SNMP traps - NLB 162 to the task 1162" },
       { from = "telegraf_nlb", to = "telegraf", protocol = "udp", port = 5140, why = "syslog - NLB 5140 to the task 5140" },
+      { from = "telegraf_nlb", to = "telegraf", protocol = "tcp", port = 57000, why = "Cisco MDT dial-out - NLB 57000 to the task 57000" },
       { from = "telegraf_nlb", to = "telegraf", protocol = "tcp", port = 8080, why = "NLB health check - Telegraf outputs.health" },
 
       # trap と syslog: 機器 → lab の EC2（lab.sh forward の DNAT）→ NLB。送り元は機器の管理 IP のままなので、NLB は管理ネットワークの CIDR から受け、
@@ -86,6 +89,11 @@ locals {
       { from = "telegraf", to = "lab", protocol = "udp", port = 161, only = "ingress", why = "SNMP polling forwarded to the switches" },
       { from = "telegraf", to = "lab", protocol = "tcp", port = 57400, only = "ingress", why = "gNMI forwarded to the switches" },
     ],
+    # MDT の dial-out: 本番の Cisco → NLB の 57000/tcp（docs/collection.md）。送り元の CIDR は変数（既定は空で、どこからも受けない）。
+    # lab の SR Linux は MDT を送れないので、lab の管理ネットワークからは開けない
+    [for c in var.mdt_source_cidrs :
+      { from = "cidr:${c}", cidr = c, to = "telegraf_nlb", protocol = "tcp", port = 57000, why = "Cisco MDT dial-out from the devices (mdt_source_cidrs)" }
+    ],
   ])
 
   sg_rules = { for f in local.sg_flows : "${f.from}-${f.to}-${f.protocol}-${f.port}" => {
@@ -95,6 +103,7 @@ locals {
     port     = f.port
     to_port  = try(f.to_port, f.port)
     only     = try(f.only, "")
+    cidr     = try(f.cidr, null)
     why      = f.why
   } }
 }
@@ -135,7 +144,7 @@ resource "aws_vpc_security_group_ingress_rule" "flow" {
   from_port                    = each.value.port
   to_port                      = each.value.to_port
   referenced_security_group_id = contains(local.sg_keys, each.value.from) ? local.sg_ids[each.value.from] : null
-  cidr_ipv4                    = each.value.from == "lab_mgmt" ? local.lab_mgmt_cidr : null
+  cidr_ipv4                    = each.value.from == "lab_mgmt" ? local.lab_mgmt_cidr : each.value.cidr
 }
 
 # インターフェース型と OpenSearch Serverless の VPC エンドポイント（endpoints.tf）に付ける。受信は表の 443 だけ

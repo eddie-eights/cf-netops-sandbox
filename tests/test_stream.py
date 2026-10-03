@@ -104,8 +104,18 @@ check("syslog のポートが lab.sh・telegraf.sh・telegraf.conf.in・stream �
               for a, b, pt in (("lab_mgmt", "telegraf_nlb", log_port), ("lab", "telegraf_nlb", log_port), ("telegraf_nlb", "telegraf", log_port),
                                ("lab_mgmt", "telegraf_nlb", 162), ("lab", "telegraf_nlb", 162), ("telegraf_nlb", "telegraf", 1162)))
       and "log_port" not in lab_locals
-      and re.search(rf"syslog = \{{ listener = {log_port}, container = {log_port} \}}", stream_tg) is not None
-      and re.search(r"trap\s+= \{ listener = 162, container = 1162 \}", stream_tg) is not None)
+      and re.search(rf'syslog = \{{ listener = {log_port}, container = {log_port}, protocol = "UDP" \}}', stream_tg) is not None
+      and re.search(r'trap\s+= \{ listener = 162, container = 1162, protocol = "UDP" \}', stream_tg) is not None)
+# MDT の dial-out は 4 か所で同じポート（telegraf.sh / telegraf.conf.in / stream の NLB とタスク / 土台の通信の表）で TCP。NLB は TCP の送り元を残さない
+check("MDT は tcp 57000 で受ける（inputs.cisco_telemetry_mdt・telegraf.sh・NLB の TCP のリスナー・タスクの portMappings・NLB → タスクの SG）",
+      re.search(r'^MDT_PORT=57000$', tgsh, re.M) is not None
+      and re.search(r'\[\[inputs\.cisco_telemetry_mdt\]\]\s*\n\s*transport = "grpc"\s*\n\s*service_address = ":57000"', tele) is not None
+      and re.search(r'mdt\s+= \{ listener = 57000, container = 57000, protocol = "TCP" \}', stream_tg) is not None
+      and "protocol    = each.value.protocol" in stream_tg and "protocol          = each.value.protocol" in stream_tg
+      and 'preserve_client_ip = each.value.protocol == "UDP"' in stream_tg
+      and '{ containerPort = 57000, protocol = "tcp" }' in stream_tg
+      and re.search(r'\{ from = "telegraf_nlb", to = "telegraf", protocol = "tcp", port = 57000,', core_sg) is not None
+      and "57000" not in lab_locals and "57000" not in labsh)
 # 管理ネットワークは 4 か所で同じ（containerlab の mgmt / lab.sh / lab の locals の VPC ルート / 土台の SG の lab_mgmt）
 mgmt = re.search(r"^MGMT=(\S+)$", labsh, re.M).group(1)
 check("管理ネットワークが containerlab・lab.sh・lab の locals・土台の SG の lab_mgmt_cidr で同じ",
@@ -139,7 +149,41 @@ check("inputs.gnmi は TLS（自己署名）で bgp_neighbor / isis_interface（
       and gnmi_blk.count('subscription_mode = "sample"') == 2 and gnmi_blk.count('sample_interval = "30s"') == 2)
 check("gNMI の 4 つは gnmi トピックへ（metrics には混ざらない）",
       re.search(r'topic = "gnmi"[\s\S]*?namepass = \["bgp_neighbor", "isis_interface", "evpn_es", "mac_table"\]', tele) is not None
-      and re.search(r'topic = "metrics"[\s\S]*?namepass = \["system", "interface"\]', tele) is not None)
+      and re.search(r'topic = "metrics"[\s\S]*?namepass = \["device_cpu", "device_memory", "if_stats", "sessions", "circuits", "system", "interface"\]', tele) is not None)
+# ---- lab の性能メトリクス（2 つめの inputs.gnmi → Starlark で共通の形（仮）へ → metrics トピック）
+LAB_SUBS = {
+    "lab_cpu": "/platform/control[slot=*]/cpu[index=*]/total/instant",
+    "lab_memory": "/platform/control[slot=*]/memory",
+    "lab_if_counters": "/interface[name=*]/statistics",
+    "lab_port_speed": "/interface[name=*]/ethernet/port-speed",
+    "lab_lag_speed": "/interface[name=*]/lag/lag-speed",
+    "lab_ni_mac_active": "/network-instance[name=*]/bridge-table/statistics/active-entries",
+    "lab_ni_mac_limit": "/network-instance[name=*]/bridge-table/mac-limit",
+    "lab_subif_mac_active": "/interface[name=*]/subinterface[index=*]/bridge-table/statistics/active-entries",
+    "lab_subif_mac_limit": "/interface[name=*]/subinterface[index=*]/bridge-table/mac-limit",
+    "lab_subif_type": "/interface[name=*]/subinterface[index=*]/type",
+    "lab_if_oper": "/interface[name=*]/oper-state",
+}
+_gnmi_blocks = tele.split("[[inputs.gnmi]]")[1:]
+lab_blk = _gnmi_blocks[1].split("# ----", 1)[0] if len(_gnmi_blocks) == 2 else ""
+_lab_subs = dict(re.findall(r'name = "(lab_\w+)"\s*\n\s*path = "([^"]+)"\s*\n\s*subscription_mode = "sample"\s*\n\s*sample_interval = "30s"', lab_blk))
+check("性能メトリクスは 2 つめの inputs.gnmi（知らないパスで BGP / IS-IS の購読を巻き込まない）で、lab_* の 11 本を 30 秒の sample。宛先・認証・TLS は 1 つめと同じ",
+      len(_gnmi_blocks) == 2 and _lab_subs == LAB_SUBS and lab_blk.count("[[inputs.gnmi.subscription]]") == len(LAB_SUBS)
+      and "name = \"lab_" not in gnmi_blk
+      and all(l in lab_blk for l in ("addresses = [__GNMI_TARGETS__]", 'encoding = "json_ietf"', "tls_enable = true", "insecure_skip_verify = true", 'username = "admin"')))
+_star_proc = re.search(r'\[\[processors\.starlark\]\]\s*\n\s*namepass = \[([^\]]*)\]\s*\n\s*script = "/etc/telegraf/lab_gnmi\.star"', tele)
+_star_aggr = re.search(r'\[\[aggregators\.starlark\]\]\s*\n\s*namepass = \[([^\]]*)\]\s*\n\s*period = "30s"\s*\n\s*grace = "\d+s"\s*\n\s*drop_original = true\s*\n\s*script = "/etc/telegraf/lab_circuits\.star"', tele)
+_dockerfile = _read("telegraf", "Dockerfile")
+check("lab_* は processors.starlark（lab_gnmi.star）と aggregators.starlark（lab_circuits.star）で全部受け、Kafka のどの出力にも lab_* を載せない。.star はイメージの /etc/telegraf",
+      _star_proc is not None and _star_aggr is not None
+      and sorted(re.findall(r'"(\w+)"', _star_proc.group(1)) + re.findall(r'"(\w+)"', _star_aggr.group(1))) == sorted(LAB_SUBS)
+      and re.findall(r'"(\w+)"', _star_aggr.group(1)) == ["lab_subif_type", "lab_if_oper"]
+      and not any("lab_" in blk.split("# <<<", 1)[0] for blk in tele.split("[[outputs.kafka]]")[1:])
+      and re.search(r"^COPY telegraf\.conf\.in lab_gnmi\.star lab_circuits\.star /etc/telegraf/$", _dockerfile, re.M) is not None)
+check("MDT は collector タグで mdt トピックへだけ（measurement の名前は機器で変わるので namepass でなく tagpass）",
+      re.search(r'\[\[inputs\.cisco_telemetry_mdt\]\][\s\S]*?\[inputs\.cisco_telemetry_mdt\.tags\]\s*\n\s*collector = "mdt"', tele) is not None
+      and re.search(r'topic = "mdt"[\s\S]*?\[outputs\.kafka\.tagpass\]\s*\n\s*collector = \["mdt"\]\s*\n# <<< sink kafka', tele) is not None
+      and tele.count('topic = "mdt"') == 1)
 check("lab.sh forward は gNMI の GNMI_PORT/tcp も SNMP の 161/udp と同じく Telegraf から管理ネットワークへ通す",
       re.search(r'-p tcp --dport "\$GNMI_PORT" "\$\{c\[@\]\}" -j ACCEPT', labsh) is not None and re.search(r"^GNMI_PORT=57400$", labsh, re.M) is not None)
 _up = _read("ops", "up.sh")
@@ -174,12 +218,12 @@ check("Telegraf はポーリングの IF の鍵を ifName（タグ）にする�
 check("Telegraf は機器の syslog を inputs.syslog（udp）で受け、device_log として logs トピックに出す",
       'name_override = "device_log"' in tele and "[[inputs.tail]]" not in tele and "[[inputs.socket_listener]]" not in tele
       and re.search(r'topic = "logs"[\s\S]*?namepass = \["device_log"\]|namepass = \["device_log"\][\s\S]*?topic = "logs"', tele) is not None)
-check("metrics / traps の出力に device_log が混ざらない（namepass / namedrop）",
-      all(re.search(r"name(pass|drop)", blk) for blk in tele.split("[[outputs.kafka]]")[1:]))
+check("metrics / traps / mdt の出力に device_log が混ざらない（namepass / namedrop / tagpass）",
+      all(re.search(r"name(pass|drop)|tagpass", blk) for blk in tele.split("[[outputs.kafka]]")[1:]))
 check("syslog の hostname を sysName のタグに付け替える（metrics / traps と同じ機器名のタグ）",
       re.search(r'\[\[processors\.rename\]\]\s*\n\s*namepass = \["device_log"\]\s*\n\s*\[\[processors\.rename\.replace\]\]\s*\n\s*tag = "hostname"\s*\n\s*dest = "sysName"', tele) is not None)
-check("Spark の既定は gnmi トピックも読む（iceberg / prometheus は metrics,gnmi、opensearch は traps,logs）", mod.METRIC_TOPICS == "metrics,gnmi"
-      and mod.sink_topics("iceberg", mod.METRIC_TOPICS, mod.LOG_TOPICS) == "metrics,gnmi,traps,logs" and mod.sink_topics("prometheus", mod.METRIC_TOPICS, mod.LOG_TOPICS) == "metrics,gnmi")
+check("Spark の既定は gnmi / mdt トピックも読む（iceberg / prometheus は metrics,gnmi,mdt、opensearch は traps,logs）", mod.METRIC_TOPICS == "metrics,gnmi,mdt"
+      and mod.sink_topics("iceberg", mod.METRIC_TOPICS, mod.LOG_TOPICS) == "metrics,gnmi,mdt,traps,logs" and mod.sink_topics("prometheus", mod.METRIC_TOPICS, mod.LOG_TOPICS) == "metrics,gnmi,mdt")
 _access = _read("terraform", "pipeline", "stream", "access.tf")
 _lab_tg = _read("terraform", "pipeline", "lab", "telegraf.tf")
 check("Telegraf は stream の ECS で、MSK への書き込みはタスクロール（lab の state のロールに頼らない。2026-09-28）",
@@ -195,5 +239,89 @@ check("down.sh は stream の必須変数（snmp_agents / gnmi_targets）に形�
       re.search(r"destroy_root pipeline/stream -var 'snmp_agents=\"udp://[0-9.]+:161\"' -var 'gnmi_targets=\"[0-9.]+:57400\"'", _down) is not None)
 check("Spark の既定は logs も読む", mod.LOG_TOPICS == "traps,logs"
       and mod.sink_topics("opensearch", mod.METRIC_TOPICS, mod.LOG_TOPICS) == "traps,logs")
+
+# ---- lab_gnmi.star / lab_circuits.star を Python で動かす（Python と Starlark の両方で動く書き方にしてある。Telegraf の Starlark は Metric と state を入れる）
+class _NoLen(dict):   # Telegraf の Metric の tags / fields は len も真偽値も持たない（len(m.fields) は Telegraf で落ちた）
+    def __len__(self):
+        raise TypeError("Telegraf の tags / fields に len は無い")
+
+class FakeMetric:
+    def __init__(self, name, tags=None, fields=None, time=0):
+        self.name, self.tags, self.fields, self.time = name, _NoLen(tags or {}), _NoLen(fields or {}), time
+
+def _star(name):
+    g = {"Metric": FakeMetric, "state": {}}
+    exec(compile(_read("telegraf", name), name, "exec"), g)
+    return g
+
+_g = _star("lab_gnmi.star")
+_apply = _g["apply"]
+S = "203.0.113.11"
+_m = _apply(FakeMetric("lab_cpu", {"source": S, "slot": "A", "index": "all"}, {"instant": 7}, time=123))
+check("lab_cpu: index all だけを device_cpu（used_pct は float、component は slot、time と source を引き継ぐ）にし、コアごとは落とす",
+      _m.name == "device_cpu" and _m.tags == {"source": S, "component": "A"} and _m.fields == {"used_pct": 7.0} and _m.time == 123
+      and _apply(FakeMetric("lab_cpu", {"source": S, "slot": "A", "index": "0"}, {"instant": 9})) is None)
+_m = _apply(FakeMetric("lab_memory", {"source": S, "slot": "A"}, {"physical": "8000000000", "free": "6000000000", "reserved": "1", "srl_nokia-platform-control:utilization": 25}))
+_m2 = _apply(FakeMetric("lab_memory", {"source": S, "slot": "A"}, {"memory/physical": "1000", "memory/free": "250"}))
+check("lab_memory: uint64 の文字列を数にし、utilization が無ければ (total - free) / total。名前空間の接頭辞とパスの前置きを外して比べる",
+      _m.name == "device_memory" and _m.fields == {"total_bytes": 8000000000, "free_bytes": 6000000000, "used_pct": 25.0}
+      and _m2.fields == {"total_bytes": 1000, "free_bytes": 250, "used_pct": 75.0})
+_none = _apply(FakeMetric("lab_port_speed", {"source": S, "name": "ethernet-1/1"}, {"port_speed": "25G"}))
+_none2 = _apply(FakeMetric("lab_lag_speed", {"source": S, "name": "lag1"}, {"lag_speed": "50000"}))
+_m = _apply(FakeMetric("lab_if_counters", {"source": S, "name": "ethernet-1/1"},
+                       {"in_octets": "123456789012345678", "out_octets": "5", "in_discarded_packets": "1", "out_discarded_packets": "2",
+                        "in_error_packets": "3", "out_error_packets": "4", "in_unicast_packets": "9"}))
+_m2 = _apply(FakeMetric("lab_if_counters", {"source": S, "name": "lag1"}, {"in_octets": 1.0}))
+_m3 = _apply(FakeMetric("lab_if_counters", {"source": S, "name": "mgmt0"}, {"in_octets": "1"}))
+check("lab_if_counters: if_stats（discarded / error の名前を共通の形に）。速度は先に届いた port-speed（25G）/ lag-speed（Mbps）を覚えて speed_bps に付け、速度の metric は落とす",
+      _none is None and _none2 is None and _m.name == "if_stats" and _m.tags == {"source": S, "if_name": "ethernet-1/1"}
+      and _m.fields == {"in_octets": 123456789012345678, "out_octets": 5, "in_discards": 1, "out_discards": 2, "in_errors": 3, "out_errors": 4, "speed_bps": 25000000000}
+      and _m2.fields == {"in_octets": 1, "speed_bps": 50000000000} and _m3.fields == {"in_octets": 1})
+_none = _apply(FakeMetric("lab_ni_mac_limit", {"source": S, "name": "mac-vrf-1"}, {"maximum_entries": 250, "warning_threshold_pct": 95}))
+_m = _apply(FakeMetric("lab_ni_mac_active", {"source": S, "name": "mac-vrf-1"}, {"active_entries": "10"}))
+_none2 = _apply(FakeMetric("lab_subif_mac_limit", {"source": S, "name": "ethernet-1/1", "index": "1"}, {"maximum_entries": "100"}))
+_m2 = _apply(FakeMetric("lab_subif_mac_active", {"source": S, "name": "ethernet-1/1", "index": "1"}, {"active_entries": 5}))
+_m3 = _apply(FakeMetric("lab_subif_mac_active", {"source": "203.0.113.12", "name": "ethernet-1/1", "index": "1"}, {"active_entries": 5}))
+check("MAC の数: sessions（kind mac、scope network_instance / subinterface、owner は mac-vrf かサブ IF）。上限は機器と owner ごとに覚えて limit / warning_pct / used_pct に",
+      _none is None and _none2 is None
+      and _m.name == "sessions" and _m.tags == {"source": S, "kind": "mac", "scope": "network_instance", "owner": "mac-vrf-1"}
+      and _m.fields == {"active": 10, "limit": 250, "used_pct": 4.0, "warning_pct": 95}
+      and _m2.tags == {"source": S, "kind": "mac", "scope": "subinterface", "owner": "ethernet-1/1.1"} and _m2.fields == {"active": 5, "limit": 100, "used_pct": 5.0}
+      and _m3.fields == {"active": 5})
+_raw = [FakeMetric("lab_cpu", {"source": S, "index": "all"}, {"instant": "n/a"}), FakeMetric("lab_memory", {"source": S}, {"x": 1}),
+        FakeMetric("lab_if_counters", {"source": S}, {"in_octets": 1}), FakeMetric("lab_port_speed", {"source": S, "name": "e"}, {"port_speed": "fast"}),
+        FakeMetric("lab_ni_mac_active", {"source": S, "name": "v"}, {"other": 1}), FakeMetric("other", {}, {"v": 1})]
+check("変換できないものは lab_* のまま返す（Kafka には載らず、デバッグ用の EC2 の標準出力で見える）",
+      all(_apply(m) is m for m in _raw))
+check("数の文字列: 負・小数・桁あふれ（19 桁以上は float）・数でないもの", _g["_num"]("-3") == -3 and _g["_num"]("2.5") == 2.5 and _g["_num"](".5") == 0.5
+      and _g["_num"]("12345678901234567890") == 12345678901234567890.0 and _g["_num"]("1e3") is None and _g["_num"]("") is None and _g["_num"](None) is None
+      and _g["_speed_bps"]("2.5G") == 2500000000 and _g["_speed_bps"]("100M") == 100000000 and _g["_speed_bps"]("G") is None)
+
+_c = _star("lab_circuits.star")
+def _circuit_round(metrics):
+    for m in metrics:
+        _c["add"](m)
+    out = _c["push"]()
+    _c["reset"]()
+    return {m.tags["source"]: m.fields for m in out}
+def _subif(src, name, idx, kind):
+    return FakeMetric("lab_subif_type", {"source": src, "name": name, "index": idx}, {"type": kind})
+def _oper(src, name, st):
+    return FakeMetric("lab_if_oper", {"source": src, "name": name}, {"oper_state": st})
+_r1 = _circuit_round([_oper(S, "ethernet-1/1", "up"), _oper(S, "ethernet-1/2", "down"), _oper(S, "ethernet-1/3", "up"), _oper(S, "lag1", "up"), _oper(S, "mgmt0", "up"),
+                      _subif(S, "ethernet-1/1", "0", "routed"), _subif(S, "ethernet-1/2", "1", "srl_nokia-interfaces:bridged"),
+                      _subif(S, "ethernet-1/2", "2", "bridged"), _subif(S, "lag1", "1", "bridged"),
+                      _oper("203.0.113.12", "ethernet-1/1", "up")])
+check("circuits: 機器ごとに active（bridged のサブ IF を持つ IF。lag も数える）/ up（そのうち oper up）/ capacity（ethernet-*）/ used_pct",
+      _r1 == {S: {"active": 2, "up": 1, "capacity": 3, "used_pct": 2 * 100.0 / 3}, "203.0.113.12": {"active": 0, "up": 0, "capacity": 1, "used_pct": 0.0}})
+_r2 = _circuit_round([_oper(S, "ethernet-1/1", "up")])
+_r3 = _circuit_round([_oper(S, "ethernet-1/1", "up")])
+_r4 = _circuit_round([_oper(S, "ethernet-1/1", "up")])
+check("circuits: 届かなくなった IF / サブ IF / 機器は EXPIRE（3）回の push で数えなくなる（gNMI の delete は Telegraf が載せない）",
+      _c["EXPIRE"] == 3 and _r2 == _r1 and _r3 == _r1 and _r4 == {S: {"active": 0, "up": 0, "capacity": 1, "used_pct": 0.0}}
+      and [_circuit_round([]) for _ in range(3)] == [_r4, _r4, {}] and _c["state"]["devices"] == {})
+check("circuits: source や name の無いもの、type / oper-state の無いものは数えない",
+      _circuit_round([FakeMetric("lab_if_oper", {"name": "ethernet-1/1"}, {"oper_state": "up"}), FakeMetric("lab_subif_type", {"source": S, "name": "ethernet-1/1"}, {"type": "bridged"}),
+                      FakeMetric("lab_if_oper", {"source": S, "name": "ethernet-1/1"}, {"other": "up"})]) == {})
 
 print(f"通過 {passed} / 失敗 0")

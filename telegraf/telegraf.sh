@@ -24,6 +24,8 @@ SNMP_POLL=${SNMP_POLL:-0}
 LOG_PORT=5140
 # trap を受ける UDP のポート。機器は 162 に送り、NLB が 1162 に向ける（非 root は 1024 未満で待てない）
 TRAP_PORT=1162
+# MDT の dial-out を受ける TCP のポート（telegraf.conf.in の inputs.cisco_telemetry_mdt と terraform/pipeline/stream の telegraf.tf）
+MDT_PORT=57000
 
 render() {
   # ECS のタスク定義の環境変数（terraform/pipeline/stream の telegraf.tf）を埋めて $CONF を作る:
@@ -64,7 +66,7 @@ render() {
   # 選ばなかった出力の区間を消す
   for s in $SINKS; do [ "$s" = "$SINK" ] || drop+=(-e "/^# >>> sink $s/,/^# <<< sink $s/d"); done
   sed "${drop[@]}" -e "s#__KAFKA_BROKERS__#$q#" -e "s#__AWS_REGION__#$AWS_REGION#" -e "s#__SNMP_AGENTS__#$agents#" -e "s#__GNMI_TARGETS__#$gnmi#" -e "s#__SYSLOG_STANDARD__#$SYSLOG_STANDARD#" "$TEMPLATE" > "$CONF"
-  echo "$CONF を作った（sink: ${SINK}${q:+ / brokers: $KAFKA_BROKERS} / snmp poll: ${agents:-off} / gnmi: ${gnmi} / trap: ${TRAP_PORT}/udp / syslog: ${LOG_PORT}/udp ${SYSLOG_STANDARD}）"
+  echo "$CONF を作った（sink: ${SINK}${q:+ / brokers: $KAFKA_BROKERS} / snmp poll: ${agents:-off} / gnmi: ${gnmi} / trap: ${TRAP_PORT}/udp / syslog: ${LOG_PORT}/udp ${SYSLOG_STANDARD} / mdt: ${MDT_PORT}/tcp）"
 }
 
 case "${1:-run}" in

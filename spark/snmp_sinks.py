@@ -41,7 +41,7 @@ import time
 import urllib.error
 import urllib.request
 
-METRIC_TOPICS = "metrics,gnmi"   # metrics = Telegraf の inputs.snmp、gnmi = inputs.gnmi（telegraf/telegraf.conf.in。Telegraf（ECS）で動く）
+METRIC_TOPICS = "metrics,gnmi,mdt"   # metrics = Telegraf の inputs.snmp と lab の gNMI を変えた共通の形、gnmi = inputs.gnmi、mdt = inputs.cisco_telemetry_mdt（telegraf/telegraf.conf.in。Telegraf（ECS）で動く）
 LOG_TOPICS = "traps,logs"   # traps = Telegraf の inputs.snmp_trap、logs = inputs.syslog（機器の syslog。measurement は device_log）
 SINKS = ("iceberg", "opensearch", "prometheus", "splunk")
 TRIGGER = "60 seconds"

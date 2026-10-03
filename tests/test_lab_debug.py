@@ -226,8 +226,8 @@ def render(sink, **extra):
             return tomllib.load(f), r.stdout, os.listdir(d)
 kafka, _, kafka_files = render(None, KAFKA_BROKERS="b-1.example:9098,b-2.example:9098")
 stdout_conf, out, stdout_files = render("stdout")
-check("SINK の既定は kafka（MSK）。outputs.kafka が 4 つで outputs.file は無い", kafka is not None
-      and len(kafka["outputs"]["kafka"]) == 4 and "file" not in kafka["outputs"] and "aws_config" in kafka_files)
+check("SINK の既定は kafka（MSK）。outputs.kafka が 5 つ（metrics / traps / gnmi / logs / mdt）で outputs.file は無い", kafka is not None
+      and len(kafka["outputs"]["kafka"]) == 5 and "file" not in kafka["outputs"] and "aws_config" in kafka_files)
 check("SINK=stdout は KAFKA_BROKERS が無くても描け、outputs.kafka が無く outputs.file（stdout / json）だけ。aws_config も書かない",
       stdout_conf is not None and "kafka" not in stdout_conf["outputs"]
       and stdout_conf["outputs"]["file"] == [{"files": ["stdout"], "data_format": "json", "json_timestamp_units": "1s"}]
@@ -257,9 +257,18 @@ check("telegraf.conf.in の inputs.snmp（ポーリング）は「>>> snmp_poll�
       and not any(w in _snmp_blk for w in ("[[inputs.snmp_trap]]", "[[inputs.gnmi]]", "[[inputs.syslog]]", "[[outputs.")))
 check("SNMP_POLL の既定は 0: kafka でも stdout でも inputs.snmp が無く、trap / gNMI / syslog は残る（ログは snmp poll: off）",
       sh_const(tg_sh, "SNMP_POLL") == "${SNMP_POLL:-0}"
-      and all("snmp" not in c["inputs"] and len(c["inputs"]["snmp_trap"]) == 1 and len(c["inputs"]["gnmi"]) == 1 and len(c["inputs"]["syslog"]) == 1
+      and all("snmp" not in c["inputs"] and len(c["inputs"]["snmp_trap"]) == 1 and len(c["inputs"]["gnmi"]) == 2 and len(c["inputs"]["syslog"]) == 1
               for c in (kafka, stdout_conf))
       and "snmp poll: off" in out)
+check("gNMI は 2 つ（状態と lab の性能メトリクス）で、どちらも GNMI_TARGETS を宛先にする。MDT の受け口（57000/tcp）と Starlark の変換は kafka でも stdout でも入る",
+      all([g["addresses"] for g in c["inputs"]["gnmi"]] == [["203.0.113.11:57400"]] * 2
+          and c["inputs"]["cisco_telemetry_mdt"] == [{"transport": "grpc", "service_address": ":57000", "tags": {"collector": "mdt"}}]
+          and [p["script"] for p in c["processors"]["starlark"]] == ["/etc/telegraf/lab_gnmi.star"]
+          and [p["script"] for p in c["aggregators"]["starlark"]] == ["/etc/telegraf/lab_circuits.star"]
+          for c in (kafka, stdout_conf))
+      and "mdt: 57000/tcp" in out
+      and [o["topic"] for o in kafka["outputs"]["kafka"]] == ["metrics", "gnmi", "traps", "logs", "mdt"]
+      and kafka["outputs"]["kafka"][-1]["tagpass"] == {"collector": ["mdt"]})
 check("SNMP_POLL=1 は inputs.snmp を残し、agents を SNMP_AGENTS で埋める（ifName をタグにした interface の表と system）",
       _poll is not None and _poll["inputs"]["snmp"][0]["agents"] == ["udp://203.0.113.11:161", "udp://203.0.113.12:161"]
       and _poll["inputs"]["snmp"][0]["name"] == "system" and _poll["inputs"]["snmp"][0]["table"][0]["name"] == "interface"

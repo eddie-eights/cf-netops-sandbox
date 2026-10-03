@@ -6,10 +6,13 @@
 # ops/up.sh が lab の定義から作って terraform/pipeline/stream の変数に渡す
 #（lab/lab_topology.py --snmp-agents / --gnmi-targets。機器の一覧を lab の定義 1 か所にするため、ここに IP を書かない）。
 #
-# 流れ: Spine-Leaf の SR Linux 6 台からの trap を udp 162 で受ける + gNMI で BGP / IS-IS / EVPN の状態を購読
-#       + 機器の syslog を udp 5140 で受ける（+ SNMP_POLL=1 なら SNMP を 10 秒ごとにポーリング。ifTable）→ MSK（IAM 認証、TLS）
-#   metrics トピック: interface（ifName / ifOperStatus / ifInErrors ...）と system（sysName / sysUpTime）。SNMP_POLL=1 のときだけ載る
+# 流れ: Spine-Leaf の SR Linux 6 台からの trap を udp 162 で受ける + gNMI で BGP / IS-IS / EVPN の状態と性能メトリクスを購読
+#       + 機器の syslog を udp 5140 で受ける + 本番の Cisco の MDT（dial-out）を tcp 57000 で受ける
+#       （+ SNMP_POLL=1 なら SNMP を 10 秒ごとにポーリング。ifTable）→ MSK（IAM 認証、TLS）
+#   metrics トピック: 共通の形（仮）の device_cpu / device_memory / if_stats / sessions / circuits（lab では gNMI の lab_* を変換したもの。下の
+#                     processors.starlark と aggregators.starlark）と、SNMP_POLL=1 のときだけ interface（ifName / ifOperStatus / ifInErrors ...）と system
 #   gnmi    トピック: bgp_neighbor（session_state。on_change）/ isis_interface（oper_state。on_change）/ evpn_es / mac_table（30 秒ごと）
+#   mdt     トピック: inputs.cisco_telemetry_mdt が受けたもの（measurement は sensor path。共通の形への変換はまだ無い）
 #   traps   トピック: snmp_trap（linkDown / linkUp）
 #   logs    トピック: device_log（機器の syslog。BGP の隣接の up / down など。lab/srlinux/*.cli の remote-server）
 # 機器は lab の EC2 の中の docker network（203.0.113.0/24）にいる。このコンテナからは次の経路で届く（lab の EC2 で sudo lab forward-status）:
@@ -81,8 +84,9 @@
       oid = ".1.3.6.1.2.1.2.2.1.20"
 # <<< snmp_poll
 
-# ---- gNMI は lab 用。本番の Cisco は MDT の dial-out で機器から送らせる方針（docs/collection.md）だが、lab の SR Linux は MDT を話さないので
-# ここから gNMI（dial-in）で取りにいき、本番と同じ共通の形に変換する（変換はまだ無い）。取りにいく入力なので、これがあるあいだ Telegraf は 1 タスク。
+# ---- gNMI は lab 用。本番の Cisco は MDT の dial-out で機器から送らせる方針（docs/collection.md。受け口は下の inputs.cisco_telemetry_mdt）だが、
+# lab の SR Linux は MDT を話さないので、ここから gNMI（dial-in）で取りにいく。性能メトリクスは 2 つめの inputs.gnmi で取り、本番と同じ共通の形に変換する。
+# 取りにいく入力なので、これがあるあいだ Telegraf は 1 タスク。
 # ---- gNMI（SR Linux の状態を購読。SNMP には無い BGP / IS-IS / EVPN の層）。containerlab が全ノードで 57400（TLS、自己署名）を開け、
 # ユーザーは containerlab が入れる既定（admin / NokiaSrl1!。lab だけの公開既定値で、実機の値ではない。実機なら SSM から埋める）。
 # source タグは購読先のアドレス（機器の管理 IP。Splunk のアラートアクションがこれと device map で機器名を引く）。パスの鍵（peer-address など）はタグになる。
@@ -117,15 +121,102 @@
     path = "/system/network-instance/protocols/evpn/ethernet-segments/bgp-instance[id=1]/ethernet-segment[name=*]/oper-state"
     subscription_mode = "sample"
     sample_interval = "30s"
-  # mac_table は MAC の一覧（どの端末がどこにいるか）。lab ではセッション数（本番の NAT / FW / BNG の加入者）の代替を MAC テーブルの数
-  # （bridge-table/statistics/active-entries と mac-limit/maximum-entries。mac-vrf ごととサブ IF ごと）で、収容回線数の代替を
-  # type bridged のサブ IF を持つ IF の数で取る予定で、どちらもまだ購読していない。本番の値の代替であることと、揃わない要素（上限で断った数が無い、
-  # 当たったときの影響が違う、lab では値が動かない）は docs/collection.md の「lab（SR Linux）での取り方」
+  # mac_table は MAC の一覧（どの端末がどこにいるか）。数（セッション数の代替）は下の 2 つめの inputs.gnmi の lab_*_mac_active
   [[inputs.gnmi.subscription]]
     name = "mac_table"
     path = "/network-instance[name=*]/bridge-table/mac-table/mac[address=*]"
     subscription_mode = "sample"
     sample_interval = "30s"
+
+# ---- gNMI（lab の性能メトリクス。measurement は lab_*。Kafka には載せず、下の processors.starlark（lab_gnmi.star）と
+# aggregators.starlark（lab_circuits.star）が共通の形（仮）の device_cpu / device_memory / if_stats / sessions / circuits に変えて metrics トピックへ）。
+# 上の inputs.gnmi と分けるのは、SR Linux が知らないパスが 1 つでもあると購読（SubscribeRequest）ごと拒むので、未実測のパスが BGP / IS-IS を巻き込まないため。
+# パスは SR Linux 26.7.2 の YANG（nokia/srlinux-yang-models の v26.7.2）で確かめたが、gNMI での購読は未実測。
+# セッション数の代替は MAC テーブルの数（bridge-table/statistics/active-entries と mac-limit。mac-vrf ごととサブ IF ごと）、
+# 収容回線数の代替は type bridged のサブ IF を持つ IF の数。本番の値の代替であることと、揃わない要素（上限で断った数が無い、
+# 当たったときの影響が違う、lab では値が動かない）は docs/collection.md の「lab（SR Linux）での取り方」
+[[inputs.gnmi]]
+  addresses = [__GNMI_TARGETS__]
+  username = "admin"
+  password = "NokiaSrl1!"
+  encoding = "json_ietf"
+  redial = "10s"
+  tls_enable = true
+  insecure_skip_verify = true
+
+  # CPU。index は "all"（全コア）とコアの番号で、lab_gnmi.star が all だけ残す
+  [[inputs.gnmi.subscription]]
+    name = "lab_cpu"
+    path = "/platform/control[slot=*]/cpu[index=*]/total/instant"
+    subscription_mode = "sample"
+    sample_interval = "30s"
+  # メモリ（physical / free / reserved / utilization）
+  [[inputs.gnmi.subscription]]
+    name = "lab_memory"
+    path = "/platform/control[slot=*]/memory"
+    subscription_mode = "sample"
+    sample_interval = "30s"
+  # IF（物理ポートと lag）のカウンタ。帯域使用率は octets の差分と速度で、ドロップは discarded-packets、エラーは error-packets
+  [[inputs.gnmi.subscription]]
+    name = "lab_if_counters"
+    path = "/interface[name=*]/statistics"
+    subscription_mode = "sample"
+    sample_interval = "30s"
+  # 速度。物理ポートは port-speed（10G などの enum）、lag は lag-speed（Mbps）。lab_gnmi.star が覚えて if_stats の speed_bps に付ける
+  [[inputs.gnmi.subscription]]
+    name = "lab_port_speed"
+    path = "/interface[name=*]/ethernet/port-speed"
+    subscription_mode = "sample"
+    sample_interval = "30s"
+  [[inputs.gnmi.subscription]]
+    name = "lab_lag_speed"
+    path = "/interface[name=*]/lag/lag-speed"
+    subscription_mode = "sample"
+    sample_interval = "30s"
+  # セッション数の代替: mac-vrf ごとの MAC の数と上限（maximum-entries、既定 250。warning-threshold-pct、既定 95）
+  [[inputs.gnmi.subscription]]
+    name = "lab_ni_mac_active"
+    path = "/network-instance[name=*]/bridge-table/statistics/active-entries"
+    subscription_mode = "sample"
+    sample_interval = "30s"
+  [[inputs.gnmi.subscription]]
+    name = "lab_ni_mac_limit"
+    path = "/network-instance[name=*]/bridge-table/mac-limit"
+    subscription_mode = "sample"
+    sample_interval = "30s"
+  # 同じものをサブ IF ごとに（どこが食っているか）
+  [[inputs.gnmi.subscription]]
+    name = "lab_subif_mac_active"
+    path = "/interface[name=*]/subinterface[index=*]/bridge-table/statistics/active-entries"
+    subscription_mode = "sample"
+    sample_interval = "30s"
+  [[inputs.gnmi.subscription]]
+    name = "lab_subif_mac_limit"
+    path = "/interface[name=*]/subinterface[index=*]/bridge-table/mac-limit"
+    subscription_mode = "sample"
+    sample_interval = "30s"
+  # 収容回線数の代替: サブ IF の type（bridged を数える）と IF の oper-state。lab_circuits.star が機器ごとに数える
+  [[inputs.gnmi.subscription]]
+    name = "lab_subif_type"
+    path = "/interface[name=*]/subinterface[index=*]/type"
+    subscription_mode = "sample"
+    sample_interval = "30s"
+  [[inputs.gnmi.subscription]]
+    name = "lab_if_oper"
+    path = "/interface[name=*]/oper-state"
+    subscription_mode = "sample"
+    sample_interval = "30s"
+
+# ---- 本番の Cisco の MDT（model-driven telemetry）の dial-out を受ける（docs/collection.md の方針）。機器 → NLB の 57000/tcp → ここ。
+# 機器側は telemetry の destination をこの NLB の 57000 に、protocol を grpc（TLS なし）にする想定（本番の機種と版が分かってから確かめる）。
+# source タグは機器が名乗る node_id、measurement は sensor path（エンコーディングのパス）。共通の形への変換はまだ無いので、生のまま mdt トピックへ。
+# lab の SR Linux は MDT を送れないので、lab では何も届かない（受け口が開いていることだけ確かめる。ss -ltn に 57000）。
+# collector タグで mdt トピックへ振り分ける（measurement の名前は機器と版で変わるので namepass では書けない）
+[[inputs.cisco_telemetry_mdt]]
+  transport = "grpc"
+  service_address = ":57000"
+  [inputs.cisco_telemetry_mdt.tags]
+    collector = "mdt"
 
 # ---- trap 受信。コンテナは非 root なので 162 ではなく 1162 で待つ（NLB が 162 を 1162 に向ける。telegraf.sh の TRAP_PORT）。
 # source タグは機器の管理 IP（lab の EC2 も NLB も送り元を変えない）
@@ -155,8 +246,23 @@
     tag = "hostname"
     dest = "sysName"
 
+# ---- lab の gNMI（lab_*）を共通の形（仮）に変える。説明は lab_gnmi.star の頭。lab_subif_type / lab_if_oper は下の aggregators.starlark が受ける
+[[processors.starlark]]
+  namepass = ["lab_cpu", "lab_memory", "lab_if_counters", "lab_port_speed", "lab_lag_speed", "lab_ni_mac_active", "lab_ni_mac_limit", "lab_subif_mac_active", "lab_subif_mac_limit"]
+  script = "/etc/telegraf/lab_gnmi.star"
+
+# ---- 収容回線数の代替（circuits）を機器ごとに数える。説明は lab_circuits.star の頭。period は gNMI の sample_interval と同じ 30 秒で、
+# 機器の時刻で付いた metric が period の始まりより前でも落とさないよう grace を付ける。元の lab_subif_type / lab_if_oper は流さない
+[[aggregators.starlark]]
+  namepass = ["lab_subif_type", "lab_if_oper"]
+  period = "30s"
+  grace = "60s"
+  drop_original = true
+  script = "/etc/telegraf/lab_circuits.star"
+
 # >>> sink kafka（telegraf.sh render が SINK で片方だけ残す。既定 kafka）
-# ---- MSK へ。トピックは metric 名で分ける（snmp_trap → traps、device_log → logs、gNMI の 4 つ → gnmi、SNMP のポーリング → metrics）
+# ---- MSK へ。トピックは metric 名で分ける（snmp_trap → traps、device_log → logs、gNMI の 4 つ → gnmi、共通の形と SNMP のポーリング → metrics、
+# MDT → mdt（collector タグ））。lab_* の変換前の値はどれにも載せない
 # sasl_aws_msk_iam_profile: Telegraf 1.40.0 は profile か role + session のどちらかを書かないと
 # 「both role and session must be set」で落ち、インスタンスプロファイルだけでは起動しない（2026-09-18 に EC2 で確認。plugins/common/kafka/sasl_aws_iam_msk.go）。
 # telegraf.sh render が region だけの [default] を /tmp/aws_config に書き、鍵が無いので SDK がタスクロール（ECS のコンテナの認証情報）に落ちる
@@ -171,7 +277,7 @@
   json_timestamp_units = "1s"
   required_acks = 1
   max_retry = 3
-  namepass = ["system", "interface"]
+  namepass = ["device_cpu", "device_memory", "if_stats", "sessions", "circuits", "system", "interface"]
 
 [[outputs.kafka]]
   brokers = [__KAFKA_BROKERS__]
@@ -211,11 +317,25 @@
   required_acks = 1
   max_retry = 3
   namepass = ["device_log"]
+
+[[outputs.kafka]]
+  brokers = [__KAFKA_BROKERS__]
+  topic = "mdt"
+  enable_tls = true
+  sasl_mechanism = "AWS-MSK-IAM"
+  sasl_aws_msk_iam_region = "__AWS_REGION__"
+  sasl_aws_msk_iam_profile = "default"
+  data_format = "json"
+  json_timestamp_units = "1s"
+  required_acks = 1
+  max_retry = 3
+  [outputs.kafka.tagpass]
+    collector = ["mdt"]
 # <<< sink kafka
 
 # >>> sink stdout
 # ---- 標準出力へ（デバッグ用の EC2。cloudformation/lab-debug.yaml。MSK が無いので docker logs で見る。sudo lab telegraf logs）。
-# 形は MSK に載るものと同じ（json、秒の timestamp）。トピックの代わりに name で見分ける
+# 形は MSK に載るものと同じ（json、秒の timestamp）。トピックの代わりに name で見分ける。lab_* が出ていたら lab_gnmi.star で変換できなかったもの
 [[outputs.file]]
   files = ["stdout"]
   data_format = "json"

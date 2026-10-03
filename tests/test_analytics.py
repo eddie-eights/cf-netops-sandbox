@@ -95,17 +95,25 @@ EXPECTED_FLOWS = {(c, t, "tcp", 443, 443, "") for c in ("web", "lab", "telegraf"
     ("web", "grafana", "tcp", 3000, 3000, ""), ("web", "splunk", "tcp", 8000, 8000, ""), ("web", "workflow", "tcp", 8233, 8233, ""),
     ("telegraf", "msk", "tcp", 9098, 9098, ""), ("spark", "msk", "tcp", 9098, 9098, ""), ("msk", "msk", "tcp", 9092, 9098, ""),
     ("spark", "spark", "tcp", 0, 65535, ""), ("spark", "splunk", "tcp", 8088, 8088, ""),
-    ("telegraf_nlb", "telegraf", "udp", 1162, 1162, ""), ("telegraf_nlb", "telegraf", "udp", 5140, 5140, ""), ("telegraf_nlb", "telegraf", "tcp", 8080, 8080, ""),
+    ("telegraf_nlb", "telegraf", "udp", 1162, 1162, ""), ("telegraf_nlb", "telegraf", "udp", 5140, 5140, ""), ("telegraf_nlb", "telegraf", "tcp", 57000, 57000, ""), ("telegraf_nlb", "telegraf", "tcp", 8080, 8080, ""),
     ("lab_mgmt", "telegraf_nlb", "udp", 162, 162, ""), ("lab_mgmt", "telegraf_nlb", "udp", 5140, 5140, ""),
     ("lab", "telegraf_nlb", "udp", 162, 162, "egress"), ("lab", "telegraf_nlb", "udp", 5140, 5140, "egress"),
     ("telegraf", "lab_mgmt", "udp", 161, 161, ""), ("telegraf", "lab_mgmt", "tcp", 57400, 57400, ""),
     ("telegraf", "lab", "udp", 161, 161, "ingress"), ("telegraf", "lab", "tcp", 57400, 57400, "ingress"),
 }
 check(f"通信の表は決めた流れだけ（多い: {sorted(_flows - EXPECTED_FLOWS)} 足りない: {sorted(EXPECTED_FLOWS - _flows)}）",
-      _flows == EXPECTED_FLOWS and _sg_tf.count("{ from = ") == len(EXPECTED_FLOWS) - 2 * len(_clients) + 2)
-check("Temporal の gRPC 7233（workflow）と Splunk の管理 API 8089（splunk）は開けず、CIDR のルールは lab の管理ネットワークと endpoints の送信なしだけ（EMR Serverless は 0.0.0.0/0 の inbound を拒否する）",
+      _flows == EXPECTED_FLOWS and _sg_tf.count("{ from = ") == len(EXPECTED_FLOWS) - 2 * len(_clients) + 2 + 1)
+_core_vars = open(os.path.join(ROOT, "terraform", "base", "core", "variables.tf"), encoding="utf-8").read()
+check("MDT の送り元は変数 mdt_source_cidrs の CIDR から NLB の 57000/tcp だけ（受信だけ。既定は空、0.0.0.0/0 と重複とネットワークアドレスでない書き方を拒む）",
+      re.search(r'\[for c in var\.mdt_source_cidrs :\s*\{ from = "cidr:\$\{c\}", cidr = c, to = "telegraf_nlb", protocol = "tcp", port = 57000, why = "[^"]*" \}\s*\]', _sg_tf) is not None
+      and "cidr     = try(f.cidr, null)" in _sg_tf
+      and re.search(r'variable "mdt_source_cidrs" \{[\s\S]*?type\s*=\s*list\(string\)\s*default\s*=\s*\[\][\s\S]*?cidrsubnet\(c, 0, 0\) == c[\s\S]*?length\(distinct\(var\.mdt_source_cidrs\)\) == length\(var\.mdt_source_cidrs\)'
+                    r'[\s\S]*?!contains\(var\.mdt_source_cidrs, "0\.0\.0\.0/0"\)', _core_vars) is not None
+      and 'MAIN_VARS+=(-var "mdt_source_cidrs=' in open(os.path.join(ROOT, "ops", "up.sh"), encoding="utf-8").read()
+      and "MDT_SOURCE_CIDRS" in open(os.path.join(ROOT, "ops", "deploy-env.sh"), encoding="utf-8").read())
+check("Temporal の gRPC 7233（workflow）と Splunk の管理 API 8089（splunk）は開けず、CIDR のルールは lab の管理ネットワーク・MDT の送り元・endpoints の送信なしだけ（EMR Serverless は 0.0.0.0/0 の inbound を拒否する）",
       not any(t == "workflow" and p <= 7233 <= q or t == "splunk" and p <= 8089 <= q for _, t, _, p, q, _ in _flows)
-      and sorted(re.findall(r'cidr_ipv4\s*=\s*(.+)', _sg_tf)) == sorted(['each.value.to == "lab_mgmt" ? local.lab_mgmt_cidr : null', 'each.value.from == "lab_mgmt" ? local.lab_mgmt_cidr : null', '"127.0.0.1/32"'])
+      and sorted(re.findall(r'cidr_ipv4\s*=\s*(.+)', _sg_tf)) == sorted(['each.value.to == "lab_mgmt" ? local.lab_mgmt_cidr : null', 'each.value.from == "lab_mgmt" ? local.lab_mgmt_cidr : each.value.cidr', '"127.0.0.1/32"'])
       and "var.vpc_cidr" not in _sg_tf and "cidr_ipv6" not in _sg_tf)
 check("ルールは表から for_each で作る。送信は from の SG、受信は to の SG で、相手は SG の参照・S3 のプレフィックスリスト・lab の管理ネットワークのどれか 1 つ",
       re.search(r'resource "aws_vpc_security_group_egress_rule" "flow" \{\n\s*for_each = \{ for k, r in local\.sg_rules : k => r if contains\(local\.sg_keys, r\.from\) && r\.only != "ingress" \}', _sg_tf) is not None
@@ -170,7 +178,7 @@ check("variable sinks は list、既定 3 つ（iceberg / opensearch / prometheu
       re.search(r'variable "sinks"[\s\S]*?type\s*=\s*list\(string\)[\s\S]*?default\s*=\s*\["iceberg",\s*"opensearch",\s*"prometheus"\][\s\S]*?validation', tf, re.S) is not None
       and re.search(r'variable "sinks"[\s\S]*?validation[\s\S]*?\["iceberg",\s*"opensearch",\s*"prometheus",\s*"splunk"\]', tf, re.S) is not None)
 check("variable metric_topics / log_topics（既定 metrics / traps + logs、空を拒否）",
-      re.search(r'variable "metric_topics"[\s\S]*?default\s*=\s*\["metrics",\s*"gnmi"\][\s\S]*?validation', tf, re.S) is not None
+      re.search(r'variable "metric_topics"[\s\S]*?default\s*=\s*\["metrics",\s*"gnmi",\s*"mdt"\][\s\S]*?validation', tf, re.S) is not None
       and re.search(r'variable "log_topics"[\s\S]*?default\s*=\s*\["traps",\s*"logs"\][\s\S]*?validation', tf, re.S) is not None)
 _splunk_tf = open(os.path.join(TF_DIR, "splunk.tf"), encoding="utf-8").read()
 _grafana_tf = open(os.path.join(TF_DIR, "grafana.tf"), encoding="utf-8").read()
@@ -305,7 +313,7 @@ check("analytics に events / sns のエンドポイントは無い（SNS へは
 check("build の引数は spark / args（格納先ごとに Kafka を読む）", [a.arg for a in funcs["build"].args.args] == ["spark", "args"])
 check("pyspark はモジュールの先頭で import しない（テストと引数の検査を pyspark 無しで動かすため）",
       not any(isinstance(n, (ast.Import, ast.ImportFrom)) and "pyspark" in ast.dump(n) for n in tree.body))
-check("既定のトピックは metrics / gnmi（メトリクス。gnmi は Telegraf の inputs.gnmi）と traps / logs（ログ。logs は機器の syslog）", re.search(r'^METRIC_TOPICS\s*=\s*"metrics,gnmi"', src, re.M) is not None
+check("既定のトピックは metrics / gnmi / mdt（メトリクス。gnmi は Telegraf の inputs.gnmi、mdt は inputs.cisco_telemetry_mdt）と traps / logs（ログ。logs は機器の syslog）", re.search(r'^METRIC_TOPICS\s*=\s*"metrics,gnmi,mdt"', src, re.M) is not None
       and re.search(r'^LOG_TOPICS\s*=\s*"traps,logs"', src, re.M) is not None)
 check("SINKS は iceberg / opensearch / prometheus / splunk（Terraform の validation と同じ）", re.search(r'^SINKS\s*=\s*\("iceberg", "opensearch", "prometheus", "splunk"\)', src, re.M) is not None)
 check("Kafka を readStream で読み、購読は引数（格納先ごと）", '.readStream.format("kafka")' in src and '.option("subscribe", topics)' in src)
@@ -350,7 +358,7 @@ def parse_error(argv):
 base = ["--bootstrap", "b:9098", "--checkpoint", "s3://bucket/analytics/checkpoint"]
 a = mod.parse_args(base + ["--sinks", "iceberg", "--iceberg-table", "s3tablesbucket.ns.t"])
 check("parse_args: 既定は metrics / traps,logs、checkpoint に / を足す、sinks はリスト",
-      a.metric_topics == "metrics,gnmi" and a.log_topics == "traps,logs" and a.checkpoint == "s3://bucket/analytics/checkpoint/" and a.sinks == ["iceberg"])
+      a.metric_topics == "metrics,gnmi,mdt" and a.log_topics == "traps,logs" and a.checkpoint == "s3://bucket/analytics/checkpoint/" and a.sinks == ["iceberg"])
 a = mod.parse_args(base + ["--sinks", "iceberg, prometheus ,opensearch", "--iceberg-table", "t", "--prometheus-url", "https://p/api/v1/remote_write",
                            "--opensearch-endpoint", "https://o", "--metric-topics", " metrics , cpu ", "--log-topics", "traps,logs"])
 check("parse_args: 空白を除いて 3 つ、トピックも空白を除く", a.sinks == ["iceberg", "prometheus", "opensearch"] and a.metric_topics == "metrics,cpu" and a.log_topics == "traps,logs"
@@ -402,7 +410,7 @@ check("all_topics: 格納先が読むトピックの和（重複なし、引数�
       mod.all_topics(mod.parse_args(base + ["--sinks", "opensearch", "--opensearch-endpoint", "https://o"])) == ["traps", "logs"]
       and mod.all_topics(mod.parse_args(base + ["--sinks", "prometheus,opensearch", "--prometheus-url", "https://p/api/v1/remote_write", "--opensearch-endpoint", "https://o",
                                                  "--metric-topics", "metrics,gnmi", "--log-topics", "gnmi,traps,logs"])) == ["metrics", "gnmi", "traps", "logs"]
-      and mod.all_topics(mod.parse_args(base + ["--sinks", "prometheus", "--prometheus-url", "https://p/api/v1/remote_write"])) == ["metrics", "gnmi"])
+      and mod.all_topics(mod.parse_args(base + ["--sinks", "prometheus", "--prometheus-url", "https://p/api/v1/remote_write"])) == ["metrics", "gnmi", "mdt"])
 
 
 class _Fut:

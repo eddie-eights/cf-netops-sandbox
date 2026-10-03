@@ -1,5 +1,5 @@
 # ---------------------------------------------------------------- Telegraf (ECS on Fargate + internal NLB)
-# 機器の SNMP のポーリング・gNMI の購読・trap・syslog を受けて MSK に書く Telegraf を、Fargate のタスク 1 つで動かす（2026-09-28 まで terraform/pipeline/lab の EC2）。
+# 機器の SNMP のポーリング・gNMI の購読・trap・syslog・MDT を受けて MSK に書く Telegraf を、Fargate のタスク 1 つで動かす（2026-09-28 まで terraform/pipeline/lab の EC2）。
 # イメージは telegraf/Dockerfile（公式の telegraf に設定のテンプレートと入口を足したもの）で、ops/up.sh が ECR の <接頭辞>-telegraf に置く。
 # lab の管理ネットワーク（203.0.113.0/24）は lab の EC2 の中の docker network なので、terraform/pipeline/lab（forward_to_telegraf）が VPC のルートと
 # lab.sh forward で届ける:
@@ -7,10 +7,13 @@
 #               タスクのサブネットの CIDR（SSM の /<接頭辞>/telegraf-source-cidr）で通す
 #   trap        機器 → lab の EC2 の 162/udp → DNAT → 下の NLB の 162 → タスクの 1162（非 root は 1024 未満で待てない）
 #   syslog      機器 → lab の EC2 の 5140/udp → DNAT → NLB の 5140 → タスクの 5140
+#   MDT         本番の Cisco → NLB の 57000/tcp → タスクの 57000（dial-out。lab の SR Linux は送れないので lab からは来ない。docs/collection.md）
 # タスクの IP は作り直すと変わるので、DNAT の宛先は変わらない NLB の IP にする（SSM の /<接頭辞>/telegraf-address）。
-# NLB は送り元の IP を残す（UDP のターゲットは client IP preservation が既定で、Spark とエージェントは送り元の IP で機器を引く）。
+# NLB は UDP の送り元の IP を残す（UDP のターゲットは client IP preservation が既定で、Spark とエージェントは送り元の IP で機器を引く）。
+# MDT（TCP）は残さない（IP のターゲットの既定）。機器は MDT の中で node_id を名乗るので、送り元の IP は要らない。
 # SG は NLB（telegraf_nlb）とタスク（telegraf）で別々で、ルールは terraform/base/core の security_groups.tf の通信の表にある:
-#   NLB   管理ネットワークの CIDR から udp 162 / 5140 を受け（送り元が機器の管理 IP のまま）、タスクの SG へ udp 1162 / 5140 と tcp 8080（ヘルスチェック）を送る
+#   NLB   管理ネットワークの CIDR から udp 162 / 5140 を、mdt_source_cidrs（土台の変数。既定は空）から tcp 57000 を受け（送り元が機器の管理 IP のまま）、
+#         タスクの SG へ udp 1162 / 5140、tcp 57000 と tcp 8080（ヘルスチェック）を送る
 #   タスク NLB の SG から受け（送り元の IP が残っても、NLB の SG を参照したルールで通る）、MSK の 9098・管理ネットワークの udp 161 / tcp 57400・
 #         エンドポイントと S3 の 443 へ送る
 
@@ -19,10 +22,11 @@ locals {
   telegraf_image          = "${local.telegraf_repository_url}:${var.telegraf_image_tag}"
   telegraf_log_group      = "/ecs/${local.name_prefix}-telegraf"
 
-  # NLB の受け口 → タスクのポート（telegraf/telegraf.conf.in の inputs.snmp_trap と inputs.syslog）
+  # NLB の受け口 → タスクのポート（telegraf/telegraf.conf.in の inputs.snmp_trap、inputs.syslog と inputs.cisco_telemetry_mdt）
   telegraf_ports = {
-    trap   = { listener = 162, container = 1162 }
-    syslog = { listener = 5140, container = 5140 }
+    trap   = { listener = 162, container = 1162, protocol = "UDP" }
+    syslog = { listener = 5140, container = 5140, protocol = "UDP" }
+    mdt    = { listener = 57000, container = 57000, protocol = "TCP" }
   }
 }
 
@@ -59,15 +63,16 @@ resource "aws_lb_target_group" "telegraf" {
 
   name        = "${local.name_prefix}-${each.key}"
   port        = each.value.container
-  protocol    = "UDP"
+  protocol    = each.value.protocol
   target_type = "ip"
   vpc_id      = local.vpc_id
 
-  preserve_client_ip = true
+  # UDP は送り元（機器の管理 IP）を残す。TCP（MDT）は残さない（IP のターゲットの既定。機器は node_id を名乗る）
+  preserve_client_ip = each.value.protocol == "UDP"
   # タスクを作り直すとき、古いタスクを長く待たない
   deregistration_delay = 10
 
-  # UDP は応答で生死を見られないので、Telegraf の outputs.health（telegraf.conf.in）を見る
+  # UDP は応答で生死を見られないので、Telegraf の outputs.health（telegraf.conf.in）を見る。TCP（MDT）も同じものを見る
   health_check {
     protocol            = "HTTP"
     port                = "8080"
@@ -85,7 +90,7 @@ resource "aws_lb_listener" "telegraf" {
 
   load_balancer_arn = aws_lb.telegraf.arn
   port              = each.value.listener
-  protocol          = "UDP"
+  protocol          = each.value.protocol
 
   default_action {
     type             = "forward"
@@ -143,9 +148,10 @@ resource "aws_ecs_task_definition" "telegraf" {
       image     = local.telegraf_image
       essential = true
       portMappings = [
-        { containerPort = 1162, protocol = "udp" }, # trap（NLB の 162 から）
-        { containerPort = 5140, protocol = "udp" }, # syslog
-        { containerPort = 8080, protocol = "tcp" }, # outputs.health（NLB のヘルスチェック）
+        { containerPort = 1162, protocol = "udp" },  # trap（NLB の 162 から）
+        { containerPort = 5140, protocol = "udp" },  # syslog
+        { containerPort = 57000, protocol = "tcp" }, # MDT の dial-out
+        { containerPort = 8080, protocol = "tcp" },  # outputs.health（NLB のヘルスチェック）
       ]
       environment = [
         { name = "AWS_REGION", value = var.region },
@@ -244,7 +250,7 @@ resource "aws_iam_role_policy_attachment" "telegraf_execution" {
 
 resource "aws_iam_role" "telegraf_task" {
   name               = "${local.name_prefix}-telegraf-task"
-  description        = "Telegraf task - write SNMP / gNMI / trap / syslog to MSK (IAM auth), ECS Exec"
+  description        = "Telegraf task - write SNMP / gNMI / trap / syslog / MDT to MSK (IAM auth), ECS Exec"
   assume_role_policy = data.aws_iam_policy_document.ecs_tasks_trust.json
 }
 
