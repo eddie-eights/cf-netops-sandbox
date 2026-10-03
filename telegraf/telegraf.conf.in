@@ -110,6 +110,9 @@
   # inputs.gnmi の TLS は tls_enable（enable_tls は 1.35 で消えた。1.40 は未知のキーで起動を拒む。2026-09-27 実測）。outputs.kafka は enable_tls のまま
   tls_enable = true
   insecure_skip_verify = true
+  # isis_interface のパスの instance[name=main] の鍵は、network-instance の name と名前がぶつかるので、Telegraf が YANG のパスそのままの名前
+  # （/srl_nokia-network-instance:network-instance/protocols/srl_nokia-isis:isis/instance/name）のタグにする。値は main 固定で使わないので落とす
+  tagexclude = ["*isis/instance/name"]
 
   [[inputs.gnmi.subscription]]
     name = "bgp_neighbor"
