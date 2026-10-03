@@ -1,4 +1,4 @@
-# netops-poc - PIPELINE stream root module. MSK (2 brokers, IAM auth) receives SNMP polls, gNMI state, traps and syslog from Telegraf (telegraf.tf: one ECS on Fargate task
+# nwc-poc - PIPELINE stream root module. MSK (2 brokers, IAM auth) receives SNMP polls, gNMI state, traps and syslog from Telegraf (telegraf.tf: one ECS on Fargate task
 # behind an internal NLB; it was an EC2 of terraform/pipeline/lab until 2026-09-28),
 # and the Spark job of terraform/pipeline/analytics reads them (raw messages go to S3 Tables, Prometheus, OpenSearch and Splunk; detection is done by Grafana and Splunk since 2026-10-02). The MSK Connect S3 sink that also copied the raw messages to the asset bucket was removed on 2026-09-26
 # (Spark already stores every topic in S3 Tables). Costs about 0.61 USD per hour while it exists - destroy it the same day.

@@ -26,7 +26,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-ENV_FILE = "/opt/container_artifact/netops-alerts.env"   # splunk/entrypoint.sh が書く
+ENV_FILE = "/opt/container_artifact/nwc-alerts.env"   # splunk/entrypoint.sh が書く
 ENV_KEYS = ("AWS_REGION", "ALERTS_TOPIC_ARN", "DEVICE_MAP", "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
             "AWS_CONTAINER_CREDENTIALS_FULL_URI", "AWS_ENDPOINT_URL_SNS")
 ECS_CREDENTIALS_HOST = "http://169.254.170.2"   # ECS のタスクの認証情報の口（タスクの中からだけ届く）

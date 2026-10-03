@@ -1,4 +1,4 @@
-# netops-poc - agent root module (feature "agent"). The AgentCore Runtime (VPC mode) that answers the chat, its
+# nwc-poc - agent root module (feature "agent"). The AgentCore Runtime (VPC mode) that answers the chat, its
 # execution policy and the guardrail (the runtime reaches Bedrock / SSM / the gateway through the interface endpoints of
 # terraform/base/core, which ops/up.sh asks for when AGENT=1; the perimeter there denies calls from outside the VPC). Optionally (create_knowledge_base = true) a Bedrock
 # Knowledge Base on OpenSearch Serverless for RAG - off by default because the collection costs about 0.33 USD per hour.

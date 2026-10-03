@@ -1,4 +1,4 @@
-# netops-poc - PIPELINE analytics root module. A Spark streaming job on EMR Serverless reads the Telegraf messages
+# nwc-poc - PIPELINE analytics root module. A Spark streaming job on EMR Serverless reads the Telegraf messages
 # (topics metrics / traps) from MSK (terraform/pipeline/stream) and stores them in S3 Tables (Iceberg, all topics), OpenSearch Serverless
 # (log topics), Amazon Managed Service for Prometheus (metric topics) and, when asked, the HTTP Event Collector of a Splunk
 # (all topics; Splunk Enterprise on ECS here in splunk.tf, inside the VPC) - see var.sinks. Grafana OSS on ECS (grafana.tf)

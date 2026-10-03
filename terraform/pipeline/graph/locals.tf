@@ -1,4 +1,4 @@
-# netops-poc - PIPELINE graph root module. One Neptune cluster (IAM auth, one db.t4g.medium instance) holds the network topology
+# nwc-poc - PIPELINE graph root module. One Neptune cluster (IAM auth, one db.t4g.medium instance) holds the network topology
 # (device vertices, link edges, their dynamic status) and the repair proposals of terraform/workflow. The chat runtime and the web read it through boto3 neptunedata (Gremlin); the web can also edit it.
 # Without this root module both fall back to the static data in agent/data/. Costs about 0.12 USD per hour while it exists - destroy it the same day.
 

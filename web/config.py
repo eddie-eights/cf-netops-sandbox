@@ -46,7 +46,7 @@ PORT = int(os.environ.get("PORT", "8080"))
 DATA_DIR = os.environ.get("DATA_DIR") or os.path.join(HERE, "data")
 if not os.path.isabs(DATA_DIR):  # 相対パスは展開したフォルダ直下から（.env.example の DATA_DIR=agent/data）
     DATA_DIR = os.path.normpath(os.path.join(HERE, "..", DATA_DIR))
-TITLE = os.environ.get("TITLE", "NetOps PoC")
+TITLE = os.environ.get("TITLE", "運用管理ダッシュボード")
 MAX_PROMPT = 4000
 
 # エージェントと同じモジュール。EC2 では同じディレクトリに置く（upload_web_command）。手元では agent/ から読む。

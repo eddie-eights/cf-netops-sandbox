@@ -36,6 +36,7 @@ import os
 MGMT_SUBNET = "203.0.113.0/24"
 MGMT_GW = "203.0.113.1"        # lab の EC2 側（trap / syslog の宛先）。lab.sh の MGMT_GW と同じ
 LOG_PORT = 5140                # 機器の syslog の宛先ポート。lab.sh の LOG_PORT と telegraf.conf.in の inputs.syslog と同じ
+LOG_FACILITY = "local7"        # 機器の syslog のファシリティ。本番の Cisco（IOS の既定）に合わせる
 AS = 65100
 EVI = 100
 VNI = 100
@@ -206,6 +207,8 @@ def srl_config(sw: Switch, switches: list, hosts: list) -> str:
         "set / system snmp trap-group telegraf destination telegraf security-level no-auth-no-priv",
         "set / system snmp trap-group telegraf destination telegraf community-entry telegraf community public",  # 名前を community と同じにすると SR Linux が commit を拒む（2026-09-26 実測）
         "set / system logging network-instance mgmt",
+        # 本番は Cisco（IOS の既定は local7）を想定するので、SR Linux の subsystem のログも local7 で出す（SR Linux の既定は local6）
+        f"set / system logging subsystem-facility {LOG_FACILITY}",
         f"set / system logging remote-server {MGMT_GW} transport udp",
         f"set / system logging remote-server {MGMT_GW} remote-port {LOG_PORT}",
     ]
@@ -241,7 +244,7 @@ def clab_template(switches: list, hosts: list, links: list, leaves: int, spines:
         "mgmt:",
         "  # 名前と subnet を固定する（EC2 の中だけの docker network）。VPC からは Telegraf のタスクだけが、VPC のルートで lab の EC2 を経由して届く",
         "  # （terraform/pipeline/lab の locals.tf の mgmt_cidr と lab.sh の MGMT が同じ subnet）",
-        "  network: netops-lab",
+        "  network: nwc-lab",
         f"  ipv4-subnet: {MGMT_SUBNET}",
         "",
         "topology:",

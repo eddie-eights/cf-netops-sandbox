@@ -1,5 +1,6 @@
 # Telegraf の設定テンプレート。Telegraf のコンテナ（terraform/pipeline/stream の ECS。telegraf/Dockerfile）が起きるとき、telegraf.sh render が
 # タスク定義の環境変数で __KAFKA_BROKERS__ / __AWS_REGION__ / __SNMP_AGENTS__ / __GNMI_TARGETS__ を埋めて /tmp/telegraf.conf に書く。
+# 出力は「>>> sink <名前>」〜「<<< sink <名前>」の区間のうち SINK（kafka = MSK。既定 / stdout = 標準出力。デバッグ用の EC2）の 1 つだけを残す。
 # ブローカーは terraform/pipeline/stream が MSK から直接渡す。ポーリング先（inputs.snmp の agents）と gNMI の購読先（inputs.gnmi の addresses）は
 # ops/up.sh が lab の定義から作って terraform/pipeline/stream の変数に渡す
 #（lab/lab_topology.py --snmp-agents / --gnmi-targets。機器の一覧を lab の定義 1 か所にするため、ここに IP を書かない）。
@@ -123,13 +124,18 @@
   version = "2c"
   timeout = "5s"
 
-# ---- 機器のログ。SR Linux の system logging remote-server（RFC 5424、udp）を受ける。ポートは lab.sh の LOG_PORT と
+# ---- 機器のログ（udp。ファシリティは本番の Cisco に合わせて local7）を受ける。ポートは lab.sh の LOG_PORT と
 # terraform/pipeline/lab の local.log_port と同じ。lab の EC2 が 203.0.113.1:5140 宛てを NLB へ DNAT し、NLB がここへ渡すので、送り元は機器の管理 IP のまま。
-# RFC 5424 の HOSTNAME は SR Linux の host-name（= sysName）なので、metrics / traps と同じタグ名 sysName に付け替える（下の processors.rename）。
+# 形式は telegraf.sh render が SYSLOG_STANDARD で埋める。既定は RFC3164（本番の Cisco IOS の BSD 形式）。lab の SR Linux の
+# system logging remote-server は RFC 5424 なので、lab/lab.sh telegraf run は RFC5424 を渡す。ops/up.sh（stream の syslog_standard）は deploy.env の
+# SYSLOG_STANDARD（既定 RFC3164）を渡す（lab のログまで見るなら RFC5424）。
+# HOSTNAME は SR Linux の host-name（= sysName）なので、metrics / traps と同じタグ名 sysName に付け替える（下の processors.rename）。
+# Cisco IOS の既定のヘッダー（シーケンス番号や * 付きの時刻、ホスト名の有無）が RFC3164 でどう解析されるかは実機で確かめていない
 # best_effort は形の崩れた行（構造化データ無しなど）も捨てずに載せるため
 [[inputs.syslog]]
   # inputs.syslog の受け口は server（service_address は 1.40 では未知のキーで起動を拒む。2026-09-27 実測。inputs.snmp_trap は service_address のまま）
   server = "udp://:5140"
+  syslog_standard = "__SYSLOG_STANDARD__"
   name_override = "device_log"
   best_effort = true
 
@@ -139,6 +145,7 @@
     tag = "hostname"
     dest = "sysName"
 
+# >>> sink kafka（telegraf.sh render が SINK で片方だけ残す。既定 kafka）
 # ---- MSK へ。トピックは metric 名で分ける（snmp_trap → traps、device_log → logs、gNMI の 4 つ → gnmi、SNMP のポーリング → metrics）
 # sasl_aws_msk_iam_profile: Telegraf 1.40.0 は profile か role + session のどちらかを書かないと
 # 「both role and session must be set」で落ち、インスタンスプロファイルだけでは起動しない（2026-09-18 に EC2 で確認。plugins/common/kafka/sasl_aws_iam_msk.go）。
@@ -194,6 +201,16 @@
   required_acks = 1
   max_retry = 3
   namepass = ["device_log"]
+# <<< sink kafka
+
+# >>> sink stdout
+# ---- 標準出力へ（デバッグ用の EC2。cloudformation/lab-debug.yaml。MSK が無いので docker logs で見る。sudo lab telegraf logs）。
+# 形は MSK に載るものと同じ（json、秒の timestamp）。トピックの代わりに name で見分ける
+[[outputs.file]]
+  files = ["stdout"]
+  data_format = "json"
+  json_timestamp_units = "1s"
+# <<< sink stdout
 
 # ---- 生きているかの口。NLB のヘルスチェック（terraform/pipeline/stream の telegraf.tf。HTTP 8080）がここを見る。
 # 条件を書かないので、Telegraf が動いていれば 200 を返す。metric は system だけ通す（全部を流し込まない）

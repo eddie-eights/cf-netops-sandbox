@@ -1,4 +1,4 @@
-# netops-poc — NetOps PoC（Terraform）
+# nwc-poc — NetOps PoC（Terraform）
 
 ブラウザのチャットから AgentCore Runtime のエージェントに聞くと、Amazon Nova 2 Lite がトポロジのツール（と任意の手順書の検索）を使って答える。
 lab（containerlab の Nokia SR Linux で組んだ Spine-Leaf）の機器の SNMP・gNMI・ログを Kafka → Spark で格納先に流し、Grafana と Splunk のアラートで異常を見つけ、SNS → SQS で Temporal のワークフローを起こして原因を調べて修復案を出し、人が承認したら直す、までを試せる。
@@ -33,22 +33,23 @@ flowchart LR
 | `AGENT=1`（既定） | チャット（Runtime + ガードレール）。`CREATE_KB=1` で手順書の検索も | 約 $0.07/h（エンドポイント 5 本。ほかは質問ごとのモデル料金だけ。KB は +$0.37/h） |
 | `PIPELINE=1` | lab → Telegraf（ECS）→ MSK → Spark → S3 Tables / OpenSearch / Prometheus（`SINK_SPLUNK=1` で Splunk にも）、Grafana（`GRAFANA=1`。既定）と Splunk のアラート → SNS、Neptune のトポロジ（アラートで status が変わる） | 約 $1.40/h（ECS の Splunk は +$0.12/h） |
 | `WORKFLOW=1` | アラート（SNS → SQS）で Temporal を起こし、調査 → 承認 → 修復。AGENT と PIPELINE と、アラートの送り手（Grafana か Splunk）が要る | 約 $0.08/h |
+| `LAB_DEBUG=1` | デバッグ用の EC2（lab + Telegraf を 1 台。Telegraf の出力は標準出力）。MSK / ECS を作らずに機器と Telegraf の設定を確かめる。CloudFormation（`ops/lab-debug.sh`） | 約 $0.12/h（ECR のエンドポイント 2 本を含む） |
 
 インターフェース型エンドポイントは 1 本 $0.014/h（1 AZ。`ENDPOINTS_MULTI_AZ=1` で 2 AZ にすると倍）で、作る機能が呼ぶ API の分だけ `ops/up.sh` が選ぶ（上の金額に入れてある。同じサービスは機能をまたいで 1 本）。
 OpenSearch Serverless のコレクション（KB と logs）も公開せず、VPC エンドポイント 1 本（$0.03/h。両方作っても 1 本）からだけ届く。
 
-全部で約 $1.60/h（KB と Splunk を除く）。**1 か月置くと約 $1,170（約 18 万円）になるので、使い終わったら当日中に消す。**
+全部で約 $1.60/h（KB・Splunk・`LAB_DEBUG` を除く）。**1 か月置くと約 $1,170（約 18 万円）になるので、使い終わったら当日中に消す。**
 
 ## 手順
 
 コマンドは bash 用で、Mac と WSL2 で同じ。**展開したフォルダの直下で打つ。**
 
-1. 道具を入れる: AWS CLI v2、Terraform 1.11 以上、Docker buildx（arm64）、Session Manager plugin、python3 か uv（[setup.md](docs/setup.md)）。
+1. 道具を入れる: AWS CLI v2、Terraform 1.11 以上、Docker buildx（arm64）、Session Manager plugin、python3 か uv、curl（[setup.md](docs/setup.md)）。
 2. AWS に入る: `aws login --profile <プロファイル>`、`aws configure sso`、長期キーのどれか。`sts get-session-token` の一時セッションでは止まる。
-3. zip を Linux 側のホームに展開して入る（WSL2 は `/mnt/c` を使わない）。
+3. GitHub の「Download ZIP」で取った zip を Linux 側のホームに展開して入る（WSL2 は `/mnt/c` を使わない）。`git clone https://github.com/eddie-eights/nwc-poc.git` なら `~/nwc-poc` に入る。
 
 ```bash
-unzip ~/netops-poc.zip -d ~ && cd ~/netops-poc
+unzip ~/nwc-poc-main.zip -d ~ && cd ~/nwc-poc-main
 ```
 
 4. 設定を写し、空の `OWNER=` に自分の名前を書き、要る機能を `1` にする。
@@ -81,6 +82,8 @@ ops/down.sh
 | `AGENT` / `PIPELINE` / `WORKFLOW` / `CREATE_KB` | 作る機能 |
 | `SKIP_LAB` / `SKIP_STREAM` / `SKIP_ANALYTICS` / `SKIP_GRAPH` | PIPELINE の一部を外す |
 | `IMAGE_TAG` | `agent/` や `workflow/` を変えたら `v2` などに上げる |
+| `SYSLOG_STANDARD` | stream の Telegraf が受ける syslog の形式。既定 `RFC3164`（本番の Cisco IOS）。lab の SR Linux のログまで見るなら `RFC5424` |
+| `LAB_DEBUG` | `1` でデバッグ用の EC2（lab と Telegraf を 1 台。`ops/lab-debug.sh up\|sync\|status\|down`） |
 | `KEEP_ECR` | `1` で `ops/down.sh` が ECR を残す |
 
 ほかのキーと、`ops/up.sh` / `ops/down.sh` が何をするかは [deploy.md](docs/deploy.md)。その回だけ変えるなら `PIPELINE=1 ops/up.sh` のように環境変数で渡す。
@@ -98,8 +101,9 @@ ops/down.sh
 | [architecture.md](docs/architecture.md) | 構成図（スライドは [architecture.pptx](docs/architecture.pptx)）、どのファイルがどこで動くか、名前とタグ、ログ |
 | [setup.md](docs/setup.md) | 前提（AWS の権限、ネットワーク、Mac / WSL2、社内 PC の CA） |
 | [deploy.md](docs/deploy.md) | `deploy.env` の全キー、`ops/up.sh` / `ops/down.sh` の中身、利用者に渡す権限、試す質問 |
-| [pipeline.md](docs/pipeline.md) | lab、Spark、Grafana と Splunk のアラート、Neptune のトポロジの使い方 |
+| [pipeline.md](docs/pipeline.md) | lab、Telegraf、デバッグ用の EC2（`LAB_DEBUG`）、Spark、Grafana と Splunk のアラート、Neptune のトポロジの使い方 |
 | [workflow.md](docs/workflow.md) | 承認の流れと Temporal UI |
 | [troubleshooting.md](docs/troubleshooting.md) | うまくいかないとき |
 | [development.md](docs/development.md) | 手元のテスト、変更するときの決まり、Web を手元で動かす |
+| [faq-fukuda-nwc-poc.md](docs/faq-fukuda-nwc-poc.md) | 学習 FAQ: 作業中に質問したことと答え（syslog の基本、lab を `local7` にした理由、デバッグ用の EC2、本番の Cisco から送るとき） |
 | [data-stores.md](docs/data-stores.md) | 勉強会メモ: データの置き場（Neptune にトポロジと修復案の「いま」、S3 Tables に証跡。障害の履歴の置き場は未定）と DynamoDB をやめた理由、コンテナイメージの役目と arm64 に揃える理由（Splunk だけ x86）、Neptune の基礎（Aurora との関係、AZ 冗長、トポロジをグラフにする意味）、MSK のブートストラップサーバーと、Telegraf・Spark がそれをどう受け取るか（`msk-bootstrap` を残す理由） |

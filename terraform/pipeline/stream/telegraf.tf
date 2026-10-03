@@ -152,6 +152,7 @@ resource "aws_ecs_task_definition" "telegraf" {
         { name = "KAFKA_BROKERS", value = aws_msk_cluster.stream.bootstrap_brokers_sasl_iam },
         { name = "SNMP_AGENTS", value = var.snmp_agents },
         { name = "GNMI_TARGETS", value = var.gnmi_targets },
+        { name = "SYSLOG_STANDARD", value = var.syslog_standard },
       ]
       logConfiguration = {
         logDriver = "awslogs"

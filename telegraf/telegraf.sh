@@ -2,12 +2,21 @@
 # Telegraf のコンテナ（terraform/pipeline/stream の ECS。telegraf/Dockerfile）の入口。イメージの /usr/local/bin/tg。
 #   tg run    （既定。ECS が起こす）設定を作って Telegraf を起こす
 #   tg test | gnmi   （ECS Exec から打つ。コマンドは ops/up.sh の最後に出る）ポーリング / gNMI の購読を 1 回だけ回して標準出力に出す
+#   tg render       設定を作るだけ（中身を見る。tests/test_lab_debug.py も手元でこれを回す）
+# 同じイメージをデバッグ用の EC2（cloudformation/lab-debug.yaml）でも SINK=stdout で動かす（lab/lab.sh telegraf）。
 # 機器（lab の EC2 の中の containerlab）への経路は lab の EC2 側で `sudo lab forward-status` を見る。
 set -euo pipefail
-TEMPLATE=/etc/telegraf/telegraf.conf.in
+TEMPLATE=${TELEGRAF_TEMPLATE:-/etc/telegraf/telegraf.conf.in}
 # コンテナの / は書けるが、書くのは /tmp だけにする（作り直せば消える）
-CONF=/tmp/telegraf.conf
-export AWS_CONFIG_FILE=/tmp/aws_config
+CONF=${TELEGRAF_CONF:-/tmp/telegraf.conf}
+export AWS_CONFIG_FILE="${CONF%/*}/aws_config"
+# 出力先。kafka = MSK（stream の ECS。既定）/ stdout = 標準出力（デバッグ用の EC2。MSK が無い）。telegraf.conf.in の「>>> sink <名前>」の区間
+SINK=${SINK:-kafka}
+SINKS="kafka stdout"
+# 機器の syslog の形式。RFC3164 = BSD 形式（本番の Cisco IOS の既定。既定）/ RFC5424 = 新しい形式（lab の SR Linux。ops/up.sh と lab/lab.sh が渡す）。
+# inputs.syslog の syslog_standard。形式が違うと best_effort でも項目がきれいに取れない
+SYSLOG_STANDARD=${SYSLOG_STANDARD:-RFC3164}
+SYSLOG_STANDARDS="RFC3164 RFC5424"
 # 機器の syslog を受ける UDP のポート（telegraf.conf.in の inputs.syslog と lab/lab.sh の LOG_PORT と同じ）
 LOG_PORT=5140
 # trap を受ける UDP のポート。機器は 162 に送り、NLB が 1162 に向ける（非 root は 1024 未満で待てない）
@@ -15,12 +24,15 @@ TRAP_PORT=1162
 
 render() {
   # ECS のタスク定義の環境変数（terraform/pipeline/stream の telegraf.tf）を埋めて $CONF を作る:
-  #   KAFKA_BROKERS  MSK のブローカー（host:9098 をカンマで。IAM 認証の口）
+  #   KAFKA_BROKERS  MSK のブローカー（host:9098 をカンマで。IAM 認証の口）。SINK=stdout では要らない
   #   SNMP_AGENTS    ポーリング先（"udp://<IP>:161", ...）。ops/up.sh が lab の定義から作る（lab/lab_topology.py --snmp-agents）
   #   GNMI_TARGETS   gNMI の購読先（"<IP>:57400", ...）。同じく lab/lab_topology.py --gnmi-targets
+  #   SYSLOG_STANDARD  機器の syslog の形式（既定 RFC3164）。stream の syslog_standard。lab の SR Linux は RFC5424
   #   AWS_REGION
-  : "${AWS_REGION:?}" "${KAFKA_BROKERS:?}"
-  local agents="${SNMP_AGENTS:-}" gnmi="${GNMI_TARGETS:-}" q
+  : "${AWS_REGION:?}"
+  local agents="${SNMP_AGENTS:-}" gnmi="${GNMI_TARGETS:-}" q="" s drop=()
+  case " $SINKS " in *" $SINK "*) ;; *) echo "SINK は $SINKS のどれか: $SINK" >&2; exit 1 ;; esac
+  case " $SYSLOG_STANDARDS " in *" $SYSLOG_STANDARD "*) ;; *) echo "SYSLOG_STANDARD は $SYSLOG_STANDARDS のどれか: $SYSLOG_STANDARD" >&2; exit 1 ;; esac
   # 形が崩れていると Telegraf が起きないので、決まった形だけ通す
   if ! printf '%s' "$agents" | grep -Eq '^"udp://[0-9.]+:[0-9]+"(, *"udp://[0-9.]+:[0-9]+")*$'; then
     echo "SNMP_AGENTS が無いか形が違う（ops/up.sh が lab の定義から作って terraform/pipeline/stream の snmp_agents に渡す）: $agents" >&2; exit 1
@@ -28,15 +40,20 @@ render() {
   if ! printf '%s' "$gnmi" | grep -Eq '^"[0-9.]+:[0-9]+"(, *"[0-9.]+:[0-9]+")*$'; then
     echo "GNMI_TARGETS が無いか形が違う（ops/up.sh が lab の定義から作って terraform/pipeline/stream の gnmi_targets に渡す）: $gnmi" >&2; exit 1
   fi
-  if ! printf '%s' "$KAFKA_BROKERS" | grep -Eq '^[A-Za-z0-9.-]+:[0-9]+(,[A-Za-z0-9.-]+:[0-9]+)*$'; then
-    echo "KAFKA_BROKERS の形が違う: $KAFKA_BROKERS" >&2; exit 1
+  if [ "$SINK" = kafka ]; then
+    : "${KAFKA_BROKERS:?}"
+    if ! printf '%s' "$KAFKA_BROKERS" | grep -Eq '^[A-Za-z0-9.-]+:[0-9]+(,[A-Za-z0-9.-]+:[0-9]+)*$'; then
+      echo "KAFKA_BROKERS の形が違う: $KAFKA_BROKERS" >&2; exit 1
+    fi
+    q=$(printf '"%s"' "${KAFKA_BROKERS//,/\",\"}")
+    # Telegraf の MSK IAM 認証は profile の指定が要る（telegraf.conf.in の注記）。鍵を書かない [default] なので、
+    # SDK はタスクロール（ECS が入れる AWS_CONTAINER_CREDENTIALS_RELATIVE_URI）を使う
+    printf '[default]\nregion = %s\n' "$AWS_REGION" > "$AWS_CONFIG_FILE"
   fi
-  q=$(printf '"%s"' "${KAFKA_BROKERS//,/\",\"}")
-  # Telegraf の MSK IAM 認証は profile の指定が要る（telegraf.conf.in の注記）。鍵を書かない [default] なので、
-  # SDK はタスクロール（ECS が入れる AWS_CONTAINER_CREDENTIALS_RELATIVE_URI）を使う
-  printf '[default]\nregion = %s\n' "$AWS_REGION" > "$AWS_CONFIG_FILE"
-  sed -e "s#__KAFKA_BROKERS__#$q#" -e "s#__AWS_REGION__#$AWS_REGION#" -e "s#__SNMP_AGENTS__#$agents#" -e "s#__GNMI_TARGETS__#$gnmi#" "$TEMPLATE" > "$CONF"
-  echo "$CONF を作った（brokers: ${KAFKA_BROKERS} / agents: ${agents} / gnmi: ${gnmi} / trap: ${TRAP_PORT}/udp / syslog: ${LOG_PORT}/udp）"
+  # 選ばなかった出力の区間を消す
+  for s in $SINKS; do [ "$s" = "$SINK" ] || drop+=(-e "/^# >>> sink $s/,/^# <<< sink $s/d"); done
+  sed "${drop[@]}" -e "s#__KAFKA_BROKERS__#$q#" -e "s#__AWS_REGION__#$AWS_REGION#" -e "s#__SNMP_AGENTS__#$agents#" -e "s#__GNMI_TARGETS__#$gnmi#" -e "s#__SYSLOG_STANDARD__#$SYSLOG_STANDARD#" "$TEMPLATE" > "$CONF"
+  echo "$CONF を作った（sink: ${SINK}${q:+ / brokers: $KAFKA_BROKERS} / agents: ${agents} / gnmi: ${gnmi} / trap: ${TRAP_PORT}/udp / syslog: ${LOG_PORT}/udp ${SYSLOG_STANDARD}）"
 }
 
 case "${1:-run}" in
@@ -44,6 +61,7 @@ case "${1:-run}" in
     render
     exec telegraf --config "$CONF"
     ;;
+  render) render ;;
   test)
     # ポーリングだけ 1 回まわして標準出力に出す（MSK には送らない）。機器に届かないときは lab の EC2 の forward を疑う
     [ -f "$CONF" ] || render
@@ -54,5 +72,5 @@ case "${1:-run}" in
     [ -f "$CONF" ] || render
     timeout 20 telegraf --config "$CONF" --test --input-filter gnmi --test-wait 15 || true
     ;;
-  *) sed -n '2,4p' "$0"; exit 1 ;;
+  *) sed -n '2,5p' "$0"; exit 1 ;;
 esac

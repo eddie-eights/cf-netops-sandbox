@@ -15,61 +15,25 @@ MIME-Version: 1.0
 Content-Transfer-Encoding: 8bit
 
 #!/bin/bash
+# 支度の中身は S3 の lab/setup.sh（cloudformation/lab-debug.yaml の UserData と共通）。ここは env を書いて置き直し、呼ぶだけ
 set -euo pipefail
 LAB=/opt/${name_prefix}-lab
-REGISTRY=${account_id}.dkr.ecr.${region}.amazonaws.com
-# Docker は AL2023 のリポジトリから（S3 ゲートウェイエンドポイント経由）。containerlab は S3 に置いた rpm から
-command -v docker >/dev/null || dnf install -y docker
-# snmpwalk は lab.sh check / snmp が EC2 から機器の ifTable を引くのに使う。入らなくてもトポロジは上げる
-command -v snmpwalk >/dev/null || dnf install -y net-snmp-utils || echo "net-snmp-utils could not be installed. \"lab snmp\" will not work." >&2
-systemctl enable --now docker
-# VM（linux ノード）の bond0（LACP。leaf の組へ dual-home）はカーネルの bonding モジュールが要る。コンテナからは読み込めないので EC2 側で。再起動後も lab.sh up が modprobe する
-echo bonding > /etc/modules-load.d/netops-lab-bonding.conf
-modprobe bonding || echo "bonding module could not be loaded. The VMs cannot build bond0." >&2
 install -d -m 0755 $LAB
+cat > /etc/${name_prefix}-lab.env <<'__ENV__'
+NAME_PREFIX=${name_prefix}
+AWS_REGION=${region}
+REGISTRY=${account_id}.dkr.ecr.${region}.amazonaws.com
+SRLINUX_IMAGE=${account_id}.dkr.ecr.${region}.amazonaws.com/${name_prefix}-lab-srlinux:${srlinux_image_tag}
+MULTITOOL_IMAGE=${account_id}.dkr.ecr.${region}.amazonaws.com/${name_prefix}-lab-multitool:${multitool_image_tag}
+TELEGRAF_IMAGE=
+PARAM_PREFIX=/${name_prefix}
+CONTAINERLAB_VERSION=${containerlab_version}
+AUTO_START_LAB=${auto_start_lab}
+__ENV__
 aws s3 sync --delete --region ${region} s3://${bucket}/lab/ $LAB/src/
-if [ ! -f $LAB/src/lab.sh ] || [ ! -f $LAB/src/containerlab_${containerlab_version}_linux_arm64.rpm ]; then
-  echo "lab/ or the containerlab rpm is not in s3://${bucket}/lab/ yet. Upload (output UploadLabCommand) and reboot." >&2
+if [ ! -f $LAB/src/setup.sh ]; then
+  echo "lab/ is not in s3://${bucket}/lab/ yet. Run ops/up.sh and reboot." >&2
   exit 0
 fi
-command -v containerlab >/dev/null || dnf install -y $LAB/src/containerlab_${containerlab_version}_linux_arm64.rpm
-chmod 0755 $LAB/src/lab.sh
-ln -sfn $LAB/src/lab.sh /usr/local/bin/lab
-# 前の版は Telegraf をこの EC2 で動かしていた。rpm ごと S3 の lab/ に残っていても、ここでは入れない（Telegraf は terraform/pipeline/stream の ECS のタスク）
-
-cat > /etc/${name_prefix}-lab.env <<__ENV__
-AWS_REGION=${region}
-REGISTRY=$REGISTRY
-SRLINUX_IMAGE=$REGISTRY/${name_prefix}-lab-srlinux:${srlinux_image_tag}
-MULTITOOL_IMAGE=$REGISTRY/${name_prefix}-lab-multitool:${multitool_image_tag}
-PARAM_PREFIX=/${name_prefix}
-__ENV__
-
-cat > /etc/systemd/system/${name_prefix}-lab.service <<__UNIT__
-[Unit]
-Description=${name_prefix} containerlab topology (splab, Spine-Leaf)
-After=docker.service network-online.target
-Requires=docker.service
-
-[Service]
-Type=oneshot
-RemainAfterExit=yes
-ExecStart=$LAB/src/lab.sh up
-ExecStop=$LAB/src/lab.sh down
-# SR Linux は 6 台が並んで起きるのに数分かかる（containerlab は 1 台 5 分まで待つ）
-TimeoutStartSec=1200
-
-[Install]
-WantedBy=multi-user.target
-__UNIT__
-
-systemctl daemon-reload
-$LAB/src/lab.sh render
-$LAB/src/lab.sh pull
-if [ "${auto_start_lab}" = "true" ]; then
-  systemctl enable ${name_prefix}-lab.service
-  systemctl restart ${name_prefix}-lab.service
-else
-  systemctl disable ${name_prefix}-lab.service || true
-fi
+exec bash $LAB/src/setup.sh
 --==BOUNDARY==--

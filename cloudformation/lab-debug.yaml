@@ -1,0 +1,197 @@
+AWSTemplateFormatVersion: "2010-09-09"
+# デバッグ用の EC2: lab（containerlab の SR Linux 6 台 + VM 2 台）と Telegraf を 1 台に入れる。MSK / ECS / NLB を作らずに、
+# 機器の設定と Telegraf の設定（telegraf/telegraf.conf.in）を確かめる。Telegraf の出力は標準出力（sudo lab telegraf logs）。
+#
+# 作るのも消すのも ops/lab-debug.sh up / down（スタック名 <接頭辞>-lab-debug）。土台（terraform/base/core）の VPC・サブネット・lab の SG・
+# バケットを使い、ECR の ecr.api / ecr.dkr のエンドポイントが要る（LAB_DEBUG=1 ops/up.sh で土台ごと作る）。
+#
+# terraform/pipeline/lab とずれないようにしてあるところ（tests/test_lab_debug.py が見る）:
+#   - EC2 の中でやることは S3 の lab/setup.sh 1 つ。UserData は env を書いて S3 から lab/ を置き直し、setup.sh を exec するだけ
+#     （terraform/pipeline/lab/templates/lab_user_data.sh.tftpl と同じ形。違うのは TELEGRAF_IMAGE があること）
+#   - パラメータの既定値は terraform/pipeline/lab の変数の既定値と ops/lab-common.sh の版
+#   - ロールの権限は terraform/pipeline/lab/iam.tf と同じ Sid（EcrPull は Telegraf のリポジトリも読む。TelegrafAddress は要らない）
+#   - Telegraf のイメージは stream の ECS と同じもの（ops/lab-common.sh の telegraf_tag。telegraf/ の中身からタグを作る）
+Description: nwc-poc lab debug EC2 (containerlab + Telegraf to stdout on one instance)
+
+Parameters:
+  NamePrefix:
+    Type: String
+    Description: <owner>-nwc-poc (same as the Terraform roots)
+    AllowedPattern: "^[a-z][a-z0-9]*(-[a-z0-9]+)*-nwc-poc$"
+  Owner:
+    Type: String
+    Description: OWNER in deploy.env (the owner tag)
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: terraform/base/core output instance_subnet_id
+  SecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: terraform/base/core output security_group_ids["lab"]
+  BucketName:
+    Type: String
+    Description: terraform/base/core output kb_bucket_name (lab/ is read at every boot)
+  PerimeterPolicyArn:
+    Type: String
+    Default: ""
+    Description: terraform/base/core output network_perimeter_policy_arn (empty when NETWORK_PERIMETER=0)
+  ImageId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64
+  InstanceType:
+    Type: String
+    Default: t4g.xlarge
+    AllowedValues: [t4g.large, t4g.xlarge, t4g.2xlarge]
+    Description: Six SR Linux nodes need about 1.5-2.5 GB each at boot, plus Telegraf
+  VolumeSize:
+    Type: Number
+    Default: 24
+    MinValue: 8
+    MaxValue: 64
+  ContainerlabVersion:
+    Type: String
+    Default: "0.79.0"
+  SrlinuxImageTag:
+    Type: String
+    Default: "26.7.2"
+  MultitoolImageTag:
+    Type: String
+    Default: "v0.10.0"
+  TelegrafImageTag:
+    Type: String
+    Description: "<Telegraf version>-<hash of telegraf/> (ops/lab-common.sh telegraf_tag)"
+  AutoStartLab:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+
+Conditions:
+  HasPerimeter: !Not [!Equals [!Ref PerimeterPolicyArn, ""]]
+
+Resources:
+  Role:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${NamePrefix}-lab-debug"
+      Description: !Sub "${NamePrefix} lab debug EC2 - SSM managed node, pull lab and Telegraf images from ECR, read lab/ from the asset bucket"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore"
+        # terraform/base/core の perimeter.tf の Deny（VPC エンドポイントを通らない呼び出しを拒む）
+        - !If [HasPerimeter, !Ref PerimeterPolicyArn, !Ref AWS::NoValue]
+      Policies:
+        - PolicyName: lab-assets
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: EcrPull
+                Effect: Allow
+                Action: [ecr:BatchGetImage, ecr:GetDownloadUrlForLayer, ecr:BatchCheckLayerAvailability]
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/${NamePrefix}-lab-*"
+                  - !Sub "arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/${NamePrefix}-telegraf"
+              - Sid: EcrToken
+                Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: "*"
+              - Sid: S3Read
+                Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub "arn:${AWS::Partition}:s3:::${BucketName}/lab/*"
+              - Sid: S3List
+                Effect: Allow
+                Action: s3:ListBucket
+                Resource: !Sub "arn:${AWS::Partition}:s3:::${BucketName}"
+                Condition:
+                  StringLike: { "s3:prefix": "lab/*" }
+      Tags:
+        - { Key: Name, Value: !Sub "${NamePrefix}-lab-debug" }
+        - { Key: Project, Value: !Ref NamePrefix }
+        - { Key: owner, Value: !Ref Owner }
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub "${NamePrefix}-lab-debug"
+      Roles: [!Ref Role]
+
+  # 起動のたびに流す（cloud-config の always）。S3 の lab/ を置き直して再起動すれば設定も更新される（ops/lab-debug.sh sync）
+  Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref ImageId
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref InstanceProfile
+      SubnetId: !Ref SubnetId
+      SecurityGroupIds: [!Ref SecurityGroupId]
+      MetadataOptions:
+        HttpEndpoint: enabled
+        HttpTokens: required
+        # コンテナからは IMDS に届かせない（hop limit 1 は docker bridge を越えない。Telegraf は host ネットワークで AWS の API は呼ばない）
+        HttpPutResponseHopLimit: 1
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeType: gp3
+            VolumeSize: !Ref VolumeSize
+            Encrypted: true
+            DeleteOnTermination: true
+      PropagateTagsToVolumeOnCreation: true
+      Tags:
+        - { Key: Name, Value: !Sub "${NamePrefix}-lab-debug" }
+        - { Key: Project, Value: !Ref NamePrefix }
+        - { Key: owner, Value: !Ref Owner }
+      # 中身は terraform/pipeline/lab/templates/lab_user_data.sh.tftpl と同じ形（env のキーも同じ）。Fn::Sub が ${…} を埋めるので、シェルの変数は $LAB と書く
+      UserData:
+        Fn::Base64: !Sub |
+          Content-Type: multipart/mixed; boundary="==BOUNDARY=="
+          MIME-Version: 1.0
+
+          --==BOUNDARY==
+          Content-Type: text/cloud-config; charset="us-ascii"
+          MIME-Version: 1.0
+
+          #cloud-config
+          cloud_final_modules:
+          - [scripts-user, always]
+
+          --==BOUNDARY==
+          Content-Type: text/x-shellscript; charset="utf-8"
+          MIME-Version: 1.0
+          Content-Transfer-Encoding: 8bit
+
+          #!/bin/bash
+          # 支度の中身は S3 の lab/setup.sh（terraform/pipeline/lab の user_data と共通）。ここは env を書いて置き直し、呼ぶだけ
+          set -euo pipefail
+          LAB=/opt/${NamePrefix}-lab
+          install -d -m 0755 $LAB
+          cat > /etc/${NamePrefix}-lab.env <<'__ENV__'
+          NAME_PREFIX=${NamePrefix}
+          AWS_REGION=${AWS::Region}
+          REGISTRY=${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com
+          SRLINUX_IMAGE=${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${NamePrefix}-lab-srlinux:${SrlinuxImageTag}
+          MULTITOOL_IMAGE=${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${NamePrefix}-lab-multitool:${MultitoolImageTag}
+          TELEGRAF_IMAGE=${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${NamePrefix}-telegraf:${TelegrafImageTag}
+          PARAM_PREFIX=/${NamePrefix}
+          CONTAINERLAB_VERSION=${ContainerlabVersion}
+          AUTO_START_LAB=${AutoStartLab}
+          __ENV__
+          aws s3 sync --delete --region ${AWS::Region} s3://${BucketName}/lab/ $LAB/src/
+          if [ ! -f $LAB/src/setup.sh ]; then
+            echo "lab/ is not in s3://${BucketName}/lab/ yet. Run ops/lab-debug.sh up and reboot." >&2
+            exit 0
+          fi
+          exec bash $LAB/src/setup.sh
+          --==BOUNDARY==--
+
+Outputs:
+  InstanceId:
+    Description: Target of the SSM session
+    Value: !Ref Instance
+  StartSessionCommand:
+    Description: Run on the user's PC (AWS CLI v2 + Session Manager plugin), then "sudo lab status" / "sudo lab telegraf logs -f" / "sudo lab check"
+    Value: !Sub "aws ssm start-session --region ${AWS::Region} --target ${Instance}"

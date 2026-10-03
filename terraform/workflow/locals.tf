@@ -1,4 +1,4 @@
-# netops-poc - workflow root module (feature "workflow"). One ECS on Fargate task (ARM64, 1 vCPU / 2 GB) runs the Temporal dev server
+# nwc-poc - workflow root module (feature "workflow"). One ECS on Fargate task (ARM64, 1 vCPU / 2 GB) runs the Temporal dev server
 # and a Python worker in the VPC of terraform/base/core. The Grafana alert rules and the Splunk saved searches of terraform/pipeline/analytics
 # publish alerts to the SNS topic of terraform/base/core; events.tf subscribes an SQS queue to it and the worker starts one workflow per anomaly
 # (and signals it when the alert resolves). The workflow asks the

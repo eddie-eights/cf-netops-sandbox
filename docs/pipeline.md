@@ -64,7 +64,8 @@ aws ssm start-session --region ap-northeast-1 --target "$LAB_INSTANCE_ID"
 - 機器の CLI: `sudo docker exec -it clab-splab-dc1-leaf-01 sr_cli`（1 行だけなら `sudo lab cli dc1-leaf-01 "show ..."`）。設定は `lab/srlinux/<機器>.cli`（`set /` の行だけ。containerlab が起動時に流し込む。手で直さず `lab/gen_lab.py` で作り直す）
 - `sudo lab failover` を打つと、trap が 5 秒以内に Kafka に届く（2026-09-27 に EC2 で確認）。そのあと Grafana のルールが物理 IF の `link_down` を出し、`SINK_SPLUNK=1` なら Splunk も linkDown の trap から同じ `link_down` を、gNMI から `isis_down` を出す。`sudo lab heal-main` で `resolved` が出る。落としてから通知までは 1〜2 分（下の「アラート」の遅れ）。
   - SR Linux の SNMP の `ifOperStatus` は実際の oper-state より 15〜20 秒遅れる（2026-09-27 実測）。Spark の検知は trap とポーリングを 1 つの状態にまとめていたので、古いポーリングが trap を打ち消さないよう 30 秒の猶予（`POLL_LAG`）を持っていた。いまは送り手ごとに自分の見た状態だけを出し、Grafana は自分が発火させたアラートにしか解消を送らないので、この猶予は要らない。
-- 機器のログは SR Linux の `system logging remote-server`（RFC 5424、udp）で lab の EC2 へ出て、Telegraf の `inputs.syslog` が受け、トピック `logs` に出す（measurement は `device_log`。hostname は `sysName` タグに付け替える）。送る subsystem は bgp / chassis / linux / netinst / xdp。
+- 機器のログは SR Linux の `system logging remote-server`（RFC 5424、udp）で lab の EC2 へ出て、Telegraf の `inputs.syslog` が受け、トピック `logs` に出す（measurement は `device_log`。hostname は `sysName` タグに付け替える）。送る subsystem は bgp / chassis / evpn / isis / lag / linux / netinst / xdp（informational 以上）。ファシリティは本番の Cisco（IOS の既定）に合わせて `local7`（`system logging subsystem-facility`。SR Linux の既定は `local6`）。
+- syslog の形式は Telegraf の `SYSLOG_STANDARD`（stream の変数 `syslog_standard`、`inputs.syslog` の `syslog_standard`）で選ぶ。既定は本番の Cisco IOS の BSD 形式 `RFC3164`。`ops/up.sh` は `deploy.env` の `SYSLOG_STANDARD`（空なら同じ `RFC3164`）を渡す。lab の SR Linux は RFC 5424 で送る（`ops/lab-common.sh` の `LAB_SYSLOG_STANDARD`）ので、lab のログの項目まで見るなら `SYSLOG_STANDARD=RFC5424`。デバッグ用の EC2 は `lab/lab.sh` の `LOG_STANDARD` を渡す。Cisco IOS の既定のヘッダー（シーケンス番号や `*` 付きの時刻）が RFC3164 でどう解析されるかは実機で確かめていない。
 - SNMP は containerlab が全ノードに v2c の community `public` を入れ、gNMI も全ノードで `57400/tcp`（TLS、containerlab の既定の admin）に開く。監視対象は `lab/srlinux/<機器>.cli` の `system snmp trap-group`（trap の宛先）の有無で決まり、いまは SR Linux の 6 台全部。VM 2 台は対象外。
 - SR Linux の ifTable は未使用の物理ポートも全部出す（`ifAdminStatus` が down）。IF の鍵は `ifName`（`ifDescr` は「名前 + description」）。Grafana のルールは admin down の行、サブインタフェース（`ethernet-1/1.0`）、ループバック、管理ポートを見ない。
 
@@ -79,7 +80,7 @@ sudo systemctl restart <prefix>-lab
 
 - ECR からイメージを取れない（`docker pull` がタイムアウトする）: ecr.api / ecr.dkr のエンドポイントが `ops/up.sh` の手順 0 の一覧にあるか、レイヤーを取る S3 の gateway エンドポイントがプライベートのルートテーブルに載っているかを見る。`explicit deny` なら VPC のエンドポイントを通っていない（[troubleshooting.md](troubleshooting.md) の「閉域」）。
 - SR Linux が起きない（`containerlab deploy` が readiness で止まる）: 6 台で 10 GB ほど使うので `free -m` を見る。`t4g.large` では足りない（既定は `t4g.xlarge`）。1 台の起動ログは `sudo docker logs clab-splab-dc1-leaf-01`。
-- VM の `bond0` が無い（`sudo lab check` の LAG が「bond0 が無い」）: EC2 のカーネルに bonding モジュールが要る。`lsmod | grep bonding`、無ければ `sudo modprobe bonding`（`terraform/pipeline/lab` の user data が起動時に入れる）。
+- VM の `bond0` が無い（`sudo lab check` の LAG が「bond0 が無い」）: EC2 のカーネルに bonding モジュールが要る。`lsmod | grep bonding`、無ければ `sudo modprobe bonding`（`lab/setup.sh` が起動時に入れる）。
 - 設定が入らない（deploy が `startup-config` で失敗する）: `lab/srlinux/<機器>.cli` の行を `sudo lab cli <機器>` で 1 行ずつ流して、どの行で落ちるかを見る。
 
 ### 止める・起動する
@@ -104,7 +105,7 @@ terraform -chdir=terraform/pipeline/stream output -raw telegraf_exec_command; ec
 | `tg test` | SNMP のポーリングを 1 回だけまわして画面に出す（MSK には送らない） |
 | `tg gnmi` | gNMI の購読を 20 秒だけ受けて画面に出す（MSK には送らない。BGP / IS-IS の行が出れば届いている） |
 
-- ログは CloudWatch Logs の `/ecs/<prefix>-telegraf`（出力 `telegraf_log_group_name`）。起動時に `/tmp/telegraf.conf を作った（brokers: …）` が出る。
+- ログは CloudWatch Logs の `/ecs/<prefix>-telegraf`（出力 `telegraf_log_group_name`）。起動時に `/tmp/telegraf.conf を作った（sink: kafka / brokers: … / … / syslog: 5140/udp RFC3164）` が出る（最後は `SYSLOG_STANDARD` の値）。
 
 ```bash
 aws logs tail --region ap-northeast-1 "$(terraform -chdir=terraform/pipeline/stream output -raw telegraf_log_group_name)" --since 10m --follow
@@ -113,6 +114,32 @@ aws logs tail --region ap-northeast-1 "$(terraform -chdir=terraform/pipeline/str
 - 以前の `sudo tg status` / `logs` / `restart` は無い（systemd が無い）。作り直すのは `ops/up.sh`（設定かポーリング先が変わるとタスクが作り直される）か、`aws ecs update-service --force-new-deployment`。
 - 設定のテンプレートは `telegraf/telegraf.conf.in`。変えたときは下の「変えたとき」。
 - `tg test` で機器に届かない、trap が来ない、ログが来ないときは、lab の EC2 で `sudo lab forward-status` を見る（規則が無ければ `sudo lab forward`）。
+
+## デバッグ用の EC2（lab + Telegraf を 1 台）
+
+MSK / ECS / NLB を作らずに、機器の設定（`lab/`）と Telegraf の設定（`telegraf/`）を確かめる EC2。terraform ではなく CloudFormation のスタック `<prefix>-lab-debug`（[cloudformation/lab-debug.yaml](../cloudformation/lab-debug.yaml)）で、作るのも消すのも [ops/lab-debug.sh](../ops/lab-debug.sh) の 1 コマンド。`PIPELINE` とは独立で、lab の EC2 と並べて立ててもよい（管理ネットワーク `203.0.113.0/24` は EC2 の中だけにある）。待機は約 $0.09/h（t4g.xlarge）と ECR のエンドポイント 2 本。
+
+```bash
+LAB_DEBUG=1 ops/up.sh          # 土台に ecr.api / ecr.dkr のエンドポイントを足し、最後に ops/lab-debug.sh up を呼ぶ（deploy.env に LAB_DEBUG=1 でもよい）
+ops/lab-debug.sh up            # 土台ができていれば、これだけでもよい（イメージと lab/ を置き、スタックを作る・変える）
+ops/lab-debug.sh status        # スタックと EC2 の状態。最後の行が SSM で入るコマンド
+ops/lab-debug.sh sync          # lab/ を置き直して EC2 を再起動する（lab/ を変えたとき）
+ops/lab-debug.sh down          # スタックを消す（ops/down.sh も土台より先にこれを呼ぶ）
+```
+
+- 中身は lab の EC2 と同じ: 版とイメージ（ECR のミラー）と S3 の `lab/` の置き方は `ops/lab-common.sh`、EC2 の中の支度は `lab/setup.sh`（起動のたびに S3 の `lab/` を置き直して流す）。UserData は terraform の user_data と同じ形で、違うのは `TELEGRAF_IMAGE` があることだけ。パラメータの既定値・ロールの権限・IMDS の設定が terraform/pipeline/lab とずれていないことは `tests/test_lab_debug.py` が見る。
+- Telegraf は stream の ECS と同じイメージ（同じ `telegraf/telegraf.conf.in`）を docker の host ネットワークで動かし、出力だけを標準出力（`SINK=stdout`。MSK に載るのと同じ JSON）にする。ポーリング先と gNMI の相手は stream と同じく `lab/lab_topology.py` から作る。機器は trap を `162/udp` に送るので、`lab forward` が iptables の REDIRECT で Telegraf の `1162/udp` へ向ける（syslog は `5140/udp` でそのまま受ける）。
+- 入ったら `sudo lab status` / `sudo lab check` などは lab の EC2 と同じ。Telegraf は次のコマンド。
+
+| コマンド | 何をする |
+|---|---|
+| `sudo lab telegraf logs -f` | Telegraf の出力（メトリクス・trap・syslog・gNMI の JSON）を流す。行数は `LINES=200` を前に付ける |
+| `sudo lab telegraf test` / `sudo lab telegraf gnmi` | ECS の `tg test` / `tg gnmi` と同じ |
+| `sudo lab telegraf status` / `run` / `stop` | コンテナの状態 / 起こし直す / 止める（docker を直接。起動時は systemd の `<prefix>-telegraf` が `run` を呼ぶ） |
+| `sudo lab forward-status` | trap の REDIRECT（162 → 1162） |
+
+- `telegraf/` を変えたら `ops/lab-debug.sh up`（タグが変わるのでイメージを作り直し、スタックの UserData が変わって EC2 が止まって起きる）。`lab/` だけなら `ops/lab-debug.sh sync`。
+- スタックが `ROLLBACK_COMPLETE` などで止まったら `ops/lab-debug.sh down` してから `up`。原因は `aws cloudformation describe-stack-events --region ap-northeast-1 --stack-name <prefix>-lab-debug`。
 
 ## Grafana と Splunk を開く
 
@@ -149,7 +176,7 @@ terraform -chdir=terraform/pipeline/analytics output -raw splunk_password_comman
 
 ### Grafana のアラート
 
-- ルール `link_down`（フォルダ `netops-alerts`）。`ifOperStatus` が 2（down）の IF を 30 秒ごとに見て、すぐ発火する（`for: 0s`）。admin-state が disable のポート（oper は down だが異常ではない）は外す。
+- ルール `link_down`（フォルダ `nwc-alerts`）。`ifOperStatus` が 2（down）の IF を 30 秒ごとに見て、すぐ発火する（`for: 0s`）。admin-state が disable のポート（oper は down だが異常ではない）は外す。
 - データが無い・クエリが失敗したときは直前の状態のまま（`KeepLast`。分からないときに発火も解消もしない）。機器ごと止まって系列が途切れると、Grafana は古い系列として解消を送る（機器の停止はここでは検知しない）。
 - 通知は IF ごとに 1 通。発火はすぐ、解消は 30 秒以内（`group_interval`）。直らないあいだは 4 時間ごと（`repeat_interval`）に同じ `starts_at` で送り直す。
 - 画面は Alerting → Alert rules。provisioning したルール・連絡先・ポリシーは画面から変えられない。変えるなら `grafana/provisioning/alerting/netops.yaml` を変えて `ops/up.sh`（イメージから作り直す）。
@@ -170,7 +197,7 @@ terraform -chdir=terraform/pipeline/analytics output -raw splunk_password_comman
 - 項目は `fields` で `_raw` だけにしてから `spath` で取る。`props.conf` の `KV_MODE = json` と重ねると全部の項目が同じ値 2 つの多値になり、1 行も出なくなる（10.4.3 で実測）。
 - gNMI と trap のイベントは機器名でなく IP を持つので、アラートアクションがタスクの環境変数 `DEVICE_MAP`（`ops/up.sh` が `lab/lab_topology.py --device-map` で作る）で機器名に直す。直せなかった IP はそのまま `device_id` になり、Neptune では「未登録」の頂点になる。
 - アラートアクションは標準ライブラリだけで SigV4 に署名する（Splunk の Python に boto3 は無く、VPC から PyPI へも出られない）。認証情報は ECS のタスクロール。1 通に 50 件まで、失敗は 3 回まで試す。
-- splunkd はコンテナの環境変数を子プロセスに引き継がないので、`splunk/entrypoint.sh` が要る値（リージョン、トピックの ARN、`DEVICE_MAP`、認証情報の取り出し口の URI）を `/opt/container_artifact/netops-alerts.env` に写す（鍵そのものは書かない）。
+- splunkd はコンテナの環境変数を子プロセスに引き継がないので、`splunk/entrypoint.sh` が要る値（リージョン、トピックの ARN、`DEVICE_MAP`、認証情報の取り出し口の URI）を `/opt/container_artifact/nwc-alerts.env` に写す（鍵そのものは書かない）。
 - Splunkbase の Splunk Add-on for AWS は使っていない。配布物を公開リポジトリに置けず、VPC から Splunkbase へも出られないため。
 - 確かめる（Splunk の画面の検索）:
   - サーチが動いたか: `index=_internal sourcetype=scheduler savedsearch_name=netops_*`
@@ -253,8 +280,8 @@ uv run python lab/lab_topology.py lab --layers > agent/data/layers.json
 
 | 変えたもの | やること |
 |---|---|
-| `lab/` の設定（`lab/gen_lab.py` を回したあと） | `ops/up.sh` を打つ（手順 5 で S3 に置き直す）→ lab に入って `sudo systemctl restart <prefix>-lab` |
-| `telegraf/`（`telegraf.conf.in` / `telegraf.sh` / `Dockerfile`） | `ops/up.sh` を打つ（ディレクトリのハッシュが変わるので手順 2 がイメージを作り直し、手順 7 の stream の apply がタスクを入れ替える）。lab の EC2 はそのまま |
+| `lab/` の設定（`lab/gen_lab.py` を回したあと） | `ops/up.sh` を打つ（手順 5 で S3 に置き直す）→ lab に入って `sudo systemctl restart <prefix>-lab`。デバッグ用の EC2 は `ops/lab-debug.sh sync` |
+| `telegraf/`（`telegraf.conf.in` / `telegraf.sh` / `Dockerfile`） | `ops/up.sh` を打つ（ディレクトリのハッシュが変わるので手順 2 がイメージを作り直し、手順 7 の stream の apply がタスクを入れ替える）。lab の EC2 はそのまま。デバッグ用の EC2 は `ops/lab-debug.sh up` |
 | `grafana/`（provisioning。ダッシュボードとアラート） | `ops/up.sh` を打つ（同じく手順 2 がイメージを作り直し、手順 7-4 の analytics の apply がタスクを入れ替える） |
 | `splunk/`（保存済みサーチ、アラートアクション） | `ops/up.sh` を打つ（同じ。Splunk の index はタスクと一緒に消えるので、入れ替えの前のイベントは検索できなくなる） |
 | `spark/snmp_sinks.py` | `ops/up.sh` を打つ（手順 7-5 がハッシュの違いを見て、動いているジョブを止めて起こし直す）。手で止めるコマンドは下 |

@@ -57,7 +57,7 @@ with workflow.unsafe.imports_passed_through():
     import rules
 
 TEMPORAL_ADDRESS = os.environ.get("TEMPORAL_ADDRESS", "localhost:7233")
-TASK_QUEUE = os.environ.get("TASK_QUEUE", "netops-investigate")
+TASK_QUEUE = os.environ.get("TASK_QUEUE", "nwc-investigate")
 APPROVAL_TIMEOUT_MINUTES = int(os.environ.get("APPROVAL_TIMEOUT_MINUTES", "120"))
 # 処置のあと、解消の通知を待つ秒数。通知は「機器 → Telegraf → MSK → Spark → AMP / Splunk → ルールの評価 → SNS → SQS」を通るので分の単位で遅れる
 VERIFY_TIMEOUT = int(os.environ.get("VERIFY_TIMEOUT", "300"))

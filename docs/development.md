@@ -14,6 +14,8 @@
 | ガードレール（`terraform/agent/kb.tf`） | `aws_bedrock_guardrail_version.r1` の `description` の末尾を `r2` のように上げて `ops/up.sh`。上げないと Runtime は古い版のまま判定する |
 | `templates/*.sh.tftpl` | シェルの `${…}` は `$${…}`、`%{` は `%%{` と書く（`templatefile` を通るため）。user_data は 16 KB まで |
 | 変数の既定 | `terraform/<ルート>/terraform.tfvars.example` を `terraform.tfvars` に写して書く |
+| lab と Telegraf の版 | `ops/lab-common.sh` を正本に、`terraform/pipeline/lab` の変数の既定値・`cloudformation/lab-debug.yaml` のパラメータの既定値（Telegraf は `telegraf/Dockerfile` の ARG も）を全部そろえる（`tests/test_lab_debug.py` が見る） |
+| `cloudformation/lab-debug.yaml` の UserData | `Fn::Sub` を通るので、シェルの変数は `${…}` でなく `$LAB` の形で書く。EC2 の中の支度は `lab/setup.sh` に書き、UserData には足さない |
 
 - user_data や AMI（apply のたびに最新の AL2023 を引く）が変わると、**EC2 が作り直されてインスタンス ID が変わる。**利用者に配った `start_session_command` は配り直す。
 
@@ -29,7 +31,7 @@ uv sync --group dev
 bash ops/check.sh
 ```
 
-最後の行が `すべて通過` なら健全。中身は `terraform fmt`、8 ルートの `terraform validate`、`bash -n`、`tests/` の 8 本（`test_app` 55 項目、`test_graph` 48、`test_stream` 40、`test_sync` 59、`test_analytics` 249、`test_workflow` 238、`test_alerts` 89、`test_kb_index` 7）。途中で落ちたらそこで止まる。
+最後の行が `すべて通過` なら健全。中身は `terraform fmt`、8 ルートの `terraform validate`、`bash -n`、`tests/` の 9 本（`test_app` 55 項目、`test_graph` 48、`test_stream` 42、`test_sync` 59、`test_analytics` 249、`test_workflow` 238、`test_alerts` 89、`test_kb_index` 7、`test_lab_debug` 52）。途中で落ちたらそこで止まる。
 
 ## Web を手元で動かす
 

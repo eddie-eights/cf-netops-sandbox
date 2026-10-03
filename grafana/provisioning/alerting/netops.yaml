@@ -12,11 +12,11 @@ apiVersion: 1
 # 機器ごと止まって系列が途切れたときは、Grafana が古い系列として解消を送る（機器の停止はここでは検知しない）
 groups:
   - orgId: 1
-    name: netops-link
-    folder: netops-alerts
+    name: nwc-link
+    folder: nwc-alerts
     interval: 30s
     rules:
-      - uid: netops-link-down
+      - uid: nwc-link-down
         title: link_down
         condition: C
         for: 0s
@@ -51,9 +51,9 @@ groups:
 # ---- 連絡先。SNS へ SigV4 で publish する（鍵は書かない = タスクロール。sns へは terraform/base/core のインターフェース型エンドポイントを通る）
 contactPoints:
   - orgId: 1
-    name: netops-sns
+    name: nwc-sns
     receivers:
-      - uid: netops-sns
+      - uid: nwc-sns
         type: sns
         disableResolveMessage: false
         settings:
@@ -67,7 +67,7 @@ contactPoints:
 # 直らないあいだは repeat_interval ごとに同じ starts_at で送り直す（ワークフローは同じ id なので二重には起きない）
 policies:
   - orgId: 1
-    receiver: netops-sns
+    receiver: nwc-sns
     group_by: ['alertname', 'sysName', 'ifName']
     group_wait: 0s
     group_interval: 30s

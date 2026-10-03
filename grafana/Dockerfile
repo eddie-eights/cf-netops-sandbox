@@ -12,7 +12,7 @@ RUN mkdir -p /opt/grafana-plugins \
  && grafana cli --pluginsDir /opt/grafana-plugins plugins install grafana-opensearch-datasource \
  && chown -R 472:0 /opt/grafana-plugins
 COPY provisioning /etc/grafana/netops
-COPY --chmod=0755 start.sh /usr/local/bin/netops-grafana
+COPY --chmod=0755 start.sh /usr/local/bin/nwc-grafana
 USER 472
 
 # GF_PLUGINS_PREINSTALL_DISABLED: 起動のたびに grafana.com からプラグインを取りに行かない（届かないので起動が遅れる）。
@@ -28,4 +28,4 @@ ENV GF_PATHS_PLUGINS=/opt/grafana-plugins \
     GF_AUTH_SIGV4_AUTH_ENABLED=true \
     GF_AWS_ALLOWED_AUTH_PROVIDERS=default
 
-ENTRYPOINT ["/usr/local/bin/netops-grafana"]
+ENTRYPOINT ["/usr/local/bin/nwc-grafana"]

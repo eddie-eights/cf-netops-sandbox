@@ -20,6 +20,8 @@
 | destroy が `provider["registry.terraform.io/opensearch-project/opensearch"]` で止まる | 2026-09-28 より前に作った agent の state（`opensearch_index.kb` 入り）。コミット f7b1688 の `terraform/agent` で destroy する |
 | 手順 0 の後に「2026-09-29 より前の SG（internal）が残っている」で止まる | SG をワークロードごとに分ける前の state。まだ何も作っていない。先に `ops/down.sh` を打つ（Runtime の ENI が残るあいだは VPC・サブネット・`internal` が残るので、時間をおいて打ち直す） |
 | `terraform apply` が「state に security_group_ids が無い」（Resource postcondition failed）で止まる | 土台（`terraform/base/core`）が SG をワークロードごとに分ける前の state。`ops/up.sh` を通さずにルートを直接 apply したときに出る。先に `ops/down.sh` を打ってから `ops/up.sh` |
+| `ops/lab-debug.sh` が「VPC に ecr.api / ecr.dkr のエンドポイントが無い」で止まる | `deploy.env` に `LAB_DEBUG=1` を書いて `ops/up.sh` を打つ（土台にエンドポイントを足してから最後に `lab-debug.sh up` を呼ぶ） |
+| `ops/lab-debug.sh` が「… が ROLLBACK_COMPLETE」（ROLLBACK_FAILED / DELETE_FAILED）で止まる | 原因は `aws cloudformation describe-stack-events --stack-name <prefix>-lab-debug`。`ops/lab-debug.sh down` のあと `up` |
 | ビルドの `pip install` が `CERTIFICATE_VERIFY_FAILED` | 社内 CA の差し替え。`ReadTimeoutError` は QEMU が遅いだけなので打ち直す |
 
 ## 閉域（`explicit deny`）
@@ -69,12 +71,14 @@ Web のログは Web の EC2 で `sudo journalctl -u <prefix>-web -n 100`、起�
 |---|---|
 | 回線を落としても Grafana のルール `link_down` が Normal のまま | 通知まで 2 分ほどかかる（[pipeline.md](pipeline.md) の「アラート」の表）。それでも変わらなければ、Grafana の Explore で `snmp_interface_ifOperStatus` が来ているか見る（来ていなければ Telegraf か Spark。下の行と [pipeline.md](pipeline.md) の「Spark を確かめる」）。Alerting → Alert rules にルールが無いなら `SINK_PROMETHEUS=0` か `GRAFANA=0`（アラートの定義ごと並べない） |
 | Splunk のアラートが出ない | `SINK_SPLUNK=1` か（既定は 0）。Splunk の検索で `index=* source="telegraf:snmp_trap"` にイベントが来ているか、保存済みサーチが動いたか（`index=_internal sourcetype=scheduler savedsearch_name=netops_*`）を見る（[pipeline.md](pipeline.md) の「Splunk のアラート」） |
-| アラートは出ているのに SNS に届かない（Grafana の Contact points の `netops-sns` が失敗、Splunk の `sendmodalert` に `ERROR`） | タイムアウトなら `sns` のインターフェース型エンドポイント（手順 0 の一覧）。`AccessDenied` ならタスクロールの `sns:Publish` と、トピックのポリシー（VPC の外からの publish を拒む）。ログは `/ecs/<prefix>-grafana`、Splunk は検索 `index=_internal sourcetype=splunkd sendmodalert netops_sns` |
+| アラートは出ているのに SNS に届かない（Grafana の Contact points の `nwc-sns` が失敗、Splunk の `sendmodalert` に `ERROR`） | タイムアウトなら `sns` のインターフェース型エンドポイント（手順 0 の一覧）。`AccessDenied` ならタスクロールの `sns:Publish` と、トピックのポリシー（VPC の外からの publish を拒む）。ログは `/ecs/<prefix>-grafana`、Splunk は検索 `index=_internal sourcetype=splunkd sendmodalert netops_sns` |
 | トポロジに赤い線が出ない | `/aws/lambda/<prefix>-graph-status` のログを見る。呼ばれていなければ送り手か SNS（上の 3 行）。`UNREGISTERED` の警告は、アラートの機器名・IF 名がトポロジに無い（Splunk なら IP を `DEVICE_MAP` で機器名に直せていない。lab に足した機器なら `ops/sync-graph.sh --replace`）。`読めないメッセージ（捨てる）` は本文の形が違う（[pipeline.md](pipeline.md) の「アラート」） |
 | BGP / IS-IS の層や機器の `ALARM` が変わらない | 仕様。出すのは Splunk のアラートで、既定（`SINK_SPLUNK=0`）で見つかるのは `link_down` だけ |
 | トポロジは赤くなるのに修復案が出ない | SNS → SQS か、ワーカー。`WORKFLOW=1` か、起こす種類か（ワークフローを起こすのは `link_down` だけ）を見る。`terraform -chdir=terraform/workflow output -raw anomaly_dlq_url` のキューに溜まっていれば、ワーカーが 5 回読んで処理できなかった。ワーカーのログは `terraform -chdir=terraform/workflow output -raw worker_logs_command`（[workflow.md](workflow.md) の「うまくいかないとき」） |
 | 承認しても approved のまま進まない | ワーカーのイメージが古い。`deploy.env` の `IMAGE_TAG` を上げて `ops/up.sh`（[workflow.md](workflow.md)） |
 | 手順 7-2c で「Telegraf のサービスが 10 分たっても安定しない」 | タスクが起きては止まっている。`terraform -chdir=terraform/pipeline/stream output -raw telegraf_list_tasks_command` に `--desired-status STOPPED` を足して打ち、`aws ecs describe-tasks` の `stoppedReason` を見る。`CannotPullContainerError` / `ResourceInitializationError` は ecr.api / ecr.dkr / logs のエンドポイント（手順 0 の一覧）と S3 の gateway。起きてすぐ終わるならロググループ `/ecs/<prefix>-telegraf` の最初の行（`SNMP_AGENTS が無いか形が違う` なら stream の変数 `snmp_agents` の形。`ops/up.sh` を通して打つ）。NLB のヘルスチェック（`8080/tcp`、Telegraf の `outputs.health`。Telegraf が動いていれば 200）が通らないと入れ替えが続く |
+| syslog の項目（ホスト名・本文など）が崩れる、取れない | Telegraf の `syslog_standard` と機器の形式が合っていない。既定は RFC3164（本番の Cisco）、lab の SR Linux は RFC5424。up.sh は `deploy.env` の `SYSLOG_STANDARD`（空なら RFC3164）を stream の `syslog_standard` に渡す。lab のログを見るなら `SYSLOG_STANDARD=RFC5424` にして打ち直す。`lab telegraf run`（デバッグ用の EC2）は常に RFC5424 |
+| デバッグ用の EC2 で Telegraf の出力を見たい | `sudo lab telegraf status` / `logs -f` / `test` / `gnmi`（出力は標準出力。MSK へは送らない） |
 | `tg test` は通るのに trap / syslog が Kafka に来ない | lab の EC2 の DNAT の宛先が古い NLB の IP か、転送が無い。lab の EC2 で `sudo lab forward-status`、無ければ `sudo lab forward`（SSM `/<prefix>/telegraf-address` を読み直す） |
 | Grafana / Splunk のポートフォワードがつながらない | 踏み台は Web の EC2（`Online` か上の「画面に入れない」のコマンドで見る）。タスクが動いているか `aws ecs list-services --cluster <prefix>-analytics` と `describe-services` の `runningCount` を見る。Cloud Map の名前（`grafana.<prefix>.internal` / `splunk.<prefix>.internal`）はタスクが動いていないと引けない。起きないときはロググループ `/ecs/<prefix>-grafana` / `/ecs/<prefix>-splunk` と `stoppedReason`（ECR のエンドポイントと、SSM のパスワードが消えていないか） |
 | Grafana に入れない（パスワードが違う） | admin のパスワードは SSM の値（`grafana_password_command`）。タスクが起きたときに読むので、SSM を手で変えたら `aws ecs update-service --force-new-deployment` で作り直す |
@@ -85,4 +89,5 @@ Web のログは Web の EC2 で `sudo journalctl -u <prefix>-web -n 100`、起�
 | 症状 | 原因と直し方 |
 |---|---|
 | `DependencyViolation`（SG / サブネット） | Runtime の ENI が残っている（最大 8 時間）。時間をおいて `ops/down.sh` を打ち直す |
+| `ops/down.sh` が「NG: デバッグ用の EC2 のスタックが消えなかった」 | `ops/lab-debug.sh down` を打ち直す（残りの一覧には `cloudformation:<prefix>-lab-debug` と出る） |
 | `ops/down.sh` の最後に残りが出る | 上と同じなら待つ。それ以外は get-resources で `Project=<prefix>` を探して手で消す |

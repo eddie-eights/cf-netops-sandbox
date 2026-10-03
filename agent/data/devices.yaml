@@ -3,7 +3,7 @@
 # 項目名は lab/lab_topology.py が作る形と揃える（tests/test_sync.py が lab の定義と同じであることを確かめる）。
 # lab を変える（lab/gen_lab.py を打ち直す）ときはここも直す（ここが唯一のシード。lab 側にコピーは置かない）。
 #
-# - mgmt_ip は containerlab の mgmt ネットワーク netops-lab（203.0.113.0/24）上のアドレス。
+# - mgmt_ip は containerlab の mgmt ネットワーク nwc-lab（203.0.113.0/24）上のアドレス。
 # - snmp_community は lab 固定の public。実機の値は書かない。
 # - device_id は SR Linux の host-name（= SNMP の sysName、syslog の hostname）と同じ値。SNMP 側からも突き合わせられる。
 # - 役割は名前から: leafsw = 上流側の Leaf、spine、leaf = アクセス側の Leaf、upstream = 上流の VM（拠点 wan）、host = アクセス側の VM。

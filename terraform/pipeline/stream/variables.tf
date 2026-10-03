@@ -83,6 +83,17 @@ variable "gnmi_targets" {
   }
 }
 
+variable "syslog_standard" {
+  description = "Format of the device syslog that Telegraf parses (inputs.syslog syslog_standard). RFC3164 is the BSD format of Cisco IOS, the production devices. ops/up.sh passes SYSLOG_STANDARD from deploy.env (default RFC3164). The SR Linux lab sends RFC5424 (LAB_SYSLOG_STANDARD in ops/lab-common.sh)."
+  type        = string
+  default     = "RFC3164"
+
+  validation {
+    condition     = contains(["RFC3164", "RFC5424"], var.syslog_standard)
+    error_message = "syslog_standard must be RFC3164 or RFC5424."
+  }
+}
+
 variable "telegraf_task_cpu" {
   description = "Fargate CPU units of the Telegraf task (ARM64). 256 (0.25 vCPU) is enough for 6 SNMP agents, 6 gNMI subscriptions, traps and syslog."
   type        = number

@@ -3,7 +3,7 @@
 # state（terraform/<ルート>/terraform.tfstate）にリソースが載っているルートだけを消す。作っていないルートは飛ばす。
 #
 # 使い方（展開したフォルダの直下で。先に AWS CLI の認証を通しておく。IAM ユーザーなら長期キーのまま打つ）:
-#   ops/down.sh              # 全部消す（workflow → analytics → graph → stream → lab → agent → base/core → ecr → Runtime のロググループ → ops/up.sh が作った SSM のパラメータ）。KEEP_ECR=0 と同じ
+#   ops/down.sh              # 全部消す（workflow → analytics → graph → stream → lab とデバッグ用の EC2（CloudFormation）→ agent → base/core → ecr → Runtime のロググループ → ops/up.sh が作った SSM のパラメータ）。KEEP_ECR=0 と同じ
 #   KEEP_ECR=1 ops/down.sh   # ECR（イメージ）だけ残す。翌日の ops/up.sh でビルドを飛ばせる（保管料は月数円）
 #
 # ops/up.sh と同じ deploy.env（DEPLOY_ENV_FILE=<パス> で別のファイル）を読む。環境変数はファイルより優先。
@@ -186,8 +186,13 @@ destroy_lambda_root pipeline/graph "$PREFIX-graph-status"
 # stream の snmp_agents / gnmi_targets も必須変数だが destroy では使われないので、形だけ合う値を渡す
 destroy_root pipeline/stream -var 'snmp_agents="udp://0.0.0.0:161"' -var 'gnmi_targets="0.0.0.0:57400"'
 
-log "2. lab"
+log "2. lab（デバッグ用の EC2 の CloudFormation のスタックも。土台のサブネット・SG・バケットを使うので base/core より先）"
 destroy_root pipeline/lab
+# ops/lab-debug.sh（cloudformation/lab-debug.yaml）。無ければ何もしない
+if ! ops/lab-debug.sh down; then
+  FAILED_ROOTS="$FAILED_ROOTS cloudformation:$PREFIX-lab-debug"
+  echo "NG: デバッグ用の EC2 のスタックが消えなかった（上の出力）。先へ進んで、残りを消す"
+fi
 
 log "3. agent（Runtime / ガードレール / KB。terraform/base/core のロールにポリシーを付けているので base/core より先）"
 LOG_GROUP=""

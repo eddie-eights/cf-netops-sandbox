@@ -1,4 +1,4 @@
-# ECR repositories of netops-poc. The agent image, the two lab images (srlinux / multitool),
+# ECR repositories of nwc-poc. The agent image, the two lab images (srlinux / multitool),
 # the two workflow images (worker / temporal) and the three ECS images of the pipeline (telegraf / grafana / splunk) go here.
 # ops/up.sh pushes them in step 2.
 # force_delete = true so that `terraform destroy` removes the repositories together with their images (daily ops/down.sh).

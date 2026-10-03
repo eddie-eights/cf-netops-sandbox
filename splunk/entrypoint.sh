@@ -8,7 +8,7 @@
 #   AWS_CONTAINER_CREDENTIALS_RELATIVE_URI  ECS が入れる。タスクロールの一時的な認証情報の取り出し口（鍵そのものではない）
 # AWS_CONTAINER_CREDENTIALS_FULL_URI と AWS_ENDPOINT_URL_SNS はローカルで偽の SNS に向けて試すときだけ使う（AWS SDK と同じ名前）
 set -eu
-ENV_FILE="${NETOPS_ALERTS_ENV:-/opt/container_artifact/netops-alerts.env}"
+ENV_FILE="${NETOPS_ALERTS_ENV:-/opt/container_artifact/nwc-alerts.env}"
 umask 022
 : > "$ENV_FILE"
 for k in AWS_REGION ALERTS_TOPIC_ARN DEVICE_MAP AWS_CONTAINER_CREDENTIALS_RELATIVE_URI AWS_CONTAINER_CREDENTIALS_FULL_URI AWS_ENDPOINT_URL_SNS; do

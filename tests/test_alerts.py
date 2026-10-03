@@ -34,7 +34,7 @@ sns = load(ACTION, "netops_sns")
 import rules   # noqa: E402  受け手（workflow/rules.py）
 src = read(ACTION)
 KEYS = ["status", "device_id", "kind", "target", "detail", "starts_at"]
-TOPIC = "arn:aws:sns:ap-northeast-1:111122223333:netops-alerts"
+TOPIC = "arn:aws:sns:ap-northeast-1:111122223333:netops-alerts"  # 下の SigV4 の既知の答えはこの ARN で作ってある
 CREDS = ("AKIDTEST", "test-secret", "test-token")   # 偽の値（署名の計算を確かめるためだけ）
 
 # ---- アラートアクション: 行 → アラート
@@ -97,7 +97,7 @@ with tempfile.TemporaryDirectory() as tmp:
           ep.rstrip().endswith('exec /sbin/entrypoint.sh "$@"') and "umask 022" in ep and "set -eu" in ep)
     check("認証情報そのもの（AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_SESSION_TOKEN）はファイルに写さない",
           not any(k in ep or k in sns.ENV_KEYS for k in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN")))
-    ENVF = os.path.join(tmp, "netops-alerts.env")
+    ENVF = os.path.join(tmp, "nwc-alerts.env")
     DM = "203.0.113.31=dc1-leaf-01,10.255.2.2=dc1-leaf-02"
     stub = os.path.join(tmp, "entrypoint.sh")
     with open(stub, "w", encoding="utf-8") as f:
@@ -369,7 +369,7 @@ df = read("splunk", "Dockerfile")
 dcode = [l for l in df.splitlines() if l.strip() and not l.startswith("#")]
 check("Splunk のイメージは上流の公式イメージに app と入口を足すだけ（RUN は無い = arm64 の PC でも QEMU 無しでビルドできる）",
       dcode == ["ARG SPLUNK_VERSION=10.4.3", "FROM splunk/splunk:${SPLUNK_VERSION}", "COPY --chown=splunk:splunk netops_alerts /opt/splunk-etc/apps/netops_alerts",
-                "COPY --chmod=0755 entrypoint.sh /sbin/netops-entrypoint.sh", 'ENTRYPOINT ["/sbin/netops-entrypoint.sh"]', 'CMD ["start-service"]'])
+                "COPY --chmod=0755 entrypoint.sh /sbin/nwc-entrypoint.sh", 'ENTRYPOINT ["/sbin/nwc-entrypoint.sh"]', 'CMD ["start-service"]'])
 up = read("ops", "up.sh")
 check("up.sh の SPLUNK_VERSION / GRAFANA_VERSION は Dockerfile の ARG の既定値と同じ",
       re.search(r"^SPLUNK_VERSION=([\d.]+)", up, re.M).group(1) == re.search(r"ARG SPLUNK_VERSION=([\d.]+)", df).group(1)
@@ -434,7 +434,7 @@ check("連絡先は SNS（鍵は書かない = タスクロールで SigV4）。
       and "disableResolveMessage: false" in gcode and "message: '{{ template \"netops.sns\" . }}'" in gcode
       and not re.search(r"(?i)access_key|secret_key|assume_role|profile", gcode))
 check("通知ポリシー: IF ごとに 1 通、発火はすぐ、解消は 30 秒以内、直らないあいだは 4 時間ごとに送り直す",
-      "receiver: netops-sns" in gcode and "group_by: ['alertname', 'sysName', 'ifName']" in gcode and "group_wait: 0s" in gcode and "group_interval: 30s" in gcode and "repeat_interval: 4h" in gcode)
+      "receiver: nwc-sns" in gcode and "group_by: ['alertname', 'sysName', 'ifName']" in gcode and "group_wait: 0s" in gcode and "group_interval: 30s" in gcode and "repeat_interval: 4h" in gcode)
 gdf = read("grafana", "Dockerfile")
 check("Grafana のイメージは provisioning を持ち、SigV4 を既定の認証情報（タスクロール）で使う",
       "COPY provisioning /etc/grafana/netops" in gdf and "GF_AUTH_SIGV4_AUTH_ENABLED=true" in gdf and "GF_AWS_ALLOWED_AUTH_PROVIDERS=default" in gdf)

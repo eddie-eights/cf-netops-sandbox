@@ -1,4 +1,4 @@
-# netops-poc - optional lab root module. One EC2 (Amazon Linux 2023 arm64) runs Docker + containerlab with the splab topology
+# nwc-poc - optional lab root module. One EC2 (Amazon Linux 2023 arm64) runs Docker + containerlab with the splab topology
 # (Spine-Leaf: 6 Nokia SR Linux switches with IS-IS + iBGP EVPN-VXLAN, 2 VMs dual-homed with LACP, all fictional addresses. lab/gen_lab.py). Reached with SSM Session Manager.
 # Images come from ECR (terraform/base/ecr), the containerlab rpm and configs from the S3 bucket of terraform/base/core. Stop the instance when not in use.
 # With forward_to_telegraf (telegraf.tf), the VPC routes the lab mgmt network to this EC2 so Telegraf (an ECS task of terraform/pipeline/stream)

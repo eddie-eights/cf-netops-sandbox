@@ -17,5 +17,6 @@
 # telegraf_image_tag   = "1.40.0"          # ops/up.sh passes <telegraf version>-<hash of telegraf/>
 # snmp_agents          = "\"udp://203.0.113.11:161\", ..."   # python3 lab/lab_topology.py lab --snmp-agents
 # gnmi_targets         = "\"203.0.113.11:57400\", ..."       # python3 lab/lab_topology.py lab --gnmi-targets
+# syslog_standard      = "RFC3164"       # Cisco IOS (BSD format). ops/up.sh passes SYSLOG_STANDARD (default RFC3164; RFC5424 for the SR Linux lab logs)
 # telegraf_task_cpu    = 256
 # telegraf_task_memory = 512

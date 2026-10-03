@@ -40,7 +40,7 @@ python3.13 -m pip install --quiet --no-index --find-links $APP/src/wheels --targ
 cat > /etc/${name_prefix}-web.env <<__ENV__
 AWS_REGION=${region}
 PORT=8080
-TITLE=NetOps PoC
+TITLE=運用管理ダッシュボード
 DATA_DIR=$APP/src/data
 PARAM_PREFIX=/${name_prefix}
 PYTHONPATH=$APP/lib

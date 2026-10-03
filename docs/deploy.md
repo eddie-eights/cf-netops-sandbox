@@ -22,6 +22,8 @@
 | `SINK_S3` / `SINK_OPENSEARCH` / `SINK_PROMETHEUS` | Spark の格納先。既定は 3 つとも `1`。`0` にするとリソースごと作らない。`SINK_SPLUNK` と合わせて全部 `0` は止まる。`SINK_PROMETHEUS=0` にすると Grafana のアラート（`link_down`）も無くなる |
 | `SINK_SPLUNK` | 4 本目の格納先。`1` で Spark が全トピックを Splunk の HTTP Event Collector（HEC）に送る。既定 `0`。analytics の ECS に Splunk Enterprise（公式イメージ `splunk/splunk:10.4.3` に検知のアプリ `netops_alerts` を足したもの、試用ライセンス。Fargate x86 2 vCPU / 4 GB、エフェメラルストレージ 40 GiB）を立て、Spark は VPC の中の `https://splunk.<prefix>.internal:8088` に送る（自己署名なので検証しない）。起動時に Splunk のライセンスと Splunk General Terms に同意する。admin のパスワードと HEC の token は `ops/up.sh` が SSM の SecureString に乱数で作る。index はタスクと一緒に消える（検証用）。trap と gNMI（BGP / IS-IS）のアラートも Splunk が出す（[pipeline.md](pipeline.md) の「アラート」）。+$0.12/h。`SPLUNK_INDEX`（空なら token の既定）も読む。AWS の外の Splunk へ NAT Gateway で送る道（`SPLUNK_HEC_URL`）は 2026-09-28 にやめた（書いてあると `ops/up.sh` が止まる） |
 | `GRAFANA` | Grafana OSS（analytics の ECS。Fargate ARM 0.5 vCPU / 1 GB。+$0.02/h）で Prometheus（AMP、SigV4）と OpenSearch Serverless を見る。既定 `1`。`SINK_PROMETHEUS` か `SINK_OPENSEARCH` があるときだけ作る。`SINK_PROMETHEUS=1` なら `link_down` のアラートを SNS へ出す（[pipeline.md](pipeline.md) の「アラート」）。Amazon Managed Grafana はサインインに IAM Identity Center か SAML が要り、このアカウントには Organizations も Identity Center も無いので使えない |
+| `SYSLOG_STANDARD` | stream の Telegraf（ECS）が受ける機器の syslog の形式。`RFC3164`（既定。本番の Cisco IOS の BSD 形式）か `RFC5424`（lab の SR Linux が送る形式。`ops/lab-common.sh` の `LAB_SYSLOG_STANDARD`）。それ以外は止まる。既定のままだと lab の機器のログの項目が崩れる（`ops/up.sh` が注意を出す）ので、lab のログまで見るなら `RFC5424`。変えて打ち直すと Telegraf のタスクが入れ替わる。デバッグ用の EC2 の Telegraf はこの値によらず RFC5424 |
+| `LAB_DEBUG` | デバッグ用の EC2（lab + Telegraf を 1 台。Telegraf の出力は標準出力）を CloudFormation のスタック `<prefix>-lab-debug` で作る。既定 `0`。`PIPELINE` とは独立。+$0.09/h と ECR のエンドポイント 2 本。手順 8-7 で `ops/lab-debug.sh up` を呼ぶ（[pipeline.md](pipeline.md) の「デバッグ用の EC2」） |
 | `IMAGE_TAG` | エージェントとワーカーのイメージのタグ。既定 `v1` |
 | `KEEP_ECR` | `1` で `ops/down.sh` が ECR を残す（保管料は月数円） |
 | `AWS_PROFILE` / `LOCAL_PORT` / `NO_PORTFORWARD` | プロファイル / PC 側のポート（既定 8080）/ ポートフォワーディングを開かない |
@@ -43,7 +45,7 @@
 | 0 | `deploy.env` と道具と認証を確かめ、作るルート、インターフェース型エンドポイント、費用の目安を出す |
 | 1 | `terraform/base/ecr` |
 | 2 | ECR に無いタグだけビルドして push（agent、lab の srlinux / multitool のミラー、worker、Temporal のミラー、Telegraf、Grafana は arm64。ECS の Splunk は amd64 の公式イメージ（約 2〜3 GB）に検知のアプリを足してビルドする）。Telegraf / Grafana / Splunk のタグは `<版>-<ディレクトリの中身のハッシュ 12 文字>` で、`telegraf/`・`grafana/`・`splunk/` を変えると次の `ops/up.sh` が作り直す |
-| 3 | `terraform/base/core`（エンドポイントは今回作る機能の分に、state にリソースが残っているルートの分を足す）。graph を作るなら裏で `terraform/pipeline/graph` を始める（ログは `ops/logs/graph-apply.log`） |
+| 3 | `terraform/base/core`（エンドポイントは今回作る機能の分に、state にリソースが残っているルートとデバッグ用の EC2 のスタックの分を足す）。graph を作るなら裏で `terraform/pipeline/graph` を始める（ログは `ops/logs/graph-apply.log`） |
 | 3-3 | `terraform/agent` |
 | 4 | Web の部品を S3 に置く。`CREATE_KB=1` なら手順書を取り込む。Web を再起動 |
 | 5 | 5-1 で containerlab の rpm と `lab/`、5-2 で Spark の jar 6 本と `spark/snmp_sinks.py` を S3 に置く |
@@ -58,6 +60,7 @@
 | 8-3 | Web を再起動 |
 | 8-5 | `terraform/workflow`。Temporal UI を開くコマンドを表示 |
 | 8-6 | Web を再起動 |
+| 8-7 | `LAB_DEBUG=1` なら `ops/lab-debug.sh up`（デバッグ用の EC2。CloudFormation） |
 | 9 | Runtime のロググループの保持を 7 日にする |
 | 10 | `start_session_command`、lab と Telegraf に入るコマンド、Grafana / Splunk のポートフォワードとパスワードを見るコマンドを表示し、ポートフォワーディングを開く（`Ctrl+C` で閉じる） |
 
@@ -70,7 +73,7 @@ state にリソースが載っているルートだけを、この順に消す�
 
 ```mermaid
 flowchart LR
-  A["workflow"] --> B["analytics<br/>Spark のジョブを cancel"] --> C["graph"] --> D["stream"] --> E["lab"] --> F["agent"] --> G["base/core"] --> H["base/ecr"] --> I["Runtime の<br/>ロググループ"] --> J["SSM のパラメータ<br/>ManagedBy=ops/up.sh"]
+  A["workflow"] --> B["analytics<br/>Spark のジョブを cancel"] --> C["graph"] --> D["stream"] --> E["lab<br/>デバッグ用の EC2 のスタック"] --> F["agent"] --> G["base/core"] --> H["base/ecr"] --> I["Runtime の<br/>ロググループ"] --> J["SSM のパラメータ<br/>ManagedBy=ops/up.sh"]
 ```
 
 - 手順 5-2 で、`ops/up.sh` が作った SSM のパラメータ（`/<prefix>/` の下でタグ `ManagedBy=ops/up.sh` のもの。Grafana / Splunk の admin のパスワードと Splunk の HEC の token）を消す。手で入れたパラメータは消さない。
