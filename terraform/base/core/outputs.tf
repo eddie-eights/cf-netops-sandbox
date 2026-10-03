@@ -60,8 +60,13 @@ output "network_perimeter_policy_arn" {
 }
 
 output "perimeter_exempt_principals" {
-  description = "Principals the resource policy Deny statements leave out (the deployer and the knowledge base role). Read by terraform/pipeline/analytics (S3 Tables) and terraform/workflow (SQS)"
+  description = "Principals the resource policy Deny statements leave out (the deployer and the knowledge base role). Used by the alerts topic here (alerts.tf) and read by terraform/pipeline/analytics (S3 Tables) and terraform/workflow (SQS)"
   value       = local.perimeter_exempt_principals
+}
+
+output "alerts_topic_arn" {
+  description = "SNS topic the Grafana alert rules and the Splunk saved searches publish to (alerts.tf). Read by terraform/pipeline/analytics (publish), terraform/workflow (SQS subscription) and terraform/pipeline/graph (Lambda subscription)"
+  value       = aws_sns_topic.alerts.arn
 }
 
 output "kb_bucket_name" {
@@ -75,7 +80,7 @@ output "kb_bucket_arn" {
 }
 
 output "runtime_role_name" {
-  description = "Read by terraform/agent (execution policy), terraform/pipeline/stream / terraform/pipeline/graph (read policies for the anomaly table and Neptune)"
+  description = "Read by terraform/agent (execution policy), terraform/pipeline/stream (SSM parameters) and terraform/pipeline/graph (read policy for Neptune)"
   value       = aws_iam_role.runtime.name
 }
 
@@ -96,6 +101,6 @@ output "flow_log_group_name" {
 
 # ---------------------------------------------------------------- commands
 output "upload_web_command" {
-  description = "Run in this repository after \"pip download\" into wheels/ (step 4 of ops/up.sh). Copies every web/*.py (app / config / chat / topology_view / incident_view) plus the agent modules the web UI shares (toolkit / topology / anomalies / graph / proposals). The instance pulls web/ on every boot."
-  value       = "aws s3 cp web/ s3://${aws_s3_bucket.kb.bucket}/web/ --recursive --exclude '*' --include '*.py' --include 'requirements.txt' && for f in toolkit topology anomalies graph proposals; do aws s3 cp agent/$f.py s3://${aws_s3_bucket.kb.bucket}/web/$f.py; done && aws s3 cp agent/data/ s3://${aws_s3_bucket.kb.bucket}/web/data/ --recursive && aws s3 sync wheels/ s3://${aws_s3_bucket.kb.bucket}/web/wheels/"
+  description = "Run in this repository after \"pip download\" into wheels/ (step 4 of ops/up.sh). Copies every web/*.py (app / config / chat / topology_view / incident_view) plus the agent modules the web UI shares (toolkit / topology / graph / proposals). The instance pulls web/ on every boot."
+  value       = "aws s3 cp web/ s3://${aws_s3_bucket.kb.bucket}/web/ --recursive --exclude '*' --include '*.py' --include 'requirements.txt' && for f in toolkit topology graph proposals; do aws s3 cp agent/$f.py s3://${aws_s3_bucket.kb.bucket}/web/$f.py; done && aws s3 cp agent/data/ s3://${aws_s3_bucket.kb.bucket}/web/data/ --recursive && aws s3 sync wheels/ s3://${aws_s3_bucket.kb.bucket}/web/wheels/"
 }

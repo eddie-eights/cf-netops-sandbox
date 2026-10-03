@@ -2,11 +2,11 @@
 # AWS の API は全部 VPC エンドポイント（endpoints.tf）を通すので、正しいリクエストには aws:SourceVpc = この VPC が付く。
 # それが付かないリクエスト（盗んだ認証情報を VPC の外で使った）を 2 か所で拒む:
 #   1. IAM 側   ワークロードのロールに付ける Deny（下の network_perimeter）。付け先は web / runtime（ここ）、lab / Telegraf（pipeline/lab）、
-#               Spark（pipeline/analytics）、ワーカー（workflow）、ツールの Lambda（workflow）
-#   2. 資源側   バケット（下）、S3 Tables（pipeline/analytics）、SQS（workflow）のリソースポリシーの Deny
+#               Spark / Grafana / Splunk（pipeline/analytics）、ワーカー（workflow）、ツールの Lambda（workflow）
+#   2. 資源側   バケット（下）、アラートの SNS トピック（alerts.tf）、S3 Tables（pipeline/analytics）、SQS（workflow）のリソースポリシーの Deny
 # 例外は 3 つ:
 #   - デプロイする人（ops/up.sh を打つ PC の認証情報。terraform と s3 cp が VPC の外から来る。PoC では仕方ないとユーザーが決めた、2026-09-28）
-#   - AWS のサービス自身（aws:PrincipalIsAWSService: EventBridge → SQS）とサービスが呼び手の代わりに出すリクエスト（aws:ViaAWSService）
+#   - AWS のサービス自身（aws:PrincipalIsAWSService: SNS → SQS）とサービスが呼び手の代わりに出すリクエスト（aws:ViaAWSService）
 #   - サービスがロールを引き受けて自分の側から来るもの（Bedrock の KB が docs/ を読む <prefix>-kb）
 # IAM 側で拒む API は、VPC エンドポイントを通るものだけにする。logs / ecr / ec2 / kms / sts / xray はサービスがロールの認証情報で
 # 自分の側から呼ぶ（Lambda のログ、Runtime のイメージ取得）ので入れない。neptune-db / kafka-cluster は VPC の中にしか無く、aoss はネットワークポリシーで閉じている。
@@ -33,7 +33,7 @@ locals {
     "ssm:*",
     "ssmmessages:*",
     "bedrock:*",
-    "events:*",
+    "sns:*",
     "aps:*",
     "bedrock-agentcore:InvokeAgentRuntime",
     "bedrock-agentcore:InvokeGateway",

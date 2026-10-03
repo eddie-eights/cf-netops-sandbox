@@ -92,9 +92,9 @@ variable "interface_endpoints" {
     condition = alltrue([for s in var.interface_endpoints : contains([
       "ssm", "ssmmessages", "ecr.api", "ecr.dkr", "logs",
       "bedrock-runtime", "bedrock-agent-runtime", "bedrock-agentcore", "bedrock-agentcore.gateway",
-      "s3tables", "events", "aps-workspaces", "sqs",
+      "s3tables", "aps-workspaces", "sqs", "sns",
     ], s)])
-    error_message = "interface_endpoints may only list ssm, ssmmessages, ecr.api, ecr.dkr, logs, bedrock-runtime, bedrock-agent-runtime, bedrock-agentcore, bedrock-agentcore.gateway, s3tables, events, aps-workspaces and sqs."
+    error_message = "interface_endpoints may only list ssm, ssmmessages, ecr.api, ecr.dkr, logs, bedrock-runtime, bedrock-agent-runtime, bedrock-agentcore, bedrock-agentcore.gateway, s3tables, aps-workspaces, sqs and sns."
   }
 }
 
@@ -111,7 +111,7 @@ variable "flow_log_retention_days" {
 }
 
 variable "network_perimeter" {
-  description = "Deny AWS API calls that do not come through this VPC (aws:SourceVpc): an IAM policy on the workload roles (perimeter.tf, attached by every root) and resource policies on the bucket here, the S3 Tables bucket, the SQS queues and the AgentCore Runtime and Gateway in the other roots (Prometheus has no resource policy - only the IAM side). The deployer (whoever runs terraform) and AWS service principals are excepted. false only to rule it out while troubleshooting."
+  description = "Deny AWS API calls that do not come through this VPC (aws:SourceVpc): an IAM policy on the workload roles (perimeter.tf, attached by every root) and resource policies on the bucket and the alerts topic here, the S3 Tables bucket, the SQS queues and the AgentCore Runtime and Gateway in the other roots (Prometheus has no resource policy - only the IAM side). The deployer (whoever runs terraform) and AWS service principals are excepted. false only to rule it out while troubleshooting."
   type        = bool
   default     = true
 }
