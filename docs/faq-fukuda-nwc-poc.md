@@ -7,6 +7,7 @@ nwc-poc の作業中に質問したことと、その答えをまとめた。答
 - [3. lab の syslog を local7 にした](#3-lab-の-syslog-を-local7-にした)
 - [4. デバッグ用の EC2（lab + Telegraf）](#4-デバッグ用の-ec2lab--telegraf)
 - [5. 本番の Cisco から送るとき](#5-本番の-cisco-から送るとき)
+- [6. SNMP のポーリングを既定で止めた](#6-snmp-のポーリングを既定で止めた)
 
 ---
 
@@ -448,3 +449,27 @@ SYSLOG_STANDARD=RFC5424 PIPELINE=1 ops/up.sh   # lab の SR Linux のログま�
 - 既定は stream の変数と同じ `RFC3164`（本番の Cisco に合わせる）。lab の SR Linux は RFC 5424 で送るので、既定のままだと lab のログはホスト名・本文などがきれいに取れない。lab のログまで見るときだけ `RFC5424` にする。
 - 変えて打ち直すと、ECS の Telegraf のタスクが入れ替わる（環境変数が変わるので）。
 - デバッグ用の EC2 の Telegraf は lab 専用なので、この値によらず `lab/lab.sh` の `LOG_STANDARD`（RFC5424）のまま。
+
+## 6. SNMP のポーリングを既定で止めた
+
+### Q. snmp ポーリングはデフォルトでは無効にして、snmp trap だけにしたい。環境変数で書き換えられるようにできる？
+
+**A. Telegraf の SNMP のポーリング（`inputs.snmp`）を既定で止め、SNMP は trap（`inputs.snmp_trap`）だけ受けるようにした。`SNMP_POLL=1` で戻せる。** gNMI と syslog は変えていない。
+
+| どこ | 中身 |
+|---|---|
+| `telegraf/telegraf.conf.in` | `[[inputs.snmp]]` を `# >>> snmp_poll` 〜 `# <<< snmp_poll` で囲んだ |
+| `telegraf/telegraf.sh` | `SNMP_POLL`（既定 `0`。`0` / `1` 以外は止まる）が `0` ならその区間を消す。`SNMP_AGENTS` を見るのは `1` のときだけ。`tg test` は `0` なら「止めてある」と出して終わる |
+| `terraform/pipeline/stream` | 変数 `snmp_poll`（bool、既定 `false`）をタスクの環境変数 `SNMP_POLL`（`1` / `0`）に渡す。ECS Exec の既定のコマンド（出力 `telegraf_exec_command`）を `tg test` から `tg gnmi` にした |
+| `ops/up.sh` / `ops/deploy-env.sh` / `deploy.env.example` | `deploy.env` の `SNMP_POLL`（`1` / `0`、`true` / `false` も可）を stream の `snmp_poll` に渡す。読めるキーに足した |
+| `lab/lab.sh` | デバッグ用の EC2 の Telegraf にも `SNMP_POLL`（既定 `0`）を渡す |
+
+```bash
+SNMP_POLL=1 PIPELINE=1 ops/up.sh     # ポーリングもするとき（deploy.env に SNMP_POLL=1 でもよい）
+sudo SNMP_POLL=1 lab telegraf run    # デバッグ用の EC2 で、ポーリングありで起こし直す
+```
+
+- **止めると空になるもの:** `metrics` トピック（measurement `system` / `interface`）が出なくなるので、Grafana のダッシュボード「netops / SNMP metrics」、エージェントの `query_metrics`、S3 Tables のポーリングの行が空になる。
+- **アラート:** Grafana のルール `link_down` はポーリングの `ifOperStatus` を見るので発火しない。IF の up / down は trap から Splunk（`SINK_SPLUNK=1`）が `link_down` を出す。そのため `ops/up.sh` は Grafana を `SNMP_POLL=1` のときだけアラートの送り手に数え、既定のまま `WORKFLOW=1` にすると「`SINK_SPLUNK=1` か `SNMP_POLL=1` が要る」と出して止まる。Grafana と `SINK_PROMETHEUS` があってどちらの送り手も無いときは注意を出す。
+- NLB のヘルスチェック（`outputs.health`）は、何も書いていないうちは 200 を返すので、ポーリングを止めても通る。Spark は無いトピックを作るので、`metrics` が無くても動く。
+- 変えて打ち直すと、ECS の Telegraf のタスクが入れ替わる（環境変数が変わるので）。

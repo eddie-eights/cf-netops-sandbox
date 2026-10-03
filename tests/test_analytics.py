@@ -648,11 +648,13 @@ def _senders(**env):
     r = subprocess.run(["bash", "-c", 'die() { echo "DIE: $1"; exit 1; }\n' + _sndblk + 'echo "OUT: ${GRAFANA_ALERTS:-0}"'],
                        capture_output=True, text=True, env={"PATH": os.environ["PATH"], **env})
     return r.stdout.strip().splitlines()[-1][:40] if r.stdout.strip() else r.stderr
-check("Grafana のアラートは GRAFANA と SINK_PROMETHEUS の両方があるときだけ（ルールは Prometheus のメトリクスを見る）",
-      _senders(GRAFANA="1", SINK_PROMETHEUS="1") == "OUT: 1" and _senders(GRAFANA="1") == "OUT: 0" and _senders(SINK_PROMETHEUS="1") == "OUT: 0")
-check("up.sh の WORKFLOW=1 はアラートの送り手（Grafana のアラートか Splunk）が 1 つも無ければ、何も作る前に止まる",
+check("Grafana のアラートは GRAFANA と SINK_PROMETHEUS と SNMP_POLL があるときだけ（ルールは Prometheus の、SNMP のポーリングの ifOperStatus を見る）",
+      _senders(GRAFANA="1", SINK_PROMETHEUS="1", SNMP_POLL="1") == "OUT: 1" and _senders(GRAFANA="1", SINK_PROMETHEUS="1") == "OUT: 0"
+      and _senders(GRAFANA="1", SNMP_POLL="1") == "OUT: 0" and _senders(SINK_PROMETHEUS="1", SNMP_POLL="1") == "OUT: 0")
+check("up.sh の WORKFLOW=1 はアラートの送り手（Grafana のアラートか Splunk）が 1 つも無ければ、何も作る前に止まる（既定の SNMP_POLL=0 では Grafana は数えない）",
       _senders(WORKFLOW="1", GRAFANA="1").startswith("DIE: WORKFLOW はアラートの送り手が要る") and _senders(WORKFLOW="1").startswith("DIE: WORKFLOW はアラートの送り手が要る")
-      and _senders(WORKFLOW="1", GRAFANA="1", SINK_PROMETHEUS="1") == "OUT: 1" and _senders(WORKFLOW="1", SPLUNK_ON_ECS="1") == "OUT: 0"
+      and _senders(WORKFLOW="1", GRAFANA="1", SINK_PROMETHEUS="1").startswith("DIE: WORKFLOW はアラートの送り手が要る")
+      and _senders(WORKFLOW="1", GRAFANA="1", SINK_PROMETHEUS="1", SNMP_POLL="1") == "OUT: 1" and _senders(WORKFLOW="1", SPLUNK_ON_ECS="1") == "OUT: 0"
       and up.index('die "WORKFLOW はアラートの送り手が要る') < up.index("ENDPOINTS=\"\""))
 check("up.sh は base/core に interface_endpoints / network_perimeter / endpoints_multi_az を渡し、state に残るルートの分も足す",
       'MAIN_VARS+=(-var "interface_endpoints=[' in up and 'MAIN_VARS+=(-var "network_perimeter=' in up and 'MAIN_VARS+=(-var "endpoints_multi_az=' in up

@@ -9,7 +9,7 @@
 #   WORKFLOW          Temporal での実行。workflow（Temporal on ECS Fargate のワーカー + AgentCore Gateway（MCP）+ SNS → SQS）。
 #                     Grafana / Splunk のアラートが SNS → SQS で届き、エージェントが Neptune / OpenSearch / Prometheus を見て原因を調べて修復案を出し、
 #                     Web の「承認」タブで人が承認すると Temporal が lab で直す。AGENT と PIPELINE（lab / stream / analytics / graph）と、
-#                     アラートの送り手（Grafana と SINK_PROMETHEUS、または SINK_SPLUNK=1）が要る
+#                     アラートの送り手（SINK_SPLUNK=1、または Grafana と SINK_PROMETHEUS と SNMP_POLL=1）が要る
 # 毎日全部消す運用向け。何度打っても同じ状態に収束する（できているものは Terraform が差分なしで飛ばし、ECR にあるタグはビルドしない）。
 # あとから別の機能を 1 にして打ち直せば、その機能だけ足される（土台と他の機能は作り直さない）。
 # Terraform の state はこの PC の展開したフォルダの中（terraform/<ルート>/terraform.tfstate）に置く。消すのは ops/down.sh。
@@ -32,7 +32,7 @@
 #   AGENT=1                 agent での分析（既定 1）。terraform/agent を作る
 #   PIPELINE=1              データパイプライン（既定 0）。lab / stream / analytics / graph を作る（SKIP_* で減らせる）
 #   WORKFLOW=1              Temporal での実行（既定 0）。workflow を作る。AGENT と PIPELINE が要り、SKIP_LAB / SKIP_STREAM / SKIP_ANALYTICS / SKIP_GRAPH は書けない。
-#                           アラートの送り手も要る（GRAFANA と SINK_PROMETHEUS の両方、または SINK_SPLUNK=1。既定のままなら Grafana が送る）
+#                           アラートの送り手も要る（SINK_SPLUNK=1、または GRAFANA と SINK_PROMETHEUS と SNMP_POLL=1。既定のままでは送り手が無いので止まる）
 #   CREATE_KB=1             AGENT=1 で Knowledge Base も作る（既定 0。+$0.37/h = OpenSearch Serverless の OCU $0.33 + 土台の VPC エンドポイント $0.03（SINK_OPENSEARCH と共用）
 #                           + bedrock-agent-runtime のエンドポイント $0.01）。コレクションは公開せず、そのエンドポイントと Bedrock からだけ届く
 #   SKIP_LAB=1              PIPELINE=1 で lab を作らない（stream は lab が要るので SKIP_STREAM=1 も要る）
@@ -50,10 +50,14 @@
 #                           AWS の外の Splunk へ NAT Gateway で送る道は 2026-09-28 にやめた（VPC から AWS の外へ出る経路は作らない）
 #   GRAFANA=0               analytics に Grafana OSS（ECS。Prometheus と OpenSearch を見る。+$0.02/h）を作らない（既定 1。SINK_PROMETHEUS か SINK_OPENSEARCH があるときだけ作る）。
 #                           SINK_PROMETHEUS があればアラートルール（IF の ifOperStatus → link_down）も入り、SNS へ出す（grafana/provisioning/alerting）。
+#                           ifOperStatus は SNMP のポーリングの値なので、SNMP_POLL=1 でなければルールは発火しない。
 #                           web の EC2 を踏み台にした SSM のポートフォワードで開く（コマンドは最後に出る）
 #   SYSLOG_STANDARD         stream の Telegraf が受ける機器の syslog の形式。RFC3164（既定。本番の Cisco IOS の BSD 形式）か RFC5424。
 #                           lab の SR Linux は RFC 5424 で送る（ops/lab-common.sh の LAB_SYSLOG_STANDARD）ので、lab のログの項目まで見るなら RFC5424。
 #                           デバッグ用の EC2（ops/lab-debug.sh。up.sh とは別に作る）の Telegraf はこの値を使わず、lab/lab.sh の LOG_STANDARD（RFC5424）
+#   SNMP_POLL=1             stream の Telegraf で SNMP もポーリングする（10 秒ごとに ifTable → metrics トピック）。既定 0 で、SNMP は trap だけ受ける。
+#                           Grafana のアラートルール link_down と IF のグラフ、エージェントの IF のメトリクスはこのポーリングを見るので、0 では空になる
+#                           （IF の up / down は SINK_SPLUNK=1 の Splunk が trap から link_down を出す）。stream の変数 snmp_poll に渡す
 #   SKIP_GRAPH=1            PIPELINE=1 で graph（Neptune）を作らない。「トポロジ」は使えず、アラートが届いても status を書く先が無い
 #   IMAGE_TAG               エージェント（WORKFLOW=1 ではワーカーも）のイメージのタグ。既定 v1。ECR にそのタグが無いときだけ PC の docker buildx でビルドして push する（タグは上書きできない）
 #   VPC_CIDR                terraform/base/core の vpc_cidr（社内と重なるとき）
@@ -63,7 +67,7 @@
 #   NO_PORTFORWARD=1        ポートフォワーディングを開かずに終わる
 #   TF_VERBOSE=1            terraform の出力を全部画面に出す（既定は進みと結果だけ。全文は ops/logs/tf-<ルート>-apply.log）
 #   AWS_PROFILE / AWS_CA_BUNDLE  AWS CLI と terraform がそのまま読む
-# AGENT / PIPELINE / WORKFLOW / CREATE_KB / SKIP_* / SINK_* / GRAFANA / NO_PORTFORWARD / NETWORK_PERIMETER / ENDPOINTS_MULTI_AZ は 1 / 0 のほか true / false、yes / no でも書ける（ops/down.sh の KEEP_ECR は 1 か 0 だけ）。
+# AGENT / PIPELINE / WORKFLOW / CREATE_KB / SKIP_* / SINK_* / GRAFANA / SNMP_POLL / NO_PORTFORWARD / NETWORK_PERIMETER / ENDPOINTS_MULTI_AZ は 1 / 0 のほか true / false、yes / no でも書ける（ops/down.sh の KEEP_ECR は 1 か 0 だけ）。
 #
 # 利用者への権限は人に渡す作業なので入れていない（docs/deploy.md の「利用者に画面を渡す」）。
 set -euo pipefail
@@ -242,6 +246,8 @@ flag_value SKIP_LAB; flag_value SKIP_STREAM; flag_value SKIP_ANALYTICS; flag_val
 # stream の Telegraf の syslog の形式。既定は本番の Cisco に合わせた RFC3164（stream の変数の既定と同じ）
 SYSLOG_STANDARD="${SYSLOG_STANDARD:-RFC3164}"
 case "$SYSLOG_STANDARD" in RFC3164 | RFC5424) ;; *) die "SYSLOG_STANDARD は RFC3164 か RFC5424（大文字）: $SYSLOG_STANDARD。まだ何も作っていない" ;; esac
+# stream の Telegraf の SNMP のポーリング。既定 0（trap だけ受ける。stream の変数 snmp_poll の既定と同じ）
+flag_value SNMP_POLL
 # どの機能を作るか（既定は土台 + AGENT）
 AGENT="${AGENT:-1}"
 flag_value AGENT; flag_value PIPELINE; flag_value WORKFLOW; flag_value CREATE_KB
@@ -275,11 +281,15 @@ GRAFANA="${GRAFANA:-1}"; flag_value GRAFANA
 if [ -n "$SKIP_ANALYTICS" ] || { [ -z "$SINK_PROMETHEUS" ] && [ -z "$SINK_OPENSEARCH" ]; }; then GRAFANA=""; fi
 if [ -n "$SKIP_ANALYTICS" ]; then SPLUNK_ON_ECS=""; fi
 # アラート（SNS のトピック <接頭辞>-alerts）の送り手。Grafana のアラートルールは Prometheus のメトリクスを見るので SINK_PROMETHEUS が要る
-# （grafana/start.sh は PROMETHEUS_URL があるときだけルールを入れる）。Splunk は保存済みサーチが trap と gNMI を見る
+# （grafana/start.sh は PROMETHEUS_URL があるときだけルールを入れる）。ルール link_down が見る ifOperStatus は SNMP のポーリングの値なので、
+# SNMP_POLL=1 でなければ発火しない（送り手に数えず、sns のエンドポイントも足さない）。Splunk は保存済みサーチが trap と gNMI を見る
 GRAFANA_ALERTS=""
-if [ -n "$GRAFANA" ] && [ -n "$SINK_PROMETHEUS" ]; then GRAFANA_ALERTS=1; fi
+if [ -n "$GRAFANA" ] && [ -n "$SINK_PROMETHEUS" ] && [ -n "$SNMP_POLL" ]; then GRAFANA_ALERTS=1; fi
 if [ -n "$WORKFLOW" ] && [ -z "$GRAFANA_ALERTS$SPLUNK_ON_ECS" ]; then
-  die "WORKFLOW はアラートの送り手が要る（ワークフローを起こすのは Grafana か Splunk のアラート）。GRAFANA と SINK_PROMETHEUS を 1 のままにするか、SINK_SPLUNK=1 にする。まだ何も作っていない"
+  die "WORKFLOW はアラートの送り手が要る（ワークフローを起こすのは Grafana か Splunk のアラート）。SINK_SPLUNK=1 にする（trap と gNMI から検知する）か、GRAFANA と SINK_PROMETHEUS を 1 のまま SNMP_POLL=1 にする（SNMP のポーリングから検知する）。まだ何も作っていない"
+fi
+if [ -n "$GRAFANA" ] && [ -n "$SINK_PROMETHEUS" ] && [ -z "$SNMP_POLL" ] && [ -z "$SPLUNK_ON_ECS" ]; then
+  echo "注意: SNMP_POLL=0（既定）なので Grafana のアラートルール link_down は発火せず、IF の up / down を知らせるものが無い。trap から知らせるなら SINK_SPLUNK=1、ポーリングで知らせるなら SNMP_POLL=1"
 fi
 if [ -z "$AGENT" ] && [ -n "$CREATE_KB" ]; then
   echo "AGENT=0 なので CREATE_KB は効かない（Knowledge Base は agent の一部）"
@@ -677,10 +687,17 @@ fi
 if [ -z "$SKIP_STREAM" ]; then
   log "7. stream（terraform/pipeline/stream。MSK の作成に 20〜30 分。Telegraf は ECS のタスク）"
   # Telegraf のポーリング先と gNMI の購読先は lab の定義から作る（機器の一覧を lab の定義 1 か所にする。telegraf/telegraf.sh が
-  # タスクの環境変数から telegraf.conf.in の __SNMP_AGENTS__ / __GNMI_TARGETS__ を埋める）
+  # タスクの環境変数から telegraf.conf.in の __SNMP_AGENTS__ / __GNMI_TARGETS__ を埋める）。
+  # ポーリング先は SNMP_POLL=0 でも作って渡す（stream の snmp_agents は必須。telegraf.sh は SNMP_POLL=1 のときだけ使う）
   SNMP_AGENTS=$("${PY[@]}" lab/lab_topology.py lab --snmp-agents) || die "lab/lab_topology.py が lab の定義からポーリング先を作れなかった"
   GNMI_TARGETS=$("${PY[@]}" lab/lab_topology.py lab --gnmi-targets) || die "lab/lab_topology.py が lab の定義から gNMI の購読先を作れなかった"
-  echo "Telegraf のポーリング先: $SNMP_AGENTS"
+  if [ -n "$SNMP_POLL" ]; then
+    SNMP_POLL_TF=true
+    echo "Telegraf の SNMP: trap を受け、ポーリングもする（SNMP_POLL=1）。ポーリング先: $SNMP_AGENTS"
+  else
+    SNMP_POLL_TF=false
+    echo "Telegraf の SNMP: trap だけ受ける（ポーリングしない。する場合は SNMP_POLL=1）"
+  fi
   echo "Telegraf の gNMI の購読先: $GNMI_TARGETS"
   # syslog の形式は SYSLOG_STANDARD（既定は本番の Cisco の RFC3164）。lab の SR Linux は ops/lab-common.sh の LAB_SYSLOG_STANDARD（RFC5424）で送る
   echo "Telegraf の syslog の形式: $SYSLOG_STANDARD"
@@ -688,7 +705,7 @@ if [ -z "$SKIP_STREAM" ]; then
     echo "注意: lab の SR Linux は $LAB_SYSLOG_STANDARD で送るので、SYSLOG_STANDARD=$SYSLOG_STANDARD では lab のログの項目（ホスト名・本文など）が崩れる。lab のログまで見るなら SYSLOG_STANDARD=$LAB_SYSLOG_STANDARD"
   fi
   tf_apply pipeline/stream -var "telegraf_image_tag=$TELEGRAF_TAG" -var "snmp_agents=$SNMP_AGENTS" -var "gnmi_targets=$GNMI_TARGETS" \
-    -var "syslog_standard=$SYSLOG_STANDARD"
+    -var "syslog_standard=$SYSLOG_STANDARD" -var "snmp_poll=$SNMP_POLL_TF"
 fi
 
 # ---- 7-2. lab と Telegraf の中を確かめる ------------------------------------------------
@@ -878,7 +895,7 @@ if [ -n "$LAB_INSTANCE_ID" ]; then
   tf pipeline/lab output -raw start_session_command; echo
 fi
 if [ -z "$SKIP_STREAM" ]; then
-  echo "Telegraf（ECS）に入るコマンド（中で tg test / tg gnmi）:"
+  echo "Telegraf（ECS）に入るコマンド（中で tg gnmi。SNMP_POLL=1 なら tg test でポーリングも見られる）:"
   tf pipeline/stream output -raw telegraf_exec_command; echo
 fi
 if [ -n "$GRAFANA" ]; then

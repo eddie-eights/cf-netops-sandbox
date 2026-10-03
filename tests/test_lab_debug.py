@@ -248,6 +248,35 @@ tpl = read("telegraf", "telegraf.conf.in")
 check("telegraf.conf.in の出力の区間は telegraf.sh の SINKS と同じ名前で、開きと閉じが対になる",
       sorted(re.findall(r"^# >>> sink (\w+)", tpl, re.M)) == sorted(re.findall(r"^# <<< sink (\w+)", tpl, re.M))
       == sorted(re.search(r'^SINKS="([^"]*)"', tg_sh, re.M).group(1).split()))
+# SNMP のポーリングは既定で止める（trap だけ。2026-10-04 ユーザー決定）。SNMP_POLL=1 で inputs.snmp を残す
+_poll, out_poll, _ = render("stdout", SNMP_POLL="1")
+_snmp_blk = tpl.split("# >>> snmp_poll", 1)[1].split("# <<< snmp_poll", 1)[0] if "# >>> snmp_poll" in tpl else ""
+check("telegraf.conf.in の inputs.snmp（ポーリング）は「>>> snmp_poll」〜「<<< snmp_poll」の 1 区間に丸ごと入り、trap / gNMI / syslog は外にある",
+      tpl.count("# >>> snmp_poll") == 1 and tpl.count("# <<< snmp_poll") == 1 and "[[inputs.snmp]]" in _snmp_blk and "agents = [__SNMP_AGENTS__]" in _snmp_blk
+      and tpl.count("[[inputs.snmp]]") == 1 and tpl.count("agents = [__SNMP_AGENTS__]") == 1
+      and not any(w in _snmp_blk for w in ("[[inputs.snmp_trap]]", "[[inputs.gnmi]]", "[[inputs.syslog]]", "[[outputs.")))
+check("SNMP_POLL の既定は 0: kafka でも stdout でも inputs.snmp が無く、trap / gNMI / syslog は残る（ログは snmp poll: off）",
+      sh_const(tg_sh, "SNMP_POLL") == "${SNMP_POLL:-0}"
+      and all("snmp" not in c["inputs"] and len(c["inputs"]["snmp_trap"]) == 1 and len(c["inputs"]["gnmi"]) == 1 and len(c["inputs"]["syslog"]) == 1
+              for c in (kafka, stdout_conf))
+      and "snmp poll: off" in out)
+check("SNMP_POLL=1 は inputs.snmp を残し、agents を SNMP_AGENTS で埋める（ifName をタグにした interface の表と system）",
+      _poll is not None and _poll["inputs"]["snmp"][0]["agents"] == ["udp://203.0.113.11:161", "udp://203.0.113.12:161"]
+      and _poll["inputs"]["snmp"][0]["name"] == "system" and _poll["inputs"]["snmp"][0]["table"][0]["name"] == "interface"
+      and len(_poll["inputs"]["snmp_trap"]) == 1 and "snmp poll: \"udp://203.0.113.11:161\"" in out_poll)
+check("SNMP_AGENTS を見るのは SNMP_POLL=1 のときだけ（無いか形が違えば止まる）。SNMP_POLL は 0 か 1 だけ",
+      render("stdout", SNMP_AGENTS="")[0] is not None and render("stdout", SNMP_AGENTS="bad")[0] is not None
+      and render("stdout", SNMP_POLL="1", SNMP_AGENTS="")[0] is None and render("stdout", SNMP_POLL="1", SNMP_AGENTS="bad")[0] is None
+      and render("stdout", SNMP_POLL="0")[0] is not None and render("stdout", SNMP_POLL="yes")[0] is None and render("stdout", SNMP_POLL="true")[0] is None)
+def _tg_test(**extra):  # 描いた設定に inputs.snmp が無ければ、telegraf を呼ぶ前に分かる言葉で止まる（手元に telegraf は無くてよい）
+    with tempfile.TemporaryDirectory() as d:
+        env = {"PATH": os.environ["PATH"], "TELEGRAF_TEMPLATE": os.path.join(ROOT, "telegraf", "telegraf.conf.in"),
+               "TELEGRAF_CONF": os.path.join(d, "telegraf.conf"), "AWS_REGION": "ap-northeast-1", "SINK": "stdout",
+               "GNMI_TARGETS": '"203.0.113.11:57400"', **extra}
+        return subprocess.run(["bash", os.path.join(ROOT, "telegraf", "telegraf.sh"), "test"], capture_output=True, text=True, env=env)
+_t = _tg_test()
+check("tg test はポーリングを止めている（SNMP_POLL=0）と、SNMP_POLL=1 で起こし直すよう言って止まる",
+      _t.returncode == 1 and "SNMP_POLL=1" in _t.stderr and "telegraf: command not found" not in _t.stderr)
 
 # ---- lab.sh: この EC2 の Telegraf
 check("trap のポートは lab.sh と telegraf.sh で同じ（機器は 162 に送り、デバッグ用の EC2 は REDIRECT で Telegraf の待つポートへ）",
@@ -258,7 +287,7 @@ check("lab の SR Linux の syslog の形式は lab.sh の LOG_STANDARD = lab-co
       sh_const(lab_sh, "LOG_STANDARD") == sh_const(common, "LAB_SYSLOG_STANDARD") == "RFC5424"
       and sh_const(tg_sh, "SYSLOG_STANDARD") == "${SYSLOG_STANDARD:-RFC3164}")
 check("lab.sh telegraf run は同じイメージを host ネットワークで SINK=stdout で起こし、ポーリング先は up.sh と同じ lab_topology.py から作る",
-      re.search(r"docker run -d --name \"\$TG\" --restart unless-stopped --network host [^\n]*\\\n\s*-e SINK=stdout -e SYSLOG_STANDARD=\"\$LOG_STANDARD\" -e AWS_REGION -e SNMP_AGENTS=\"\$agents\" -e GNMI_TARGETS=\"\$gnmi\" \"\$TELEGRAF_IMAGE\" run", lab_sh) is not None
+      re.search(r"docker run -d --name \"\$TG\" --restart unless-stopped --network host [^\n]*\\\n\s*-e SINK=stdout -e SYSLOG_STANDARD=\"\$LOG_STANDARD\" -e SNMP_POLL=\"\$\{SNMP_POLL:-0\}\" -e AWS_REGION -e SNMP_AGENTS=\"\$agents\" -e GNMI_TARGETS=\"\$gnmi\" \"\$TELEGRAF_IMAGE\" run", lab_sh) is not None
       and "python3 lab_topology.py . --snmp-agents" in lab_sh and "python3 lab_topology.py . --gnmi-targets" in lab_sh
       and "lab/lab_topology.py lab --snmp-agents" in up)
 check("lab.sh の forward は TELEGRAF_IMAGE があれば SSM の NLB を見ずに抜ける（デバッグ用の EC2 は stream を使わない）",

@@ -34,6 +34,6 @@ output "telegraf_list_tasks_command" {
 }
 
 output "telegraf_exec_command" {
-  description = "Run on the user's PC (AWS CLI v2 + Session Manager plugin). tg test polls SNMP once, tg gnmi subscribes for 20 seconds; neither writes to MSK"
-  value       = "aws ecs execute-command --region ${var.region} --cluster ${aws_ecs_cluster.telegraf.name} --task TASK_ID --container telegraf --interactive --command 'tg test'"
+  description = "Run on the user's PC (AWS CLI v2 + Session Manager plugin). tg gnmi subscribes for 20 seconds, tg test polls SNMP once (only with snmp_poll = true); neither writes to MSK"
+  value       = "aws ecs execute-command --region ${var.region} --cluster ${aws_ecs_cluster.telegraf.name} --task TASK_ID --container telegraf --interactive --command 'tg gnmi'"
 }

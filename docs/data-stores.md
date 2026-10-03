@@ -41,7 +41,7 @@ flowchart LR
 
 ### 2. 1 回の障害で何が書かれるか
 
-`sudo lab fail-main` でアクセス側 Leaf の fabric（`dc1-leaf-01 ethernet-1/1`）を落としたときの流れ（既定の構成。送り手は Grafana）。
+`sudo lab fail-main` でアクセス側 Leaf の fabric（`dc1-leaf-01 ethernet-1/1`）を落としたときの流れ（送り手が Grafana の構成。`GRAFANA` / `SINK_PROMETHEUS` は既定の `1` のまま、`SNMP_POLL=1` にしたとき）。既定の `SNMP_POLL=0` ではポーリングをしないので 1〜3 が起きず、`SINK_SPLUNK=0` のままならアラートは出ない。`SINK_SPLUNK=1` なら、1〜3 の代わりに linkDown の trap が `traps` に載り、Splunk の保存済みサーチが同じ id の `link_down` を SNS に出す（4 から先は同じ）。
 
 1. **ポーリング（10 秒ごと）:** Telegraf が `ifOperStatus=down` を拾い、MSK の `metrics` に出す。
 2. **Spark:** `iceberg` が行をそのまま `snmp_metrics` に追記し、`prometheus` が同じ値を Prometheus に書く。どちらも up か down かを判断しない。
@@ -125,8 +125,8 @@ ECR に置くイメージが「どこで・何をして」いるかのまとめ�
 | `lab-multitool` | `ghcr.io/srl-labs/network-multitool`（ミラー） | lab の EC2（containerlab） | ping / traceroute / tcpdump 入りの VM 役（`wan-upstream-01` / `dc1-host-01`）。Leaf の組へ bond0（LACP）で 2 本つなぎ、疎通確認と障害の再現に使う |
 | `temporal` | `temporalio/temporal`（ミラー） | ECS Fargate（WORKFLOW=1） | Temporal のサーバー。`server start-dev` で 1 コンテナで動く。Fargate はプライベート網から Docker Hub を引けないので ECR にミラーする |
 | `worker` | [workflow/](../workflow/)（自前ビルド） | ECS Fargate（WORKFLOW=1） | Temporal のワーカー。SQS のアラートを拾い、Runtime に修復案を作らせ、Neptune と S3 Tables に記録し、承認後に SSM で lab の機器へ流して検証する。同じタスクの `temporal` に `localhost:7233` でつなぐ |
-| `telegraf` | [telegraf/](../telegraf/)（公式の `telegraf:1.40.0` に設定のテンプレートと `tg` を足す） | ECS Fargate（stream。内部 NLB の後ろ）。デバッグ用の EC2（`ops/lab-debug.sh`）でも同じ作り方のイメージ（スタックの ECR の `<prefix>-debug-telegraf`）を docker で動かす | 機器の SNMP のポーリング・gNMI の購読・trap・syslog を受けて MSK に書く（デバッグ用の EC2 では `SINK=stdout` で標準出力に書く）。2026-09-28 まで lab とは別の EC2 で systemd の下に rpm で動いていた |
-| `grafana` | [grafana/](../grafana/)（公式の Grafana OSS にデータソースの plugin と provisioning を焼き込む） | ECS Fargate（analytics。`GRAFANA=1`） | Prometheus（AMP）と OpenSearch Serverless を SigV4 で読んで見せる。アラートルール（`link_down`）を評価して SNS へ出す |
+| `telegraf` | [telegraf/](../telegraf/)（公式の `telegraf:1.40.0` に設定のテンプレートと `tg` を足す） | ECS Fargate（stream。内部 NLB の後ろ）。デバッグ用の EC2（`ops/lab-debug.sh`）でも同じ作り方のイメージ（スタックの ECR の `<prefix>-debug-telegraf`）を docker で動かす | 機器の gNMI の購読・SNMP の trap・syslog を受けて MSK に書く。SNMP のポーリングは `SNMP_POLL=1` のときだけ（既定は止めてある）（デバッグ用の EC2 では `SINK=stdout` で標準出力に書く）。2026-09-28 まで lab とは別の EC2 で systemd の下に rpm で動いていた |
+| `grafana` | [grafana/](../grafana/)（公式の Grafana OSS にデータソースの plugin と provisioning を焼き込む） | ECS Fargate（analytics。`GRAFANA=1`） | Prometheus（AMP）と OpenSearch Serverless を SigV4 で読んで見せる。アラートルール（`link_down`）を評価して SNS へ出す（ポーリングの値を見るので、発火するのは `SNMP_POLL=1` のときだけ） |
 | `splunk` | [splunk/](../splunk/)（公式の `splunk/splunk:10.4.3` に検知のアプリ `netops_alerts` と入口のスクリプトを足す。amd64 だけ、約 2〜3 GB） | ECS Fargate x86（analytics。`SINK_SPLUNK=1` のとき） | Splunk Enterprise（試用ライセンス）。Spark が HEC に全トピックを送り、保存済みサーチが trap と gNMI から異常を見つけて SNS へ出す |
 
 分けて見ると、監視される側が `lab-srlinux` / `lab-multitool`、集める側が `telegraf`、考える側が `agent`、実行する側が `temporal` / `worker`、見る側と見つける側が `grafana` / `splunk`。
@@ -257,8 +257,8 @@ Telegraf・Spark が「どのブローカーにつなぐか」をどう知るか
 
 **Telegraf 側の流れ**（[telegraf/telegraf.sh](../telegraf/telegraf.sh) の `render`。コンテナの入口 `tg run` が最初に呼ぶ）。
 
-1. タスクの環境変数 `SINK`（kafka / stdout、既定 kafka）・`SYSLOG_STANDARD`（RFC3164 / RFC5424、既定 RFC3164）・`KAFKA_BROKERS`（`SINK=kafka` のときだけ）/ `SNMP_AGENTS` / `GNMI_TARGETS` / `AWS_REGION` の形を確かめる。崩れていればそこで終わり、ECS がタスクを立て直す（ログに理由が出る）。
-2. `telegraf.conf.in` の `__KAFKA_BROKERS__` / `__SYSLOG_STANDARD__` などを埋めて `/tmp/telegraf.conf` を作る。`[[outputs.kafka]]` が metrics / gnmi / traps / logs の分あり、どれも同じブローカーに `sasl_mechanism = "AWS-MSK-IAM"` でつなぐ。出力は環境変数 `SINK`（既定 `kafka`）で選び、選ばなかった出力の区間（`# >>> sink <名前>` 〜 `# <<< sink <名前>`）を消す。デバッグ用の EC2 は `SINK=stdout` で `[[outputs.file]]`（標準出力、同じ JSON）だけになり、`KAFKA_BROKERS` も `/tmp/aws_config` も要らない。
+1. タスクの環境変数 `SINK`（kafka / stdout、既定 kafka）・`SYSLOG_STANDARD`（RFC3164 / RFC5424、既定 RFC3164）・`SNMP_POLL`（0 / 1、既定 0）・`KAFKA_BROKERS`（`SINK=kafka` のときだけ）/ `SNMP_AGENTS`（`SNMP_POLL=1` のときだけ）/ `GNMI_TARGETS` / `AWS_REGION` の形を確かめる。崩れていればそこで終わり、ECS がタスクを立て直す（ログに理由が出る）。
+2. `telegraf.conf.in` の `__KAFKA_BROKERS__` / `__SYSLOG_STANDARD__` などを埋めて `/tmp/telegraf.conf` を作る。`[[outputs.kafka]]` が metrics / gnmi / traps / logs の分あり、どれも同じブローカーに `sasl_mechanism = "AWS-MSK-IAM"` でつなぐ。出力は環境変数 `SINK`（既定 `kafka`）で選び、選ばなかった出力の区間（`# >>> sink <名前>` 〜 `# <<< sink <名前>`）を消す。デバッグ用の EC2 は `SINK=stdout` で `[[outputs.file]]`（標準出力、同じ JSON）だけになり、`KAFKA_BROKERS` も `/tmp/aws_config` も要らない。`SNMP_POLL=0`（既定）なら SNMP のポーリングの区間（`# >>> snmp_poll` 〜 `# <<< snmp_poll`。`[[inputs.snmp]]`）も消す。
 3. 認証はタスクロール `<prefix>-telegraf-task`。Telegraf の MSK IAM 認証は profile の指定が要る（[telegraf.conf.in](../telegraf/telegraf.conf.in) の注記）ので、鍵の無い `[default]`（region だけ）を `/tmp/aws_config` に置き、SDK が ECS の入れる `AWS_CONTAINER_CREDENTIALS_RELATIVE_URI` のロールに落ちるようにしてある。
 
 **IAM は 1 段。** タスクロールのポリシー `<prefix>-telegraf-task`（[telegraf.tf](../terraform/pipeline/stream/telegraf.tf)）は次の 2 文。前の `<prefix>-stream-produce` にあった `Bootstrap`（`ssm:GetParameter`）は要らなくなったので消した。
@@ -266,7 +266,7 @@ Telegraf・Spark が「どのブローカーにつなぐか」をどう知るか
 | Sid | 許可 | 使うとき |
 |---|---|---|
 | `Kafka` | `kafka-cluster:Connect` / `DescribeCluster` / `WriteData` / `WriteDataIdempotently` / `DescribeTopic` / `CreateTopic` を「クラスターの ARN」と「`topic/<クラスター>/*`」に | トピックに書く（`auto.create.topics.enable=true` なので初回の書き込みでトピックができる。そのために `CreateTopic` が要る） |
-| `EcsExec` | `ssmmessages` の 4 つ | ECS Exec で入って `tg test` / `tg gnmi` を打つ |
+| `EcsExec` | `ssmmessages` の 4 つ | ECS Exec で入って `tg gnmi` / `tg test` を打つ |
 
 実行ロール `<prefix>-telegraf-exec` は `AmazonECSTaskExecutionRolePolicy`（ECR とログ）だけ。どちらのロールにも閉域の Deny（`<prefix>-network-perimeter`）を付ける。
 
@@ -277,4 +277,4 @@ Telegraf・Spark が「どのブローカーにつなぐか」をどう知るか
 | Telegraf（ECS） | タスク定義の環境変数 `KAFKA_BROKERS`（同じ root の MSK の属性） | MSK と同じ root で作られ、タスクは起動のたびに環境変数をもらえるから |
 | Spark（EMR Serverless） | [terraform/pipeline/analytics](../terraform/pipeline/analytics) が stream の state の `bootstrap_brokers` を読み、ジョブの引数 `--bootstrap` で渡す（[spark/snmp_sinks.py](../spark/snmp_sinks.py)） | ジョブは起動のたびに引数をもらえるので、パラメータストアを引く必要が無い |
 
-**確かめ方。** ロググループ `/ecs/<prefix>-telegraf` に「`/tmp/telegraf.conf を作った（sink: kafka / brokers: …）`」が出ていれば `render` は通っている。ECS Exec で入って（[pipeline.md](pipeline.md) の「Telegraf に入る」）`tg test` を打つと、ポーリングだけを 1 回まわして標準出力に出す（MSK には送らない）ので、機器との疎通と MSK との疎通を切り分けられる。MSK 側は、Kafka の `WriteData` が拒まれればログに出る。
+**確かめ方。** ロググループ `/ecs/<prefix>-telegraf` に「`/tmp/telegraf.conf を作った（sink: kafka / brokers: …）`」が出ていれば `render` は通っている。ECS Exec で入って（[pipeline.md](pipeline.md) の「Telegraf に入る」）`tg gnmi` を打つと gNMI の購読を 20 秒だけ受けて標準出力に出す（MSK には送らない）ので、機器との疎通と MSK との疎通を切り分けられる。`SNMP_POLL=1` のタスクなら `tg test` でポーリングを 1 回まわして同じように見られる（既定の `0` では「止めてある」と出して終わる）。MSK 側は、Kafka の `WriteData` が拒まれればログに出る。

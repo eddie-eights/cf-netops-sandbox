@@ -153,6 +153,7 @@ resource "aws_ecs_task_definition" "telegraf" {
         { name = "SNMP_AGENTS", value = var.snmp_agents },
         { name = "GNMI_TARGETS", value = var.gnmi_targets },
         { name = "SYSLOG_STANDARD", value = var.syslog_standard },
+        { name = "SNMP_POLL", value = var.snmp_poll ? "1" : "0" },
       ]
       logConfiguration = {
         logDriver = "awslogs"

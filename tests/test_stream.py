@@ -151,6 +151,17 @@ check("syslog の形式は stream の syslog_standard（既定 RFC3164 = 本番�
       and "case \"$SYSLOG_STANDARD\" in RFC3164 | RFC5424) ;;" in _up
       and re.search(r"\bSYSLOG_STANDARD\b", _read("ops", "deploy-env.sh").split("DEPLOY_ENV_KEYS=", 1)[1].split('"')[1]) is not None
       and re.search(r"^#SYSLOG_STANDARD=RFC5424$", _read("deploy.env.example"), re.M) is not None and re.search(r"^LAB_SYSLOG_STANDARD=RFC5424\b", _read("ops", "lab-common.sh"), re.M) is not None)
+check("SNMP のポーリングは既定で止める（trap だけ。2026-10-04 ユーザー決定）: stream の snmp_poll（bool、既定 false）→ タスクの SNMP_POLL（1 / 0）→ telegraf.sh が「>>> snmp_poll」の区間を残すか消す。"
+      "up.sh は deploy.env の SNMP_POLL（既定 0）を渡す",
+      re.search(r'variable "snmp_poll" \{[^}]*type\s*=\s*bool[^}]*default\s*=\s*false', _read("terraform", "pipeline", "stream", "variables.tf")) is not None
+      and '{ name = "SNMP_POLL", value = var.snmp_poll ? "1" : "0" }' in stream_tg
+      and re.search(r"^SNMP_POLL=\$\{SNMP_POLL:-0\}$", tgsh, re.M) is not None and '/^# >>> snmp_poll/,/^# <<< snmp_poll/d' in tgsh
+      and re.search(r"^# >>> snmp_poll[\s\S]*?^\[\[inputs\.snmp\]\][\s\S]*?^# <<< snmp_poll", tele, re.M) is not None
+      and "flag_value SNMP_POLL" in _up and '-var "snmp_poll=$SNMP_POLL_TF"' in _up
+      and re.search(r"\bSNMP_POLL\b", _read("ops", "deploy-env.sh").split("DEPLOY_ENV_KEYS=", 1)[1].split('"')[1]) is not None
+      and re.search(r"^#SNMP_POLL=1$", _read("deploy.env.example"), re.M) is not None)
+check("Telegraf に入るコマンドの既定は tg gnmi（tg test はポーリングを止めていると何も取らない）",
+      "--command 'tg gnmi'" in _read("terraform", "pipeline", "stream", "outputs.tf"))
 check("up.sh は lab の定義からポーリング先と gNMI の購読先を作り、stream の snmp_agents / gnmi_targets に渡す（S3 には置かない）",
       'lab/lab_topology.py lab --snmp-agents' in _up and 'lab/lab_topology.py lab --gnmi-targets' in _up
       and '-var "snmp_agents=$SNMP_AGENTS" -var "gnmi_targets=$GNMI_TARGETS"' in _up and "/telegraf/" not in _up)

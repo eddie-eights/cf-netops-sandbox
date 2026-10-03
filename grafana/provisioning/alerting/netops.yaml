@@ -6,6 +6,7 @@
 apiVersion: 1
 
 # ---- ルール。SNMP のポーリング（Telegraf 10 秒おき → Kafka → Spark → AMP）の ifOperStatus が 2（down）の IF を link_down にする。
+# ポーリングは既定で止めてある（Telegraf の SNMP_POLL=0。trap だけ受ける）ので、発火するのは SNMP_POLL=1 のときだけ（trap からの link_down は Splunk）。
 # 見ないもの: ループバック、管理ポート、サブインタフェース（"." 付き。親と同じ上げ下げ）、admin-state が disable のポート（oper は down だが異常ではない）。
 # 式は絞り込まず値で判定する（== 2 で絞ると、直ったときに系列が消えるだけで、解消が「系列が無い評価 2 回」ぶん遅れる）。
 # データが無い・クエリが失敗したときは直前の状態のまま（分からないときに発火も解消もしない）。

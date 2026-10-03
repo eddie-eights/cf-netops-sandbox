@@ -1,13 +1,14 @@
 # Telegraf の設定テンプレート。Telegraf のコンテナ（terraform/pipeline/stream の ECS。telegraf/Dockerfile）が起きるとき、telegraf.sh render が
 # タスク定義の環境変数で __KAFKA_BROKERS__ / __AWS_REGION__ / __SNMP_AGENTS__ / __GNMI_TARGETS__ を埋めて /tmp/telegraf.conf に書く。
 # 出力は「>>> sink <名前>」〜「<<< sink <名前>」の区間のうち SINK（kafka = MSK。既定 / stdout = 標準出力。デバッグ用の EC2）の 1 つだけを残す。
+# SNMP のポーリング（「>>> snmp_poll」〜「<<< snmp_poll」の区間）は SNMP_POLL=1 のときだけ残す。既定（0）は消して、SNMP は trap だけ受ける。
 # ブローカーは terraform/pipeline/stream が MSK から直接渡す。ポーリング先（inputs.snmp の agents）と gNMI の購読先（inputs.gnmi の addresses）は
 # ops/up.sh が lab の定義から作って terraform/pipeline/stream の変数に渡す
 #（lab/lab_topology.py --snmp-agents / --gnmi-targets。機器の一覧を lab の定義 1 か所にするため、ここに IP を書かない）。
 #
-# 流れ: Spine-Leaf の SR Linux 6 台の SNMP を 10 秒ごとにポーリング（ifTable）+ gNMI で BGP / IS-IS / EVPN の状態を購読
-#       + 機器からの trap を udp 162 で受ける + 機器の syslog を udp 5140 で受ける → MSK（IAM 認証、TLS）
-#   metrics トピック: interface（ifName / ifOperStatus / ifInErrors ...）と system（sysName / sysUpTime）
+# 流れ: Spine-Leaf の SR Linux 6 台からの trap を udp 162 で受ける + gNMI で BGP / IS-IS / EVPN の状態を購読
+#       + 機器の syslog を udp 5140 で受ける（+ SNMP_POLL=1 なら SNMP を 10 秒ごとにポーリング。ifTable）→ MSK（IAM 認証、TLS）
+#   metrics トピック: interface（ifName / ifOperStatus / ifInErrors ...）と system（sysName / sysUpTime）。SNMP_POLL=1 のときだけ載る
 #   gnmi    トピック: bgp_neighbor（session_state。on_change）/ isis_interface（oper_state。on_change）/ evpn_es / mac_table（30 秒ごと）
 #   traps   トピック: snmp_trap（linkDown / linkUp）
 #   logs    トピック: device_log（機器の syslog。BGP の隣接の up / down など。lab/srlinux/*.cli の remote-server）
@@ -31,7 +32,9 @@
   omit_hostname = true
   snmp_translator = "gosmi"
 
+# >>> snmp_poll（telegraf.sh render が SNMP_POLL=1 のときだけ残す。既定は消す）
 # ---- ポーリング。agents は監視対象（CE）の管理 IP（SR Linux の mgmt0。SNMP v2c の community public は containerlab が全ノードに入れる）。lab の EC2 を経由する（上の注記）
+# 止めると Grafana のルール link_down（ifOperStatus を見る）は発火しない。IF の up / down は trap（Splunk の保存済みサーチ。SINK_SPLUNK=1）で見る
 [[inputs.snmp]]
   agents = [__SNMP_AGENTS__]
   version = 2
@@ -76,6 +79,7 @@
     [[inputs.snmp.table.field]]
       name = "ifOutErrors"
       oid = ".1.3.6.1.2.1.2.2.1.20"
+# <<< snmp_poll
 
 # ---- gNMI（SR Linux の状態を購読。SNMP には無い BGP / IS-IS / EVPN の層）。containerlab が全ノードで 57400（TLS、自己署名）を開け、
 # ユーザーは containerlab が入れる既定（admin / NokiaSrl1!。lab だけの公開既定値で、実機の値ではない。実機なら SSM から埋める）。
@@ -213,7 +217,8 @@
 # <<< sink stdout
 
 # ---- 生きているかの口。NLB のヘルスチェック（terraform/pipeline/stream の telegraf.tf。HTTP 8080）がここを見る。
-# 条件を書かないので、Telegraf が動いていれば 200 を返す。metric は system だけ通す（全部を流し込まない）
+# 条件を書かないので、Telegraf が動いていれば 200 を返す。metric は system だけ通す（全部を流し込まない）。
+# ポーリングを止めている（SNMP_POLL=0。既定）と system は来ないが、何も届いていない間は default_status（200）を返すので、ヘルスチェックは通る
 [[outputs.health]]
   service_address = "http://:8080"
   namepass = ["system"]

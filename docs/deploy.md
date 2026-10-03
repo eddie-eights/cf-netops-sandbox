@@ -13,7 +13,7 @@
 | `OWNER` | 自分の名前。英小文字で始まる 14 文字まで（英小文字・数字・ハイフン。ハイフンは連続させず末尾に置かない）。**作ったあとで変えない**（変えるなら先に `ops/down.sh`） |
 | `AGENT` | チャット（Runtime + ガードレール）。既定 `1` |
 | `PIPELINE` | lab / stream / analytics / graph。既定 `0` |
-| `WORKFLOW` | Temporal での調査と修復。`AGENT=1` と `PIPELINE=1` が要り、`SKIP_LAB` / `SKIP_STREAM` / `SKIP_ANALYTICS` / `SKIP_GRAPH` とは一緒に書けない。ワークフローを起こすのはアラートなので、送り手も要る（`GRAFANA=1` と `SINK_PROMETHEUS=1` の既定のままか、`SINK_SPLUNK=1`。どちらも無いと `ops/up.sh` が止まる） |
+| `WORKFLOW` | Temporal での調査と修復。`AGENT=1` と `PIPELINE=1` が要り、`SKIP_LAB` / `SKIP_STREAM` / `SKIP_ANALYTICS` / `SKIP_GRAPH` とは一緒に書けない。ワークフローを起こすのはアラートなので、送り手も要る（`SINK_SPLUNK=1` か、`GRAFANA=1` と `SINK_PROMETHEUS=1` の既定のまま `SNMP_POLL=1`。どちらも無いと `ops/up.sh` が止まる。`SNMP_POLL` が既定の `0` だと Grafana のルールは発火しないので、既定のままの `WORKFLOW=1` は止まる） |
 | `CREATE_KB` | ナレッジベース（+$0.37/h。OpenSearch Serverless の VPC エンドポイント $0.03（`SINK_OPENSEARCH` の logs と共用）と bedrock-agent-runtime のエンドポイント $0.014 を含む）。`AGENT=1` のとき |
 | `SKIP_LAB` | lab を作らない（-$0.09/h）。`SKIP_STREAM=1` も要る |
 | `SKIP_STREAM` | stream（MSK と Telegraf の ECS）を作らない（-$1.17/h）。analytics も外れる |
@@ -21,8 +21,9 @@
 | `SKIP_GRAPH` | Neptune を作らない（-$0.14/h）。トポロジは静的データになる（アラートで `status` が変わらない） |
 | `SINK_S3` / `SINK_OPENSEARCH` / `SINK_PROMETHEUS` | Spark の格納先。既定は 3 つとも `1`。`0` にするとリソースごと作らない。`SINK_SPLUNK` と合わせて全部 `0` は止まる。`SINK_PROMETHEUS=0` にすると Grafana のアラート（`link_down`）も無くなる |
 | `SINK_SPLUNK` | 4 本目の格納先。`1` で Spark が全トピックを Splunk の HTTP Event Collector（HEC）に送る。既定 `0`。analytics の ECS に Splunk Enterprise（公式イメージ `splunk/splunk:10.4.3` に検知のアプリ `netops_alerts` を足したもの、試用ライセンス。Fargate x86 2 vCPU / 4 GB、エフェメラルストレージ 40 GiB）を立て、Spark は VPC の中の `https://splunk.<prefix>.internal:8088` に送る（自己署名なので検証しない）。起動時に Splunk のライセンスと Splunk General Terms に同意する。admin のパスワードと HEC の token は `ops/up.sh` が SSM の SecureString に乱数で作る。index はタスクと一緒に消える（検証用）。trap と gNMI（BGP / IS-IS）のアラートも Splunk が出す（[pipeline.md](pipeline.md) の「アラート」）。+$0.12/h。`SPLUNK_INDEX`（空なら token の既定）も読む。AWS の外の Splunk へ NAT Gateway で送る道（`SPLUNK_HEC_URL`）は 2026-09-28 にやめた（書いてあると `ops/up.sh` が止まる） |
-| `GRAFANA` | Grafana OSS（analytics の ECS。Fargate ARM 0.5 vCPU / 1 GB。+$0.02/h）で Prometheus（AMP、SigV4）と OpenSearch Serverless を見る。既定 `1`。`SINK_PROMETHEUS` か `SINK_OPENSEARCH` があるときだけ作る。`SINK_PROMETHEUS=1` なら `link_down` のアラートを SNS へ出す（[pipeline.md](pipeline.md) の「アラート」）。Amazon Managed Grafana はサインインに IAM Identity Center か SAML が要り、このアカウントには Organizations も Identity Center も無いので使えない |
+| `GRAFANA` | Grafana OSS（analytics の ECS。Fargate ARM 0.5 vCPU / 1 GB。+$0.02/h）で Prometheus（AMP、SigV4）と OpenSearch Serverless を見る。既定 `1`。`SINK_PROMETHEUS` か `SINK_OPENSEARCH` があるときだけ作る。`SINK_PROMETHEUS=1` なら `link_down` のアラートを SNS へ出す（[pipeline.md](pipeline.md) の「アラート」）。ルールが見るのは SNMP のポーリングの値なので、発火するのは `SNMP_POLL=1` のときだけ（`0` のときは送り手に数えず、`sns` のエンドポイントも足さない）。Amazon Managed Grafana はサインインに IAM Identity Center か SAML が要り、このアカウントには Organizations も Identity Center も無いので使えない |
 | `SYSLOG_STANDARD` | stream の Telegraf（ECS）が受ける機器の syslog の形式。`RFC3164`（既定。本番の Cisco IOS の BSD 形式）か `RFC5424`（lab の SR Linux が送る形式。`ops/lab-common.sh` の `LAB_SYSLOG_STANDARD`）。それ以外は止まる。既定のままだと lab の機器のログの項目が崩れる（`ops/up.sh` が注意を出す）ので、lab のログまで見るなら `RFC5424`。変えて打ち直すと Telegraf のタスクが入れ替わる。デバッグ用の EC2 の Telegraf はこの値によらず RFC5424 |
+| `SNMP_POLL` | stream の Telegraf（ECS）で SNMP をポーリングするか。既定 `0` で、SNMP は trap だけ受ける（gNMI と syslog は変わらない）。`1` で 10 秒ごとに ifTable を取って `metrics` トピックに出す（stream の変数 `snmp_poll` → タスクの環境変数 `SNMP_POLL`）。`0` のままだと、Grafana のアラートルール `link_down`、Grafana の IF のグラフ、エージェントが見る IF のメトリクスは空になる（IF の up / down は `SINK_SPLUNK=1` で trap から知らせる。どちらも無いと `ops/up.sh` が注意を出す）。変えて打ち直すと Telegraf のタスクが入れ替わる。デバッグ用の EC2 の Telegraf も既定は `0`（`sudo SNMP_POLL=1 lab telegraf run` で起こし直す） |
 | `LAB_DEBUG` | 2026-10-04 から使わない。書いてあれば `ops/up.sh` が注意を出すだけ。デバッグ用の EC2 は `ops/lab-debug.sh up` / `down` で作る・消す（`ops/up.sh` / `ops/down.sh` とは別。[pipeline.md](pipeline.md) の「デバッグ用の EC2」） |
 | `IMAGE_TAG` | エージェントとワーカーのイメージのタグ。既定 `v1` |
 | `KEEP_ECR` | `1` で `ops/down.sh` が ECR を残す（保管料は月数円） |
@@ -50,8 +51,8 @@
 | 4 | Web の部品を S3 に置く。`CREATE_KB=1` なら手順書を取り込む。Web を再起動 |
 | 5 | 5-1 で containerlab の rpm と `lab/`、5-2 で Spark の jar 6 本と `spark/snmp_sinks.py` を S3 に置く |
 | 6 | `terraform/pipeline/lab` |
-| 7 | `terraform/pipeline/stream`（MSK に 20〜30 分。Telegraf の ECS と内部 NLB も。ポーリング先と gNMI の相手は lab の定義から作って変数で渡す） |
-| 7-2b | lab の EC2 で `lab forward` を打ち、Telegraf のタスクのサブネットから SNMP / gNMI のポーリングを通し、trap / syslog を Telegraf の NLB へ DNAT する |
+| 7 | `terraform/pipeline/stream`（MSK に 20〜30 分。Telegraf の ECS と内部 NLB も。ポーリング先と gNMI の相手は lab の定義から作って変数で渡す。ポーリング先は `SNMP_POLL=0` でも渡す（Telegraf が使うのは `SNMP_POLL=1` のときだけ）） |
+| 7-2b | lab の EC2 で `lab forward` を打ち、Telegraf のタスクのサブネットから SNMP のポーリング（`SNMP_POLL=1` のとき）と gNMI の購読を通し、trap / syslog を Telegraf の NLB へ DNAT する |
 | 7-2c | Telegraf の ECS のサービスが安定するのを待つ（最大 10 分。落ちても止まらず、見るところを出す） |
 | 7-3 | graph を待ち、Neptune が空ならトポロジを入れる（アラートの送り手より先に、`status` の Lambda とトポロジを用意する） |
 | 7-4 | `terraform/pipeline/analytics`（`SINK_SPLUNK=1` なら、Splunk のアラートが IP を機器名に直す device map を lab の定義から作って渡す）。先に Grafana / ECS の Splunk の admin のパスワードと HEC の token を SSM の SecureString に作る（無いときだけ。値は出さない） |

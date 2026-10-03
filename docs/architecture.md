@@ -27,7 +27,7 @@ flowchart LR
 ```mermaid
 flowchart LR
   LAB["lab の EC2<br/>containerlab + Nokia SR Linux（Spine-Leaf）"] -->|"trap / syslog（DNAT）"| NLB["内部 NLB<br/>trap 162 / syslog 5140"] --> TG["Telegraf<br/>ECS Fargate"] --> MSK["MSK<br/>metrics / gnmi / traps / logs"]
-  TG -.->|"SNMP ポーリング 10 秒 / gNMI"| LAB
+  TG -.->|"gNMI 購読<br/>（SNMP_POLL=1 なら SNMP ポーリング 10 秒も）"| LAB
   MSK --> SPARK["Spark（EMR Serverless）"]
   SPARK -->|"全トピック（正本）"| ICE["S3 Tables<br/>snmp_metrics"]
   SPARK -->|"traps / logs"| OS["OpenSearch<br/>snmp-logs"]
@@ -35,7 +35,7 @@ flowchart LR
   SPARK -.->|"全トピック（SINK_SPLUNK=1 のとき）"| SPL["Splunk HEC<br/>analytics の ECS"]
   GRAF["Grafana（ECS Fargate）<br/>GRAFANA=1"] -.->|"SigV4"| OS
   GRAF -.->|"SigV4"| PROM
-  GRAF -->|"アラートルール<br/>link_down（SNMP のポーリング）"| SNS["SNS<br/>prefix-alerts"]
+  GRAF -->|"アラートルール<br/>link_down（SNMP のポーリング。SNMP_POLL=1 のとき）"| SNS["SNS<br/>prefix-alerts"]
   SPL -.->|"保存済みサーチ<br/>trap / BGP / IS-IS（gNMI）"| SNS
   SNS --> GL["graph の Lambda<br/>機器・回線・層の status"] --> NEP["Neptune<br/>トポロジ + 修復案"]
   SNS --> SQS["SQS"] --> WF["Temporal（ECS Fargate）<br/>調査 → 承認 → 修復"]
@@ -44,7 +44,7 @@ flowchart LR
   WF -->|"SSM Run Command"| LAB
 ```
 
-- Telegraf は stream の ECS（Fargate ARM64）の 1 タスクで、内部 NLB の後ろにいる。trap（162/udp）はタスクの 1162 へ、syslog（5140/udp）は 5140 へ渡す（非 root なので 1024 未満で受けない）。ポーリングと gNMI はタスクから機器へ直接行く。2026-09-28 に lab の EC2 から移した。
+- Telegraf は stream の ECS（Fargate ARM64）の 1 タスクで、内部 NLB の後ろにいる。trap（162/udp）はタスクの 1162 へ、syslog（5140/udp）は 5140 へ渡す（非 root なので 1024 未満で受けない）。gNMI の購読と SNMP のポーリングはタスクから機器へ直接行く。2026-09-28 に lab の EC2 から移した。SNMP のポーリングは既定で止めてあり（`SNMP_POLL=0`。SNMP は trap だけ受ける）、`deploy.env` の `SNMP_POLL=1` で有効にする（[pipeline.md](pipeline.md)）。
 - Grafana と ECS の Splunk は analytics の ECS クラスタ `<prefix>-analytics` のタスクで、Cloud Map の `grafana.<prefix>.internal:3000` / `splunk.<prefix>.internal` で引く。LB は無く、PC からは Web の EC2 を踏み台にした SSM のポートフォワード（`AWS-StartPortForwardingSessionToRemoteHost`）で開く。
 - Web は EC2 のまま。Grafana と Splunk の踏み台も兼ねる（ECS にするとタスクの IP が変わり、踏み台にしにくい）。
 - 異常を見つけるのは Grafana と Splunk（2026-10-02 に Spark の検知をやめた。Spark は格納先へ流すだけ）。どちらも同じ形の JSON を SNS のトピック `<prefix>-alerts`（土台）へ publish し、トピックが graph の Lambda（Neptune の `status`）と workflow の SQS（ワークフローの起動と解消）へ配る。アラートを 1 か所に集めるのは、同じ障害を別の送り手が知らせても 1 つの異常にまとめる（相関）ため。分担と遅れは [pipeline.md](pipeline.md) の「アラート」。
@@ -84,7 +84,7 @@ AWS の API へは全部 VPC エンドポイントから行き、この VPC を�
 | spark | splunk | 8088/tcp | HEC（`SINK_SPLUNK=1`） |
 | telegraf_nlb | telegraf | 1162/udp、5140/udp、8080/tcp | trap・syslog の転送と、NLB のヘルスチェック |
 | lab の管理ネットワーク（203.0.113.0/24） | telegraf_nlb | 162/udp、5140/udp | 機器の trap と syslog（lab の EC2 が DNAT するので送り元は機器の IP のまま） |
-| telegraf | lab の管理ネットワーク | 161/udp、57400/tcp | SNMP のポーリングと gNMI（VPC のルートで lab の EC2 へ） |
+| telegraf | lab の管理ネットワーク | 161/udp、57400/tcp | SNMP のポーリング（`SNMP_POLL=1` のときだけ使う。SG は既定でも開けておく）と gNMI（VPC のルートで lab の EC2 へ） |
 
 - lab の EC2 が転送する流れは、SG が見る IP が lab の EC2 ではなく機器の管理 IP になる。そこで、相手の ENI の IP が見える側だけを SG の参照で書き（lab の送信は telegraf_nlb へ、lab の受信は telegraf から）、反対側は管理ネットワークの CIDR で書く。
 - 開けていないもの: Temporal の gRPC 7233（ワーカーは同じタスクの `localhost`。Temporal も `127.0.0.1` だけで待つ）と Splunk の管理 API 8089。インターネットからの受信は、SG の前に経路が無い。

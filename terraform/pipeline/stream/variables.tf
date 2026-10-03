@@ -94,6 +94,12 @@ variable "syslog_standard" {
   }
 }
 
+variable "snmp_poll" {
+  description = "Whether Telegraf polls SNMP (inputs.snmp, ifTable every 10 seconds) and writes it to the metrics topic. Off by default: SNMP comes in as traps only, so the Grafana rule link_down (it reads the polled ifOperStatus) stays silent and link down is seen by the Splunk saved search on traps (SINK_SPLUNK=1). ops/up.sh passes SNMP_POLL from deploy.env. Becomes SNMP_POLL (1 / 0) of the task."
+  type        = bool
+  default     = false
+}
+
 variable "telegraf_task_cpu" {
   description = "Fargate CPU units of the Telegraf task (ARM64). 256 (0.25 vCPU) is enough for 6 SNMP agents, 6 gNMI subscriptions, traps and syslog."
   type        = number
