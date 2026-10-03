@@ -1,7 +1,7 @@
 # netops-poc — NetOps PoC（Terraform）
 
 ブラウザのチャットから AgentCore Runtime のエージェントに聞くと、Amazon Nova 2 Lite がトポロジのツール（と任意の手順書の検索）を使って答える。
-lab（containerlab の Nokia SR Linux で組んだ Spine-Leaf）の機器の SNMP・gNMI・ログを Kafka → Spark に流して異常を見つけ、Temporal のワークフローで原因を調べて修復案を出し、人が承認したら直す、までを試せる。
+lab（containerlab の Nokia SR Linux で組んだ Spine-Leaf）の機器の SNMP・gNMI・ログを Kafka → Spark で格納先に流し、Grafana と Splunk のアラートで異常を見つけ、SNS → SQS で Temporal のワークフローを起こして原因を調べて修復案を出し、人が承認したら直す、までを試せる。
 全部を**プライベートサブネット**に作り、**AWS の API へは VPC エンドポイントだけを通す閉域**にする。この VPC のエンドポイントを通らない呼び出しは、IAM とリソースポリシーの Deny（`aws:SourceVpc`）で拒む（鍵が漏れても VPC の外からは使えない）。
 VPC にインターネットへの経路は無い（NAT Gateway も IGW も作らない。Splunk も VPC の中の ECS に立てる）。PC からは SSM のポートフォワーディングで入り、インターネットからの受信ルールは無い。
 
@@ -14,10 +14,11 @@ flowchart LR
   LAB["lab の EC2<br/>containerlab"] --> TG["Telegraf<br/>ECS Fargate"] --> MSK["MSK"] --> SPARK["Spark<br/>EMR Serverless"]
   SPARK --> STORE["S3 Tables / OpenSearch / Prometheus<br/>（+ Splunk）"]
   PC -->|"SSM ポートフォワーディング<br/>（Web の EC2 を踏み台）"| GRAF["Grafana<br/>ECS Fargate"] -->|"Prometheus / OpenSearch を見る"| STORE
-  SPARK -->|"異常のいま"| NEP["Neptune<br/>トポロジ・異常・修復案"]
-  SPARK -->|"異常の履歴"| AUDIT["S3 Tables<br/>anomaly_events"]
+  GRAF -->|"アラート（link_down）"| SNS["SNS<br/>prefix-alerts"]
+  STORE -.->|"Splunk のアラート<br/>（trap / BGP / IS-IS）"| SNS
+  SNS -->|"Lambda"| NEP["Neptune<br/>トポロジ（status）・修復案"]
+  SNS -->|"SQS"| WF["Temporal<br/>ECS Fargate"]
   WF -->|"修復案の証跡"| PAUDIT["S3 Tables<br/>proposal_events"]
-  SPARK -->|"AnomalyOpened"| WF["Temporal<br/>ECS Fargate"]
   WF -->|"調査"| RT
   WF -->|"承認後に修復"| LAB
 ```
@@ -30,8 +31,8 @@ flowchart LR
 |---|---|---|
 | 土台（必ず） | VPC、SSM のエンドポイント 2 本、Web の EC2、S3、ECR | 約 $0.05/h |
 | `AGENT=1`（既定） | チャット（Runtime + ガードレール）。`CREATE_KB=1` で手順書の検索も | 約 $0.07/h（エンドポイント 5 本。ほかは質問ごとのモデル料金だけ。KB は +$0.37/h） |
-| `PIPELINE=1` | lab → Telegraf（ECS）→ MSK → Spark → S3 Tables / OpenSearch / Prometheus（`SINK_SPLUNK=1` で Splunk にも）、異常検知、Neptune のトポロジ、Grafana（`GRAFANA=1`。既定） | 約 $1.40/h（ECS の Splunk は +$0.12/h） |
-| `WORKFLOW=1` | Temporal で調査 → 承認 → 修復。AGENT と PIPELINE が要る | 約 $0.08/h |
+| `PIPELINE=1` | lab → Telegraf（ECS）→ MSK → Spark → S3 Tables / OpenSearch / Prometheus（`SINK_SPLUNK=1` で Splunk にも）、Grafana（`GRAFANA=1`。既定）と Splunk のアラート → SNS、Neptune のトポロジ（アラートで status が変わる） | 約 $1.40/h（ECS の Splunk は +$0.12/h） |
+| `WORKFLOW=1` | アラート（SNS → SQS）で Temporal を起こし、調査 → 承認 → 修復。AGENT と PIPELINE と、アラートの送り手（Grafana か Splunk）が要る | 約 $0.08/h |
 
 インターフェース型エンドポイントは 1 本 $0.014/h（1 AZ。`ENDPOINTS_MULTI_AZ=1` で 2 AZ にすると倍）で、作る機能が呼ぶ API の分だけ `ops/up.sh` が選ぶ（上の金額に入れてある。同じサービスは機能をまたいで 1 本）。
 OpenSearch Serverless のコレクション（KB と logs）も公開せず、VPC エンドポイント 1 本（$0.03/h。両方作っても 1 本）からだけ届く。
@@ -97,8 +98,8 @@ ops/down.sh
 | [architecture.md](docs/architecture.md) | 構成図（スライドは [architecture.pptx](docs/architecture.pptx)）、どのファイルがどこで動くか、名前とタグ、ログ |
 | [setup.md](docs/setup.md) | 前提（AWS の権限、ネットワーク、Mac / WSL2、社内 PC の CA） |
 | [deploy.md](docs/deploy.md) | `deploy.env` の全キー、`ops/up.sh` / `ops/down.sh` の中身、利用者に渡す権限、試す質問 |
-| [pipeline.md](docs/pipeline.md) | lab、Spark、Neptune のトポロジの使い方 |
+| [pipeline.md](docs/pipeline.md) | lab、Spark、Grafana と Splunk のアラート、Neptune のトポロジの使い方 |
 | [workflow.md](docs/workflow.md) | 承認の流れと Temporal UI |
 | [troubleshooting.md](docs/troubleshooting.md) | うまくいかないとき |
 | [development.md](docs/development.md) | 手元のテスト、変更するときの決まり、Web を手元で動かす |
-| [data-stores.md](docs/data-stores.md) | 勉強会メモ: データの置き場（Neptune に「いま」、S3 Tables に履歴と証跡）と DynamoDB をやめた理由、コンテナイメージの役目と arm64 に揃える理由（Splunk だけ x86）、Neptune の基礎（Aurora との関係、AZ 冗長、障害をグラフにする意味）、MSK のブートストラップサーバーと、Telegraf・Spark がそれをどう受け取るか（`msk-bootstrap` を残す理由） |
+| [data-stores.md](docs/data-stores.md) | 勉強会メモ: データの置き場（Neptune にトポロジと修復案の「いま」、S3 Tables に証跡。障害の履歴の置き場は未定）と DynamoDB をやめた理由、コンテナイメージの役目と arm64 に揃える理由（Splunk だけ x86）、Neptune の基礎（Aurora との関係、AZ 冗長、トポロジをグラフにする意味）、MSK のブートストラップサーバーと、Telegraf・Spark がそれをどう受け取るか（`msk-bootstrap` を残す理由） |

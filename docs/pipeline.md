@@ -16,25 +16,25 @@ flowchart LR
   SPARK -->|"SINK_OPENSEARCH"| OS["OpenSearch<br/>snmp-logs"]
   SPARK -->|"SINK_PROMETHEUS"| PROM["Prometheus"]
   SPARK -->|"SINK_SPLUNK（既定 0）"| SPL["Splunk HEC<br/>（analytics の ECS）"]
-  SPARK -->|"開いた / 閉じた（証跡）"| AEV["S3 Tables<br/>anomaly_events"]
-  SPARK -->|"異常の open / resolved"| NEP["Neptune（graph）<br/>トポロジ・状態・異常"]
-  SPARK -->|"AnomalyOpened / Resolved"| EB["EventBridge"]
-  EB --> GL["Lambda graph-status"] --> NEP
   GRAF["Grafana（analytics の ECS）<br/>GRAFANA=1"] -.-> OS
   GRAF -.-> PROM
+  GRAF -->|"アラートルール（link_down）"| SNS["SNS<br/>prefix-alerts（土台）"]
+  SPL -->|"保存済みサーチ（trap / BGP / IS-IS）"| SNS
+  SNS --> GL["Lambda graph-status"] --> NEP["Neptune（graph）<br/>トポロジと status"]
+  SNS -.->|"WORKFLOW=1"| SQS["SQS → ワークフロー"]
 ```
 
 - lab は Web やエージェントとはつながっていない。使うのは SNMP とログの発生源としてだけ。
 - Telegraf は stream の ECS（Fargate ARM64、0.25 vCPU / 0.5 GB）の 1 タスクで動き、内部 NLB の後ろにいる（`terraform/pipeline/stream/telegraf.tf`。2026-09-28 に terraform/pipeline/lab の Telegraf 用の EC2 から移した）。イメージは `telegraf/Dockerfile`（公式の `telegraf:1.40.0` に `telegraf.conf.in` と `tg` を入れたもの）で、`ops/up.sh` が ECR の `<prefix>-telegraf:<版>-<ディレクトリのハッシュ 12 文字>` に作る。ポーリング先と gNMI の購読先は `ops/up.sh` が lab の定義から作って stream の変数 `snmp_agents` / `gnmi_targets` に渡し、タスクの環境変数 `SNMP_AGENTS` / `GNMI_TARGETS` になる。MSK のブローカーは環境変数 `KAFKA_BROKERS`。起動時に `tg run` が設定を埋める。ポーリングが二重にならないよう、作り直すときは古いタスクを止めてから新しいタスクを立てる。
 - lab は Spine-Leaf（EVPN-VXLAN）。上流側の Leaf-SW 2 台と アクセス側の Leaf 2 台が Spine 2 台とフルメッシュ（fabric。IS-IS）、上流 VM は Leaf-SW の組へ、アクセス側 VM は Leaf の組へ LAG（EVPN マルチホーミング）で 2 本ずつ。機器の定義は `lab/gen_lab.py` が作る（[lab を変える](#lab-を変える)）。SR-MPLS は SR Linux のコンテナが `ixr6e` / `ixr10e` + ライセンスを要るので、ライセンスが届くまで license 不要の `ixr-d2l` で EVPN-VXLAN にしている。
 - 機器は lab の EC2 の中の docker network（`203.0.113.0/24`）にいる。Telegraf のタスクからの SNMP のポーリング（`161/udp`）と gNMI の購読（`57400/tcp`）は VPC のルートで lab の EC2 を通り（タスクの IP は作り直すたびに変わるので、送り元はタスクのサブネットの CIDR（SSM `/<prefix>/telegraf-source-cidr`）で通す）、trap（`162/udp`）と syslog（`5140/udp`）は機器が lab の EC2（`203.0.113.1`）へ送り、lab の EC2 が Telegraf の NLB の IP（SSM `/<prefix>/telegraf-address`）へ DNAT する。NLB は trap をタスクの `1162/udp` へ、syslog を `5140/udp` へ渡す（UDP なので送り元の IP はそのまま）。この 4 つは lab の EC2 で `sudo lab forward` が張る（`lab up` が毎回呼び、`ops/up.sh` も手順 7-2b で打つ。lab の変数 `forward_to_telegraf`）。
-- gNMI（Telegraf の `inputs.gnmi`）は BGP の `session-state` と IS-IS の IF の `oper-state`（隣接そのもの（`interface/adjacency`）は落ちると down を経ずに消え、Telegraf は gNMI の delete を載せないので取らない）を on_change で、EVPN の ethernet-segment の `oper-state` と MAC テーブルを 30 秒おきに取り、トピック `gnmi` に出す。Spark はここから `bgp_down`（相手の IP が対象）と `isis_down`（サブインタフェースが対象）を出す。
+- gNMI（Telegraf の `inputs.gnmi`）は BGP の `session-state` と IS-IS の IF の `oper-state`（隣接そのもの（`interface/adjacency`）は落ちると down を経ずに消え、Telegraf は gNMI の delete を載せないので取らない）を on_change で、EVPN の ethernet-segment の `oper-state` と MAC テーブルを 30 秒おきに取り、トピック `gnmi` に出す。Splunk の保存済みサーチ `netops_gnmi` はここから `bgp_down`（相手の IP が対象）と `isis_down`（サブインタフェースが対象）を出す（`SINK_SPLUNK=1` のとき。下の「アラート」）。
 - Spark は起動時に、読むトピック（`metrics` / `gnmi` / `traps` / `logs`）のうち無いものを作る（`snmp_sinks.py` の `ensure_topics`。EMR のロールに `kafka-cluster:CreateTopic`）。MSK の `auto.create.topics.enable=true` は書き込みのときにしか効かず、Telegraf が最初の trap / syslog を出すまで `traps` / `logs` が無い。無いトピックを購読するとジョブは offset 読みで落ちて、起こし直しの上限（1 時間 5 回）を使い切る（2026-09-27 に実測）。
-- 履歴の正本は S3 Tables。異常の「いま」は Neptune の頂点 `anomaly` で、Web の「異常一覧」とエージェントの `list_anomalies` はそれを読む。開いた・閉じたの履歴は `anomaly_events` に残る（[data-stores.md](data-stores.md)）。
-- 検知が Neptune に書くので、analytics は graph が要る。`SKIP_GRAPH=1` にするなら `SKIP_ANALYTICS=1` も書く（トポロジは `agent/data/` の静的データになり、異常一覧は出ない）。
+- メトリクスとログの履歴の正本は S3 Tables（`snmp_metrics`）。Spark は格納先へ流すだけで、異常の検知はしない（2026-10-02 にやめた）。検知は Grafana と Splunk のアラートで、SNS のトピック `<prefix>-alerts` に出す（下の「アラート」）。Neptune の頂点 `anomaly`、S3 Tables の `anomaly_events`、Web の「異常一覧」、エージェントの `list_anomalies` は無くなり、障害の履歴の置き場は決めていない（[data-stores.md](data-stores.md)）。
+- analytics は graph が無くても作れる（Neptune に書くのは SNS を購読する graph の Lambda だけ）。`SKIP_GRAPH=1` だと、トポロジは `agent/data/` の静的データになり、アラートが届いても `status` を書く先が無い。
 - テーブルバケットは `SINK_S3=0` でも作る（証跡の置き場）。`ops/down.sh` はバケットごと消すので、証跡も消える。
 - Splunk（`SINK_SPLUNK=1`）は Spark の driver が全トピックを HTTP Event Collector（HEC）に POST する（2026-09-26 に MSK Connect の Splunk Connect for Kafka をやめて、ほかの格納先と同じ形にした）。
-  - analytics の ECS に Splunk Enterprise（`splunk/splunk:10.4.3` を ECR の `<prefix>-splunk:10.4.3` に写したもの。amd64 しか無いので Fargate x86、2 vCPU / 4 GB、エフェメラルストレージ 40 GiB）を 1 タスク立て、Spark は Cloud Map の `https://splunk.<prefix>.internal:8088` に送る（イメージの自己署名の証明書なので検証しない）。起動時に Splunk のライセンスと Splunk General Terms に同意する（`SPLUNK_START_ARGS=--accept-license`、`SPLUNK_GENERAL_TERMS=--accept-sgt-current-at-splunk-com`）。試用ライセンス（60 日、1 日 500 MB）。admin のパスワード `/<prefix>/splunk/admin-password` と HEC の token `/<prefix>/splunk/hec-token`（uuid）は `ops/up.sh` が SSM の SecureString に作る（値は出さない。`ops/down.sh` が消す）。index はタスクのエフェメラルストレージにあり、タスクと一緒に消える（検証用）。`ops/up.sh` は手順 7-4b でタスクが HEALTHY になるのを待ってから（最大 20 分）Spark のジョブを起こす。画面は下の「Grafana と Splunk を開く」。
+  - analytics の ECS に Splunk Enterprise（`splunk/Dockerfile`。公式の `splunk/splunk:10.4.3` に検知のアプリ `netops_alerts` を足し、ECR の `<prefix>-splunk:10.4.3-<ディレクトリのハッシュ 12 文字>` に作る。amd64 しか無いので Fargate x86、2 vCPU / 4 GB、エフェメラルストレージ 40 GiB）を 1 タスク立て、Spark は Cloud Map の `https://splunk.<prefix>.internal:8088` に送る（イメージの自己署名の証明書なので検証しない）。起動時に Splunk のライセンスと Splunk General Terms に同意する（`SPLUNK_START_ARGS=--accept-license`、`SPLUNK_GENERAL_TERMS=--accept-sgt-current-at-splunk-com`）。試用ライセンス（60 日、1 日 500 MB）。admin のパスワード `/<prefix>/splunk/admin-password` と HEC の token `/<prefix>/splunk/hec-token`（uuid）は `ops/up.sh` が SSM の SecureString に作る（値は出さない。`ops/down.sh` が消す）。index はタスクのエフェメラルストレージにあり、タスクと一緒に消える（検証用）。`ops/up.sh` は手順 7-4b でタスクが HEALTHY になるのを待ってから（最大 20 分）Spark のジョブを起こす。画面は下の「Grafana と Splunk を開く」。
   - AWS の外の Splunk（Splunk Cloud など）へ NAT Gateway で送る道は 2026-09-28 にやめた（VPC から AWS の外へ出る経路を作らない。`SPLUNK_HEC_URL` が書いてあると `ops/up.sh` が止まる）。
   - HEC が 4xx を返したまとまり（最大 500 件）は捨ててログに出し、ジョブは止めない。5xx は再送する。
 
@@ -62,11 +62,11 @@ aws ssm start-session --region ap-northeast-1 --target "$LAB_INSTANCE_ID"
 | `sudo lab clab inspect --all` | containerlab をそのまま呼ぶ |
 
 - 機器の CLI: `sudo docker exec -it clab-splab-dc1-leaf-01 sr_cli`（1 行だけなら `sudo lab cli dc1-leaf-01 "show ..."`）。設定は `lab/srlinux/<機器>.cli`（`set /` の行だけ。containerlab が起動時に流し込む。手で直さず `lab/gen_lab.py` で作り直す）
-- `sudo lab failover` を打つと、trap が 5 秒以内に Kafka に届き、次の検知バッチ（トリガー 60 秒）で `link_down`（物理 IF とサブインタフェース）と gNMI の `isis_down` が開く。`sudo lab heal-main` で resolved に戻る（2026-09-27 に EC2 で確認）。
-  - SR Linux の SNMP の `ifOperStatus` は実際の oper-state より 15〜20 秒遅れる（2026-09-27 実測）。そのまま時刻順の最後の状態を採ると、落ちた直後の古い up が trap の linkDown を閉じ（1 分ほどで戻すと物理 IF の `link_down` が開かなかった）、戻った直後の古い down が閉じたばかりの異常を開き直す。検知は link の trap から 30 秒（`snmp_sinks.py` の `POLL_LAG`）のあいだ、同じ IF のポーリングを使わない。1 分で戻しても物理 IF の `link_down` が開いて閉じ、閉じた後に開き直さないことを 2026-09-27 に EC2 で確認した（落として約 80 秒で開き、戻して約 70 秒で閉じる）。
+- `sudo lab failover` を打つと、trap が 5 秒以内に Kafka に届く（2026-09-27 に EC2 で確認）。そのあと Grafana のルールが物理 IF の `link_down` を出し、`SINK_SPLUNK=1` なら Splunk も linkDown の trap から同じ `link_down` を、gNMI から `isis_down` を出す。`sudo lab heal-main` で `resolved` が出る。落としてから通知までは 1〜2 分（下の「アラート」の遅れ）。
+  - SR Linux の SNMP の `ifOperStatus` は実際の oper-state より 15〜20 秒遅れる（2026-09-27 実測）。Spark の検知は trap とポーリングを 1 つの状態にまとめていたので、古いポーリングが trap を打ち消さないよう 30 秒の猶予（`POLL_LAG`）を持っていた。いまは送り手ごとに自分の見た状態だけを出し、Grafana は自分が発火させたアラートにしか解消を送らないので、この猶予は要らない。
 - 機器のログは SR Linux の `system logging remote-server`（RFC 5424、udp）で lab の EC2 へ出て、Telegraf の `inputs.syslog` が受け、トピック `logs` に出す（measurement は `device_log`。hostname は `sysName` タグに付け替える）。送る subsystem は bgp / chassis / linux / netinst / xdp。
 - SNMP は containerlab が全ノードに v2c の community `public` を入れ、gNMI も全ノードで `57400/tcp`（TLS、containerlab の既定の admin）に開く。監視対象は `lab/srlinux/<機器>.cli` の `system snmp trap-group`（trap の宛先）の有無で決まり、いまは SR Linux の 6 台全部。VM 2 台は対象外。
-- SR Linux の ifTable は未使用の物理ポートも全部出す（`ifAdminStatus` が down）。IF の鍵は `ifName`（`ifDescr` は「名前 + description」）。Spark は admin down の行とサブインタフェース（`ethernet-1/1.0`）を見ない。
+- SR Linux の ifTable は未使用の物理ポートも全部出す（`ifAdminStatus` が down）。IF の鍵は `ifName`（`ifDescr` は「名前 + description」）。Grafana のルールは admin down の行、サブインタフェース（`ethernet-1/1.0`）、ループバック、管理ポートを見ない。
 
 ### 動かないとき
 
@@ -132,6 +132,51 @@ terraform -chdir=terraform/pipeline/analytics output -raw splunk_password_comman
 - Splunk（ECS）は `SINK_SPLUNK=1` のときだけ。検索は `index=main`（HEC の token の既定の index）。
 - Web は EC2 のまま（踏み台を兼ねる。ECS にするとタスクの IP が変わり、踏み台にしにくい）。
 
+## アラート
+
+異常を見つけるのは Grafana と Splunk。どちらも発火（`firing`）と解消（`resolved`）を、同じ形の JSON で SNS のトピック `<prefix>-alerts`（`terraform/base/core/alerts.tf`）に publish する。トピックは graph の Lambda（Neptune の `status`）と、`WORKFLOW=1` なら workflow の SQS（[workflow.md](workflow.md)）へ配る。
+
+| 送り手 | 見るもの | 出す `kind` | 定義 | 落ちてから通知まで |
+|---|---|---|---|---|
+| Grafana（`GRAFANA=1` と `SINK_PROMETHEUS=1`。どちらも既定） | SNMP のポーリングの `ifOperStatus`（Prometheus） | `link_down` | `grafana/provisioning/alerting/netops.yaml` | ポーリング 10 秒 + SNMP の遅れ 15〜20 秒 + Spark のマイクロバッチ 60 秒 + ルールの評価 30 秒 |
+| Splunk（`SINK_SPLUNK=1`。既定は 0） | trap と、gNMI の on_change（BGP のセッション、IS-IS の IF） | `link_down`（linkDown / linkUp の trap）、`trap`（ほかの trap）、`bgp_down`、`isis_down` | `splunk/netops_alerts/default/savedsearches.conf` | Spark のマイクロバッチ 60 秒 + 保存済みサーチ（毎分。索引に入ってから最大 70 秒ほど） |
+
+- **既定（`SINK_SPLUNK=0`）で見つかるのは `link_down` だけ。**BGP / IS-IS の層の `status` と機器の `ALARM` は Splunk が出すので、`SINK_SPLUNK=1` にしないと変わらない。
+- 本文は `{"source": "grafana" | "splunk", "alerts": [{"status", "device_id", "kind", "target", "detail", "starts_at"}]}`。異常の id は `<device_id>#<kind>#<target>` で、送り手が違っても同じ機器・種類・対象なら同じ id になる（Grafana と Splunk が同じ `link_down` を知らせても 1 つ）。形を変えるときは、Grafana のテンプレート、Splunk のアラートアクション、`workflow/rules.py` の `alerts_from_message`（ワーカーと Lambda が同じものを使う）を一緒に変える。
+- 送り手は「いまの状態」を出すだけなので、同じ知らせが重なって届くことがある。受け手は何度受けてもよい作り（ワークフローの id は異常ごとに 1 つ、`status` は上書き）。
+- publish はタスクロール（`sns:Publish` だけ）で、VPC の `sns` のエンドポイントを通る。アクセスキーは置かない。トピックは VPC の外からの publish を拒む。
+- トピックは土台にあるので、送り手も受け手も無いときも作る（時間課金は無い）。
+
+### Grafana のアラート
+
+- ルール `link_down`（フォルダ `netops-alerts`）。`ifOperStatus` が 2（down）の IF を 30 秒ごとに見て、すぐ発火する（`for: 0s`）。admin-state が disable のポート（oper は down だが異常ではない）は外す。
+- データが無い・クエリが失敗したときは直前の状態のまま（`KeepLast`。分からないときに発火も解消もしない）。機器ごと止まって系列が途切れると、Grafana は古い系列として解消を送る（機器の停止はここでは検知しない）。
+- 通知は IF ごとに 1 通。発火はすぐ、解消は 30 秒以内（`group_interval`）。直らないあいだは 4 時間ごと（`repeat_interval`）に同じ `starts_at` で送り直す。
+- 画面は Alerting → Alert rules。provisioning したルール・連絡先・ポリシーは画面から変えられない。変えるなら `grafana/provisioning/alerting/netops.yaml` を変えて `ops/up.sh`（イメージから作り直す）。
+- このファイルのテンプレートの `$` はそのまま書く。`$$` とエスケープすると Grafana が起動しない（`Invalid format of the submitted template`。13.2.2 で実測）。`${ALERTS_TOPIC_ARN}` と `${AWS_REGION}` だけは、起動時に Grafana が環境変数で埋める。
+- `grafana/start.sh` は `PROMETHEUS_URL` と `ALERTS_TOPIC_ARN` の両方があるときだけアラートの定義を並べる（`SINK_PROMETHEUS=0` ならアラートは無い）。
+
+### Splunk のアラート
+
+- アプリ `netops_alerts` をイメージに焼き込んである（`splunk/netops_alerts/`）。保存済みサーチ 3 本と、結果を SNS へ publish するアラートアクション `netops_sns`（`bin/netops_sns.py`）。
+
+| 保存済みサーチ | 見るもの | 出すもの |
+|---|---|---|
+| `netops_gnmi` | `telegraf:bgp_neighbor` の `session_state`、`telegraf:isis_interface` の `oper_state` | `established` / `up` でなければ `bgp_down` / `isis_down` の `firing`、戻れば `resolved` |
+| `netops_trap` | `telegraf:snmp_trap` | linkDown は `link_down` の `firing`、linkUp は `resolved`。ほかの trap は `trap` の `firing`（coldStart / warmStart などは出さない） |
+| `netops_trap_clear` | 同上（過去 70 分） | その機器から link 以外の trap が 10 分来なければ、その機器の `trap` を `resolved` にする（機器ごと。1 つの trap につき 1 回） |
+
+- 3 本とも毎分動き、「索引に入った時刻」で直前の 1 分を 1 回だけ読む（`_index_earliest` / `_index_latest`。イベントの時刻で切ると、Spark のマイクロバッチで遅れて届いた分を取りこぼす）。スケジューラが遅れても飛ばさない（`realtime_schedule = 0`）。
+- 項目は `fields` で `_raw` だけにしてから `spath` で取る。`props.conf` の `KV_MODE = json` と重ねると全部の項目が同じ値 2 つの多値になり、1 行も出なくなる（10.4.3 で実測）。
+- gNMI と trap のイベントは機器名でなく IP を持つので、アラートアクションがタスクの環境変数 `DEVICE_MAP`（`ops/up.sh` が `lab/lab_topology.py --device-map` で作る）で機器名に直す。直せなかった IP はそのまま `device_id` になり、Neptune では「未登録」の頂点になる。
+- アラートアクションは標準ライブラリだけで SigV4 に署名する（Splunk の Python に boto3 は無く、VPC から PyPI へも出られない）。認証情報は ECS のタスクロール。1 通に 50 件まで、失敗は 3 回まで試す。
+- splunkd はコンテナの環境変数を子プロセスに引き継がないので、`splunk/entrypoint.sh` が要る値（リージョン、トピックの ARN、`DEVICE_MAP`、認証情報の取り出し口の URI）を `/opt/container_artifact/netops-alerts.env` に写す（鍵そのものは書かない）。
+- Splunkbase の Splunk Add-on for AWS は使っていない。配布物を公開リポジトリに置けず、VPC から Splunkbase へも出られないため。
+- 確かめる（Splunk の画面の検索）:
+  - サーチが動いたか: `index=_internal sourcetype=scheduler savedsearch_name=netops_*`
+  - publish の結果: `index=_internal sourcetype=splunkd sendmodalert netops_sns`（成功は `published=` の分子と分母が同じ。失敗は `ERROR`）
+- 2026-10-02 の作り替えは、模擬テストと手元のコンテナ（Splunk 10.4.3、Grafana 13.2.2）で確かめた。AWS の上での通し（SNS からの配信、`sns` のエンドポイント越しの publish、trap の送り元の IP が `DEVICE_MAP` に当たるか、SR Linux の linkDown の trap に IF 名が載るか）はまだ確かめていない。
+
 ## Spark を確かめる
 
 ジョブの一覧とテーブルの一覧は出力のコマンドで見る。テーブルの中身は Athena で見る（カタログは `s3tablescatalog`）。
@@ -162,7 +207,7 @@ LOG_GROUP=$(terraform -chdir=terraform/pipeline/analytics output -raw log_group_
 
 - `FAILED` なら、ロググループ `/aws/emr-serverless/<prefix>` のドライバーの stderr を見る。
 - ジョブは同時に 1 本だけにする（同じチェックポイントを 2 本で書くと壊れる）。`ops/up.sh` の手順 7-5 は、スクリプトと引数のハッシュをジョブのタグ `SpecHash` に付けて起こし、動いているジョブのタグが今のハッシュと同じなら何もせず、違えば止めて（最大 3 分待つ）起こし直す。
-- 格納先ごとのクエリ（iceberg / opensearch / prometheus / splunk）と detect のどれかが止まると、ジョブを終わらせ（exit 1）、STREAMING モードに起こし直させる。チェックポイントの続きから読むので、取りこぼしも二重も無い。起こし直しは既定で 1 時間に 5 回まで（超えると `FAILED`）。
+- 格納先ごとのクエリ（iceberg / opensearch / prometheus / splunk）のどれかが止まると、ジョブを終わらせ（exit 1）、STREAMING モードに起こし直させる。チェックポイントの続きから読むので、取りこぼしも二重も無い。起こし直しは既定で 1 時間に 5 回まで（超えると `FAILED`）。
 - チェックポイントは MSK クラスタごとのパス（`s3://<バケット>/analytics/checkpoint/<クラスタの uuid>/`）。MSK を作り直すと、前のクラスタのオフセットを読まずに新しいパスから始まる。
 - analytics を消すと S3 Tables の履歴も消える。
 
@@ -178,7 +223,7 @@ Neptune に入れる機器・インタフェース・回線（物理層）と、
 | IP | `ip_interface`（アドレス付きサブインタフェース） / `isis_adjacency` | `<機器>#<IF>.0` / `<機器>#isis#<IF>.0` | `interface_id` / `ip_interface_id` |
 | EVPN・BGP | `bgp_session` / `evpn_instance` / `ethernet_segment` | `<機器>#bgp#<相手の IP>` / `<機器>#evi#<EVI>` / `<機器>#es#<名前>` | `ip_interface_id`（ループバック `system0.0`） / `interface_id`（`lag1`） |
 
-同じ定義から、Telegraf のポーリング先（`--snmp-agents` → stream の変数 `snmp_agents`）、gNMI の購読先（`--gnmi-targets` → stream の変数 `gnmi_targets`）と、Spark の検知が trap の送り元を機器名に直す device map（`--device-map`。hostname・管理 IP・全インタフェースのアドレス → 機器名）も作る。機器の一覧はこの 1 か所だけにある。
+同じ定義から、Telegraf のポーリング先（`--snmp-agents` → stream の変数 `snmp_agents`）、gNMI の購読先（`--gnmi-targets` → stream の変数 `gnmi_targets`）と、Splunk のアラートアクションが gNMI と trap の送り元を機器名に直す device map（`--device-map`。hostname・管理 IP・全インタフェースのアドレス → 機器名。Splunk のタスクの環境変数 `DEVICE_MAP`）も作る。機器の一覧はこの 1 か所だけにある。
 
 ```bash
 ops/sync-graph.sh              # 空のときに入れる
@@ -187,8 +232,8 @@ ops/sync-graph.sh --dry-run    # 作った JSON を出すだけ
 ```
 
 - Web の「トポロジ」タブの「静的データを投入」は `agent/data/` を入れる。同じタブでリンクの追加と削除もできる。
-- 状態は Lambda `<prefix>-graph-status` が書く。`link_down` なら回線の辺に `DOWN` / `UP`、`bgp_down` / `isis_down`（gNMI）なら上の層の頂点 `bgp_session` / `isis_adjacency` に `DOWN` / `UP`、ほかの trap なら機器に `ALARM` / `UP`（`UP` に戻すのは機器が `ALARM` のときだけ。IF の分からない linkDown の `DOWN` は残す）。
-- link 以外の trap には「直った」の知らせが無いので、最後の trap から 10 分で resolved にする（Spark が 1 分おきに見回る）。coldStart / warmStart は異常にしない。調査ワークフローを起こすのは `link_down` だけ。
+- 状態は Lambda `<prefix>-graph-status` が書く（SNS のトピック `<prefix>-alerts` を購読する。`firing` で落とし、`resolved` で戻す）。`link_down` なら回線の辺に `DOWN` / `UP`、`bgp_down` / `isis_down`（gNMI）なら上の層の頂点 `bgp_session` / `isis_adjacency` に `DOWN` / `UP`、ほかの trap なら機器に `ALARM` / `UP`（`UP` に戻すのは機器が `ALARM` のときだけ。IF の分からない linkDown の `DOWN` は残す）。
+- link 以外の trap には「直った」の知らせが無いので、その機器の最後の trap から 10 分で `resolved` にする（Splunk の保存済みサーチ `netops_trap_clear` が 1 分おきに見る）。coldStart / warmStart は異常にしない。調査ワークフローを起こすのは `link_down` だけ。
 - 入れ直すと状態は全部 `UP` に戻る（上の層も入れ直す。`ops/sync-graph.sh --replace`）。
 - トポロジに無い機器やインタフェースの異常は捨てず、「未登録」の頂点（`registered=false`、機器は `role=unknown`）として残す。Web の図では橙の点線の枠、表の「監視」は「未登録」になる。Lambda のログには WARNING で `UNREGISTERED` が出る。lab に足した機器なら `ops/sync-graph.sh --replace` で登録すると置き換わり、`UP` でない状態は引き継ぐ。
 
@@ -210,9 +255,10 @@ uv run python lab/lab_topology.py lab --layers > agent/data/layers.json
 |---|---|
 | `lab/` の設定（`lab/gen_lab.py` を回したあと） | `ops/up.sh` を打つ（手順 5 で S3 に置き直す）→ lab に入って `sudo systemctl restart <prefix>-lab` |
 | `telegraf/`（`telegraf.conf.in` / `telegraf.sh` / `Dockerfile`） | `ops/up.sh` を打つ（ディレクトリのハッシュが変わるので手順 2 がイメージを作り直し、手順 7 の stream の apply がタスクを入れ替える）。lab の EC2 はそのまま |
-| `grafana/`（provisioning など） | `ops/up.sh` を打つ（同じく手順 2 がイメージを作り直し、手順 7-4 の analytics の apply がタスクを入れ替える） |
+| `grafana/`（provisioning。ダッシュボードとアラート） | `ops/up.sh` を打つ（同じく手順 2 がイメージを作り直し、手順 7-4 の analytics の apply がタスクを入れ替える） |
+| `splunk/`（保存済みサーチ、アラートアクション） | `ops/up.sh` を打つ（同じ。Splunk の index はタスクと一緒に消えるので、入れ替えの前のイベントは検索できなくなる） |
 | `spark/snmp_sinks.py` | `ops/up.sh` を打つ（手順 7-5 がハッシュの違いを見て、動いているジョブを止めて起こし直す）。手で止めるコマンドは下 |
-| lab の機器や回線 | 上のあと `ops/sync-graph.sh --replace`。監視する機器を足したら `ops/up.sh`（stream の変数 `snmp_agents` / `gnmi_targets` が変わるので Telegraf のタスクが作り直される。device map はジョブの引数なので、変われば手順 7-5 がジョブを起こし直す） |
+| lab の機器や回線 | 上のあと `ops/sync-graph.sh --replace`。監視する機器を足したら `ops/up.sh`（stream の変数 `snmp_agents` / `gnmi_targets` が変わるので Telegraf のタスクが作り直される。device map は Splunk のタスクの環境変数なので、変われば手順 7-4 の apply が Splunk のタスクを入れ替える） |
 
 ジョブを止めるコマンド（`$APP_ID` と `$JOB_RUN_ID` は上の「Spark を確かめる」で入れる）:
 

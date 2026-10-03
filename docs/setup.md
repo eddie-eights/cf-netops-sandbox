@@ -8,7 +8,7 @@
 
 - **VPC は `terraform/base/core` が作る。**既定は `10.0.0.0/16` に `/24` のプライベートサブネット 2 つ（`apne1-az1` / `apne1-az4`）。インターネットへの経路は無い（NAT Gateway も IGW もパブリックサブネットも作らない。外から入る経路も無い）。社内のネットワークと重なるなら `deploy.env` の `VPC_CIDR` を変える（`/16`〜`/24`）。
 - **SG はワークロードごとに 1 つ（12 個）と、VPC エンドポイント用の `endpoints`。**全部 `terraform/base/core` の `security_groups.tf` が作り、ルールはそこの通信の表から作る。表に無い通信は VPC の中でも通らない（送信も絞る）。表は [architecture.md](architecture.md) の「SG」。VPC の全 ENI の通信は VPC フローログ（ロググループ `/<prefix>/vpc-flow-logs`、保存 7 日）に残る。
-- AWS の API（SSM / ECR / CloudWatch Logs / Bedrock / AgentCore / S3 Tables / EventBridge / SQS / Prometheus）へはインターフェース型エンドポイントで届き、VPC の外からの呼び出しは Deny で拒む（[architecture.md](architecture.md) の「閉域」）。ほかに S3 の Gateway 型（無料。ポリシーは付けない）と、KB か logs のコレクションを作るときの OpenSearch Serverless の 1 本（2 AZ で約 $0.03/h）。エンドポイントの無い API へは届かない（NAT Gateway が無いので Deny より先に接続のタイムアウトになる）。
+- AWS の API（SSM / ECR / CloudWatch Logs / Bedrock / AgentCore / S3 Tables / SNS / SQS / Prometheus）へはインターフェース型エンドポイントで届き、VPC の外からの呼び出しは Deny で拒む（[architecture.md](architecture.md) の「閉域」）。ほかに S3 の Gateway 型（無料。ポリシーは付けない）と、KB か logs のコレクションを作るときの OpenSearch Serverless の 1 本（2 AZ で約 $0.03/h）。エンドポイントの無い API へは届かない（NAT Gateway が無いので Deny より先に接続のタイムアウトになる）。
 - 組織の SCP で `aws:SourceVpc` の Deny をすでに掛けているなら、この Terraform の Deny と重なっても害は無い。逆に VPC エンドポイントの作成を SCP で止めていると、手順 3 で落ちる。
 - 使うモデル: Nova 2 Lite（`jp.amazon.nova-2-lite-v1:0`）、Titan Text Embeddings V2、Rerank（`amazon.rerank-v1:0`）。どれも Amazon のモデルなので Marketplace の購読は要らない。SCP や IAM でモデルを絞っているなら、この 3 つを許可する。
 - apply する人に要る権限（管理者権限なら足りる）:
@@ -29,8 +29,8 @@ AWS CLI v2 と Session Manager plugin を入れる。PC から `ssm.ap-northeast
 
 - AWS CLI v2、Terraform 1.11 以上、Docker buildx（arm64）、Session Manager plugin、uv。
 - `registry.terraform.io` に 443 で届くこと（OpenSearch Serverless には PC からつながない）。
-- イメージをビルドするので、インターネットに出られること。`SINK_SPLUNK=1`（ECS に立てる既定の形）では Docker Hub から `splunk/splunk` の amd64 のイメージ（約 2〜3 GB）を引いて ECR に写す。
-- x86_64 の PC では、agent / worker / Grafana のビルドに QEMU（binfmt）が要る（下の WSL2 の `binfmt` の行。Telegraf は COPY だけなので要らない）。
+- イメージをビルドするので、インターネットに出られること。`SINK_SPLUNK=1`（ECS に立てる既定の形）では Docker Hub から `splunk/splunk` の amd64 のイメージ（約 2〜3 GB）を引き、検知のアプリを足して ECR に push する。
+- x86_64 の PC では、agent / worker / Grafana のビルドに QEMU（binfmt）が要る（下の WSL2 の `binfmt` の行。Telegraf と Splunk は COPY だけなので要らない）。
 
 ### Mac
 
