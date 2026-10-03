@@ -38,10 +38,6 @@ resource "aws_emrserverless_application" "spark" {
       condition     = local.msk_cluster_arn != "" && local.bootstrap != ""
       error_message = "terraform/pipeline/stream の state（terraform/pipeline/stream/terraform.tfstate）から msk_cluster_arn / bootstrap_brokers が読めない。terraform/pipeline/stream を先に apply する。"
     }
-    precondition {
-      condition     = local.neptune_host != "" && local.neptune_resource_id != ""
-      error_message = "terraform/pipeline/graph の state（terraform/pipeline/graph/terraform.tfstate）から cluster_endpoint / cluster_resource_id が読めない。検知は異常の「いま」を Neptune に書くので、terraform/pipeline/graph を先に apply する（2026-09-24 から）。"
-    }
   }
 
   tags = { Name = "${local.name_prefix}-spark" }

@@ -154,8 +154,8 @@ case "${1:-}" in
     echo "$w"
     if iptables -t nat -S PREROUTING 2>/dev/null | grep -q -- "--comment $FW_TAG"; then
       echo "== Telegraf（stream。ECS のタスク）=="
-      echo "  ポーリング（10 秒周期）と SR Linux の linkDown トラップ、syslog、gNMI の IS-IS の隣接が MSK に流れ、analytics の Spark が異常を Neptune に書く（S3 Tables に履歴、EventBridge にも出す）。"
-      echo "  GUI の「異常一覧」か、エージェントに「今の異常は？」と聞くと dc1-leaf-01 ethernet-1/1 の link_down（と isis_down）が出る。戻すのは 'lab heal-main'"
+      echo "  ポーリング（10 秒周期）と SR Linux の linkDown トラップ、syslog、gNMI の IS-IS の隣接が MSK に流れ、Grafana のアラートルール（ポーリング）と Splunk の保存済みサーチ（trap と gNMI）が SNS のトピックに出す。"
+      echo "  数分で GUI の「トポロジ」の dc1-leaf-01 ethernet-1/1 が DOWN になり（link_down と isis_down）、WORKFLOW=1 なら「承認」に修復案が出る。アラートは Grafana / Splunk で見る。戻すのは 'lab heal-main'"
     fi
     ;;
   forward)

@@ -17,9 +17,9 @@
 #               NLB が 1162 でここへ渡す。NLB は送り元を変えない（UDP のクライアント IP の保持）ので、送り元は機器の管理 IP のまま
 #   syslog      機器は lab の EC2（203.0.113.1:5140/udp）へ送り、trap と同じ仕組みで NLB からここへ届く（rsyslog は使わない）
 # MIB は入れないので OID は数値で書き、名前を明示する（translator が無くても動く）。trap の varbind 名は数値 OID のまま
-# Kafka に載る（detector 側で ifName の OID を引く）。
-# SR Linux の ifTable は物理ポート全部（未使用の admin-down も）とサブインタフェース（ethernet-1/1.0）を行に出す。落とすのは Spark 側
-#（spark/snmp_sinks.py。ifAdminStatus が down の行と "." を含む名前）。ifDescr は「名前 + description」になるので IF の鍵は ifName にする。
+# Kafka に載る（ifName の OID を引くのは Splunk の保存済みサーチ。splunk/netops_alerts）。
+# SR Linux の ifTable は物理ポート全部（未使用の admin-down も）とサブインタフェース（ethernet-1/1.0）を行に出す。落とすのは Grafana のアラートルール
+#（grafana/provisioning/alerting/netops.yaml。ifAdminStatus が down の行と "." を含む名前）。ifDescr は「名前 + description」になるので IF の鍵は ifName にする。
 
 [agent]
   interval = "10s"
@@ -78,10 +78,10 @@
 
 # ---- gNMI（SR Linux の状態を購読。SNMP には無い BGP / IS-IS / EVPN の層）。containerlab が全ノードで 57400（TLS、自己署名）を開け、
 # ユーザーは containerlab が入れる既定（admin / NokiaSrl1!。lab だけの公開既定値で、実機の値ではない。実機なら SSM から埋める）。
-# source タグは購読先のアドレス（機器の管理 IP。Spark はこれと device map で機器名を引く）。パスの鍵（peer-address など）はタグになる。
+# source タグは購読先のアドレス（機器の管理 IP。Splunk のアラートアクションがこれと device map で機器名を引く）。パスの鍵（peer-address など）はタグになる。
 # on_change は購読の直後に今の状態を全部送り、その後は変わったときだけ送る。sample は sample_interval ごと。
-# Spark（spark/snmp_sinks.py の events）は bgp_neighbor の session_state != established を bgp_down、isis_interface の
-# oper_state != up を isis_down として Neptune の bgp_session / isis_adjacency の頂点を DOWN にする（graph/status_handler.py）。
+# Splunk の保存済みサーチ（splunk/netops_alerts の netops_gnmi）は bgp_neighbor の session_state != established を bgp_down、isis_interface の
+# oper_state != up を isis_down として SNS に出し、graph の Lambda が Neptune の bgp_session / isis_adjacency の頂点を DOWN にする（graph/status_handler.py）。
 # 実測（2026-09-27、SR Linux 26.7.2 / Telegraf 1.40）: bgp_neighbor はタグ peer_address、field session_state。isis_interface はタグ interface_name
 # （ethernet-1/1.0。サブインタフェース。system0.0 も来る）、field oper_state（up / down）
 [[inputs.gnmi]]

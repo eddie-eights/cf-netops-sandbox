@@ -1,7 +1,9 @@
 # ---------------------------------------------------------------- Splunk Enterprise（ECS on Fargate）
-# sinks に splunk があるとき、Splunk の公式イメージ（splunk/splunk）を 1 タスク立て、Spark の splunk の格納先が
-# VPC の中の HEC（https://splunk.<名前空間>:8088）へ書く。AWS の外へは出ない（2026-09-28 まであった外の Splunk へ NAT で出る道はやめた）。
-# イメージは amd64 しか無いので X86_64 のタスクにし、ops/up.sh の手順 2 が ECR の <接頭辞>-splunk にそのまま写す（VPC から AWS の外へ出る経路が無いので Docker Hub から引けない）。
+# sinks に splunk があるとき、Splunk の公式イメージ（splunk/splunk）にアラートの app を足したもの（splunk/Dockerfile）を 1 タスク立て、
+# Spark の splunk の格納先が VPC の中の HEC（https://splunk.<名前空間>:8088）へ書く。AWS の外へは出ない（2026-09-28 まであった外の Splunk へ NAT で出る道はやめた）。
+# イメージは amd64 しか無いので X86_64 のタスクにし、ops/up.sh の手順 2 が ECR の <接頭辞>-splunk に入れる（VPC から AWS の外へ出る経路が無いので Docker Hub から引けない）。
+# 検知は app netops_alerts の保存済みサーチ（リンク・BGP・IS-IS・trap）で、アラートアクション netops_sns が土台の SNS トピック
+# （terraform/base/core の alerts.tf）へ publish する。認証はタスクロール（アクセスキーは置かない）で、sns のエンドポイントを通る。
 # ライセンスは Splunk Enterprise の試用（60 日、1 日 500 MB まで）。SPLUNK_START_ARGS / SPLUNK_GENERAL_TERMS で起動時に Splunk の
 # ライセンスと Splunk General Terms に同意する（イメージがこの 2 つ無しでは起きない）ので、デプロイする人が同意したことになる。
 # index はタスクのエフェメラルストレージにあり、タスクと一緒に消える（PoC。残すなら EFS が要る）。
@@ -47,7 +49,8 @@ resource "aws_ecs_task_definition" "splunk" {
   cpu                      = var.splunk_task_cpu
   memory                   = var.splunk_task_memory
   execution_role_arn       = aws_iam_role.splunk_execution[0].arn
-  # AWS の API を呼ばないのでタスクロールは付けない
+  # アラートアクション（splunk/netops_alerts/bin/netops_sns.py）が SNS へ publish する
+  task_role_arn = aws_iam_role.splunk_task[0].arn
 
   runtime_platform {
     operating_system_family = "LINUX"
@@ -71,6 +74,11 @@ resource "aws_ecs_task_definition" "splunk" {
       environment = [
         { name = "SPLUNK_START_ARGS", value = "--accept-license" },
         { name = "SPLUNK_GENERAL_TERMS", value = "--accept-sgt-current-at-splunk-com" },
+        # アラートアクションが読む（splunk/entrypoint.sh がファイルに写す。splunkd の子プロセスはコンテナの環境変数を引き継がない）
+        { name = "AWS_REGION", value = var.region },
+        { name = "ALERTS_TOPIC_ARN", value = local.alerts_topic_arn },
+        # gNMI と trap のイベントは機器の名前でなく管理 IP を持つ。アラートアクションがこの表で名前に直す
+        { name = "DEVICE_MAP", value = var.device_map },
       ]
       secrets = [
         { name = "SPLUNK_PASSWORD", valueFrom = local.splunk_password_arn },
@@ -102,6 +110,10 @@ resource "aws_ecs_task_definition" "splunk" {
       condition     = try(data.terraform_remote_state.ecr.outputs.splunk_repository_url, "") != ""
       error_message = "terraform/base/ecr の state から splunk_repository_url が読めない。terraform/base/ecr を先に apply する（ops/up.sh の手順 1）。"
     }
+    precondition {
+      condition     = local.alerts_topic_arn != ""
+      error_message = "terraform/base/core の state から alerts_topic_arn が読めない（2026-10-02 より前の土台）。terraform/base/core を先に apply する。"
+    }
   }
 }
 
@@ -131,6 +143,7 @@ resource "aws_ecs_service" "splunk" {
   depends_on = [
     aws_iam_role_policy.splunk_execution,
     aws_iam_role_policy_attachment.splunk_execution,
+    aws_iam_role_policy.splunk_task,
   ]
 }
 
@@ -172,5 +185,38 @@ resource "aws_iam_role_policy_attachment" "splunk_execution_perimeter" {
   count = local.splunk_on_ecs && local.perimeter_policy_arn != "" ? 1 : 0
 
   role       = aws_iam_role.splunk_execution[0].name
+  policy_arn = local.perimeter_policy_arn
+}
+
+# アラートアクションのロール。できるのは土台のトピックへの publish だけ（トピックの鍵は AWS 管理の aws/sns なので kms の許可は要らない）
+resource "aws_iam_role" "splunk_task" {
+  count = local.splunk_on_ecs ? 1 : 0
+
+  name               = "${local.name_prefix}-splunk-task"
+  description        = "Splunk task - the netops_sns alert action publishes alerts to the SNS topic"
+  assume_role_policy = data.aws_iam_policy_document.ecs_tasks_trust.json
+}
+
+resource "aws_iam_role_policy" "splunk_task" {
+  count = local.splunk_on_ecs ? 1 : 0
+
+  name = "${local.name_prefix}-splunk-task"
+  role = aws_iam_role.splunk_task[0].name
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Sid      = "PublishAlerts"
+      Effect   = "Allow"
+      Action   = ["sns:Publish"]
+      Resource = local.alerts_topic_arn
+    }]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "splunk_task_perimeter" {
+  count = local.splunk_on_ecs && local.perimeter_policy_arn != "" ? 1 : 0
+
+  role       = aws_iam_role.splunk_task[0].name
   policy_arn = local.perimeter_policy_arn
 }

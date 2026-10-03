@@ -3,12 +3,13 @@
 #   土台（必ず作る）  base/ecr + base/core（VPC / Web の EC2 / バケット / ロール。インターネットへの経路は無い）。約 $0.02/h + エンドポイント。
 #   AGENT（既定 1）   agent での分析。terraform/agent（AgentCore Runtime + ガードレール。CREATE_KB=1 なら Knowledge Base も）。
 #                     Web の「チャット」タブが使える
-#   PIPELINE          データパイプライン。lab（containerlab）→ stream（MSK と Telegraf（ECS））→ analytics（Spark on EMR Serverless → S3 Tables / OpenSearch / Prometheus、
-#                     異常検知 → Neptune + S3 Tables の証跡 + EventBridge。Grafana（ECS）で Prometheus と OpenSearch を見る）と graph（Neptune のトポロジと投入）。
-#                     Web の「トポロジ」「異常一覧」タブが動く
-#   WORKFLOW          Temporal での実行。workflow（Temporal on ECS Fargate のワーカー + AgentCore Gateway（MCP）+ EventBridge → SQS）。
-#                     Spark の検知が EventBridge → SQS で届き、エージェントが Neptune / OpenSearch / Prometheus を見て原因を調べて修復案を出し、
-#                     Web の「承認」タブで人が承認すると Temporal が lab で直す。AGENT と PIPELINE（lab / stream / analytics / graph）が要る
+#   PIPELINE          データパイプライン。lab（containerlab）→ stream（MSK と Telegraf（ECS））→ analytics（Spark on EMR Serverless → S3 Tables / OpenSearch / Prometheus / Splunk。
+#                     Grafana（ECS）で Prometheus と OpenSearch を見る。検知は Grafana のアラートルールと Splunk の保存済みサーチで、SNS のトピック <接頭辞>-alerts へ出す）と
+#                     graph（Neptune のトポロジと投入。アラートが届くと機器・回線の status を書き換える）。Web の「トポロジ」タブが動く
+#   WORKFLOW          Temporal での実行。workflow（Temporal on ECS Fargate のワーカー + AgentCore Gateway（MCP）+ SNS → SQS）。
+#                     Grafana / Splunk のアラートが SNS → SQS で届き、エージェントが Neptune / OpenSearch / Prometheus を見て原因を調べて修復案を出し、
+#                     Web の「承認」タブで人が承認すると Temporal が lab で直す。AGENT と PIPELINE（lab / stream / analytics / graph）と、
+#                     アラートの送り手（Grafana と SINK_PROMETHEUS、または SINK_SPLUNK=1）が要る
 # 毎日全部消す運用向け。何度打っても同じ状態に収束する（できているものは Terraform が差分なしで飛ばし、ECR にあるタグはビルドしない）。
 # あとから別の機能を 1 にして打ち直せば、その機能だけ足される（土台と他の機能は作り直さない）。
 # Terraform の state はこの PC の展開したフォルダの中（terraform/<ルート>/terraform.tfstate）に置く。消すのは ops/down.sh。
@@ -30,24 +31,27 @@
 #                           **作ったあとで変えると、Terraform は名前の違うリソースを作り直す**（先に ops/down.sh で消す）
 #   AGENT=1                 agent での分析（既定 1）。terraform/agent を作る
 #   PIPELINE=1              データパイプライン（既定 0）。lab / stream / analytics / graph を作る（SKIP_* で減らせる）
-#   WORKFLOW=1              Temporal での実行（既定 0）。workflow を作る。AGENT と PIPELINE が要り、SKIP_LAB / SKIP_STREAM / SKIP_ANALYTICS / SKIP_GRAPH は書けない
+#   WORKFLOW=1              Temporal での実行（既定 0）。workflow を作る。AGENT と PIPELINE が要り、SKIP_LAB / SKIP_STREAM / SKIP_ANALYTICS / SKIP_GRAPH は書けない。
+#                           アラートの送り手も要る（GRAFANA と SINK_PROMETHEUS の両方、または SINK_SPLUNK=1。既定のままなら Grafana が送る）
 #   CREATE_KB=1             AGENT=1 で Knowledge Base も作る（既定 0。+$0.37/h = OpenSearch Serverless の OCU $0.33 + 土台の VPC エンドポイント $0.03（SINK_OPENSEARCH と共用）
 #                           + bedrock-agent-runtime のエンドポイント $0.01）。コレクションは公開せず、そのエンドポイントと Bedrock からだけ届く
 #   SKIP_LAB=1              PIPELINE=1 で lab を作らない（stream は lab が要るので SKIP_STREAM=1 も要る）
 #   SKIP_STREAM=1           PIPELINE=1 で stream と analytics（stream の Kafka を読む）を作らない
-#   SKIP_ANALYTICS=1        PIPELINE=1 で analytics（Spark → S3 Tables / OpenSearch / Prometheus と異常検知）を作らない。「異常一覧」は使えない
+#   SKIP_ANALYTICS=1        PIPELINE=1 で analytics（Spark → S3 Tables / OpenSearch / Prometheus / Splunk と、検知する Grafana / Splunk）を作らない
 #   SINK_S3=0 / SINK_OPENSEARCH=0 / SINK_PROMETHEUS=0
 #                           analytics の Spark の格納先を 1 つずつ外す（既定は 3 つとも 1。0 にするとリソースごと作らない。1 つ以上は要る）。
 #                           SINK_S3 = 全トピック → S3 Tables（Iceberg）、SINK_OPENSEARCH = traps と logs（機器の syslog）→ OpenSearch Serverless、
 #                           SINK_PROMETHEUS = metrics と gnmi → Amazon Managed Service for Prometheus。terraform/pipeline/analytics の var.sinks（iceberg / opensearch / prometheus / splunk）に組んで渡す。
 #   SINK_SPLUNK=1           4 本目の格納先: 全トピック → Splunk の HTTP Event Collector（既定 0）。
 #                           Splunk Enterprise（公式イメージ・試用ライセンス）を analytics の ECS で立てて VPC の中で送る（+$0.12/h。
-#                           起動時に Splunk のライセンスと Splunk General Terms に同意する。index はタスクと一緒に消える）。管理者のパスワードと HEC の token は
+#                           起動時に Splunk のライセンスと Splunk General Terms に同意する。index はタスクと一緒に消える）。
+#                           イメージは公式イメージに検知のアプリ（splunk/netops_alerts。trap と gNMI の BGP / IS-IS を保存済みサーチで見て SNS へ出す）を足したもの。管理者のパスワードと HEC の token は
 #                           手順 7-4 で SSM の SecureString に作る（値は出さない。見るコマンドを最後に出す）。SPLUNK_INDEX（既定は空 = token の既定の index）は任意。
 #                           AWS の外の Splunk へ NAT Gateway で送る道は 2026-09-28 にやめた（VPC から AWS の外へ出る経路は作らない）
 #   GRAFANA=0               analytics に Grafana OSS（ECS。Prometheus と OpenSearch を見る。+$0.02/h）を作らない（既定 1。SINK_PROMETHEUS か SINK_OPENSEARCH があるときだけ作る）。
+#                           SINK_PROMETHEUS があればアラートルール（IF の ifOperStatus → link_down）も入り、SNS へ出す（grafana/provisioning/alerting）。
 #                           web の EC2 を踏み台にした SSM のポートフォワードで開く（コマンドは最後に出る）
-#   SKIP_GRAPH=1            PIPELINE=1 で graph（Neptune）を作らない。analytics の検知が異常を Neptune に書くので、SKIP_ANALYTICS=1（か SKIP_STREAM=1）も要る
+#   SKIP_GRAPH=1            PIPELINE=1 で graph（Neptune）を作らない。「トポロジ」は使えず、アラートが届いても status を書く先が無い
 #   IMAGE_TAG               エージェント（WORKFLOW=1 ではワーカーも）のイメージのタグ。既定 v1。ECR にそのタグが無いときだけ PC の docker buildx でビルドして push する（タグは上書きできない）
 #   VPC_CIDR                terraform/base/core の vpc_cidr（社内と重なるとき）
 #   NETWORK_PERIMETER=0     VPC の外からの AWS の API を拒む Deny（terraform/base/core の perimeter.tf）を外す。既定 1。切り分けのときだけ
@@ -65,8 +69,7 @@ REGION=ap-northeast-1
 # デプロイする人の名前 OWNER は deploy.env に書くので、OWNER と接頭辞 PREFIX=<owner>-nwc-poc が確定するのは
 # load_deploy_env のあと（手順 0 の resolve_name_prefix。必須なので、無ければそこで止まる。形の検査も ops/deploy-env.sh）
 # SRLINUX_TAG / MULTITOOL_TAG / CONTAINERLAB_VERSION は terraform/pipeline/lab の変数の既定値（*_image_tag / containerlab_version）、
-# TELEGRAF_VERSION / GRAFANA_VERSION は telegraf/ と grafana/ の Dockerfile の ARG の既定値、SPLUNK_VERSION は terraform/pipeline/analytics の
-# splunk_image_tag の既定値に合わせてある。変えるときは両方を変える
+# TELEGRAF_VERSION / GRAFANA_VERSION / SPLUNK_VERSION は telegraf/ と grafana/ と splunk/ の Dockerfile の ARG の既定値に合わせてある。変えるときは両方を変える
 SRLINUX_TAG=26.7.2   # terraform/pipeline/lab の srlinux_image_tag の既定値。変えるときは両方を変える（ghcr.io/nokia/srlinux はマルチアーキ。arm64 を引く）
 MULTITOOL_TAG=v0.10.0
 CONTAINERLAB_VERSION=0.79.0
@@ -269,7 +272,7 @@ if [ -n "$WORKFLOW" ]; then
     die "WORKFLOW は AGENT が要る（ワーカーがエージェントの Runtime を呼ぶ。terraform/workflow は terraform/agent の state から ARN を読む）。AGENT=1 にする。まだ何も作っていない"
   fi
   if [ -z "$PIPELINE" ]; then
-    die "WORKFLOW は PIPELINE が要る（analytics の Spark が異常を検知して EventBridge に出し、ワーカーが Neptune の異常と修復案を読み書きし、lab の EC2 で直す）。PIPELINE=1 にする。まだ何も作っていない"
+    die "WORKFLOW は PIPELINE が要る（analytics の Grafana / Splunk がアラートを SNS に出し、ワーカーが Neptune のトポロジと修復案を読み書きし、lab の EC2 で直す）。PIPELINE=1 にする。まだ何も作っていない"
   fi
   if [ -n "$SKIP_LAB" ] || [ -n "$SKIP_STREAM" ] || [ -n "$SKIP_ANALYTICS" ] || [ -n "$SKIP_GRAPH" ]; then
     die "WORKFLOW は lab と stream と analytics と graph が要る。SKIP_LAB / SKIP_STREAM / SKIP_ANALYTICS / SKIP_GRAPH を外す。まだ何も作っていない"
@@ -283,9 +286,6 @@ if [ -n "$PIPELINE" ]; then
     echo "SKIP_STREAM=1 なので analytics も作らない（読む Kafka が無い）"
     SKIP_ANALYTICS=1
   fi
-  if [ -n "$SKIP_GRAPH" ] && [ -z "$SKIP_ANALYTICS" ]; then
-    die "analytics は graph が要る（検知が異常の「いま」を Neptune に書く。2026-09-24 から）。SKIP_GRAPH を外すか SKIP_ANALYTICS=1 も書く。まだ何も作っていない"
-  fi
   if [ -n "$SKIP_LAB" ] && [ -n "$SKIP_GRAPH" ]; then
     echo "SKIP_LAB と SKIP_STREAM と SKIP_GRAPH があるので、PIPELINE=1 でも土台だけになる"
   fi
@@ -296,6 +296,13 @@ fi
 GRAFANA="${GRAFANA:-1}"; flag_value GRAFANA
 if [ -n "$SKIP_ANALYTICS" ] || { [ -z "$SINK_PROMETHEUS" ] && [ -z "$SINK_OPENSEARCH" ]; }; then GRAFANA=""; fi
 if [ -n "$SKIP_ANALYTICS" ]; then SPLUNK_ON_ECS=""; fi
+# アラート（SNS のトピック <接頭辞>-alerts）の送り手。Grafana のアラートルールは Prometheus のメトリクスを見るので SINK_PROMETHEUS が要る
+# （grafana/start.sh は PROMETHEUS_URL があるときだけルールを入れる）。Splunk は保存済みサーチが trap と gNMI を見る
+GRAFANA_ALERTS=""
+if [ -n "$GRAFANA" ] && [ -n "$SINK_PROMETHEUS" ]; then GRAFANA_ALERTS=1; fi
+if [ -n "$WORKFLOW" ] && [ -z "$GRAFANA_ALERTS$SPLUNK_ON_ECS" ]; then
+  die "WORKFLOW はアラートの送り手が要る（ワークフローを起こすのは Grafana か Splunk のアラート）。GRAFANA と SINK_PROMETHEUS を 1 のままにするか、SINK_SPLUNK=1 にする。まだ何も作っていない"
+fi
 if [ -z "$AGENT" ] && [ -n "$CREATE_KB" ]; then
   echo "AGENT=0 なので CREATE_KB は効かない（Knowledge Base は agent の一部）"
   CREATE_KB=""
@@ -367,9 +374,9 @@ endpoints_for() {  # endpoints_for <ルート>  そのルートが呼ぶ AWS の
     pipeline/lab) add_endpoints ecr.api ecr.dkr ;;
     # Telegraf（ECS）: イメージを ECR から引き、ログを CloudWatch に書く。MSK は VPC の中
     pipeline/stream) add_endpoints ecr.api ecr.dkr logs ;;
-    # Spark: S3 Tables の API、put_events、ドライバのログ（MSK / Neptune は VPC の中で、S3 は gateway）
-    pipeline/analytics) add_endpoints s3tables events logs ;;
-    # ワーカー: SQS、S3 Tables（修復案の証跡）、ECR、ログ、Runtime、Gateway
+    # Spark: S3 Tables の API、ドライバのログ（MSK は VPC の中で、S3 は gateway）
+    pipeline/analytics) add_endpoints s3tables logs ;;
+    # ワーカー: SQS（アラートは SNS → SQS で届く。SNS からの配信はエンドポイントを通らない）、S3 Tables（修復案の証跡）、ECR、ログ、Runtime、Gateway
     workflow) add_endpoints sqs s3tables ecr.api ecr.dkr logs bedrock-agentcore bedrock-agentcore.gateway ;;
   esac
 }
@@ -378,6 +385,7 @@ for r in $ROOTS; do endpoints_for "$r"; done
 if [ -n "$AGENT" ] && [ -n "$CREATE_KB" ]; then add_endpoints bedrock-agent-runtime; fi   # KB の Retrieve
 if [ -z "$SKIP_ANALYTICS" ] && [ -n "$SINK_PROMETHEUS" ]; then add_endpoints aps-workspaces; fi   # remote write とツールと Grafana の query
 if [ -n "$GRAFANA$SPLUNK_ON_ECS" ]; then add_endpoints ecr.api ecr.dkr; fi   # analytics の ECS（Grafana / Splunk）のイメージ。secrets は ssm
+if [ -n "$GRAFANA_ALERTS$SPLUNK_ON_ECS" ]; then add_endpoints sns; fi   # Grafana / Splunk のタスクがアラートを SNS のトピックへ publish する
 endpoint_count() { set -- $ENDPOINTS; echo $#; }
 if [ -n "$ENDPOINTS_MULTI_AZ" ]; then ENDPOINT_AZS=2; else ENDPOINT_AZS=1; fi
 echo "インターフェース型エンドポイント（$(endpoint_count) 本 × ${ENDPOINT_AZS} AZ）: $ENDPOINTS"
@@ -445,8 +453,8 @@ TEMPORAL_TAG=1.9.1   # terraform/workflow の temporal_image_tag の既定値。
 # ---- 2. イメージ ----------------------------------------------------------------
 log "2. イメージ（ECR に無いタグだけ作る）"
 NEED_AGENT=""; NEED_SRLINUX=""; NEED_MULTITOOL=""; NEED_WORKER=""; NEED_TEMPORAL=""; NEED_TELEGRAF=""; NEED_GRAFANA=""; NEED_SPLUNK=""
-# telegraf / grafana は Dockerfile のあるディレクトリの中身からタグを作る（中身を変えれば次の ops/up.sh が作り直す）
-TELEGRAF_TAG=""; GRAFANA_TAG=""
+# telegraf / grafana / splunk は Dockerfile のあるディレクトリの中身からタグを作る（中身を変えれば次の ops/up.sh が作り直す）
+TELEGRAF_TAG=""; GRAFANA_TAG=""; SPLUNK_TAG=""
 if [ -n "$AGENT" ]; then
   if ecr_has "$PREFIX-agent" "$IMAGE_TAG"; then echo "agent:$IMAGE_TAG はある（作り直すなら IMAGE_TAG を変える）"; else NEED_AGENT=1; fi
 fi
@@ -467,7 +475,8 @@ if [ -n "$GRAFANA" ]; then
   if ecr_has "$PREFIX-grafana" "$GRAFANA_TAG"; then echo "grafana:$GRAFANA_TAG はある"; else NEED_GRAFANA=1; fi
 fi
 if [ -n "$SPLUNK_ON_ECS" ]; then
-  if ecr_has "$PREFIX-splunk" "$SPLUNK_VERSION"; then echo "splunk:$SPLUNK_VERSION はある"; else NEED_SPLUNK=1; fi
+  SPLUNK_TAG=$(dir_tag "$SPLUNK_VERSION" splunk) || die "splunk/ のタグを作れなかった"
+  if ecr_has "$PREFIX-splunk" "$SPLUNK_TAG"; then echo "splunk:$SPLUNK_TAG はある"; else NEED_SPLUNK=1; fi
 fi
 NEED_LAB="$NEED_SRLINUX$NEED_MULTITOOL"
 if [ -z "$NEED_AGENT$NEED_LAB$NEED_WORKER$NEED_TEMPORAL$NEED_TELEGRAF$NEED_GRAFANA$NEED_SPLUNK" ]; then
@@ -475,7 +484,7 @@ if [ -z "$NEED_AGENT$NEED_LAB$NEED_WORKER$NEED_TEMPORAL$NEED_TELEGRAF$NEED_GRAFA
 else
   docker info >/dev/null 2>&1 || die "dockerd に接続できない（WSL なら sudo service docker start。docs/setup.md「Terraform を打つ PC 側」）"
   # agent / worker / grafana は RUN があるので、x86_64 の PC では QEMU（binfmt）が要る（lab のイメージは上流の arm64 をミラーするだけで、
-  # telegraf は COPY だけ）
+  # telegraf は COPY だけ。splunk も COPY だけで amd64 なので、arm64 の PC（Apple シリコン）でもエミュレーション無しで作れる）
   if [ -n "$NEED_AGENT$NEED_WORKER$NEED_GRAFANA" ] && ! docker buildx ls | grep -q 'linux/arm64'; then
     die "docker buildx ls の Platforms に linux/arm64 が無い（docs/setup.md「WSL2（Ubuntu）」の binfmt の行）"
   fi
@@ -511,10 +520,9 @@ else
     docker buildx build --platform linux/arm64 --build-arg "GRAFANA_VERSION=$GRAFANA_VERSION" -t "$REG/$PREFIX-grafana:$GRAFANA_TAG" --push grafana/
   fi
   if [ -n "$NEED_SPLUNK" ]; then
-    # Splunk Enterprise の公式イメージ（amd64 だけ。約 2〜3 GB）。Fargate は VPC の中から ECR しか引けないのでミラーする
-    docker pull --platform linux/amd64 "splunk/splunk:$SPLUNK_VERSION"
-    docker tag "splunk/splunk:$SPLUNK_VERSION" "$REG/$PREFIX-splunk:$SPLUNK_VERSION"
-    docker push "$REG/$PREFIX-splunk:$SPLUNK_VERSION"
+    # Splunk Enterprise の公式イメージ（amd64 だけ。約 2〜3 GB）に検知のアプリ（splunk/netops_alerts）を足す。
+    # Fargate は VPC の中から ECR しか引けず、タスクは Splunkbase にも出られないので、アプリはビルドのときに入れる
+    docker buildx build --platform linux/amd64 --build-arg "SPLUNK_VERSION=$SPLUNK_VERSION" -t "$REG/$PREFIX-splunk:$SPLUNK_TAG" --push splunk/
   fi
 fi
 
@@ -550,7 +558,7 @@ for pair in 'agent aws_bedrockagent_knowledge_base\.' 'pipeline/analytics aws_pr
   [ -f "terraform/$r/terraform.tfstate" ] || continue
   tf_init "$r"
   if tf "$r" state list 2>/dev/null | grep -q "^${pair#* }"; then
-    case "$pair" in agent*) add_endpoints bedrock-agent-runtime ;; *prometheus*) add_endpoints aps-workspaces ;; *) add_endpoints ecr.api ecr.dkr ;; esac
+    case "$pair" in agent*) add_endpoints bedrock-agent-runtime ;; *prometheus*) add_endpoints aps-workspaces ;; *) add_endpoints ecr.api ecr.dkr sns ;; esac
   fi
 done
 MAIN_VARS+=(-var "interface_endpoints=[\"$(printf '%s' "$ENDPOINTS" | sed 's/ /","/g')\"]")
@@ -610,7 +618,7 @@ log "4-2. Web の部品を s3://$KB_BUCKET/web/ に置く"
 # app.py が import する web/ の .py（chat / config / incident_view / topology_view）も全部置く。app.py だけだと Web が起動のたびに落ちる
 for f in web/*.py; do aws s3 cp --only-show-errors "$f" "s3://$KB_BUCKET/web/${f#web/}"; done
 aws s3 cp --only-show-errors web/requirements.txt "s3://$KB_BUCKET/web/requirements.txt"
-for f in toolkit topology anomalies graph proposals; do aws s3 cp --only-show-errors "agent/$f.py" "s3://$KB_BUCKET/web/$f.py"; done
+for f in toolkit topology graph proposals; do aws s3 cp --only-show-errors "agent/$f.py" "s3://$KB_BUCKET/web/$f.py"; done
 aws s3 cp --only-show-errors agent/data/ "s3://$KB_BUCKET/web/data/" --recursive
 aws s3 sync --only-show-errors wheels/ "s3://$KB_BUCKET/web/wheels/"
 
@@ -740,8 +748,9 @@ if [ -z "$SKIP_STREAM" ]; then
 fi
 
 # ---- 7-3. graph と投入 --------------------------------------------------------------
-# Spark のジョブ（7-5）より先にトポロジを入れる。後だと、起動直後の検知が Neptune に無い機器に当たって「未登録」の頂点ができる
-# （graph.seed が入れ直すときに引き継ぐので壊れはしないが、画面に一時的に未登録が出る）。graph は 3-2 から裏で走っていて、
+# 検知（7-4 の Grafana / Splunk）より先に graph（status の Lambda とトピックの購読）とトポロジを入れる。後だと、購読が無いうちのアラートは
+# Lambda に届かず（次に同じ状態の知らせが来るまで、画面の status が UP のまま）、トポロジが空のうちのアラートは「未登録」の頂点になって
+# UNREGISTERED の警告が出る（status は投入のときに引き継ぐので消えないが、登録漏れと見分けが付かない）。graph は 3-2 から裏で走っていて、
 # stream（MSK に 20〜30 分）の方が長いので、ここで待ってもたいてい待たない
 if [ -n "$GRAPH_PID" ]; then
   log "7-3. graph の apply が終わるのを待つ"
@@ -762,9 +771,7 @@ fi
 if [ -z "$SKIP_ANALYTICS" ]; then
   log "7-4. analytics（terraform/pipeline/analytics。EMR Serverless と格納先: ${SINKS}。数分）"
   # ドライバーのログは CloudWatch Logs へ出す（terraform/base/core の logs のエンドポイントで届く）
-  # 検知の device map（別名=機器名,...）も lab の定義から作る。trap には sysName が無いので、送り元の IP から機器名を引くのに要る
-  DEVICE_MAP=$("${PY[@]}" lab/lab_topology.py lab --device-map) || die "lab/lab_topology.py が lab の定義から device map を作れなかった"
-  ANALYTICS_VARS=(-var "sinks=[$SINKS_TF]" -var "device_map=$DEVICE_MAP")
+  ANALYTICS_VARS=(-var "sinks=[$SINKS_TF]")
   if [ -n "$GRAFANA" ]; then
     # Grafana の admin のパスワードは SSM に乱数で作る（Terraform の state に載せない。タスクが起動時に実行ロールで読む）
     ensure_secret "/$PREFIX/grafana/admin-password" password "Grafana admin password (created by ops/up.sh)"
@@ -774,9 +781,12 @@ if [ -z "$SKIP_ANALYTICS" ]; then
     # Splunk を ECS で立てる。管理者のパスワードと HEC の token は SSM に乱数で作る（token は Splunk が GUID の形を求める）。
     # Splunk のタスクが起動時に読んで設定し、Spark のジョブも同じ token を読む
     echo "Splunk Enterprise（splunk/splunk:$SPLUNK_VERSION・試用ライセンス）を立てる。Splunk のライセンスと Splunk General Terms に同意して起動する"
+    # 検知の device map（別名=機器名,...）も lab の定義から作る。trap と gNMI のイベントには sysName が無いので、
+    # Splunk のアラートアクションが送り元の IP から機器名を引くのに要る（タスクの環境変数 DEVICE_MAP。変わればタスクが入れ替わる）
+    DEVICE_MAP=$("${PY[@]}" lab/lab_topology.py lab --device-map) || die "lab/lab_topology.py が lab の定義から device map を作れなかった"
     ensure_secret "/$PREFIX/splunk/admin-password" password "Splunk admin password (created by ops/up.sh)"
     ensure_secret "/$PREFIX/splunk/hec-token" uuid "Splunk HEC token (created by ops/up.sh)"
-    ANALYTICS_VARS+=(-var "splunk_image_tag=$SPLUNK_VERSION" -var "splunk_index=$SPLUNK_INDEX")
+    ANALYTICS_VARS+=(-var "splunk_image_tag=$SPLUNK_TAG" -var "splunk_index=$SPLUNK_INDEX" -var "device_map=$DEVICE_MAP")
   fi
   tf_apply pipeline/analytics "${ANALYTICS_VARS[@]}"
   APP_ID=$(tf pipeline/analytics output -raw application_id); echo "APP_ID=$APP_ID"
@@ -805,8 +815,8 @@ if [ -z "$SKIP_ANALYTICS" ]; then
   log "7-5. Spark のストリーミングジョブ（Kafka → ${SINKS}）を起こす（同じスクリプトと引数で動いていれば何もしない）"
   JOB_DRIVER=$(tf pipeline/analytics output -raw job_driver_json)
   JOB_OVERRIDES=$(tf pipeline/analytics output -raw configuration_overrides_json)
-  # スクリプトと引数（device map・格納先・checkpoint など）のハッシュをジョブのタグ SpecHash に付けておき、動いているジョブと違えば
-  # 止めて起こし直す。STREAMING のジョブは起動したときの引数のまま動き続けるので、比べないと lab の機器を変えても古い device map のまま
+  # スクリプトと引数（格納先・checkpoint など）のハッシュをジョブのタグ SpecHash に付けておき、動いているジョブと違えば
+  # 止めて起こし直す。STREAMING のジョブは起動したときの引数のまま動き続けるので、比べないと格納先を変えても古い引数のまま
   # （checkpoint から続きを読むので、止めて起こし直してもデータは落ちない）
   JOB_SPEC=$("${PY[@]}" -c 'import hashlib, sys; h = hashlib.sha256(open(sys.argv[1], "rb").read()); [h.update(a.encode()) for a in sys.argv[2:]]; print(h.hexdigest()[:16])' \
     "$SPARK_SCRIPT" "$JOB_DRIVER" "$JOB_OVERRIDES")

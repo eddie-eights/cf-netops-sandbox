@@ -4,6 +4,8 @@
 # Amazon Managed Grafana はサインインに IAM Identity Center か SAML の IdP が要り、このアカウントはどちらも無いので使わない。
 # イメージは grafana/Dockerfile（公式の grafana にデータソースの plugin と provisioning を焼き込んだもの。AWS の外へ出る経路が無いので起動時に plugin を落とせない）。
 # データソースは SigV4（タスクロール）で、Prometheus の API は aps-workspaces、OpenSearch は土台の aoss の VPC エンドポイントを通る。
+# アラート（grafana/provisioning/alerting。Prometheus のメトリクスを見るルール）は SNS のコンタクトポイントから土台のトピック
+# （terraform/base/core の alerts.tf）へ publish する。これもタスクロールの SigV4 で、sns のエンドポイントを通る。
 # 開き方は output grafana_port_forward_command（web の EC2 を踏み台にした SSM のポートフォワード。PoC 用）。admin のパスワードは
 # ops/up.sh が作る SSM の SecureString（output grafana_password_command）。ダッシュボードは provisioning だけで、UI で変えたものはタスクと一緒に消える
 
@@ -70,6 +72,8 @@ resource "aws_ecs_task_definition" "grafana" {
         { name = "PROMETHEUS_URL", value = local.grafana_prometheus_url },
         { name = "OPENSEARCH_URL", value = local.opensearch_endpoint },
         { name = "OPENSEARCH_INDEX", value = local.opensearch_index },
+        # アラートの送り先（grafana/start.sh は PROMETHEUS_URL とこれがあるときだけ alerting の provisioning を入れる）
+        { name = "ALERTS_TOPIC_ARN", value = local.alerts_topic_arn },
       ]
       secrets = [
         { name = "GF_SECURITY_ADMIN_PASSWORD", valueFrom = local.grafana_password_arn },
@@ -89,6 +93,10 @@ resource "aws_ecs_task_definition" "grafana" {
     precondition {
       condition     = try(data.terraform_remote_state.ecr.outputs.grafana_repository_url, "") != ""
       error_message = "terraform/base/ecr の state から grafana_repository_url が読めない。terraform/base/ecr を先に apply する（ops/up.sh の手順 1）。"
+    }
+    precondition {
+      condition     = local.alerts_topic_arn != ""
+      error_message = "terraform/base/core の state から alerts_topic_arn が読めない（2026-10-02 より前の土台）。terraform/base/core を先に apply する。"
     }
   }
 }
@@ -162,7 +170,7 @@ resource "aws_iam_role" "grafana_task" {
   count = local.create_grafana ? 1 : 0
 
   name               = "${local.name_prefix}-grafana-task"
-  description        = "Grafana task - query the Prometheus workspace and read the OpenSearch logs collection (SigV4)"
+  description        = "Grafana task - query the Prometheus workspace, read the OpenSearch logs collection and publish alerts to the SNS topic (SigV4)"
   assume_role_policy = data.aws_iam_policy_document.ecs_tasks_trust.json
 }
 
@@ -188,6 +196,13 @@ resource "aws_iam_role_policy" "grafana_task" {
         Action   = ["aoss:APIAccessAll"]
         Resource = try(aws_opensearchserverless_collection.logs[0].arn, "")
       }] : s if local.sink_opensearch],
+      # アラートのコンタクトポイント（SNS）。トピックの鍵は AWS 管理の aws/sns なので kms の許可は要らない
+      [for s in [{
+        Sid      = "PublishAlerts"
+        Effect   = "Allow"
+        Action   = ["sns:Publish"]
+        Resource = local.alerts_topic_arn
+      }] : s if local.alerts_topic_arn != ""],
     )
   })
 }

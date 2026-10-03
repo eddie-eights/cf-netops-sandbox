@@ -1,0 +1,81 @@
+# Grafana のアラート（メトリクスからの検知）。発火と解消を SNS のトピック（terraform/base/core の alerts.tf）へ publish する。
+# 受け手は SQS → ワークフロー（workflow/worker.py の starter）と、トポロジの status を書く Lambda（graph/status_handler.py）。
+# grafana/start.sh が PROMETHEUS_URL と ALERTS_TOPIC_ARN の両方があるときだけ並べる。連絡先の ${...} は起動時に Grafana が環境変数で埋める。
+# テンプレートとルールの中の $i / $labels はそのまま渡る（$$ と書くと「Invalid format of the submitted template」で Grafana が起動しない。13.2.2 で実測）。
+# 画面からは変えられない（provisioning したルール・連絡先・ポリシーは読み取り専用。変えるならこのファイルを変えてイメージを作り直す）
+apiVersion: 1
+
+# ---- ルール。SNMP のポーリング（Telegraf 10 秒おき → Kafka → Spark → AMP）の ifOperStatus が 2（down）の IF を link_down にする。
+# 見ないもの: ループバック、管理ポート、サブインタフェース（"." 付き。親と同じ上げ下げ）、admin-state が disable のポート（oper は down だが異常ではない）。
+# 式は絞り込まず値で判定する（== 2 で絞ると、直ったときに系列が消えるだけで、解消が「系列が無い評価 2 回」ぶん遅れる）。
+# データが無い・クエリが失敗したときは直前の状態のまま（分からないときに発火も解消もしない）。
+# 機器ごと止まって系列が途切れたときは、Grafana が古い系列として解消を送る（機器の停止はここでは検知しない）
+groups:
+  - orgId: 1
+    name: netops-link
+    folder: netops-alerts
+    interval: 30s
+    rules:
+      - uid: netops-link-down
+        title: link_down
+        condition: C
+        for: 0s
+        noDataState: KeepLast
+        execErrState: KeepLast
+        labels:
+          kind: link_down
+        annotations:
+          summary: '{{ $labels.sysName }} {{ $labels.ifName }} is down'
+        data:
+          - refId: A
+            datasourceUid: amp
+            relativeTimeRange:
+              from: 300
+              to: 0
+            model:
+              refId: A
+              expr: 'snmp_interface_ifOperStatus{ifName!~"(lo|mgmt).*|.*[.].*"} unless on (sysName, ifName) (snmp_interface_ifAdminStatus == 2)'
+              instant: true
+              range: false
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    type: within_range
+                    params: [1.5, 2.5]
+
+# ---- 連絡先。SNS へ SigV4 で publish する（鍵は書かない = タスクロール。sns へは terraform/base/core のインターフェース型エンドポイントを通る）
+contactPoints:
+  - orgId: 1
+    name: netops-sns
+    receivers:
+      - uid: netops-sns
+        type: sns
+        disableResolveMessage: false
+        settings:
+          topic_arn: ${ALERTS_TOPIC_ARN}
+          sigv4:
+            region: ${AWS_REGION}
+          subject: netops alert
+          message: '{{ template "netops.sns" . }}'
+
+# ---- 通知ポリシー。IF ごとに 1 通（機器 + IF でまとめる）。発火はすぐ送り、解消は次の group_interval で送る。
+# 直らないあいだは repeat_interval ごとに同じ starts_at で送り直す（ワークフローは同じ id なので二重には起きない）
+policies:
+  - orgId: 1
+    receiver: netops-sns
+    group_by: ['alertname', 'sysName', 'ifName']
+    group_wait: 0s
+    group_interval: 30s
+    repeat_interval: 4h
+
+# ---- 本文。workflow/rules.py の alerts_from_message が読む形（Splunk の splunk/netops_alerts/bin/netops_sns.py と同じ形）
+templates:
+  - orgId: 1
+    name: netops.sns
+    template: |
+      {{ define "netops.sns" }}{"source":"grafana","alerts":[{{ range $i, $a := .Alerts }}{{ if $i }},{{ end }}{"status":{{ printf "%q" $a.Status }},"device_id":{{ printf "%q" $a.Labels.sysName }},"kind":{{ printf "%q" $a.Labels.kind }},"target":{{ printf "%q" $a.Labels.ifName }},"detail":{{ printf "%q" (printf "%s is down (grafana)" $a.Labels.ifName) }},"starts_at":{{ $a.StartsAt.Unix }}}{{ end }}]}{{ end }}

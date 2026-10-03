@@ -1,4 +1,4 @@
-"""Kafka（MSK、IAM 認証）のトピックを読み、選んだ格納先に流し続け、異常を検知して EventBridge に出す Spark Structured Streaming のジョブ（Kafka の 4 分岐 + 検知）。
+"""Kafka（MSK、IAM 認証）のトピックを読み、選んだ格納先に流し続ける Spark Structured Streaming のジョブ（Kafka の 4 分岐）。
 
 EMR Serverless の上で動く（terraform/pipeline/analytics）。起動は ops/up.sh の a-3（start-job-run）で、引数は terraform/pipeline/analytics の
 output job_driver_json が組み立てる（--bootstrap / --checkpoint / --sinks と、格納先ごとの --iceberg-table などの値）。
@@ -21,17 +21,10 @@ Telegraf の JSON 出力（outputs.kafka の data_format = "json"、json_timesta
 の形。列に分けるのは timestamp / name / agent_host / host だけで、tags と fields は JSON 文字列のまま入れる
 （機器やメトリクスが増えてもテーブルの列を変えないため。terraform/pipeline/analytics/tables.tf の列と同じ）。
 
-異常の検知（detect）は格納先とは別に常に動く 4 本目のクエリ（検知したら EventBridge にイベントを出す）:
-  metrics の interface で ifOperStatus が down のインタフェース（ポーリング）と、traps の linkDown（即時）を open にし、up に戻ったポーリングと
-  linkUp で resolved にする。gnmi の bgp_neighbor（session_state が established でない → bgp_down。target は相手の IP）と
-  isis_interface（IS-IS の IF の oper_state が up でない → isis_down。target はサブインタフェース）も同じ仕組みで開閉する（Telegraf の inputs.gnmi。on_change）。異常の「いま」は Neptune（terraform/pipeline/graph）の頂点 label=anomaly（id は <機器>#<種別>#<インタフェース>）、
-  開いた・閉じたの履歴は S3 Tables の anomaly_events（--anomaly-events-table）に追記する（証跡。2026-09-24 に DynamoDB をやめた）。
-  新しく open になったときだけ EventBridge の既定のバスに Source <接頭辞>.spark（--event-source）/ DetailType AnomalyOpened を put_events する
-  （terraform/workflow の events.tf がルールで SQS に流し、Temporal の worker が調査ワークフローを起こす）。resolved にしたときは AnomalyResolved。
-  イベントが届いたかは頂点の notified に残し、届かなかったものは次のバッチで出し直す。link 以外の trap は TRAP_TTL 秒 次の trap が来なければ
-  resolved にする（「直った」の trap が無いので）。coldStart / warmStart（IGNORED_TRAPS）は異常にしない。SR Linux の ifTable にある未使用の物理ポート（ifAdminStatus が down）と
-  サブインタフェース（ethernet-1/1.0）は見ない。
-  機器名は sysName タグ（小文字・ドメイン無しに揃える）> --device-map（別名=機器名,...。ops/up.sh が lab の定義から作る）の順で引く。以前 terraform/pipeline/stream の detector Lambda がしていたことをここに寄せた。
+異常の検知はここではしない（2026-10-02 にやめた。detect のクエリと Neptune の anomaly 頂点、S3 Tables の anomaly_events、EventBridge への put_events を消した）。
+検知と相関は格納先の側でする: Grafana のアラートルール（AMP の ifOperStatus。grafana/provisioning/alerting）と Splunk の保存済みサーチ
+（trap・gNMI の BGP / IS-IS。splunk/netops_alerts）が SNS のトピック <接頭辞>-alerts に出し、ワークフロー（SQS）と
+トポロジの status（graph の Lambda）がそれを受ける。
 
 HTTP の送信は driver でまとめて行う（マイクロバッチを collect する。PoC の量（機器数台、10 秒間隔）なら 1 分に数百行）。
 量が増えたら foreachPartition に移す。remote write の protobuf と snappy は外部ライブラリ無しで組む
@@ -78,13 +71,6 @@ def parse_args(argv):
     p.add_argument("--splunk-token-parameter", default="", help="splunk: HEC の token を入れた SSM の SecureString の名前（/<接頭辞>/splunk/hec-token。値は起動時に読み、ログに出さない）")
     p.add_argument("--splunk-index", default="", help="splunk: イベントを入れる index（空なら token の既定の index）")
     p.add_argument("--splunk-skip-verify", action="store_true", help="splunk: HEC の TLS 証明書を検証しない（自己署名の Splunk Enterprise の検証用。既定は検証する）")
-    p.add_argument("--neptune-endpoint", default="", help="detect: 異常の「いま」を書く Neptune（host:port。terraform/pipeline/graph。空なら検知しない）")
-    p.add_argument("--anomaly-events-table", default="", help="detect: 異常の開閉の履歴を追記する Iceberg のテーブル（catalog.namespace.table。--neptune-endpoint があるなら要る）")
-    p.add_argument("--device-map", default="", help="detect: IP や別名から機器名を引く表（別名=機器名,... 。ops/up.sh が lab/lab_topology.py --device-map で作る。sysName タグがあればそちら）")
-    p.add_argument("--event-bus", default="default", help="detect: 新しい異常を put_events する EventBridge のバス名")
-    # バスは既定の 1 本を共有するので、Source を接頭辞ごとに変えないと、1 つの AWS アカウントを何人かで使ったとき
-    # 他の人の異常が自分のルール（terraform/workflow と terraform/pipeline/graph）に当たる。terraform が <接頭辞>.spark を渡す
-    p.add_argument("--event-source", default=EVENT_SOURCE, help="detect: put_events の Source（既定 netops.spark。terraform は <接頭辞>.spark を渡す）")
     args = p.parse_args(argv)
     args.sinks = [s.strip() for s in args.sinks.split(",") if s.strip()]
     bad = [s for s in args.sinks if s not in SINKS]
@@ -96,11 +82,8 @@ def parse_args(argv):
         for k in need[s]:
             if not getattr(args, k):
                 p.error(f"--sinks に {s} があるので --{k.replace('_', '-')} が要る")
-    if args.neptune_endpoint and not args.anomaly_events_table:
-        p.error("--neptune-endpoint があるので --anomaly-events-table が要る（開閉の履歴を残さずに検知しない）")
     if not args.checkpoint.endswith("/"):
         args.checkpoint += "/"
-    args.device_map = parse_device_map(args.device_map)
     for k in ("metric_topics", "log_topics"):
         setattr(args, k, ",".join(t.strip() for t in getattr(args, k).split(",") if t.strip()))
         if not getattr(args, k):
@@ -109,8 +92,8 @@ def parse_args(argv):
 
 
 def sink_topics(sink, metric_topics, log_topics):
-    """格納先が購読する Kafka のトピック（カンマ区切り）。iceberg / splunk / detect は全部、prometheus はメトリクス、opensearch はログ"""
-    if sink in ("iceberg", "splunk", "detect"):
+    """格納先が購読する Kafka のトピック（カンマ区切り）。iceberg / splunk は全部、prometheus はメトリクス、opensearch はログ"""
+    if sink in ("iceberg", "splunk"):
         return ",".join(dict.fromkeys(metric_topics.split(",") + log_topics.split(",")))
     if sink == "prometheus":
         return metric_topics
@@ -485,455 +468,13 @@ def make_prometheus_sender(url, region):
     return send
 
 
-# ---------------------------------------------------------------- detect（異常 → S3 Tables の履歴 + Neptune + EventBridge）
-LINK_DOWN, LINK_UP = ".1.3.6.1.6.3.1.1.5.3", ".1.3.6.1.6.3.1.1.5.4"   # IF-MIB linkDown / linkUp の trap OID
-# 機器が起きた知らせで、異常ではない（lab の up のたびに来る）。異常にしない。
-# 知らない trap は異常として開く（許可リストにすると、知らない本物の異常を黙って捨てる）ので、ここは「捨てる」側の一覧
-# （net-snmp の snmpd の停止・再起動の知らせ 1.3.6.1.4.1.8072.4.0.2 / .3 も、FRR + snmpd だった 2026-09-26 までの名残として残す）
-IGNORED_TRAPS = {
-    ".1.3.6.1.6.3.1.1.5.1",       # SNMPv2-MIB coldStart
-    ".1.3.6.1.6.3.1.1.5.2",       # SNMPv2-MIB warmStart
-    ".1.3.6.1.4.1.8072.4.0.2",    # NET-SNMP-AGENT-MIB nsNotifyShutdown
-    ".1.3.6.1.4.1.8072.4.0.3",    # NET-SNMP-AGENT-MIB nsNotifyRestart
-}
-# link 以外の trap には「直った」の知らせが無い。最後の trap から TRAP_TTL 秒たったら resolved にする（見回りは TRAP_SWEEP 秒に 1 回）。
-# 以前は一度開くと閉じず、graph の status Lambda が機器を ALARM のままにしていた
-TRAP_TTL = 600
-TRAP_SWEEP = 60
-# SR Linux の SNMP の ifOperStatus は実際の oper-state より 15〜20 秒遅れる（2026-09-27 に lab で 5 秒おきに実測）。
-# linkDown / linkUp の trap から POLL_LAG 秒のあいだの同じ IF のポーリングは古い値とみなして使わない。使うと、落ちた直後の up が trap の down を
-# 閉じ（短い障害で物理 IF の link_down が開かない）、戻った直後の down が閉じたばかりの異常を開き直す（調査ワークフローが空振りで起きる）
-POLL_LAG = 30
-EVENT_RETRIES = 3   # put_events で落ちた entry（FailedEntryCount）だけ打ち直す回数。届かなかったものは notified=false のまま次のバッチで出し直す
-EVENT_SOURCE = "netops.spark"          # --event-source の既定。terraform は接頭辞に合わせて <接頭辞>.spark を渡す
-EVENT_DETAIL_TYPE = "AnomalyOpened"
-EVENT_RESOLVED_TYPE = "AnomalyResolved"   # open → resolved にした瞬間に出す（terraform/pipeline/graph の status Lambda が回線を UP に戻す）
-NEPTUNE_IDS_PER_QUERY = 100   # g.V(id, id, …) に並べる id の数
-# S3 Tables の anomaly_events の列（terraform/pipeline/analytics/tables.tf と同じ順・同じ型）。時刻は epoch 秒で組み、書くときに timestamptz にする
-# （Spark の TimestampType は Iceberg の timestamptz。zone 無しの timestamp の列には既定の設定では書けない）
-ANOMALY_EVENT_COLUMNS = (
-    ("event_id", "string"), ("anomaly_id", "string"), ("occurrence_id", "string"), ("event", "string"),
-    ("device_id", "string"), ("kind", "string"), ("target", "string"), ("source", "string"), ("detail", "string"),
-    ("first_seen", "timestamptz"), ("resolved_at", "timestamptz"), ("event_time", "timestamptz"),
-)
-
-
-def parse_device_map(text):
-    """"203.0.113.31=dc1-leaf-01,dc1-leaf-01.example.net=dc1-leaf-01" → {別名（小文字）: 機器名}。= の無い要素は捨てる。
-    ops/up.sh が lab/lab_topology.py --device-map（lab の定義の全機器の管理 IP・全インタフェースと lo のアドレス・hostname）から作って渡す"""
-    out = {}
-    for p in (text or "").split(","):
-        k, sep, v = p.partition("=")
-        if sep and k.strip() and v.strip():
-            out[k.strip().lower()] = v.strip()
-    return out
-
-
-IPV4_RE = re.compile(r"^\d{1,3}(\.\d{1,3}){3}$")
-
-
-def device(m, devmap):
-    """機器名。sysName タグ（小文字にして device map を引き、無ければドメインを落とす）> device map（agent_host か source の IP）> IP そのもの > "?"。
-    sysName が FQDN や大文字でもトポロジの device_id（小文字の短い名前）に合わせる"""
-    t = m.get("tags") or {}
-    name = str(t.get("sysName") or "").strip().lower()
-    if name:
-        short = name if IPV4_RE.match(name) else name.split(".", 1)[0]
-        return devmap.get(name) or devmap.get(short) or short
-    ip = str(t.get("agent_host") or t.get("source") or "").strip().lower()
-    return devmap.get(ip, ip or "?")
-
-
-def _oid(v):
-    """数値 OID を ".1.3.6..." の形に揃える（Telegraf は MIB が無いと "iso.3.6..." と書く。下の varbind と同じ事情）"""
-    v = str(v or "").strip()
-    if v.startswith("iso."):
-        return ".1." + v[4:]
-    if v[:2] == "1.":
-        return "." + v
-    return v
-
-
-def _gnmi_field(f, leaf):
-    """Telegraf の inputs.gnmi の field。購読したパスより下は "a/b/leaf" のように / でつながるので、末尾の名前で引く（- は _ に直してある）。leaf は名前か名前の組"""
-    leaves = (leaf,) if isinstance(leaf, str) else tuple(leaf)
-    for want in leaves:
-        for k, v in f.items():
-            if str(k).replace("-", "_").rsplit("/", 1)[-1] == want:
-                return v
-    return None
-
-
-def _gnmi_tag(t, key):
-    """Telegraf の inputs.gnmi のタグ。パスの鍵（neighbor[peer-address=x]）は peer_address か neighbor_peer_address の名前で付く（版で違う）ので末尾で引く"""
-    v = t.get(key)
-    if v is None:
-        for k, val in t.items():
-            if str(k).replace("-", "_").endswith(key):
-                v = val
-                break
-    return str(v or "").strip()
-
-
-# measurement → (種別, 状態の field（複数なら先に見つかった方）, 対象のタグ, 正常な値（小文字で一致）)
-GNMI_KINDS = {"bgp_neighbor": ("bgp_down", "session_state", "peer_address", "established"),
-              "isis_interface": ("isis_down", "oper_state", "interface_name", "up"),
-              "isis_adjacency": ("isis_down", ("state", "adjacency_state"), "interface_name", "up")}
-# isis_interface が本命（IS-IS の IF の oper-state。…/interface[interface-name=*]/oper-state を on_change。up / down が届く）。
-# isis_adjacency（…/interface/adjacency の state）は残してあるが、実機（SR Linux 26.7.2 / Telegraf 1.40。2026-09-27 に fail-main で実測）では
-# 隣接は down を経ずに消え（gNMI の delete）、Telegraf は delete を載せないので isis_down が出ない。state=down の行が来たときだけ効く
-
-
-def events(m, devmap):
-    """1 メトリクス（Telegraf の JSON）から (機器, 種別, 対象（IF / 相手の IP）, 開く/閉じる, 元) の列を出す。関係ない行は []"""
-    if not isinstance(m, dict):
-        return []
-    name, f, t = m.get("name"), m.get("fields") or {}, m.get("tags") or {}
-    if name in GNMI_KINDS:
-        kind, leaf, key, good = GNMI_KINDS[name]
-        state, target = _gnmi_field(f, leaf), _gnmi_tag(t, key)
-        if state is None or not target:
-            return []
-        return [(device(m, devmap), kind, target, str(state).strip().lower() != good, "gnmi")]
-    if name == "interface" and "ifOperStatus" in f:
-        # IF の鍵は ifName（SR Linux の ifDescr は「名前 + description」で、トポロジの IF 名と合わない）。
-        # 見ないもの: ループバック、管理ポート（mgmt0）、サブインタフェース（ethernet-1/1.0 など "." 付き。親と同じ上げ下げ）、
-        # admin-state が disable のポート（SR Linux の ifTable は未使用の物理ポートも全部出す。oper は down だが異常ではない）
-        ifn = str(t.get("ifName") or t.get("ifDescr") or t.get("ifIndex") or "?")
-        if ifn.startswith(("lo", "mgmt")) or "." in ifn:
-            return []
-        try:
-            if int(float(f.get("ifAdminStatus", 1))) == 2:
-                return []
-            down = int(float(f["ifOperStatus"])) == 2
-        except (TypeError, ValueError):
-            return []
-        return [(device(m, devmap), "link_down", ifn, down, "poll")]
-    if name == "snmp_trap":
-        oid = _oid(t.get("oid", ""))
-        if oid in (LINK_DOWN, LINK_UP):
-            # MIB が無いと varbind の名前は数値 OID（末尾に ifIndex が付く）。ifName（SR Linux の linkDown の varbind）> ifDescr > ifIndex の順。
-            # lab の Telegraf 1.40 は数値 OID を "iso.3.6.1.2.1.2.2.1.2.38" と書く（先頭が ".1." でなく "iso."。2026-09-18 実機）ので
-            # 先頭を揃えてから見る。揃えないと target が "?" になり、ポーリングの ethernet-1/1 と別の異常として二重に開いていた
-            fields = {(".1." + k[4:] if k.startswith("iso.") else k): v for k, v in f.items()}
-            ifn = "?"
-            for pre in ("ifName", ".1.3.6.1.2.1.31.1.1.1.1", "ifDescr", ".1.3.6.1.2.1.2.2.1.2", "ifIndex", ".1.3.6.1.2.1.2.2.1.1"):
-                v = [v for k, v in fields.items() if k == pre or k.startswith(pre + ".")]
-                if v:
-                    ifn = str(v[0])
-                    break
-            return [(device(m, devmap), "link_down", ifn, oid == LINK_DOWN, "trap")]
-        if oid in IGNORED_TRAPS:
-            return []
-        return [(device(m, devmap), "trap", oid, True, "trap")]
-    return []
-
-
-def anomaly_key(dev, kind, ifn):
-    return f"{dev}#{kind}#{ifn}"
-
-
-def anomaly_detail(kind, ifn, src):
-    if kind == "link_down":
-        return f"{ifn} is down ({src})"
-    if kind == "bgp_down":
-        return f"bgp session to {ifn} is not established ({src})"
-    if kind == "isis_down":
-        return f"isis adjacency on {ifn} is down ({src})"
-    return f"trap {ifn}"
-
-
-# ---------------------------------------------------------------- Neptune（異常の「いま」）
-def gremlin_literal(v):
-    """Gremlin のリテラル。文字列は ' で囲む。Neptune の文字列の Gremlin は生の改行や制御文字を受け付けないので \\n / \\uXXXX に直す
-    （detail や trap の varbind に何が入っても壊れない。agent/graph.py の _q より広い）"""
-    if isinstance(v, bool):
-        return "true" if v else "false"
-    if isinstance(v, int):
-        return str(v)
-    if isinstance(v, float):
-        return repr(v)
-    out = []
-    for ch in str(v):
-        if ch == "\\":
-            out.append("\\\\")
-        elif ch == "'":
-            out.append("\\'")
-        elif ch == "\n":
-            out.append("\\n")
-        elif ch == "\r":
-            out.append("\\r")
-        elif ch == "\t":
-            out.append("\\t")
-        elif ord(ch) < 0x20 or ord(ch) == 0x7F:
-            out.append("\\u%04x" % ord(ch))
-        else:
-            out.append(ch)
-    return "'" + "".join(out) + "'"
-
-
-def graphson(v):
-    """GraphSON 3 の型付き値（{"@type": "g:List", "@value": [...]} など）を素の Python に（agent/graph.py の _un と同じ）"""
-    if isinstance(v, dict) and "@type" in v:
-        t, val = v["@type"], v.get("@value")
-        if t in ("g:List", "g:Set"):
-            return [graphson(x) for x in val]
-        if t == "g:Map":
-            it = iter(val)
-            return {graphson(k): graphson(x) for k, x in zip(it, it)}
-        return graphson(val)
-    if isinstance(v, dict):
-        return {k: graphson(x) for k, x in v.items()}
-    if isinstance(v, list):
-        return [graphson(x) for x in v]
-    return v
-
-
-class NeptuneAnomalies:
-    """異常の「いま」を Neptune の頂点に置く（terraform/pipeline/graph。以前は terraform/pipeline/stream の DynamoDB だった。2026-09-24）。
-      頂点 label=anomaly, id=<機器>#<種別>#<インタフェース>。property: device_id, kind, target, status（open / resolved）,
-      first_seen, last_seen, resolved_at（epoch 秒の整数）, source, detail, notified（AnomalyOpened / Resolved が届いたか）
-    機器やインタフェースの頂点とは辺でつながず、device_id と target で引く（graph.seed() は device / interface しか消さないので入れ直しでも残る）。
-    書くのはこのジョブの detect だけ（ストリーミングのジョブは 1 本）なので、読んでから Python で決めて書く（DynamoDB の条件付き更新の代わり）。
-    Web・エージェント・worker は読むだけ（agent/anomalies.py、workflow/awsio.py）。
-
-    接続は Neptune の HTTP の Gremlin（POST https://<host:port>/gremlin）に SigV4（neptune-db）で打つ。EMR の boto3 に neptunedata が
-    あるか分からないので、boto3 は署名にだけ使う。post はテストで差し替える（Gremlin の文字列 → 結果の list）"""
-
-    def __init__(self, endpoint, region, post=None):
-        self.url = f"https://{endpoint}/gremlin"
-        self.region = region
-        self.post = post or self._post
-
-    def _post(self, gremlin):
-        body = json.dumps({"gremlin": gremlin}).encode("utf-8")
-        headers = sigv4_headers("POST", self.url, body, "neptune-db", self.region, {"Content-Type": "application/json"})
-        status, text = http_post(self.url, body, headers)
-        if status >= 400:
-            # ここで落とすとクエリが止まり、ジョブごと起こし直す（checkpoint の続きから同じバッチを読み直す）
-            raise RuntimeError(f"Neptune が {status} を返した: {text[:300]!r}")
-        data = graphson((json.loads(text).get("result") or {}).get("data"))
-        return data if isinstance(data, list) else ([] if data is None else [data])
-
-    @staticmethod
-    def _item(m):
-        d = {k: v for k, v in m.items() if k not in ("id", "label")}
-        d["anomaly_id"] = m.get("id")
-        return d
-
-    def get(self, keys):
-        """{anomaly_id: 項目}。無い id は入らない"""
-        keys, out = list(keys), {}
-        for i in range(0, len(keys), NEPTUNE_IDS_PER_QUERY):
-            ids = ",".join(gremlin_literal(k) for k in keys[i:i + NEPTUNE_IDS_PER_QUERY])
-            for m in self.post(f"g.V({ids}).hasLabel('anomaly').elementMap()"):
-                out[m.get("id")] = self._item(m)
-        return out
-
-    def put(self, key, fields, reopen=False):
-        """無ければ作り、fields を上書きする（property は single。Neptune の既定の set だと値が増える）。reopen なら前の resolved_at を消す"""
-        k = gremlin_literal(key)
-        drop = ".sideEffect(properties('resolved_at').drop())" if reopen else ""
-        props = "".join(f".property(single,{gremlin_literal(n)},{gremlin_literal(v)})" for n, v in fields.items() if v is not None)
-        self.post(f"g.V({k}).fold().coalesce(unfold(),addV('anomaly').property(id,{k})){drop}{props}.id()")
-
-    def mark(self, key, status, field, value):
-        """status と field が value のままなら notified=true にする（そのあいだに開き直し・閉じ直しがあれば付けない）"""
-        self.post(f"g.V({gremlin_literal(key)}).hasLabel('anomaly').has('status',{gremlin_literal(status)})"
-                  f".has({gremlin_literal(field)},{gremlin_literal(value)}).property(single,'notified',true).id()")
-
-    def stale_traps(self, cut):
-        """link 以外の trap で、last_seen が cut より前の open"""
-        return [self._item(m) for m in self.post(
-            f"g.V().hasLabel('anomaly').has('status','open').has('kind','trap').has('last_seen',lt({int(cut)})).elementMap()")]
-
-
-# ---------------------------------------------------------------- S3 Tables（異常の履歴）
-def anomaly_event(event, a, now, source=None):
-    """anomaly_events の 1 行（開いた / 閉じた）。1 回の発生は <anomaly_id>#<first_seen>（workflow/rules.py の occurrence と同じで、
-    proposal_events の proposal_id と突き合わせられる）。event_id は同じ出来事なら同じ値になる（起こし直しで二重に入ったら event_id で重複を落とす）"""
-    key, first = a["anomaly_id"], int(a.get("first_seen") or 0)
-    return {
-        "event_id": f"{key}#{first}#{event}", "anomaly_id": key, "occurrence_id": f"{key}#{first}", "event": event,
-        "device_id": a.get("device_id") or "", "kind": a.get("kind") or "", "target": a.get("target") or "",
-        "source": source or a.get("source") or "", "detail": a.get("detail") or "",
-        "first_seen": first, "resolved_at": a.get("resolved_at") if event == "resolved" else None, "event_time": now,
-    }
-
-
-def make_history_writer(spark, table):
-    """anomaly_events の行（anomaly_event の辞書）を S3 Tables の Iceberg テーブル（--anomaly-events-table）に append する関数"""
-    from pyspark.sql import types as T
-
-    schema = T.StructType([T.StructField(n, T.TimestampType() if t == "timestamptz" else T.StringType(), True) for n, t in ANOMALY_EVENT_COLUMNS])
-
-    def ts(v):
-        return None if v is None else dt.datetime.fromtimestamp(int(v), dt.timezone.utc)
-
-    def write(rows):
-        data = [tuple(ts(r[n]) if t == "timestamptz" else r[n] for n, t in ANOMALY_EVENT_COLUMNS) for r in rows]
-        spark.createDataFrame(data, schema).writeTo(table).append()
-
-    return write
-
-
-# ---------------------------------------------------------------- 検知の本体
-def make_detect_sender(store, history, devmap, region, event_bus, event_source=EVENT_SOURCE, events_client=None,
-                       trap_ttl=TRAP_TTL, poll_lag=POLL_LAG, clock=time.time, sleep=time.sleep):
-    """records（row_to_record の辞書）から異常を出し、開いた / 閉じたを history（S3 Tables の anomaly_events）に追記し、
-    store（Neptune の NeptuneAnomalies）の「いま」を書き換え、新しく open になったものを AnomalyOpened、open から resolved になったものを
-    AnomalyResolved として EventBridge に出す。戻り値は新しく open になったものだけ。
-
-    events_client はテストで差し替える（無ければ boto3 で作る。EMR Serverless の Python に boto3 は入っている）。
-    同じマイクロバッチに同じキーが何度も出るときは、ts の順に並べて最後の状態だけ書く（ポーリングは 10 秒間隔、トリガーは 60 秒。
-    collect の順は Kafka のパーティションの順で、時刻の順ではない。ts で並べないと down → up の up が先に来たとき open のまま残る）。
-    link の trap が来た IF は、その trap の ts から poll_lag 秒のポーリングを捨てる（機器の SNMP の値が遅れるため。POLL_LAG）。
-    trap の時刻はバッチをまたいで覚えておく（ドライバのプロセスに持つ。ジョブを起こし直すと忘れるが、そのときはポーリングだけで決まる）。
-
-    順番は 履歴 → Neptune → イベント。どこかで落ちるとクエリが止まり、ジョブを起こし直して同じバッチを読み直す（at-least-once）:
-      履歴を先に書くので、証跡から開閉が抜けることは無い。代わりに読み直しで同じ行が二度入ることがある（event_id で落とせる。
-      Neptune を書く前に落ちた開きは、読み直しで first_seen が変わり、どの発生にもつながらない opened の行が 1 つ残る）。
-    イベントが届いたかは頂点の notified に残す:
-      開く / 閉じるときに notified=false を書き、put_events が通ったら true にする。通らなかった（例外・FailedEntryCount）ものは
-      false のまま残り、次のバッチで同じキーが来たとき出し直す（down / up のポーリングは 10 秒ごとに来る）。
-      notified の無い古い頂点は届いたものとみなす（出し直さない）。
-    """
-    if events_client is None:
-        import boto3
-        events_client = boto3.client("events", region_name=region)
-    swept = {"at": 0}
-    trap_at = {}   # anomaly_key → 最後の link の trap の ts（epoch 秒）
-
-    def opened_detail(a):
-        return {"anomaly_id": a["anomaly_id"], "device_id": a.get("device_id", ""), "kind": a.get("kind", ""), "target": a.get("target", ""),
-                "first_seen": int(a.get("first_seen") or 0), "detail": a.get("detail", ""), "source": a.get("source", "")}
-
-    def resolved_detail(a, src):
-        return {"anomaly_id": a["anomaly_id"], "device_id": a.get("device_id", ""), "kind": a.get("kind", ""), "target": a.get("target", ""),
-                "resolved_at": int(a.get("resolved_at") or 0), "source": src}
-
-    def mark(detail_type, d):
-        """届いたイベントの頂点に notified=true を付ける。そのあいだに開き直し・閉じ直しがあれば付けない（新しい方は新しい方で出す）"""
-        if detail_type == EVENT_DETAIL_TYPE:
-            store.mark(d["anomaly_id"], "open", "first_seen", d["first_seen"])
-        else:
-            store.mark(d["anomaly_id"], "resolved", "resolved_at", d["resolved_at"])
-
-    def emit(pending):
-        """[(DetailType, detail)] を put_events する（1 回 10 件まで）。落ちた entry だけ EVENT_RETRIES 回まで打ち直し、届いたものに印を付ける"""
-        left = pending
-        for attempt in range(1, EVENT_RETRIES + 1):
-            failed = []
-            for i in range(0, len(left), 10):
-                chunk = left[i:i + 10]
-                try:
-                    r = events_client.put_events(Entries=[{"Source": event_source, "DetailType": t, "EventBusName": event_bus, "Detail": json.dumps(d)}
-                                                          for t, d in chunk])
-                except Exception as e:  # noqa: BLE001 - 届かない（エンドポイント・スロットリング）ときも detect のクエリを落とさず、全部を失敗として打ち直す
-                    log(f"detect: put_events が例外: {type(e).__name__}: {str(e)[:200]}")
-                    failed += chunk
-                    continue
-                results = r.get("Entries") or []
-                for j, (t, d) in enumerate(chunk):
-                    res = results[j] if j < len(results) else {}
-                    if r.get("FailedEntryCount") and (res.get("ErrorCode") or not results):
-                        failed.append((t, d))
-                    else:
-                        mark(t, d)
-            if not failed:
-                return
-            log(f"detect: put_events で {len(failed)} 件失敗（{attempt} 回目）: {[d['anomaly_id'] for _, d in failed]}")
-            left = failed
-            if attempt < EVENT_RETRIES:
-                sleep(2 * attempt)
-        log(f"detect: {len(left)} 件のイベントが届かなかった（notified=false のまま。次のバッチで同じキーが来たら出し直す）")
-
-    def send(records):
-        now = int(clock())
-        latest = {}
-        rows = sorted((r for r in records if isinstance(r, dict)), key=lambda r: _number(r.get("ts")) or 0.0)
-        for rec in rows:
-            ts = _number(rec.get("ts"))
-            m = {"name": rec.get("measurement"), "tags": rec.get("tags") or {}, "fields": rec.get("fields") or {}}
-            for dev, kind, ifn, opened, src in events(m, devmap):
-                key = anomaly_key(dev, kind, ifn)
-                if ts is not None and kind == "link_down":
-                    if src == "trap":
-                        trap_at[key] = max(trap_at.get(key, ts), ts)
-                    elif src == "poll" and key in trap_at and ts < trap_at[key] + poll_lag:
-                        continue   # trap の直後のポーリングは機器側の古い値
-                latest[key] = (dev, kind, ifn, opened, src)
-        if trap_at and rows:
-            # 窓を過ぎた trap の時刻は捨てる（IF の数しか溜まらないが、長く動かすので）
-            newest = max((_number(r.get("ts")) or 0.0) for r in rows)
-            for k in [k for k, t in trap_at.items() if t + poll_lag < newest]:
-                del trap_at[k]
-        # trap の TTL の見回り。このバッチに trap が来たキーは閉じない（来た trap で last_seen が進む）
-        stale = []
-        if now - swept["at"] >= TRAP_SWEEP:
-            swept["at"] = now
-            stale = [a for a in store.stale_traps(now - trap_ttl) if a["anomaly_id"] not in latest]
-        cur = store.get(latest) if latest else {}
-        writes, history_rows, pending, opened_now = [], [], [], []
-        for key, (dev, kind, ifn, opened, src) in latest.items():
-            a = cur.get(key)
-            is_open = bool(a) and a.get("status") == "open"
-            if opened and is_open:
-                # たいていは開いたままの down（10 秒ごとのポーリング）。last_seen だけ進める
-                upd = {"last_seen": now, "source": src, "detail": anomaly_detail(kind, ifn, src)}
-                writes.append((key, upd, False))
-                if a.get("notified") is False:
-                    pending.append((EVENT_DETAIL_TYPE, opened_detail({**a, **upd})))   # 前のバッチで AnomalyOpened が届かなかった。出し直す
-            elif opened:
-                # 無かった、または resolved から開き直した。first_seen を今にし、前の resolved_at を消す。
-                # workflow/worker.py は anomaly_id + first_seen を 1 つの発生として扱うので、開き直しは別の発生になる（2026-09-18）
-                n = {"device_id": dev, "kind": kind, "target": ifn, "status": "open", "first_seen": now, "last_seen": now,
-                     "source": src, "detail": anomaly_detail(kind, ifn, src), "notified": False}
-                writes.append((key, n, True))
-                n = {"anomaly_id": key, **n}
-                history_rows.append(anomaly_event("opened", n, now))
-                opened_now.append(opened_detail(n))
-                pending.append((EVENT_DETAIL_TYPE, opened_detail(n)))
-            elif is_open:
-                upd = {"status": "resolved", "resolved_at": now, "last_seen": now, "notified": False}
-                writes.append((key, upd, False))
-                n = {**a, **upd}
-                history_rows.append(anomaly_event("resolved", n, now, src))
-                pending.append((EVENT_RESOLVED_TYPE, resolved_detail(n, src)))
-            elif a and a.get("status") == "resolved" and a.get("notified") is False:
-                # 開いていない異常の up（正常時のポーリングは毎回ここ）。前のバッチで AnomalyResolved が届かなかったものだけ出し直す
-                pending.append((EVENT_RESOLVED_TYPE, resolved_detail(a, src)))
-        for a in stale:
-            upd = {"status": "resolved", "resolved_at": now, "notified": False}
-            writes.append((a["anomaly_id"], upd, False))
-            n = {**a, **upd}
-            history_rows.append(anomaly_event("resolved", n, now, "ttl"))
-            pending.append((EVENT_RESOLVED_TYPE, resolved_detail(n, "ttl")))
-        if history_rows:
-            history(history_rows)
-        for key, fields, reopen in writes:
-            store.put(key, fields, reopen)
-        if pending:
-            emit(pending)
-        if opened_now:
-            log("detect: 新しい異常 " + ", ".join(o["anomaly_id"] for o in opened_now))
-        resolved = [d["anomaly_id"] for t, d in pending if t == EVENT_RESOLVED_TYPE]
-        if resolved:
-            log("detect: 解消 " + ", ".join(resolved))
-        return opened_now
-
-    return send
-
-
 # ---------------------------------------------------------------- クエリの組み立て
 def http_query(rows, name, checkpoint, sender):
     """マイクロバッチごとに driver で collect して sender に渡す foreachBatch のクエリ"""
     def each_batch(batch_df, batch_id):
         records = [row_to_record(r) for r in batch_df.collect()]
-        # detect は空のバッチでも呼ぶ（trap の TTL の見回りと、出し損ねたイベントの出し直しを送信の有無に縛らない）
-        if records or name == "detect":
-            sender(records)
         if records:
+            sender(records)
             log(f"{name}: batch {batch_id} で {len(records)} 行を送った")
 
     return (
@@ -967,7 +508,7 @@ KAFKA_IAM_PROPS = {"security.protocol": "SASL_SSL", "sasl.mechanism": "AWS_MSK_I
 def all_topics(args):
     """引数の格納先が読むトピックの和（重複なし、引数の順）"""
     seen = []
-    for s in list(args.sinks) + (["detect"] if args.neptune_endpoint else []):
+    for s in args.sinks:
         for t in sink_topics(s, args.metric_topics, args.log_topics).split(","):
             if t and t not in seen:
                 seen.append(t)
@@ -1019,11 +560,6 @@ def build(spark, args):
             # token は起動時に 1 回だけ読む（driver の中に置く。ログにも引数にも出ない）。読めなければジョブが起動で落ち、原因が stderr に出る
             token = read_ssm_parameter(args.splunk_token_parameter, args.region)
             queries.append(http_query(rows, s, args.checkpoint, make_splunk_sender(args.splunk_hec_url, token, args.splunk_index, args.splunk_skip_verify)))
-    if args.neptune_endpoint:
-        rows = read_rows(spark, args.bootstrap, sink_topics("detect", args.metric_topics, args.log_topics))
-        sender = make_detect_sender(NeptuneAnomalies(args.neptune_endpoint, args.region), make_history_writer(spark, args.anomaly_events_table),
-                                    args.device_map, args.region, args.event_bus, args.event_source)
-        queries.append(http_query(rows, "detect", args.checkpoint, sender))
     return queries
 
 
@@ -1035,12 +571,10 @@ def main(argv):
     made = ensure_topics(spark, args.bootstrap, all_topics(args))
     log("トピック: " + ", ".join(all_topics(args)) + (f"（作った: {', '.join(made)}）" if made else "（全部あった）"))
     queries = build(spark, args)
-    log("格納先: " + ", ".join(f"{s}({sink_topics(s, args.metric_topics, args.log_topics)})" for s in args.sinks)
-        + (f"; 検知: 履歴 {args.anomaly_events_table} + Neptune {args.neptune_endpoint} → EventBridge {args.event_bus}（Source {args.event_source}）"
-           if args.neptune_endpoint else "; 検知: なし（--neptune-endpoint が空）"))
+    log("格納先: " + ", ".join(f"{s}({sink_topics(s, args.metric_topics, args.log_topics)})" for s in args.sinks))
     # どれか 1 つでもクエリが止まったら、残りも止めて 1 で終わる。EMR Serverless の STREAMING モードがジョブごと起こし直し、
     # 止まったクエリも checkpoint の続きから読み直す（データは落ちない）。以前は他が動いているあいだ ERROR を出すだけでジョブが RUNNING のまま残り、
-    # 一時的な失敗（HTTP の 5xx が HTTP_RETRIES 回続いた、Neptune / S3 Tables の書き込みの失敗）で止まったクエリが二度と戻らなかった。
+    # 一時的な失敗（HTTP の 5xx が HTTP_RETRIES 回続いた、S3 Tables の書き込みの失敗）で止まったクエリが二度と戻らなかった。
     # 起こし直しの回数はジョブの retry policy（STREAMING の既定は 1 時間に 5 回）まで。超えるとジョブが FAILED になる（docs/pipeline.md）
     dead = {}
     while not dead:

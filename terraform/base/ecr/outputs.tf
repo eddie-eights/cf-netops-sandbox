@@ -34,6 +34,6 @@ output "grafana_repository_url" {
 }
 
 output "splunk_repository_url" {
-  description = "Push splunk/splunk (amd64 only) here with the same tag (step 2 of ops/up.sh, SINK_SPLUNK=1). terraform/pipeline/analytics runs it on ECS."
+  description = "ops/up.sh builds splunk/ (splunk/splunk plus the netops_alerts app, amd64 only) and pushes it here as <Splunk version>-<hash of splunk/> (step 2, SINK_SPLUNK=1). terraform/pipeline/analytics runs it on ECS."
   value       = aws_ecr_repository.pipeline["splunk"].repository_url
 }

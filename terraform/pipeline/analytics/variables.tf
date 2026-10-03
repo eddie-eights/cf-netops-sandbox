@@ -109,7 +109,7 @@ variable "splunk_index" {
 }
 
 variable "splunk_image_tag" {
-  description = "Tag of the splunk/splunk image mirrored to the ECR repository <prefix>-splunk (step 2 of ops/up.sh; amd64 only, so the task is X86_64). Used only when sinks has splunk"
+  description = "Tag of the splunk/ image (splunk/splunk plus the netops_alerts app) in the ECR repository <prefix>-splunk. ops/up.sh builds it as <Splunk version>-<hash of splunk/> (amd64 only, so the task is X86_64). Used only when sinks has splunk"
   type        = string
   default     = "10.4.3"
 
@@ -192,21 +192,15 @@ variable "grafana_task_memory" {
   }
 }
 
-# ---------------------------------------------------------------- detection (Spark -> Neptune + S3 Tables anomaly_events -> EventBridge)
+# ---------------------------------------------------------------- alerts (Grafana / Splunk -> SNS topic of terraform/base/core)
 variable "device_map" {
-  description = "alias=device_id,... (management IPs, interface and loopback addresses, hostnames) the detection query uses to name a device when a message has no sysName tag (traps) or the sysName differs from the device_id. ops/up.sh generates it from the lab definition with lab/lab_topology.py --device-map, so the device list lives in one place. Empty means only sysName tags are matched and trap sources stay raw IPs (they show up as unregistered devices in Neptune)."
+  description = "alias=device_id,... (management IPs, interface and loopback addresses, hostnames). The Splunk task gets it as DEVICE_MAP and its alert action (splunk/netops_alerts) uses it to name the device when an event has no sysName tag (traps and gNMI carry the management IP). ops/up.sh generates it from the lab definition with lab/lab_topology.py --device-map, so the device list lives in one place. Empty means such alerts keep the raw IP as device_id (they do not match a device in Neptune)."
   type        = string
   default     = ""
 }
 
-variable "event_bus" {
-  description = "EventBridge event bus the job puts AnomalyOpened / AnomalyResolved events on. terraform/workflow and terraform/pipeline/graph subscribe to the same bus."
-  type        = string
-  default     = "default"
-}
-
 variable "metric_topics" {
-  description = "Kafka topics that carry metrics (Telegraf inputs.snmp -> metrics, inputs.gnmi -> gnmi). Read by the iceberg and prometheus sinks; detect reads them for bgp_down / isis_down"
+  description = "Kafka topics that carry metrics (Telegraf inputs.snmp -> metrics, inputs.gnmi -> gnmi). Read by the iceberg, prometheus and splunk sinks"
   type        = list(string)
   default     = ["metrics", "gnmi"]
 

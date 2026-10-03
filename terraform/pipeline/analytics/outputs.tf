@@ -42,11 +42,7 @@ output "job_driver_json" {
       # 「cond ? [..] : []」は両辺の型が揃わず validate が落ちるので for … if で絞る
       entryPointArguments = concat(
         ["--bootstrap", local.bootstrap, "--checkpoint", local.checkpoint_uri, "--sinks", join(",", var.sinks), "--region", var.region,
-          "--metric-topics", local.metric_topics, "--log-topics", local.log_topics,
-          # Source を接頭辞ごとに変える。既定のバスは 1 つの AWS アカウントで共有なので、ここを固定にすると
-          # 他の人の異常が自分の workflow / graph のルールに当たる（ルール名は接頭辞付きでも event_pattern は別）
-          "--neptune-endpoint", local.neptune_endpoint, "--anomaly-events-table", local.anomaly_events_table,
-        "--device-map", var.device_map, "--event-bus", var.event_bus, "--event-source", local.event_source],
+        "--metric-topics", local.metric_topics, "--log-topics", local.log_topics],
         [for a in ["--iceberg-table", local.iceberg_table] : a if local.sink_iceberg],
         [for a in ["--opensearch-endpoint", local.opensearch_endpoint, "--opensearch-index", local.opensearch_index] : a if local.sink_opensearch],
         [for a in ["--prometheus-url", local.prometheus_remote_write_url] : a if local.sink_prometheus],
@@ -54,7 +50,7 @@ output "job_driver_json" {
         [for a in ["--splunk-hec-url", local.splunk_hec_url, "--splunk-token-parameter", local.splunk_token_parameter, "--splunk-index", var.splunk_index] : a if local.sink_splunk],
         [for a in ["--splunk-skip-verify"] : a if local.sink_splunk && local.splunk_skip_tls_verify],
       )
-      # Iceberg のカタログはいつも開く（検知が証跡の anomaly_events に書く。2026-09-24）
+      # Iceberg のカタログの設定はいつも渡す（カタログは最初に使うときに開くので、iceberg を選ばなければ S3 Tables の API を呼ばない）
       sparkSubmitParameters = join(" ", concat(
         ["--conf spark.jars=s3://${local.bucket}/${local.jars_prefix}/*.jar",
           "--conf spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions",
@@ -95,7 +91,7 @@ output "list_job_runs_command" {
 }
 
 output "list_tables_command" {
-  description = "See the tables (snmp_metrics, anomaly_events, proposal_events) in S3 Tables"
+  description = "See the tables (snmp_metrics, proposal_events) in S3 Tables"
   value       = "aws s3tables list-tables --region ${var.region} --table-bucket-arn ${local.table_bucket_arn} --namespace ${var.namespace}"
 }
 
@@ -174,11 +170,6 @@ output "table_namespace" {
   value       = aws_s3tables_namespace.netops.namespace
 }
 
-output "anomaly_events_table" {
-  description = "Audit trail of anomaly open / resolve (catalog.namespace.table), written by the detection query"
-  value       = local.anomaly_events_table
-}
-
 output "proposal_events_table_name" {
   description = "Audit trail of proposals (created / approved / rejected / applied / verified ...), written by the terraform/workflow worker"
   value       = aws_s3tables_table.proposal_events.name
@@ -187,11 +178,6 @@ output "proposal_events_table_name" {
 output "proposal_events_table_arn" {
   description = "ARN of proposal_events (terraform/workflow lets the worker append to it)"
   value       = aws_s3tables_table.proposal_events.arn
-}
-
-output "neptune_endpoint" {
-  description = "Neptune host:port the detection query writes the anomaly vertices to (from terraform/pipeline/graph)"
-  value       = local.neptune_endpoint
 }
 
 output "opensearch_collection_name" {

@@ -1,0 +1,11 @@
+[]
+access = read : [ * ], write : [ admin, power ]
+
+[alert_actions]
+export = system
+
+[savedsearches]
+export = system
+
+[props]
+export = system

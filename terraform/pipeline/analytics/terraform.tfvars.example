@@ -14,7 +14,7 @@
 #   管理者のパスワード /<owner>-nwc-poc/splunk/admin-password と HEC の token /<owner>-nwc-poc/splunk/hec-token は ops/up.sh が作る
 # sinks            = ["iceberg", "opensearch", "prometheus", "splunk"]
 # splunk_index     = ""
-# splunk_image_tag = "10.4.3"
+# splunk_image_tag = "10.4.3-<hash>"
 
 # Grafana OSS を ECS で（grafana.tf。Prometheus / OpenSearch を見る。ops/up.sh は GRAFANA=1 で渡す）。
 # 管理者のパスワード /<owner>-nwc-poc/grafana/admin-password は ops/up.sh が作る

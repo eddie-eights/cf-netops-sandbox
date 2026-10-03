@@ -49,7 +49,6 @@ locals {
       # Gremlin（Neptune は IAM 認証）。無いと ops/up.sh の seed_graph.py が接続の待ちで止まる（2026-09-17）
       { from = "web", to = "neptune", protocol = "tcp", port = 8182, why = "Gremlin - topology view and seed_graph.py" },
       { from = "runtime", to = "neptune", protocol = "tcp", port = 8182, why = "Gremlin - agent tools" },
-      { from = "spark", to = "neptune", protocol = "tcp", port = 8182, why = "Gremlin - anomaly vertices" },
       { from = "lambda", to = "neptune", protocol = "tcp", port = 8182, why = "Gremlin - graph status and MCP tools" },
       { from = "workflow", to = "neptune", protocol = "tcp", port = 8182, why = "Gremlin - workflow activities" },
 

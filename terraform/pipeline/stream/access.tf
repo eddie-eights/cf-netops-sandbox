@@ -1,5 +1,5 @@
 # ---------------------------------------------------------------- access for the roles of terraform/base/core
-# 異常の表（DynamoDB）は 2026-09-24 にやめた（異常の「いま」は Neptune、履歴は S3 Tables の anomaly_events）。残るのは SSM の読み取りだけ
+# 異常の表（DynamoDB）は 2026-09-24 にやめた（検知は 2026-10-02 から Grafana と Splunk で、Spark は異常を書かない）。残るのは SSM の読み取りだけ
 resource "aws_iam_role_policy" "parameters_read" {
   for_each = local.reader_role_names
 

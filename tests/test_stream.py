@@ -1,6 +1,5 @@
-"""異常検知（spark/snmp_sinks.py の detect）の模擬テスト。Neptune の Gremlin（HTTP の POST）と EventBridge を差し替えて、
-異常の「いま」（Neptune の anomaly の頂点）と履歴（S3 Tables の anomaly_events に渡す行）とイベントを確かめ、
-terraform/pipeline/stream に detector Lambda も DynamoDB の異常テーブルも無いことも確かめる（2026-09-24 に DynamoDB をやめた）。
+"""取り込みの経路（lab の機器 → Telegraf（ECS）→ MSK → Spark）の模擬テスト。lab の機器の設定・Telegraf の設定・terraform/pipeline/stream と、
+Spark（spark/snmp_sinks.py）が異常の検知をしなくなったこと（2026-10-02。検知は Grafana のアラートルールと Splunk の保存済みサーチ → tests/test_alerts.py）を確かめる。
 実行は python3 tests/test_stream.py（pyspark も boto3 も要らない。snmp_sinks.py は pyspark を関数の中で import する）。"""
 import importlib.util, ipaddress, json, os, re, sys
 
@@ -14,20 +13,20 @@ def check(name, cond):
     passed += 1
     print("ok", name)
 
-# ---- terraform/pipeline/stream: detector Lambda は analytics の Spark に寄せ、異常の「いま」は Neptune に置く
+# ---- terraform/pipeline/stream: 検知の資源（detector Lambda・DynamoDB の異常テーブル）は持たない
 TF_DIR = os.path.join(ROOT, "terraform", "pipeline", "stream")
 tf = ""
 for name in sorted(os.listdir(TF_DIR)):
     if name.endswith(".tf"):
         with open(os.path.join(TF_DIR, name), encoding="utf-8") as f:
             tf += f.read() + "\n"
-check("stream/detector.py は無い（検知は spark/snmp_sinks.py）", not os.path.exists(os.path.join(ROOT, "stream", "detector.py")))
+check("stream/detector.py は無い（検知は Grafana と Splunk）", not os.path.exists(os.path.join(ROOT, "stream", "detector.py")))
 check("terraform/pipeline/stream に detector の Lambda が無い", '"detector"' not in tf and "stream/detector.py" not in tf and "archive_file" not in tf)
 check("terraform/pipeline/stream に lambda のエンドポイントが無い", '.lambda"' not in tf)
 check("terraform/pipeline/stream に MSK Connect の S3 sink が無い（Spark が S3 Tables に入れるので 2026-09-26 に削除。sts のエンドポイントも一緒に）",
       not os.path.exists(os.path.join(TF_DIR, "sink.tf")) and "mskconnect" not in tf and "create_s3_sink" not in tf
       and "kafkaconnect" not in tf and "create_sts_endpoint" not in tf and "aws_vpc_endpoint" not in tf)
-check("terraform/pipeline/stream に DynamoDB が無い（異常の「いま」は Neptune、履歴は S3 Tables。2026-09-24）",
+check("terraform/pipeline/stream に DynamoDB が無い（2026-09-24）",
       "aws_dynamodb" not in tf and "anomaly_table" not in tf and "dynamodb:" not in tf and ".dynamodb" not in tf
       and not os.path.exists(os.path.join(TF_DIR, "anomalies.tf")))
 check("detector_logs の output は無い", "detector_logs" not in tf)
@@ -43,448 +42,22 @@ mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 with open(SRC, encoding="utf-8") as f:
     src = f.read()
-check("argparse に --neptune-endpoint / --anomaly-events-table / --device-map / --event-bus / --event-source があり、--anomaly-table は無い",
-      all(f'"--{a}"' in src for a in ("neptune-endpoint", "anomaly-events-table", "device-map", "event-bus", "event-source"))
-      and '"--anomaly-table"' not in src and 'client("dynamodb")' not in src and "update_item" not in src)
-check("build は --neptune-endpoint があるときだけ detect のクエリを足し、履歴の書き手（S3 Tables）を渡す",
-      re.search(r'if args\.neptune_endpoint:[\s\S]*?NeptuneAnomalies\([\s\S]*?make_history_writer\(spark, args\.anomaly_events_table\)[\s\S]*?http_query\(rows, "detect"', src) is not None)
+# 2026-10-02: Spark の検知（detect のクエリ・Neptune の anomaly の頂点・S3 Tables の anomaly_events・EventBridge への put_events）をやめた。
+# 検知は Grafana のアラートルール（ポーリング）と Splunk の保存済みサーチ（trap と gNMI）が行い、SNS のトピックへ publish する
+_code = "\n".join(l for l in src.splitlines() if not l.lstrip().startswith("#")).split('"""', 2)[2]   # 先頭の docstring とコメント行を除いたコード
+check("Spark のジョブに検知の引数（--neptune-endpoint / --anomaly-events-table / --device-map / --event-bus / --event-source）は無い",
+      not any(f'"--{a}"' in src for a in ("neptune-endpoint", "anomaly-events-table", "anomaly-table", "device-map", "event-bus", "event-source")))
+check("Spark のジョブは Neptune にも EventBridge にも触らず、boto3 を読むのは SSM の HEC token だけ",
+      not any(w in _code for w in ("put_events", "gremlin", "neptune", "anomaly", '"detect"', 'client("events")', 'client("dynamodb")'))
+      and re.findall(r'boto3\.client\("(\w+)"', _code) == ["ssm"])
+check("検知の関数と定数（events / device / parse_device_map / NeptuneAnomalies / make_detect_sender / EVENT_SOURCE / TRAP_TTL）はもう無い",
+      not any(hasattr(mod, n) for n in ("events", "device", "parse_device_map", "anomaly_key", "anomaly_detail", "NeptuneAnomalies", "make_detect_sender",
+                                        "make_history_writer", "gremlin_literal", "graphson", "EVENT_SOURCE", "EVENT_DETAIL_TYPE", "TRAP_TTL", "ANOMALY_EVENT_COLUMNS")))
 BASE = ["--bootstrap", "b", "--checkpoint", "c", "--sinks", "iceberg", "--iceberg-table", "cat.ns.t"]
-check("Source の既定は netops.spark（terraform は <接頭辞>.spark を渡す）、DetailType は AnomalyOpened / AnomalyResolved",
-      mod.EVENT_SOURCE == "netops.spark" and mod.EVENT_DETAIL_TYPE == "AnomalyOpened" and mod.EVENT_RESOLVED_TYPE == "AnomalyResolved"
-      and mod.parse_args(BASE).event_source == "netops.spark")
-try:
-    import contextlib, io
-    with contextlib.redirect_stderr(io.StringIO()):
-        mod.parse_args(BASE + ["--neptune-endpoint", "n:8182"])
-    _refused = False
-except SystemExit:
-    _refused = True
-check("--neptune-endpoint だけで --anomaly-events-table が無ければ引数の段階で止める（履歴を残さずに検知しない）",
-      _refused and mod.parse_args(BASE + ["--neptune-endpoint", "n:8182", "--anomaly-events-table", "s3tables.netops.anomaly_events"]).neptune_endpoint == "n:8182")
-check("parse_device_map は小文字にそろえ、空白と空の要素を落とす",
-      mod.parse_device_map(" HQ-CE-01.lab.example = hq-ce-01 ,=x,y=") == {"hq-ce-01.lab.example": "hq-ce-01"})
-check("device は sysName を小文字・FQDN の先頭で引き、無ければ送り元 IP を device map で引く（どれも無ければ IP / ?）",
-      mod.device({"tags": {"sysName": "HQ-CE-01.lab.example"}}, {}) == "hq-ce-01"
-      and mod.device({"tags": {"sysName": "core-rtr"}}, {"core-rtr": "hq-ce-01"}) == "hq-ce-01"
-      and mod.device({"tags": {"sysName": "hq-ce-01.lab.example"}}, {"hq-ce-01.lab.example": "x"}) == "x"
-      and mod.device({"tags": {"sysName": "203.0.113.11"}}, {"203.0.113.11": "hq-ce-01"}) == "hq-ce-01"
-      and mod.device({"tags": {"agent_host": "172.16.1.2"}}, {"172.16.1.2": "hq-ce-01"}) == "hq-ce-01"
-      and mod.device({"tags": {"source": "198.51.100.9"}}, {}) == "198.51.100.9" and mod.device({"tags": {}}, {}) == "?")
-check("parse_device_map は = の無い要素を捨てる",
-      mod.parse_device_map("203.0.113.11=hq-ce-01,garbage,203.0.113.12=dc-ce-01") == {"203.0.113.11": "hq-ce-01", "203.0.113.12": "dc-ce-01"}
-      and mod.parse_device_map("") == {})
-
-# ---- Gremlin のリテラルと GraphSON
-check("gremlin_literal は \\ と ' と改行・タブ・制御文字を逃がす（Neptune の文字列の Gremlin は生の改行を受け付けない）",
-      mod.gremlin_literal("a'b\\c\nd\re\tf\x01g") == r"'a\'b\\c\nd\re\tf\u0001g'"
-      and mod.gremlin_literal(True) == "true" and mod.gremlin_literal(12) == "12" and mod.gremlin_literal("日本") == "'日本'")
-check("graphson は g:List / g:Map / g:Int64 / g:T を素の値にする",
-      mod.graphson({"@type": "g:List", "@value": [{"@type": "g:Map", "@value": [
-          {"@type": "g:T", "@value": "id"}, "k", "n", {"@type": "g:Int64", "@value": 5}, "b", False]}]}) == [{"id": "k", "n": 5, "b": False}])
-
-
-# ---- Neptune の模擬（NeptuneAnomalies が組む 4 つの形の Gremlin だけを読む）
-def lit(s, i):
-    """s[i:] の先頭のリテラルを読んで (値, 次の位置)"""
-    if s[i] == "'":
-        out, i = [], i + 1
-        while s[i] != "'":
-            if s[i] == "\\":
-                c = s[i + 1]
-                if c == "u":
-                    out.append(chr(int(s[i + 2:i + 6], 16))); i += 6; continue
-                out.append({"n": "\n", "r": "\r", "t": "\t"}.get(c, c)); i += 2; continue
-            assert s[i] not in "\n\r", "生の改行"
-            out.append(s[i]); i += 1
-        return "".join(out), i + 1
-    m = re.compile(r"true|false|-?\d+(\.\d+)?").match(s, i)
-    v = m.group(0)
-    return (v == "true") if v in ("true", "false") else (float(v) if "." in v else int(v)), m.end()
-
-
-def lits(s):
-    out, i = [], 0
-    while i < len(s):
-        if s[i] in "',":
-            if s[i] == ",":
-                i += 1; continue
-            v, i = lit(s, i); out.append(v)
-        else:
-            v, i = lit(s, i); out.append(v)
-    return out
-
-
-class FakeNeptune:
-    """頂点は {id: {property: 値}}。queries に打たれた Gremlin を残す"""
-    def __init__(self):
-        self.v = {}
-        self.queries = []
-
-    def em(self, k):
-        return {"id": k, "label": "anomaly", **self.v[k]}
-
-    def __call__(self, g):
-        self.queries.append(g)
-        m = re.fullmatch(r"g\.V\((.*)\)\.hasLabel\('anomaly'\)\.elementMap\(\)", g)
-        if m:
-            return [self.em(k) for k in lits(m.group(1)) if k in self.v]
-        m = re.fullmatch(r"g\.V\((.+?)\)\.fold\(\)\.coalesce\(unfold\(\),addV\('anomaly'\)\.property\(id,(.+?)\)\)"
-                         r"(\.sideEffect\(properties\('resolved_at'\)\.drop\(\)\))?((?:\.property\(single,.+?\))*)\.id\(\)", g)
-        if m:
-            k = lits(m.group(1))[0]
-            assert lits(m.group(2))[0] == k
-            item = self.v.setdefault(k, {})
-            if m.group(3):
-                item.pop("resolved_at", None)
-            body, i = m.group(4), 0
-            while i < len(body):
-                assert body.startswith(".property(single,", i), body[i:]
-                n, i = lit(body, i + len(".property(single,"))
-                assert body[i] == ","
-                val, i = lit(body, i + 1)
-                assert body[i] == ")"
-                i += 1
-                item[n] = val
-            return [k]
-        m = re.fullmatch(r"g\.V\((.+?)\)\.hasLabel\('anomaly'\)\.has\('status',(.+?)\)\.has\((.+?),(.+?)\)\.property\(single,'notified',true\)\.id\(\)", g)
-        if m:
-            k, st, f, val = (lits(x)[0] for x in m.groups())
-            it = self.v.get(k)
-            if it and it.get("status") == st and it.get(f) == val:
-                it["notified"] = True
-                return [k]
-            return []
-        m = re.fullmatch(r"g\.V\(\)\.hasLabel\('anomaly'\)\.has\('status','open'\)\.has\('kind','trap'\)\.has\('last_seen',lt\((\d+)\)\)\.elementMap\(\)", g)
-        if m:
-            cut = int(m.group(1))
-            return [self.em(k) for k, it in sorted(self.v.items()) if it.get("status") == "open" and it.get("kind") == "trap" and it.get("last_seen", 0) < cut]
-        raise AssertionError("知らない Gremlin: " + g)
-
-    def plain(self, key):
-        return dict(self.v[key])
-
-
-class FakeEvents:
-    """fail に 1 回ごとの振る舞いを積む: "all"（全部 FailedEntry）/ "first"（先頭の 1 件だけ）/ "raise"（例外）。空なら全部通す"""
-    def __init__(self):
-        self.calls = []
-        self.fail = []
-
-    def put_events(self, Entries):
-        assert len(Entries) <= 10, "PutEvents は 1 回 10 件まで"
-        self.calls.append(Entries)
-        mode = self.fail.pop(0) if self.fail else ""
-        if mode == "raise":
-            raise OSError("events に届かない")
-        if mode == "all":
-            return {"FailedEntryCount": len(Entries), "Entries": [{"ErrorCode": "InternalFailure"} for _ in Entries]}
-        if mode == "first":
-            return {"FailedEntryCount": 1, "Entries": [{"ErrorCode": "ThrottlingException"}] + [{"EventId": "e"} for _ in Entries[1:]]}
-        return {"FailedEntryCount": 0, "Entries": [{"EventId": "e"} for _ in Entries]}
-
-    def details(self):
-        return [json.loads(e["Detail"]) for call in self.calls for e in call]
-
-    def types(self):
-        return [e["DetailType"] for call in self.calls for e in call]
-
-
-class Clock:
-    def __init__(self, t=1700000000):
-        self.t = t
-    def __call__(self):
-        return self.t
-
-
-class History(list):
-    """履歴の書き手（S3 Tables の append）の模擬。1 回の呼び出しの行をまとめて足し、呼ばれた順に order へ残す"""
-    def __init__(self, order):
-        super().__init__()
-        self.order = order
-    def __call__(self, rows):
-        assert rows, "空の append はしない"
-        self.order.append(("history", [r["event_id"] for r in rows]))
-        self.extend(rows)
-
-
-def make(clock=None):
-    nep, ev = FakeNeptune(), FakeEvents()
-    order = []
-    hist = History(order)
-    def post(g):
-        if ".property(single," in g and "notified',true" not in g:
-            order.append(("neptune", g))
-        return nep(g)
-    sleeps.clear()
-    send = mod.make_detect_sender(mod.NeptuneAnomalies("n:8182", "ap-northeast-1", post=post), hist,
-                                  mod.parse_device_map("203.0.113.11=hq-ce-01,203.0.113.12=dc-ce-01"), "ap-northeast-1", "default",
-                                  "demo-poc.spark", events_client=ev, clock=clock or Clock(), sleep=sleeps.append)
-    return send, nep, ev, hist
-
-
-sleeps = []
-
-
-def iface(host, ifn, status, sysname=None, ifindex=None, ts=None, ifname=None, admin=None):
-    tags = {"agent_host": host}
-    if ifn is not None:
-        tags["ifDescr"] = ifn
-    if ifname is not None:
-        tags["ifName"] = ifname
-    if ifindex is not None:
-        tags["ifIndex"] = ifindex
-    if sysname:
-        tags["sysName"] = sysname
-    fields = {"ifOperStatus": status}
-    if admin is not None:
-        fields["ifAdminStatus"] = admin
-    return {"measurement": "interface", "tags": tags, "fields": fields, "ts": ts}
-
-
-def trap(host, oid, fields):
-    return {"measurement": "snmp_trap", "tags": {"agent_host": host, "oid": oid}, "fields": fields}
-
-
-# ---- 機器名
-check("機器名は sysName > device map > IP > ?",
-      mod.device({"tags": {"agent_host": "203.0.113.11", "sysName": "r1"}}, {"203.0.113.11": "hq-ce-01"}) == "r1"
-      and mod.device({"tags": {"agent_host": "203.0.113.11"}}, {"203.0.113.11": "hq-ce-01"}) == "hq-ce-01"
-      and mod.device({"tags": {"source": "203.0.113.99"}}, {}) == "203.0.113.99"
-      and mod.device({"tags": {}}, {}) == "?")
-
-# ---- ポーリング
-send, nep, ev, hist = make()
-check("正常なポーリング（up）は何も書かない", send([iface("203.0.113.11", "eth1", 1)]) == [] and nep.v == {} and ev.calls == [] and hist == [])
-check("lo は見ない", send([iface("203.0.113.11", "lo", 2)]) == [] and nep.v == {})
-check("dict でない行や関係ない measurement は捨てる",
-      send([None, "garbage", {"measurement": "cpu", "tags": {}, "fields": {"usage": 1}}, {"measurement": "interface", "tags": {}, "fields": {}}]) == []
-      and nep.v == {})
-
-opened = send([iface("203.0.113.11", "eth1", 2)])
-key = "hq-ce-01#link_down#eth1"
-row = nep.plain(key)
-check("down → open（device_id / kind / target / source=poll / detail / first_seen=last_seen）",
-      row["status"] == "open" and row["device_id"] == "hq-ce-01" and row["kind"] == "link_down" and row["target"] == "eth1"
-      and row["source"] == "poll" and row["detail"] == "eth1 is down (poll)" and row["first_seen"] == row["last_seen"])
-check("Neptune の書き込みは property(single, …)（既定の set だと値が積み上がる）",
-      all(".property(" not in q.replace(".property(single,", "").replace(".property(id,", "") for q in nep.queries))
-check("新しく open になったものだけ返し、AnomalyOpened を 1 件出す",
-      [o["anomaly_id"] for o in opened] == [key] and len(ev.calls) == 1 and len(ev.calls[0]) == 1)
-entry = ev.calls[0][0]
-detail = json.loads(entry["Detail"])
-check("put_events の Source（--event-source がそのまま入る）/ DetailType / EventBusName", entry["Source"] == "demo-poc.spark" and entry["DetailType"] == "AnomalyOpened" and entry["EventBusName"] == "default")
-check("Detail に anomaly_id / device_id / kind / target / first_seen / detail / source",
-      detail == {"anomaly_id": key, "device_id": "hq-ce-01", "kind": "link_down", "target": "eth1", "first_seen": row["first_seen"],
-                 "detail": "eth1 is down (poll)", "source": "poll"})
-first = row["first_seen"]
-check("開いたら履歴に opened を 1 行（event_id / occurrence_id は <anomaly_id>#<first_seen> から。resolved_at は空）",
-      len(hist) == 1 and hist[0] == {"event_id": f"{key}#{first}#opened", "anomaly_id": key, "occurrence_id": f"{key}#{first}", "event": "opened",
-                                     "device_id": "hq-ce-01", "kind": "link_down", "target": "eth1", "source": "poll",
-                                     "detail": "eth1 is down (poll)", "first_seen": first, "resolved_at": None, "event_time": first})
-check("履歴の列は tables.tf の anomaly_events と同じ", [c for c, _ in mod.ANOMALY_EVENT_COLUMNS] == list(hist[0]))
-
-nep.v[key]["first_seen"] = first - 100   # 前から開いていたことにする
-check("開いたままの down は first_seen を残し、イベントも履歴も出さない",
-      send([iface("203.0.113.11", "eth1", 2)]) == [] and nep.plain(key)["first_seen"] == first - 100 and len(ev.calls) == 1 and len(hist) == 1)
-check("up → resolved（resolved_at が付く）",
-      send([iface("203.0.113.11", "eth1", 1)]) == [] and nep.plain(key)["status"] == "resolved" and "resolved_at" in nep.plain(key))
-entry = ev.calls[-1][0]
-check("open → resolved で AnomalyResolved を 1 件出す（Detail に anomaly_id / device_id / kind / target / resolved_at / source）",
-      len(ev.calls) == 2 and len(ev.calls[1]) == 1 and entry["DetailType"] == "AnomalyResolved" and entry["Source"] == "demo-poc.spark"
-      and json.loads(entry["Detail"]) == {"anomaly_id": key, "device_id": "hq-ce-01", "kind": "link_down", "target": "eth1",
-                                          "resolved_at": nep.plain(key)["resolved_at"], "source": "poll"})
-check("閉じたら履歴に resolved を 1 行（同じ発生の occurrence_id、resolved_at 付き）",
-      len(hist) == 2 and hist[1]["event"] == "resolved" and hist[1]["occurrence_id"] == f"{key}#{first - 100}"
-      and hist[1]["event_id"] == f"{key}#{first - 100}#resolved" and hist[1]["resolved_at"] == nep.plain(key)["resolved_at"])
-check("resolved のあとの up は何もしない（AnomalyResolved も履歴も出さない）",
-      send([iface("203.0.113.11", "eth1", 1)]) == [] and nep.plain(key)["status"] == "resolved" and len(ev.calls) == 2 and len(hist) == 2)
-reopened = send([iface("203.0.113.11", "eth1", 2)])
-check("resolved → 再 open はイベントをもう一度出し、first_seen を今にして resolved_at を消す（worker が起こし直せるように。2026-09-18）",
-      len(reopened) == 1 and reopened[0]["first_seen"] >= first and nep.plain(key)["status"] == "open"
-      and nep.plain(key)["first_seen"] == reopened[0]["first_seen"] and "resolved_at" not in nep.plain(key)
-      and len(ev.calls) == 3 and ev.calls[-1][0]["DetailType"] == "AnomalyOpened" and hist[-1]["event"] == "opened")
-
-send, nep, ev, hist = make()
-send([iface("203.0.113.11", "eth1", 2), iface("203.0.113.12", "eth2", 2)])
-check("履歴は Neptune より先に書く（落ちたら同じバッチを読み直すので、証跡から開閉が抜けない）",
-      [o[0] for o in hist.order][:1] == ["history"] and len([o for o in hist.order if o[0] == "history"]) == 1)
-send, nep, ev, hist = make()
-check("ifDescr が無ければ ifIndex", send([iface("203.0.113.12", None, 2, ifindex="3")]) and "dc-ce-01#link_down#3" in nep.v)
-# SR Linux（2026-09-26〜）: IF の鍵は ifName。ifDescr は「名前 + description」なので使わない
-send, nep, ev, hist = make()
-send([iface("203.0.113.11", "ethernet-1/1 WAN primary to carrier-pe-01 1G", 2, ifname="ethernet-1/1", admin=1)])
-check("ifName があれば ifDescr より ifName（SR Linux の ifDescr は description 付き）", list(nep.v) == ["hq-ce-01#link_down#ethernet-1/1"])
-send, nep, ev, hist = make()
-check("admin-state が disable のポート（SR Linux の ifTable は未使用の物理ポートも出す）は異常にしない",
-      send([iface("203.0.113.11", None, 2, ifname="ethernet-1/4", admin=2)]) == [] and nep.v == {})
-check("サブインタフェース（ethernet-1/1.0）と mgmt0 と lo0 は見ない",
-      send([iface("203.0.113.11", None, 2, ifname="ethernet-1/1.0", admin=1), iface("203.0.113.11", None, 2, ifname="mgmt0", admin=1),
-            iface("203.0.113.11", None, 2, ifname="lo0", admin=1)]) == [] and nep.v == {})
-send, nep, ev, hist = make()
-check("sysName があれば device map より優先", send([iface("203.0.113.12", "eth0", "2", sysname="r2")]) and "r2#link_down#eth0" in nep.v)
-send, nep, ev, hist = make()
-check("同じキーが 1 バッチに何度も出たら最後の状態だけ書く（down → up なら何も残らない）",
-      send([iface("203.0.113.11", "eth1", 2), iface("203.0.113.11", "eth1", 1)]) == [] and nep.v == {} and ev.calls == [] and hist == [])
-send, nep, ev, hist = make()
-check("同じキーが 1 バッチに何度も出ても開くのは 1 回（AnomalyOpened も履歴も 1 件）",
-      len(send([iface("203.0.113.11", "eth1", 2), iface("203.0.113.11", "eth1", 2)])) == 1
-      and sum("'first_seen'" in q and "addV" in q for q in nep.queries) == 1 and ev.types() == ["AnomalyOpened"] and len(hist) == 1)
-send, nep, ev, hist = make()
-check("1 バッチの中は ts の順に並べて最後の状態を採る（collect の順は時刻の順ではない。up が先に来ても down(新) が勝つ）",
-      len(send([iface("203.0.113.11", "eth1", 2, ts=20.0), iface("203.0.113.11", "eth1", 1, ts=10.0)])) == 1
-      and nep.plain("hq-ce-01#link_down#eth1")["status"] == "open")
-check("逆に up(新) が後なら resolved",
-      send([iface("203.0.113.11", "eth1", 1, ts=40.0), iface("203.0.113.11", "eth1", 2, ts=30.0)]) == []
-      and nep.plain("hq-ce-01#link_down#eth1")["status"] == "resolved")
-# ---- trap の直後のポーリング（SR Linux の ifOperStatus は 15〜20 秒遅れる。POLL_LAG）
-def ltrap(oid, ts, ifn="ethernet-1/1"):
-    return {**trap("203.0.113.11", oid, {"ifName": ifn}), "ts": ts}
-lk = "hq-ce-01#link_down#ethernet-1/1"
-send, nep, ev, hist = make()
-check("POLL_LAG は 20 秒（実測の遅れ）より長く、ポーリング 10 秒 × 数回ぶん以下", 20 < mod.POLL_LAG <= 60)
-check("linkDown の trap の後 POLL_LAG 秒以内の古い up のポーリングでは閉じない（同じバッチ。短い障害でも物理 IF の link_down が開く）",
-      len(send([ltrap(mod.LINK_DOWN, 100.0), iface("203.0.113.11", None, 1, ifname="ethernet-1/1", ts=110.0),
-                iface("203.0.113.11", None, 1, ifname="ethernet-1/1", ts=120.0)])) == 1
-      and nep.plain(lk)["status"] == "open")
-check("次のバッチでも窓の中の up は捨てる（trap の時刻はバッチをまたいで覚える）",
-      send([iface("203.0.113.11", None, 1, ifname="ethernet-1/1", ts=125.0)]) == [] and nep.plain(lk)["status"] == "open")
-check("窓を過ぎたポーリングはいつもどおり使う（down は開いたまま、up なら閉じる）",
-      send([iface("203.0.113.11", None, 2, ifname="ethernet-1/1", ts=135.0)]) == [] and nep.plain(lk)["status"] == "open"
-      and send([iface("203.0.113.11", None, 1, ifname="ethernet-1/1", ts=200.0)]) == [] and nep.plain(lk)["status"] == "resolved")
-send, nep, ev, hist = make()
-send([ltrap(mod.LINK_DOWN, 100.0)])
-check("linkUp の trap で閉じた直後の古い down のポーリングでは開き直さない（AnomalyOpened を空振りで出さない）",
-      send([ltrap(mod.LINK_UP, 200.0)]) == [] and nep.plain(lk)["status"] == "resolved"
-      and send([iface("203.0.113.11", None, 2, ifname="ethernet-1/1", ts=210.0), iface("203.0.113.11", None, 2, ifname="ethernet-1/1", ts=220.0)]) == []
-      and nep.plain(lk)["status"] == "resolved" and ev.types() == ["AnomalyOpened", "AnomalyResolved"])
-check("窓は IF ごと（別の IF のポーリングは捨てない）",
-      len(send([iface("203.0.113.11", None, 2, ifname="ethernet-1/2", ts=205.0)])) == 1)
-send, nep, ev, hist = make()
-check("trap の ts が無いときは窓を作らない（ポーリングだけで決まる）",
-      len(send([trap("203.0.113.11", mod.LINK_DOWN, {"ifName": "ethernet-1/1"})])) == 1
-      and send([iface("203.0.113.11", None, 1, ifname="ethernet-1/1", ts=110.0)]) == [] and nep.plain(lk)["status"] == "resolved")
-send, nep, ev, hist = make()
-send([iface("203.0.113.11", f"eth{i}", 1) for i in range(mod.NEPTUNE_IDS_PER_QUERY + 5)])
-check(f"キーが {mod.NEPTUNE_IDS_PER_QUERY} を超えたら g.V(…) を分けて読む",
-      sum(q.endswith(".hasLabel('anomaly').elementMap()") and q.startswith("g.V('") for q in nep.queries) == 2)
-
-# ---- trap
-send, nep, ev, hist = make()
-opened = send([trap("203.0.113.11", mod.LINK_DOWN, {".1.3.6.1.2.1.2.2.1.2.3": "eth3", ".1.3.6.1.2.1.2.2.1.1.3": 3})])
-key = "hq-ce-01#link_down#eth3"
-check("linkDown trap（MIB 無しの数値 OID）は ifDescr の varbind から target を取り source=trap",
-      [o["anomaly_id"] for o in opened] == [key] and nep.plain(key)["source"] == "trap" and nep.plain(key)["detail"] == "eth3 is down (trap)")
-check("linkUp trap で resolved", send([trap("203.0.113.11", mod.LINK_UP, {".1.3.6.1.2.1.2.2.1.2.3": "eth3"})]) == [] and nep.plain(key)["status"] == "resolved"
-      and hist[-1]["source"] == "trap")
-send, nep, ev, hist = make()
-send([{"measurement": "snmp_trap", "tags": {"source": "203.0.113.11", "oid": mod.LINK_DOWN, "name": "iso.3.6.1.6.3.1.1.5.3", "mib": ""},
-       "fields": {"iso.3.6.1.2.1.2.2.1.2.38": "eth1", "iso.3.6.1.2.1.2.2.1.1.38": 38, "iso.3.6.1.2.1.1.3.0": 882671}}])
-check("Telegraf 1.40 の \"iso.\" 始まりの数値 OID でも ifDescr を取る（source タグでも機器名が出る。2026-09-18 実機）",
-      "hq-ce-01#link_down#eth1" in nep.v and nep.plain("hq-ce-01#link_down#eth1")["target"] == "eth1")
-send([trap("203.0.113.11", mod.LINK_DOWN, {"ifDescr": "eth4", "ifIndex": 4})])
-check("MIB がある varbind 名（ifDescr）でも取れる", "hq-ce-01#link_down#eth4" in nep.v)
-send, nep, ev, hist = make()
-send([trap("203.0.113.11", mod.LINK_DOWN, {"iso.3.6.1.2.1.31.1.1.1.1.49150": "ethernet-1/1", "iso.3.6.1.2.1.2.2.1.2.49150": "ethernet-1/1 WAN 1G",
-                                           "iso.3.6.1.2.1.2.2.1.1.49150": 49150})])
-check("SR Linux の linkDown（ifName の varbind あり）は ifDescr より ifName（ポーリングと同じ鍵になる）",
-      list(nep.v) == ["hq-ce-01#link_down#ethernet-1/1"])
-send, nep, ev, hist = make()
-send([trap("203.0.113.11", mod.LINK_DOWN, {"ifIndex.5": 5})])
-check("ifDescr が無い trap は ifIndex", "hq-ce-01#link_down#5" in nep.v)
-send, nep, ev, hist = make()
-opened = send([trap("203.0.113.11", ".1.3.6.1.6.3.1.1.5.5", {})])
-key = "hq-ce-01#trap#.1.3.6.1.6.3.1.1.5.5"
-check("linkDown / linkUp 以外の trap は kind=trap で open", key in nep.v and nep.plain(key)["kind"] == "trap" and nep.plain(key)["detail"] == "trap .1.3.6.1.6.3.1.1.5.5"
-      and opened[0]["kind"] == "trap")
-send, nep, ev, hist = make()
-odd = "eth'1\\x\ny"
-send([iface("203.0.113.11", odd, 2)])
-check("インタフェース名に ' や \\ や改行があっても Gremlin が壊れず、そのまま戻る", nep.plain(f"hq-ce-01#link_down#{odd}")["target"] == odd)
-
-# ---- PutEvents の 10 件制限
-send, nep, ev, hist = make()
-opened = send([iface("203.0.113.11", f"eth{i}", 2) for i in range(23)])
-check("新しい異常が 10 件を超えたら put_events を分ける", len(opened) == 23 and [len(c) for c in ev.calls] == [10, 10, 3] and len(hist) == 23)
-
-# ---- イベントが届かなかったとき（2026-09-24 のレビュー: 以前は put_events の失敗を見ず、開いた異常のワークフローが起きないままだった）
-K1 = "hq-ce-01#link_down#eth1"
-send, nep, ev, hist = make()
-ev.fail = ["first"]
-send([iface("203.0.113.11", "eth1", 2), iface("203.0.113.11", "eth2", 2)])
-check("FailedEntryCount の entry だけ打ち直し、届いたら notified=true",
-      [len(c) for c in ev.calls] == [2, 1] and sleeps == [2] and ev.calls[1][0] == ev.calls[0][0]
-      and nep.plain(K1)["notified"] is True and nep.plain("hq-ce-01#link_down#eth2")["notified"] is True)
-send, nep, ev, hist = make()
-ev.fail = ["all", "all", "raise"]
-opened = send([iface("203.0.113.11", "eth1", 2)])
-check(f"{mod.EVENT_RETRIES} 回とも届かなければ落とさずに notified=false のまま残す（例外でもクエリを止めない）",
-      len(opened) == 1 and len(ev.calls) == mod.EVENT_RETRIES and sleeps == [2, 4]
-      and nep.plain(K1)["status"] == "open" and nep.plain(K1)["notified"] is False)
-first = nep.plain(K1)["first_seen"]
-check("次のバッチで同じ down が来たら、開いたまま（first_seen はそのまま）で AnomalyOpened を出し直す（履歴は足さない）",
-      send([iface("203.0.113.11", "eth1", 2)]) == [] and len(ev.calls) == 4 and ev.calls[-1][0]["DetailType"] == "AnomalyOpened"
-      and json.loads(ev.calls[-1][0]["Detail"])["first_seen"] == first and nep.plain(K1)["notified"] is True and len(hist) == 1)
-check("届いたあとは出し直さない", send([iface("203.0.113.11", "eth1", 2)]) == [] and len(ev.calls) == 4)
-ev.fail = ["all", "all", "all"]
-send([iface("203.0.113.11", "eth1", 1)])
-check("AnomalyResolved が届かなければ resolved で notified=false", nep.plain(K1)["status"] == "resolved" and nep.plain(K1)["notified"] is False)
-n = len(ev.calls)
-send([iface("203.0.113.11", "eth1", 1)])
-check("次の up で AnomalyResolved を出し直し（resolved_at は最初のまま）、届いたら notified=true",
-      len(ev.calls) == n + 1 and ev.calls[-1][0]["DetailType"] == "AnomalyResolved"
-      and json.loads(ev.calls[-1][0]["Detail"])["resolved_at"] == nep.plain(K1)["resolved_at"] and nep.plain(K1)["notified"] is True
-      and len(hist) == 2)
-check("そのあとの up は何も出さない", send([iface("203.0.113.11", "eth1", 1)]) == [] and len(ev.calls) == n + 1)
-send, nep, ev, hist = make()
-send([iface("203.0.113.11", "eth1", 2)])
-del nep.v[K1]["notified"]
-check("notified の無い古い頂点は届いたものとみなす（出し直さない）", send([iface("203.0.113.11", "eth1", 2)]) == [] and len(ev.calls) == 1)
-send, nep, ev, hist = make()
-ev.fail = ["all", "all", "all"]
-send([iface("203.0.113.11", "eth1", 2)])
-send([iface("203.0.113.11", "eth1", 1)])
-check("届かなかった開きのあとで閉じたら、古い開きには印を付けない（AnomalyResolved の方で notified を見る）",
-      nep.plain(K1)["status"] == "resolved" and nep.plain(K1)["notified"] is True and ev.types()[-1] == "AnomalyResolved")
-
-# ---- trap の TTL（link 以外の trap には「直った」の知らせが無い）
-clk = Clock()
-send, nep, ev, hist = make(clock=clk)
-T1, T2 = "hq-ce-01#trap#.1.3.6.1.6.3.1.1.5.5", "dc-ce-01#trap#.1.3.6.1.6.3.1.1.5.5"
-send([trap("203.0.113.11", ".1.3.6.1.6.3.1.1.5.5", {}), trap("203.0.113.12", ".1.3.6.1.6.3.1.1.5.5", {}), iface("203.0.113.11", "eth1", 2)])
-sweeps = lambda: sum("has('kind','trap')" in q for q in nep.queries)
-clk.t += mod.TRAP_TTL - 1
-check("TRAP_TTL に満たなければ閉じない", send([]) == [] and nep.plain(T1)["status"] == "open")
-clk.t += 30
-check("TRAP_SWEEP 秒たたないうちは見回らない", send([]) == [] and nep.plain(T1)["status"] == "open" and sweeps() == 2)
-clk.t += mod.TRAP_SWEEP
-n = len(ev.calls)
-send([])
-check("最後の trap から TRAP_TTL 秒たった trap を resolved にし、AnomalyResolved（source=ttl）を出す",
-      nep.plain(T1)["status"] == "resolved" and nep.plain(T2)["status"] == "resolved"
-      and sorted(d["anomaly_id"] for d in ev.details()[-2:]) == sorted([T1, T2]) and all(d["source"] == "ttl" for d in ev.details()[-2:])
-      and ev.types()[-2:] == ["AnomalyResolved", "AnomalyResolved"] and len(ev.calls) == n + 1 and nep.plain(T1)["notified"] is True)
-check("TTL で閉じたものも履歴に resolved（source=ttl）", sorted(r["anomaly_id"] for r in hist[-2:]) == sorted([T1, T2])
-      and all(r["event"] == "resolved" and r["source"] == "ttl" for r in hist[-2:]))
-check("link_down は TTL で閉じない（ポーリングの up で閉じる）", nep.plain(K1)["status"] == "open")
-send([trap("203.0.113.11", ".1.3.6.1.6.3.1.1.5.5", {})])
-check("閉じた trap がまた来たら開き直す（別の発生）", nep.plain(T1)["status"] == "open" and nep.plain(T1)["first_seen"] == clk.t)
-clk.t += mod.TRAP_TTL + mod.TRAP_SWEEP
-send([trap("203.0.113.11", ".1.3.6.1.6.3.1.1.5.5", {})])
-check("見回りと同じバッチに trap が来たキーは閉じない（来た trap で last_seen が進む）",
-      nep.plain(T1)["status"] == "open" and nep.plain(T1)["last_seen"] == clk.t and hist[-1]["event"] == "opened")
-
-# ---- 異常にしない trap と OID の形
-check("coldStart / warmStart / nsNotifyShutdown / nsNotifyRestart は異常にしない（\"iso.\" でも \"1.\" でも）",
-      all(mod.events({"name": "snmp_trap", "tags": {"agent_host": "203.0.113.11", "oid": o}, "fields": {}}, {}) == []
-          for o in (".1.3.6.1.6.3.1.1.5.1", "iso.3.6.1.6.3.1.1.5.2", "1.3.6.1.4.1.8072.4.0.2", "iso.3.6.1.4.1.8072.4.0.3")))
-check("\"iso.\" 始まりの linkDown の OID も linkDown として読む",
-      mod.events({"name": "snmp_trap", "tags": {"agent_host": "203.0.113.11", "oid": "iso.3.6.1.6.3.1.1.5.3"}, "fields": {"ifDescr": "eth1"}}, {"203.0.113.11": "hq-ce-01"})
-      == [("hq-ce-01", "link_down", "eth1", True, "trap")])
-check("知らない trap は異常として開く（許可リストにしない）",
-      mod.events({"name": "snmp_trap", "tags": {"agent_host": "203.0.113.11", "oid": "iso.3.6.1.4.1.9.9.41.2.0.1"}, "fields": {}}, {})[0][1:3]
-      == ("trap", ".1.3.6.1.4.1.9.9.41.2.0.1"))
-_src = open(SRC, encoding="utf-8").read()
-check("detect は空のマイクロバッチでも sender を呼ぶ（TTL の見回りと出し直しを止めない）", 'if records or name == "detect":' in _src)
+check("格納先は iceberg / opensearch / prometheus / splunk の 4 つで、マイクロバッチは 60 秒（アラートが届くまでの遅れの一部）",
+      mod.SINKS == ("iceberg", "opensearch", "prometheus", "splunk") and mod.TRIGGER == "60 seconds" and mod.parse_args(BASE).sinks == ["iceberg"])
+check("空のマイクロバッチでは sender を呼ばない（検知の見回りのための例外は無くなった）",
+      re.search(r"\n\s*if records:\n\s*sender\(records\)", src) is not None and 'name == "detect"' not in src)
 
 
 # ---- ログの経路: SR Linux の system logging remote-server（udp）→ lab の EC2（203.0.113.1:5140 を Telegraf の NLB へ DNAT）→ Telegraf（ECS）の inputs.syslog
@@ -582,38 +155,8 @@ check("Telegraf は機器の syslog を inputs.syslog（udp）で受け、device
       and re.search(r'topic = "logs"[\s\S]*?namepass = \["device_log"\]|namepass = \["device_log"\][\s\S]*?topic = "logs"', tele) is not None)
 check("metrics / traps の出力に device_log が混ざらない（namepass / namedrop）",
       all(re.search(r"name(pass|drop)", blk) for blk in tele.split("[[outputs.kafka]]")[1:]))
-check("syslog の hostname を sysName のタグに付け替える（detect / metrics / traps と同じ機器名のタグ）",
+check("syslog の hostname を sysName のタグに付け替える（metrics / traps と同じ機器名のタグ）",
       re.search(r'\[\[processors\.rename\]\]\s*\n\s*namepass = \["device_log"\]\s*\n\s*\[\[processors\.rename\.replace\]\]\s*\n\s*tag = "hostname"\s*\n\s*dest = "sysName"', tele) is not None)
-check("detect は device_log を異常にしない", mod.events({"name": "device_log", "tags": {"sysName": "hq-ce-01"}, "fields": {"message": "x"}}, {}) == [])
-# gNMI（inputs.gnmi）。タグの名前は Telegraf の版で peer_address / neighbor_peer_address と違うので末尾で引き、field はパスの下が / でつながる
-_dm = {"203.0.113.31": "dc1-leaf-01"}
-check("bgp_neighbor の session_state が established でなければ bgp_down（機器は source の IP を device map で引く。target = 相手の IP）",
-      mod.events({"name": "bgp_neighbor", "tags": {"source": "203.0.113.31", "neighbor_peer_address": "10.255.0.1", "path": "x"}, "fields": {"session_state": "active"}}, _dm)
-      == [("dc1-leaf-01", "bgp_down", "10.255.0.1", True, "gnmi")]
-      and mod.events({"name": "bgp_neighbor", "tags": {"source": "203.0.113.31", "peer_address": "10.255.0.1"}, "fields": {"session_state": "Established"}}, _dm)
-      == [("dc1-leaf-01", "bgp_down", "10.255.0.1", False, "gnmi")])
-check("isis_interface の oper_state が up でなければ isis_down、up なら閉じる（target = サブインタフェース。実機の行: interface_name / name / source のタグに oper_state の field）",
-      mod.events({"name": "isis_interface", "tags": {"source": "203.0.113.31", "interface_name": "ethernet-1/1.0", "name": "default"}, "fields": {"oper_state": "down"}}, _dm)
-      == [("dc1-leaf-01", "isis_down", "ethernet-1/1.0", True, "gnmi")]
-      and mod.events({"name": "isis_interface", "tags": {"source": "203.0.113.31", "interface_name": "ethernet-1/1.0"}, "fields": {"oper_state": "up"}}, _dm)
-      == [("dc1-leaf-01", "isis_down", "ethernet-1/1.0", False, "gnmi")]
-      and mod.events({"name": "isis_interface", "tags": {"source": "203.0.113.31", "name": "default"}, "fields": {"oper_state": "down"}}, _dm) == [])
-check("isis_adjacency（隣接そのもの）の state が up でなければ isis_down。実機では消えるだけで来ないが、来たら拾う。adjacency_state / adjacency/adjacency-state でもよい",
-      mod.events({"name": "isis_adjacency", "tags": {"source": "203.0.113.31", "interface_name": "ethernet-1/1.0", "neighbor_system_id": "0000.0000.0021", "name": "default"},
-                  "fields": {"state": "down", "neighbor_hostname": "dc1-spine-01", "neighbor_restart_status": "not-helping", "remaining_holdtime": 25}}, _dm)
-      == [("dc1-leaf-01", "isis_down", "ethernet-1/1.0", True, "gnmi")]
-      and mod.events({"name": "isis_adjacency", "tags": {"source": "203.0.113.31", "interface_name": "ethernet-1/1.0"}, "fields": {"adjacency/adjacency-state": "down"}}, _dm)
-      == [("dc1-leaf-01", "isis_down", "ethernet-1/1.0", True, "gnmi")]
-      and mod.events({"name": "isis_adjacency", "tags": {"source": "203.0.113.31", "interface_name": "ethernet-1/1.0"}, "fields": {"adjacency_state": "up"}}, _dm)
-      == [("dc1-leaf-01", "isis_down", "ethernet-1/1.0", False, "gnmi")]
-      and mod.events({"name": "isis_adjacency", "tags": {"source": "203.0.113.31", "interface_name": "ethernet-1/1.0"}, "fields": {"remaining_holdtime": 22, "neighbor_restart_status": "not-helping"}}, _dm) == [])
-check("状態の field や対象のタグが無い gNMI の行と、evpn_es / mac_table は異常にしない",
-      mod.events({"name": "bgp_neighbor", "tags": {"source": "203.0.113.31"}, "fields": {"session_state": "idle"}}, _dm) == []
-      and mod.events({"name": "isis_adjacency", "tags": {"source": "203.0.113.31", "interface_name": "ethernet-1/1.0"}, "fields": {"neighbor_system_id": "x"}}, _dm) == []
-      and mod.events({"name": "evpn_es", "tags": {"source": "203.0.113.31", "name": "ES-2"}, "fields": {"oper_state": "down"}}, _dm) == []
-      and mod.events({"name": "mac_table", "tags": {"source": "203.0.113.31"}, "fields": {"type": "evpn"}}, _dm) == [])
-check("anomaly_detail は bgp_down / isis_down の文を持つ", "not established" in mod.anomaly_detail("bgp_down", "10.255.0.1", "gnmi")
-      and "isis adjacency on ethernet-1/1.0" in mod.anomaly_detail("isis_down", "ethernet-1/1.0", "gnmi") and mod.anomaly_detail("link_down", "e1", "poll") == "e1 is down (poll)")
 check("Spark の既定は gnmi トピックも読む（iceberg / prometheus は metrics,gnmi、opensearch は traps,logs）", mod.METRIC_TOPICS == "metrics,gnmi"
       and mod.sink_topics("iceberg", mod.METRIC_TOPICS, mod.LOG_TOPICS) == "metrics,gnmi,traps,logs" and mod.sink_topics("prometheus", mod.METRIC_TOPICS, mod.LOG_TOPICS) == "metrics,gnmi")
 _access = _read("terraform", "pipeline", "stream", "access.tf")
