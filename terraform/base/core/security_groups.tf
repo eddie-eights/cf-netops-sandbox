@@ -15,19 +15,21 @@ locals {
   security_groups = {
     web = "Chat web EC2 - SSM port forwarding to Grafana, Splunk and the Temporal UI starts here"
     lab = "Lab EC2 - containerlab, forwards the lab mgmt network"
-    # telegraf は受ける側（dial-out。NLB の後ろ）、telegraf_poll は取りにいく側（dial-in。2026-10-04 に分けた）。
-    # telegraf の description は分ける前のまま（変えると作り直しになる。上の注記）
-    telegraf      = "Telegraf ECS task (terraform/pipeline/stream)"
-    telegraf_poll = "Telegraf poller ECS task - gNMI and SNMP polling (terraform/pipeline/stream)"
-    telegraf_nlb  = "Internal NLB in front of Telegraf - traps and syslog (terraform/pipeline/stream)"
-    msk           = "MSK brokers (terraform/pipeline/stream)"
-    spark         = "EMR Serverless workers (terraform/pipeline/analytics)"
-    grafana       = "Grafana ECS task (terraform/pipeline/analytics)"
-    splunk        = "Splunk ECS task (terraform/pipeline/analytics)"
-    neptune       = "Neptune (terraform/pipeline/graph)"
-    lambda        = "Lambda in the VPC - graph status, MCP tools, knowledge base index"
-    workflow      = "Temporal dev server and worker ECS task (terraform/workflow)"
-    runtime       = "AgentCore Runtime ENIs (terraform/agent)"
+    # Telegraf は受ける側（dialout。NLB の後ろ）と取りにいく側（dialin）の 2 つのタスク（2026-10-04 に分け、キーを dialout / dialin にそろえた。
+    # キーを変えると SG は作り直しになるので、ops/up.sh は古いキーの state のまま stream があると止める）
+    telegraf_dialout     = "Telegraf dial-out ECS task - traps, syslog and MDT behind the NLB (terraform/pipeline/stream)"
+    telegraf_dialin      = "Telegraf dial-in ECS task - gNMI and SNMP polling (terraform/pipeline/stream)"
+    telegraf_dialout_nlb = "Internal NLB in front of the Telegraf dial-out task (terraform/pipeline/stream)"
+    msk                  = "MSK brokers (terraform/pipeline/stream)"
+    spark                = "EMR Serverless workers (terraform/pipeline/analytics)"
+    grafana              = "Grafana ECS task (terraform/pipeline/analytics)"
+    splunk               = "Splunk ECS task (terraform/pipeline/analytics)"
+    neptune              = "Neptune (terraform/pipeline/graph)"
+    nautobot             = "Nautobot ECS task - web, celery worker and redis (terraform/pipeline/nautobot)"
+    nautobot_db          = "Nautobot PostgreSQL on RDS (terraform/pipeline/nautobot)"
+    lambda               = "Lambda in the VPC - graph status, MCP tools, knowledge base index"
+    workflow             = "Temporal dev server and worker ECS task (terraform/workflow)"
+    runtime              = "AgentCore Runtime ENIs (terraform/agent)"
   }
   sg_keys = concat(keys(local.security_groups), ["endpoints"])
   sg_ids  = merge({ for k, sg in aws_security_group.workload : k => sg.id }, { endpoints = aws_security_group.endpoints.id })
@@ -37,7 +39,7 @@ locals {
 
   # AWS の API（インターフェース型と OpenSearch Serverless の VPC エンドポイント）と S3（ゲートウェイエンドポイント。S3 Tables のデータ・ECR のレイヤー・
   # AL2023 の dnf もここ）へ出るワークロード。Fargate のタスクは ECR のイメージ・SSM のシークレット・ログもタスクの ENI で取りに行く
-  aws_api_clients = ["web", "lab", "telegraf", "telegraf_poll", "spark", "grafana", "splunk", "lambda", "workflow", "runtime"]
+  aws_api_clients = ["web", "lab", "telegraf_dialout", "telegraf_dialin", "spark", "grafana", "splunk", "nautobot", "lambda", "workflow", "runtime"]
 
   # 通信の表。1 行が 1 つの流れで、from が送り、to が受ける（応答は SG の接続追跡で通るので書かない）。from / to は上の SG のキーか endpoints、
   # または SG でない相手の s3（S3 のマネージドプレフィックスリスト）と lab_mgmt（local.lab_mgmt_cidr）。
@@ -56,15 +58,20 @@ locals {
       { from = "runtime", to = "neptune", protocol = "tcp", port = 8182, why = "Gremlin - agent tools" },
       { from = "lambda", to = "neptune", protocol = "tcp", port = 8182, why = "Gremlin - graph status and MCP tools" },
       { from = "workflow", to = "neptune", protocol = "tcp", port = 8182, why = "Gremlin - workflow activities" },
+      { from = "nautobot", to = "neptune", protocol = "tcp", port = 8182, why = "Gremlin - Nautobot job writes the physical topology" },
 
       # SSM のポートフォワーディング（利用者の PC → ssmmessages → Web の EC2 の SSM Agent → タスク）
       { from = "web", to = "grafana", protocol = "tcp", port = 3000, why = "Grafana UI through SSM port forwarding" },
       { from = "web", to = "splunk", protocol = "tcp", port = 8000, why = "Splunk Web through SSM port forwarding" },
       { from = "web", to = "workflow", protocol = "tcp", port = 8233, why = "Temporal UI through SSM port forwarding" },
+      { from = "web", to = "nautobot", protocol = "tcp", port = 8080, why = "Nautobot UI through SSM port forwarding" },
+
+      # Nautobot（terraform/pipeline/nautobot）→ RDS の PostgreSQL
+      { from = "nautobot", to = "nautobot_db", protocol = "tcp", port = 5432, why = "PostgreSQL - Nautobot database" },
 
       # Kafka（IAM 認証の 9098）
-      { from = "telegraf", to = "msk", protocol = "tcp", port = 9098, why = "Kafka IAM - Telegraf writes" },
-      { from = "telegraf_poll", to = "msk", protocol = "tcp", port = 9098, why = "Kafka IAM - Telegraf poller writes" },
+      { from = "telegraf_dialout", to = "msk", protocol = "tcp", port = 9098, why = "Kafka IAM - Telegraf dial-out writes" },
+      { from = "telegraf_dialin", to = "msk", protocol = "tcp", port = 9098, why = "Kafka IAM - Telegraf dial-in writes" },
       { from = "spark", to = "msk", protocol = "tcp", port = 9098, why = "Kafka IAM - Spark reads" },
       { from = "msk", to = "msk", protocol = "tcp", port = 9092, to_port = 9098, why = "Brokers talk to each other" },
 
@@ -74,29 +81,29 @@ locals {
 
       # Telegraf の NLB → タスク（terraform/pipeline/stream の telegraf.tf）。NLB が送り元の IP を残しても、タスクの受信は NLB の SG の参照で通る。
       # NLB の送信ルールは転送とヘルスチェックの両方に効く
-      { from = "telegraf_nlb", to = "telegraf", protocol = "udp", port = 1162, why = "SNMP traps - NLB 162 to the task 1162" },
-      { from = "telegraf_nlb", to = "telegraf", protocol = "udp", port = 5140, why = "syslog - NLB 5140 to the task 5140" },
-      { from = "telegraf_nlb", to = "telegraf", protocol = "tcp", port = 57000, why = "Cisco MDT dial-out - NLB 57000 to the task 57000" },
-      { from = "telegraf_nlb", to = "telegraf", protocol = "tcp", port = 8080, why = "NLB health check - Telegraf outputs.health" },
+      { from = "telegraf_dialout_nlb", to = "telegraf_dialout", protocol = "udp", port = 1162, why = "SNMP traps - NLB 162 to the task 1162" },
+      { from = "telegraf_dialout_nlb", to = "telegraf_dialout", protocol = "udp", port = 5140, why = "syslog - NLB 5140 to the task 5140" },
+      { from = "telegraf_dialout_nlb", to = "telegraf_dialout", protocol = "tcp", port = 57000, why = "Cisco MDT dial-out - NLB 57000 to the task 57000" },
+      { from = "telegraf_dialout_nlb", to = "telegraf_dialout", protocol = "tcp", port = 8080, why = "NLB health check - Telegraf outputs.health" },
 
       # trap と syslog: 機器 → lab の EC2（lab.sh forward の DNAT）→ NLB。送り元は機器の管理 IP のままなので、NLB は管理ネットワークの CIDR から受け、
       # lab の EC2 は NLB の SG へ送る
-      { from = "lab_mgmt", to = "telegraf_nlb", protocol = "udp", port = 162, why = "SNMP traps from the switches - DNAT on the lab EC2" },
-      { from = "lab_mgmt", to = "telegraf_nlb", protocol = "udp", port = 5140, why = "syslog from the switches - DNAT on the lab EC2" },
-      { from = "lab", to = "telegraf_nlb", protocol = "udp", port = 162, only = "egress", why = "SNMP traps forwarded for the switches" },
-      { from = "lab", to = "telegraf_nlb", protocol = "udp", port = 5140, only = "egress", why = "syslog forwarded for the switches" },
+      { from = "lab_mgmt", to = "telegraf_dialout_nlb", protocol = "udp", port = 162, why = "SNMP traps from the switches - DNAT on the lab EC2" },
+      { from = "lab_mgmt", to = "telegraf_dialout_nlb", protocol = "udp", port = 5140, why = "syslog from the switches - DNAT on the lab EC2" },
+      { from = "lab", to = "telegraf_dialout_nlb", protocol = "udp", port = 162, only = "egress", why = "SNMP traps forwarded for the switches" },
+      { from = "lab", to = "telegraf_dialout_nlb", protocol = "udp", port = 5140, only = "egress", why = "syslog forwarded for the switches" },
 
-      # ポーリング: 取りにいくタスク（telegraf_poll）→ 機器の SNMP と gNMI（VPC のルートで lab の EC2 へ。terraform/pipeline/lab の telegraf.tf）。
-      # タスクは管理ネットワークの CIDR へ送り、lab の EC2 はタスクの SG から受ける。受ける側のタスク（telegraf）は機器へ出ない
-      { from = "telegraf_poll", to = "lab_mgmt", protocol = "udp", port = 161, why = "SNMP polling of the switches" },
-      { from = "telegraf_poll", to = "lab_mgmt", protocol = "tcp", port = 57400, why = "gNMI subscription to the switches" },
-      { from = "telegraf_poll", to = "lab", protocol = "udp", port = 161, only = "ingress", why = "SNMP polling forwarded to the switches" },
-      { from = "telegraf_poll", to = "lab", protocol = "tcp", port = 57400, only = "ingress", why = "gNMI forwarded to the switches" },
+      # ポーリング: 取りにいくタスク（telegraf_dialin）→ 機器の SNMP と gNMI（VPC のルートで lab の EC2 へ。terraform/pipeline/lab の telegraf.tf）。
+      # タスクは管理ネットワークの CIDR へ送り、lab の EC2 はタスクの SG から受ける。受ける側のタスク（telegraf_dialout）は機器へ出ない
+      { from = "telegraf_dialin", to = "lab_mgmt", protocol = "udp", port = 161, why = "SNMP polling of the switches" },
+      { from = "telegraf_dialin", to = "lab_mgmt", protocol = "tcp", port = 57400, why = "gNMI subscription to the switches" },
+      { from = "telegraf_dialin", to = "lab", protocol = "udp", port = 161, only = "ingress", why = "SNMP polling forwarded to the switches" },
+      { from = "telegraf_dialin", to = "lab", protocol = "tcp", port = 57400, only = "ingress", why = "gNMI forwarded to the switches" },
     ],
     # MDT の dial-out: 本番の Cisco → NLB の 57000/tcp（docs/collection.md）。送り元の CIDR は変数（既定は空で、どこからも受けない）。
     # lab の SR Linux は MDT を送れないので、lab の管理ネットワークからは開けない
     [for c in var.mdt_source_cidrs :
-      { from = "cidr:${c}", cidr = c, to = "telegraf_nlb", protocol = "tcp", port = 57000, why = "Cisco MDT dial-out from the devices (mdt_source_cidrs)" }
+      { from = "cidr:${c}", cidr = c, to = "telegraf_dialout_nlb", protocol = "tcp", port = 57000, why = "Cisco MDT dial-out from the devices (mdt_source_cidrs)" }
     ],
   ])
 

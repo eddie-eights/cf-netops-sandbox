@@ -218,7 +218,7 @@ def render(sink, **extra):
         env = {"PATH": os.environ["PATH"], "TELEGRAF_TEMPLATE": os.path.join(ROOT, "telegraf", "telegraf.conf.in"),
                "TELEGRAF_CONF": os.path.join(d, "telegraf.conf"), "AWS_REGION": "ap-northeast-1",
                "SNMP_AGENTS": '"udp://203.0.113.11:161", "udp://203.0.113.12:161"', "GNMI_TARGETS": '"203.0.113.11:57400"',
-               **({"SINK": sink} if sink else {}), **extra}
+               "GNMI_USERNAME": "u", "GNMI_PASSWORD": "p", "SNMP_COMMUNITY": "c", **({"SINK": sink} if sink else {}), **extra}
         r = subprocess.run(["bash", os.path.join(ROOT, "telegraf", "telegraf.sh"), "render"], capture_output=True, text=True, env=env)
         if r.returncode != 0:
             return None, r.stderr, os.listdir(d)
@@ -281,37 +281,51 @@ def _tg_test(cmd="test", **extra):  # 描いた設定に入力が無ければ、
     with tempfile.TemporaryDirectory() as d:
         env = {"PATH": os.environ["PATH"], "TELEGRAF_TEMPLATE": os.path.join(ROOT, "telegraf", "telegraf.conf.in"),
                "TELEGRAF_CONF": os.path.join(d, "telegraf.conf"), "AWS_REGION": "ap-northeast-1", "SINK": "stdout",
-               "GNMI_TARGETS": '"203.0.113.11:57400"', **extra}
+               "GNMI_TARGETS": '"203.0.113.11:57400"', "GNMI_USERNAME": "u", "GNMI_PASSWORD": "p", **extra}
         return subprocess.run(["bash", os.path.join(ROOT, "telegraf", "telegraf.sh"), cmd], capture_output=True, text=True, env=env)
 _t = _tg_test()
 check("tg test はポーリングを止めている（SNMP_POLL=0）と、SNMP_POLL=1 で起こし直すよう言って止まる",
       _t.returncode == 1 and "SNMP_POLL=1" in _t.stderr and "telegraf: command not found" not in _t.stderr)
 
-# 役割（TELEGRAF_ROLE）: stream の ECS は受ける側（dial_out）と取りにいく側（dial_in）の 2 タスク。既定 all（デバッグ用の EC2）は両方（2026-10-04 ユーザー決定）
+# 役割（TELEGRAF_ROLE）: stream の ECS は受ける側（dialout）と取りにいく側（dialin）の 2 タスク。既定 all（デバッグ用の EC2）は両方（2026-10-04 ユーザー決定）
 _roles = re.findall(r"^# >>> role (\w+)", tpl, re.M)
-_dial_in_blk = tpl.split("# >>> role dial_in", 1)[1].split("# <<< role dial_in", 1)[0] if "# >>> role dial_in" in tpl else ""
-check("telegraf.conf.in の役割の区間は telegraf.sh の ROLES と同じ名前で対になり、snmp_poll の区間は dial_in の中にある",
+_dialin_blk = tpl.split("# >>> role dialin", 1)[1].split("# <<< role dialin", 1)[0] if "# >>> role dialin" in tpl else ""
+check("telegraf.conf.in の役割の区間は telegraf.sh の ROLES と同じ名前で対になり、snmp_poll の区間は dialin の中にある",
       sorted(_roles) == sorted(re.findall(r"^# <<< role (\w+)", tpl, re.M)) == sorted(re.search(r'^ROLES="([^"]*)"', tg_sh, re.M).group(1).split())
-      and "# >>> snmp_poll" in _dial_in_blk and "# <<< snmp_poll" in _dial_in_blk
+      and "# >>> snmp_poll" in _dialin_blk and "# <<< snmp_poll" in _dialin_blk
       and sh_const(tg_sh, "TELEGRAF_ROLE") == "${TELEGRAF_ROLE:-all}")
-_out_conf, _out_log, _ = render(None, KAFKA_BROKERS="b-1.example:9098,b-2.example:9098", TELEGRAF_ROLE="dial_out", GNMI_TARGETS="", SNMP_AGENTS="")
-_in_conf, _in_log, _ = render(None, KAFKA_BROKERS="b-1.example:9098,b-2.example:9098", TELEGRAF_ROLE="dial_in", SNMP_POLL="1")
-check("TELEGRAF_ROLE=dial_out は trap / syslog / MDT と syslog の rename だけ（gNMI・SNMP のポーリング・Starlark は無く、GNMI_TARGETS / SNMP_AGENTS は要らない）",
+_out_conf, _out_log, _ = render(None, KAFKA_BROKERS="b-1.example:9098,b-2.example:9098", TELEGRAF_ROLE="dialout", GNMI_TARGETS="", SNMP_AGENTS="")
+_in_conf, _in_log, _ = render(None, KAFKA_BROKERS="b-1.example:9098,b-2.example:9098", TELEGRAF_ROLE="dialin", SNMP_POLL="1")
+check("TELEGRAF_ROLE=dialout は trap / syslog / MDT と syslog の rename だけ（gNMI・SNMP のポーリング・Starlark は無く、GNMI_TARGETS / SNMP_AGENTS は要らない）",
       _out_conf is not None and sorted(_out_conf["inputs"]) == ["cisco_telemetry_mdt", "snmp_trap", "syslog"]
       and list(_out_conf["processors"]) == ["rename"] and "aggregators" not in _out_conf
-      and "role: dial_out" in _out_log and "mdt: 57000/tcp" in _out_log and "gnmi:" not in _out_log)
-check("TELEGRAF_ROLE=dial_in は gNMI 2 つ・SNMP のポーリング（SNMP_POLL=1 のとき）・Starlark だけ（trap / syslog / MDT の受け口は無い）",
+      and "role: dialout" in _out_log and "mdt: 57000/tcp" in _out_log and "gnmi:" not in _out_log)
+check("TELEGRAF_ROLE=dialin は gNMI 2 つ・SNMP のポーリング（SNMP_POLL=1 のとき）・Starlark だけ（trap / syslog / MDT の受け口は無い）",
       _in_conf is not None and sorted(_in_conf["inputs"]) == ["gnmi", "snmp"] and len(_in_conf["inputs"]["gnmi"]) == 2
       and list(_in_conf["processors"]) == ["starlark"] and list(_in_conf["aggregators"]) == ["starlark"]
-      and "role: dial_in" in _in_log and "trap:" not in _in_log and "mdt:" not in _in_log
-      and render(None, KAFKA_BROKERS="b-1.example:9098,b-2.example:9098", TELEGRAF_ROLE="dial_in", GNMI_TARGETS="")[0] is None)
+      and "role: dialin" in _in_log and "trap:" not in _in_log and "mdt:" not in _in_log
+      and render(None, KAFKA_BROKERS="b-1.example:9098,b-2.example:9098", TELEGRAF_ROLE="dialin", GNMI_TARGETS="")[0] is None)
 check("どの役割でも出力（Kafka の 5 つと health）は同じ。知らない TELEGRAF_ROLE は描かずに止まる。既定（all）は両方の入力を持つ",
       all(c["outputs"] == kafka["outputs"] and c["agent"] == kafka["agent"] for c in (_out_conf, _in_conf))
       and render("stdout", TELEGRAF_ROLE="dial-in")[0] is None and render("stdout", TELEGRAF_ROLE="")[0] is not None
       and "role: all" in out and {"snmp_trap", "syslog", "cisco_telemetry_mdt", "gnmi"} <= set(stdout_conf["inputs"]))
-_tg_out = [_tg_test(c, TELEGRAF_ROLE="dial_out", GNMI_TARGETS="") for c in ("test", "gnmi")]
-check("受ける側（dial_out）のタスクで tg test / tg gnmi を打つと、取りにいく側（telegraf-poll）で打つよう言って止まる",
-      all(r.returncode == 1 and "telegraf-poll" in r.stderr and "telegraf: command not found" not in r.stderr for r in _tg_out))
+_tg_out = [_tg_test(c, TELEGRAF_ROLE="dialout", GNMI_TARGETS="") for c in ("test", "gnmi")]
+check("受ける側（dialout）のタスクで tg test / tg gnmi を打つと、取りにいく側（telegraf-dialin）で打つよう言って止まる",
+      all(r.returncode == 1 and "telegraf-dialin" in r.stderr and "telegraf: command not found" not in r.stderr for r in _tg_out))
+
+# 機器の認証情報: 設定には ${...} のまま残し、Telegraf が起きるときに環境変数から読む（stream の ECS は SSM の SecureString を secrets で受ける。2026-10-04）
+check("telegraf.conf.in は機器の認証情報を持たず、${GNMI_USERNAME} / ${GNMI_PASSWORD} / ${SNMP_COMMUNITY} で受ける（render した設定にも値は入らない）",
+      "NokiaSrl1" not in tpl and 'community = "public"' not in tpl
+      and tpl.count('username = "${GNMI_USERNAME}"') == 2 and tpl.count('password = "${GNMI_PASSWORD}"') == 2 and tpl.count('community = "${SNMP_COMMUNITY}"') == 1
+      and all(g["username"] == "${GNMI_USERNAME}" and g["password"] == "${GNMI_PASSWORD}" for g in stdout_conf["inputs"]["gnmi"])
+      and _poll["inputs"]["snmp"][0]["community"] == "${SNMP_COMMUNITY}")
+check("取りにいく入力があるとき（all / dialin）は GNMI_USERNAME / GNMI_PASSWORD が無ければ止まり、SNMP_COMMUNITY は SNMP_POLL=1 のときだけ要る。dialout はどれも要らない",
+      render("stdout", GNMI_USERNAME="")[0] is None and render("stdout", GNMI_PASSWORD="")[0] is None
+      and render("stdout", SNMP_COMMUNITY="")[0] is not None and render("stdout", SNMP_POLL="1", SNMP_COMMUNITY="")[0] is None
+      and render(None, KAFKA_BROKERS="b-1.example:9098", TELEGRAF_ROLE="dialin", GNMI_PASSWORD="")[0] is None
+      and render(None, KAFKA_BROKERS="b-1.example:9098", TELEGRAF_ROLE="dialout", GNMI_USERNAME="", GNMI_PASSWORD="", SNMP_COMMUNITY="")[0] is not None)
+check("lab の認証情報（containerlab の既定）は lab.sh と lab-common.sh で同じで、lab.sh telegraf run が Telegraf に渡す",
+      all(sh_const(lab_sh, k) == sh_const(common, "LAB_" + k) != "" for k in ("GNMI_USERNAME", "GNMI_PASSWORD", "SNMP_COMMUNITY")))
 
 # ---- lab.sh: この EC2 の Telegraf
 check("trap のポートは lab.sh と telegraf.sh で同じ（機器は 162 に送り、デバッグ用の EC2 は REDIRECT で Telegraf の待つポートへ）",
@@ -322,7 +336,7 @@ check("lab の SR Linux の syslog の形式は lab.sh の LOG_STANDARD = lab-co
       sh_const(lab_sh, "LOG_STANDARD") == sh_const(common, "LAB_SYSLOG_STANDARD") == "RFC5424"
       and sh_const(tg_sh, "SYSLOG_STANDARD") == "${SYSLOG_STANDARD:-RFC3164}")
 check("lab.sh telegraf run は同じイメージを host ネットワークで SINK=stdout で起こし、ポーリング先は up.sh と同じ lab_topology.py から作る",
-      re.search(r"docker run -d --name \"\$TG\" --restart unless-stopped --network host [^\n]*\\\n\s*-e SINK=stdout -e SYSLOG_STANDARD=\"\$LOG_STANDARD\" -e SNMP_POLL=\"\$\{SNMP_POLL:-0\}\" -e AWS_REGION -e SNMP_AGENTS=\"\$agents\" -e GNMI_TARGETS=\"\$gnmi\" \"\$TELEGRAF_IMAGE\" run", lab_sh) is not None
+      re.search(r"docker run -d --name \"\$TG\" --restart unless-stopped --network host [^\n]*\\\n\s*-e SINK=stdout -e SYSLOG_STANDARD=\"\$LOG_STANDARD\" -e SNMP_POLL=\"\$\{SNMP_POLL:-0\}\" -e AWS_REGION -e SNMP_AGENTS=\"\$agents\" -e GNMI_TARGETS=\"\$gnmi\" \\\n\s*-e GNMI_USERNAME=\"\$GNMI_USERNAME\" -e GNMI_PASSWORD=\"\$GNMI_PASSWORD\" -e SNMP_COMMUNITY=\"\$SNMP_COMMUNITY\" \"\$TELEGRAF_IMAGE\" run", lab_sh) is not None
       and "python3 lab_topology.py . --snmp-agents" in lab_sh and "python3 lab_topology.py . --gnmi-targets" in lab_sh
       and "lab/lab_topology.py lab --snmp-agents" in up)
 check("lab.sh の forward は TELEGRAF_IMAGE があれば SSM の NLB を見ずに抜ける（デバッグ用の EC2 は stream を使わない）",

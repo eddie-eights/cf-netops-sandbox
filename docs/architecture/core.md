@@ -31,19 +31,19 @@ AWS の API へは全部 VPC エンドポイントから行き、この VPC を�
 
 | 送る側 | 受ける側 | ポート | 何のため |
 |---|---|---|---|
-| web / lab / telegraf / telegraf_poll / spark / grafana / splunk / lambda / workflow / runtime | endpoints / S3（プレフィックスリスト） | 443/tcp | AWS の API（インターフェース型）と S3（gateway 型。ECR のレイヤーと dnf も） |
+| web / lab / telegraf_dialout / telegraf_dialin / spark / grafana / splunk / nautobot / lambda / workflow / runtime | endpoints / S3（プレフィックスリスト） | 443/tcp | AWS の API（インターフェース型）と S3（gateway 型。ECR のレイヤーと dnf も） |
 | web / runtime / spark / lambda / workflow | neptune | 8182/tcp | Gremlin（Neptune は IAM 認証） |
 | web | grafana / splunk / workflow | 3000 / 8000 / 8233（tcp） | SSM のポートフォワーディング（Grafana / Splunk Web / Temporal UI） |
-| telegraf / telegraf_poll / spark | msk | 9098/tcp | Kafka（IAM 認証） |
+| telegraf_dialout / telegraf_dialin / spark | msk | 9098/tcp | Kafka（IAM 認証） |
 | msk | msk | 9092〜9098/tcp | ブローカー同士 |
 | spark | spark | 全部の tcp | 1 つのジョブのドライバとエグゼキュータ |
 | spark | splunk | 8088/tcp | HEC（`SINK_SPLUNK=1`） |
-| telegraf_nlb | telegraf | 1162/udp、5140/udp、57000/tcp、8080/tcp | trap・syslog・MDT の転送と、NLB のヘルスチェック |
-| lab の管理ネットワーク（203.0.113.0/24） | telegraf_nlb | 162/udp、5140/udp | 機器の trap と syslog（lab の EC2 が DNAT するので送り元は機器の IP のまま） |
-| `MDT_SOURCE_CIDRS` の CIDR（既定は空で行が無い） | telegraf_nlb | 57000/tcp | 本番の Cisco の MDT の dial-out（[collection.md](../collection.md)）。`0.0.0.0/0` は変数の検査で拒む |
-| telegraf_poll | lab の管理ネットワーク | 161/udp、57400/tcp | Telegraf の取りにいく側からの SNMP のポーリング（`SNMP_POLL=1` のときだけ使う。SG は既定でも開けておく）と gNMI（VPC のルートで lab の EC2 へ） |
+| telegraf_dialout_nlb | telegraf_dialout | 1162/udp、5140/udp、57000/tcp、8080/tcp | trap・syslog・MDT の転送と、NLB のヘルスチェック |
+| lab の管理ネットワーク（203.0.113.0/24） | telegraf_dialout_nlb | 162/udp、5140/udp | 機器の trap と syslog（lab の EC2 が DNAT するので送り元は機器の IP のまま） |
+| `MDT_SOURCE_CIDRS` の CIDR（既定は空で行が無い） | telegraf_dialout_nlb | 57000/tcp | 本番の Cisco の MDT の dial-out（[collection.md](../collection.md)）。`0.0.0.0/0` は変数の検査で拒む |
+| telegraf_dialin | lab の管理ネットワーク | 161/udp、57400/tcp | Telegraf の取りにいく側からの SNMP のポーリング（`SNMP_POLL=1` のときだけ使う。SG は既定でも開けておく）と gNMI（VPC のルートで lab の EC2 へ） |
 
-- lab の EC2 が転送する流れは、SG が見る IP が lab の EC2 ではなく機器の管理 IP になる。そこで、相手の ENI の IP が見える側だけを SG の参照で書き（lab の送信は telegraf_nlb へ、lab の受信は telegraf_poll から）、反対側は管理ネットワークの CIDR で書く。
+- lab の EC2 が転送する流れは、SG が見る IP が lab の EC2 ではなく機器の管理 IP になる。そこで、相手の ENI の IP が見える側だけを SG の参照で書き（lab の送信は telegraf_dialout_nlb へ、lab の受信は telegraf_dialin から）、反対側は管理ネットワークの CIDR で書く。
 - 開けていないもの: Temporal の gRPC 7233（ワーカーは同じタスクの `localhost`。Temporal も `127.0.0.1` だけで待つ）と Splunk の管理 API 8089。インターネットからの受信は、SG の前に経路が無い。
 - DNS（VPC の +2）・IMDS・ECS のタスクメタデータ・Time Sync は SG の対象外なので、表に無くても届く。
 - `endpoints` は表の 443 だけを受け、外へは出さない。

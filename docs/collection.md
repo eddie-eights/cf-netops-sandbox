@@ -42,7 +42,7 @@ trap と syslog では性能の時系列は取れない（届くのはイベン�
 **選んだ理由: Telegraf を増やしやすい。**
 
 - 機器から送ってくるもの（trap・syslog・MDT）は、NLB が 1 つのタスクにだけ渡すので、タスクを増やしても重複しない。
-- Telegraf から取りにいくもの（SNMP のポーリング、gNMI の購読）は、タスクごとに同じ機器へ取りにいくので、増やすと MSK に同じデータが何回も入る。取りにいく側のサービス（`<prefix>-telegraf-poll`）だけを 1 タスクに固定している（[telegraf.tf](../terraform/pipeline/stream/telegraf.tf) の `desired_count = 1` と `deployment_maximum_percent = 100`）のはこのため（下の「Telegraf を受ける側と取りにいく側に分けた」）。
+- Telegraf から取りにいくもの（SNMP のポーリング、gNMI の購読）は、タスクごとに同じ機器へ取りにいくので、増やすと MSK に同じデータが何回も入る。取りにいく側のサービス（`<prefix>-telegraf-dialin`）だけを 1 タスクに固定している（[telegraf.tf](../terraform/pipeline/stream/telegraf.tf) の `desired_count = 1` と `deployment_maximum_percent = 100`）のはこのため（下の「Telegraf を受ける側と取りにいく側に分けた」）。
 - 集める側から機器への通信（161/udp や gNMI の TCP）を本番で開けてもらえるか分からないので、機器 → 集める側の向きだけで済むほうが安全。
 
 **MDT で取れる性能メトリクス:** MDT は機器の運用データ（oper の YANG モデル）を周期（periodic）か変化時（on-change）で送るので、性能の時系列も送れる。どのモデルが使えるかは機種と版で変わる。IOS XE を仮定した例（本番では未確認）:
@@ -58,8 +58,8 @@ trap と syslog では性能の時系列は取れない（届くのはイベン�
 
 | サービス | `TELEGRAF_ROLE` | 入力 | 数 | SG |
 |---|---|---|---|---|
-| `<prefix>-telegraf` | `dial_out` | trap・syslog・MDT（NLB の後ろ） | 増やしてよい（いまは 1。入れ替えは新しいタスクが立ってから古いものを止める） | `telegraf`（NLB から受けるだけ） |
-| `<prefix>-telegraf-poll` | `dial_in` | gNMI の購読、SNMP のポーリング（`SNMP_POLL=1`）、lab の値を共通の形に変える Starlark | 1 に固定（入れ替えは古いものを止めてから。そのあいだ購読が数十秒切れる） | `telegraf_poll`（受けない。機器の 161/udp・57400/tcp へ出る） |
+| `<prefix>-telegraf-dialout` | `dialout` | trap・syslog・MDT（NLB の後ろ） | 増やしてよい（いまは 1。入れ替えは新しいタスクが立ってから古いものを止める） | `telegraf_dialout`（NLB から受けるだけ） |
+| `<prefix>-telegraf-dialin` | `dialin` | gNMI の購読、SNMP のポーリング（`SNMP_POLL=1`）、lab の値を共通の形に変える Starlark | 1 に固定（入れ替えは古いものを止めてから。そのあいだ購読が数十秒切れる） | `telegraf_dialin`（受けない。機器の 161/udp・57400/tcp へ出る） |
 
 Kafka の出力（5 トピック）と health はどちらにもある。Starlark を取りにいく側に置くのは、変える前の `lab_*` を Kafka に載せないので gNMI の入力と同じタスクにいる必要があるから。デバッグ用の EC2 は既定の `all`（両方を 1 つの Telegraf で）。
 

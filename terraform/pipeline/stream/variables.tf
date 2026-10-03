@@ -64,7 +64,7 @@ variable "telegraf_image_tag" {
 }
 
 variable "snmp_agents" {
-  description = "SNMP polling targets of Telegraf, as the inside of a TOML list (\"udp://<IP>:161\", ...). ops/up.sh makes it from the lab definition (python3 lab/lab_topology.py lab --snmp-agents)."
+  description = "SNMP polling targets of the Telegraf dial-in task, as the inside of a TOML list (\"udp://<IP>:161\", ...). ops/up.sh makes it from the lab definition (python3 lab/lab_topology.py lab --snmp-agents). Goes to the SSM parameter .../telegraf-dialin/lab/snmp-agents (or only the first value of .../nautobot/snmp-agents with dialin_targets_from_nautobot)."
   type        = string
 
   validation {
@@ -74,13 +74,19 @@ variable "snmp_agents" {
 }
 
 variable "gnmi_targets" {
-  description = "gNMI subscription targets of Telegraf, as the inside of a TOML list (\"<IP>:57400\", ...). ops/up.sh makes it from the lab definition (python3 lab/lab_topology.py lab --gnmi-targets)."
+  description = "gNMI subscription targets of the Telegraf dial-in task, as the inside of a TOML list (\"<IP>:57400\", ...). ops/up.sh makes it from the lab definition (python3 lab/lab_topology.py lab --gnmi-targets). Goes to the SSM parameter .../telegraf-dialin/lab/gnmi-targets (or only the first value of .../nautobot/gnmi-targets with dialin_targets_from_nautobot)."
   type        = string
 
   validation {
     condition     = can(regex("^\"[0-9.]+:[0-9]+\"(, *\"[0-9.]+:[0-9]+\")*$", var.gnmi_targets))
     error_message = "gnmi_targets must look like \"203.0.113.11:57400\", \"203.0.113.12:57400\" (python3 lab/lab_topology.py lab --gnmi-targets)."
   }
+}
+
+variable "dialin_targets_from_nautobot" {
+  description = "Whether the Nautobot job (terraform/pipeline/nautobot) owns the dial-in targets. true moves them to /<prefix>/telegraf-dialin/nautobot/* (Terraform writes only the first value, from snmp_agents / gnmi_targets, and ignores later changes); false keeps them in /<prefix>/telegraf-dialin/lab/* from the variables. ops/up.sh sets it from NAUTOBOT."
+  type        = bool
+  default     = false
 }
 
 variable "syslog_standard" {

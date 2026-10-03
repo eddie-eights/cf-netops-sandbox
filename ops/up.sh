@@ -209,6 +209,30 @@ with open(path, "w", encoding="utf-8") as f:
   [ "$rc" -eq 0 ] || die "SSM に $name を作れなかった（上のエラー）"
   echo "$name を作った（値は出さない。見るコマンドは最後に出る）"
 }
+ensure_fixed_secret() {  # ensure_fixed_secret <SSM のパラメータ名> <値> <説明>  無ければ決まった値の SecureString を作る。あれば触らない（書き換えた値を残す）
+  local name="$1" value="$2" desc="$3" type
+  type=$(aws ssm describe-parameters --region "$REGION" --parameter-filters "Key=Name,Values=$name" \
+    --query 'Parameters[0].Type' --output text 2>/dev/null || echo "")
+  [ "$type" != None ] || type=""
+  case "$type" in
+    SecureString) echo "$name はある（作り直さない）"; return 0 ;;
+    "") ;;
+    *) die "$name が SecureString でない（${type}）。消してから打ち直す: aws ssm delete-parameter --region $REGION --name $name" ;;
+  esac
+  # ensure_secret と同じく、本人だけが読める一時ファイルに書いて file:// で渡す（値は環境変数で Python に渡し、コマンドラインに載せない）
+  local input rc=0
+  input=$(umask 077; mktemp "${TMPDIR:-/tmp}/nwc-secret.XXXXXX") || die "一時ファイルを作れなかった"
+  FIXED_SECRET_VALUE="$value" "${PY[@]}" -c 'import json, os, sys
+name, desc, prefix, owner, path = sys.argv[1:]
+with open(path, "w", encoding="utf-8") as f:
+    json.dump({"Name": name, "Type": "SecureString", "Value": os.environ["FIXED_SECRET_VALUE"], "Description": desc,
+               "Tags": [{"Key": "ManagedBy", "Value": "ops/up.sh"}, {"Key": "Project", "Value": prefix}, {"Key": "owner", "Value": owner}]}, f)' \
+    "$name" "$desc" "$PREFIX" "$OWNER" "$input" \
+    && aws ssm put-parameter --region "$REGION" --cli-input-json "file://$input" >/dev/null || rc=$?
+  rm -f -- "${input:?}"
+  [ "$rc" -eq 0 ] || die "SSM に $name を作れなかった（上のエラー）"
+  echo "$name を作った（値は出さない）"
+}
 GRAPH_PID=""
 GRAPH_LOG=ops/logs/graph-apply.log
 on_exit() {  # 途中で止まっても、バックグラウンドの graph の apply は終わるまで待つ（打ち直したときに state のロックでぶつからないように）
@@ -432,6 +456,12 @@ if [ -f terraform/base/core/terraform.tfstate ]; then
   tf_init base/core
   if tf base/core state list 2>/dev/null | grep -qx 'aws_security_group\.internal'; then
     die "terraform/base/core の state に 2026-09-29 より前の SG（internal）が残っている。先に ops/down.sh で消す（Runtime の ENI が残るあいだは VPC・サブネットと一緒に残るので、時間をおいて打ち直す）。まだ何も作っていない"
+  fi
+  # Telegraf の SG の名前を 2026-10-04 に dialout / dialin にそろえた（telegraf → telegraf_dialout、telegraf_poll → telegraf_dialin、telegraf_nlb → telegraf_dialout_nlb）。
+  # 古い名前の SG は stream の NLB と ECS のタスクが付けたままだと消せない（DependencyViolation）ので、stream が残っているなら先に消してもらう
+  if tf base/core state list 2>/dev/null | grep -qxF 'aws_security_group.workload["telegraf"]' \
+    && [ -s terraform/pipeline/stream/terraform.tfstate ] && { tf_init pipeline/stream; [ -n "$(tf pipeline/stream state list 2>/dev/null)" ]; }; then
+    die "terraform/base/core の state に 2026-10-04 より前の Telegraf の SG（telegraf / telegraf_poll / telegraf_nlb）が残っていて、stream がそれを使っている。先に ops/down.sh で消す（stream だけ先に消してもよい）。まだ何も作っていない"
   fi
 fi
 
@@ -707,6 +737,11 @@ if [ -z "$SKIP_STREAM" ]; then
   if [ "$SYSLOG_STANDARD" != "$LAB_SYSLOG_STANDARD" ]; then
     echo "注意: lab の SR Linux は $LAB_SYSLOG_STANDARD で送るので、SYSLOG_STANDARD=$SYSLOG_STANDARD では lab のログの項目（ホスト名・本文など）が崩れる。lab のログまで見るなら SYSLOG_STANDARD=$LAB_SYSLOG_STANDARD"
   fi
+  # 機器の認証情報は SSM の SecureString に置き、取りにいく側のタスクが ECS の secrets で受ける（Terraform の state に載せない）。
+  # 最初の値は lab の公開既定値（ops/lab-common.sh）。もうあれば触らないので、実機を足すときは SSM の値を書き換えてサービスを作り直す
+  ensure_fixed_secret "/$PREFIX/telegraf-dialin/gnmi-username" "$LAB_GNMI_USERNAME" "gNMI username of the Telegraf dial-in task (created by ops/up.sh with the containerlab default)"
+  ensure_fixed_secret "/$PREFIX/telegraf-dialin/gnmi-password" "$LAB_GNMI_PASSWORD" "gNMI password of the Telegraf dial-in task (created by ops/up.sh with the containerlab default)"
+  ensure_fixed_secret "/$PREFIX/telegraf-dialin/snmp-community" "$LAB_SNMP_COMMUNITY" "SNMP community of the Telegraf dial-in task (created by ops/up.sh with the containerlab default)"
   tf_apply pipeline/stream -var "telegraf_image_tag=$TELEGRAF_TAG" -var "snmp_agents=$SNMP_AGENTS" -var "gnmi_targets=$GNMI_TARGETS" \
     -var "syslog_standard=$SYSLOG_STANDARD" -var "snmp_poll=$SNMP_POLL_TF"
 fi
@@ -734,12 +769,12 @@ if [ -n "$LAB_INSTANCE_ID" ]; then
 fi
 if [ -z "$SKIP_STREAM" ]; then
   log "7-2c. Telegraf の ECS のサービス 2 つ（受ける側と取りにいく側）が安定するのを待つ（イメージの取得と NLB のヘルスチェック。1〜3 分）"
-  TG_CLUSTER=$(tf pipeline/stream output -raw telegraf_cluster_name); TG_SERVICE=$(tf pipeline/stream output -raw telegraf_service_name)
-  TG_POLL_SERVICE=$(tf pipeline/stream output -raw telegraf_poll_service_name)
-  if aws ecs wait services-stable --region "$REGION" --cluster "$TG_CLUSTER" --services "$TG_SERVICE" "$TG_POLL_SERVICE"; then
-    echo "Telegraf は動いている（ログ: aws logs tail --region $REGION $(tf pipeline/stream output -raw telegraf_log_group_name) --follow。ストリームは受ける側が dial-out/、取りにいく側が dial-in/）"
+  TG_CLUSTER=$(tf pipeline/stream output -raw telegraf_cluster_name); TG_DIALOUT_SERVICE=$(tf pipeline/stream output -raw telegraf_dialout_service_name)
+  TG_DIALIN_SERVICE=$(tf pipeline/stream output -raw telegraf_dialin_service_name)
+  if aws ecs wait services-stable --region "$REGION" --cluster "$TG_CLUSTER" --services "$TG_DIALOUT_SERVICE" "$TG_DIALIN_SERVICE"; then
+    echo "Telegraf は動いている（ログ: aws logs tail --region $REGION $(tf pipeline/stream output -raw telegraf_log_group_name) --follow。ストリームは受ける側が dialout/、取りにいく側が dialin/）"
   else
-    printf '\033[1;33m%s\033[0m\n' "Telegraf のサービスが 10 分たっても安定しない。受ける側は $(tf pipeline/stream output -raw telegraf_list_tasks_command)、取りにいく側は $(tf pipeline/stream output -raw telegraf_poll_list_tasks_command) とロググループ $(tf pipeline/stream output -raw telegraf_log_group_name) を見る（docs/troubleshooting.md）"
+    printf '\033[1;33m%s\033[0m\n' "Telegraf のサービスが 10 分たっても安定しない。受ける側は $(tf pipeline/stream output -raw telegraf_dialout_list_tasks_command)、取りにいく側は $(tf pipeline/stream output -raw telegraf_dialin_list_tasks_command) とロググループ $(tf pipeline/stream output -raw telegraf_log_group_name) を見る（docs/troubleshooting.md）"
   fi
 fi
 
@@ -900,7 +935,7 @@ if [ -n "$LAB_INSTANCE_ID" ]; then
 fi
 if [ -z "$SKIP_STREAM" ]; then
   echo "Telegraf（ECS の取りにいく側）に入るコマンド（TASK_ID は下の 1 行目で出る ARN の最後。中で tg gnmi。SNMP_POLL=1 なら tg test でポーリングも見られる）:"
-  tf pipeline/stream output -raw telegraf_poll_list_tasks_command; echo
+  tf pipeline/stream output -raw telegraf_dialin_list_tasks_command; echo
   tf pipeline/stream output -raw telegraf_exec_command; echo
 fi
 if [ -n "$GRAFANA" ]; then

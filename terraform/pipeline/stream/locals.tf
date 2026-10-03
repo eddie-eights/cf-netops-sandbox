@@ -20,12 +20,12 @@ data "terraform_remote_state" "main" {
     path = "${path.module}/../../base/core/terraform.tfstate"
   }
 
-  # SG の ID（security_group_ids）は 2026-09-29 から。それより前の state（全部で共有する internal 1 つ）なら apply の前に止める。
-  # destroy ではこの条件を見ないので、locals の SG の try と合わせて古い state のまま ops/down.sh で消せる（Terraform 1.16 で確認）
+  # SG の ID（security_group_ids）は 2026-09-29 から、Telegraf の SG のキーが dialout / dialin になったのは 2026-10-04 から。
+  # それより前の state なら apply の前に止める。destroy ではこの条件を見ないので、locals の SG の try と合わせて古い state のまま ops/down.sh で消せる（Terraform 1.16 で確認）
   lifecycle {
     postcondition {
-      condition     = can(self.outputs.security_group_ids)
-      error_message = "terraform/base/core の state に security_group_ids が無い（2026-09-29 より前の SG）。先に ops/down.sh で消してから ops/up.sh を打ち直す"
+      condition     = can(self.outputs.security_group_ids["telegraf_dialin"])
+      error_message = "terraform/base/core の state に telegraf_dialin の SG が無い（2026-10-04 より前の SG）。先に ops/down.sh で消してから ops/up.sh を打ち直す"
     }
   }
 }
@@ -45,11 +45,11 @@ locals {
   vpc_id     = data.terraform_remote_state.main.outputs.vpc_id
   subnet_ids = data.terraform_remote_state.main.outputs.runtime_subnet_ids
   # SG は古い state の destroy でも評価できるように try（空のまま apply に進まないよう remote_state の postcondition で止める）
-  telegraf_sg_id      = try(data.terraform_remote_state.main.outputs.security_group_ids["telegraf"], "")
-  telegraf_poll_sg_id = try(data.terraform_remote_state.main.outputs.security_group_ids["telegraf_poll"], "")
-  telegraf_nlb_sg_id  = try(data.terraform_remote_state.main.outputs.security_group_ids["telegraf_nlb"], "")
-  msk_sg_id           = try(data.terraform_remote_state.main.outputs.security_group_ids["msk"], "")
-  reader_role_names   = toset([data.terraform_remote_state.main.outputs.runtime_role_name, data.terraform_remote_state.main.outputs.web_role_name])
+  telegraf_dialout_sg_id     = try(data.terraform_remote_state.main.outputs.security_group_ids["telegraf_dialout"], "")
+  telegraf_dialin_sg_id      = try(data.terraform_remote_state.main.outputs.security_group_ids["telegraf_dialin"], "")
+  telegraf_dialout_nlb_sg_id = try(data.terraform_remote_state.main.outputs.security_group_ids["telegraf_dialout_nlb"], "")
+  msk_sg_id                  = try(data.terraform_remote_state.main.outputs.security_group_ids["msk"], "")
+  reader_role_names          = toset([data.terraform_remote_state.main.outputs.runtime_role_name, data.terraform_remote_state.main.outputs.web_role_name])
 
   # Telegraf のタスク（2 つとも）と NLB はサブネット a（lab の EC2 と Web の EC2 と同じ）
   telegraf_subnet_id = data.terraform_remote_state.main.outputs.instance_subnet_id

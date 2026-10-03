@@ -101,8 +101,8 @@ check("syslog のポートが lab.sh・telegraf.sh・telegraf.conf.in・stream �
       re.search(rf"^LOG_PORT={log_port}$", tgsh, re.M) is not None and re.search(rf'^\s*server = "udp://:{log_port}"$', tele, re.M) is not None
       and re.search(r'^\s*service_address = "udp://:1162"$', tele, re.M) is not None and re.search(r"^TRAP_PORT=1162$", tgsh, re.M) is not None
       and all(re.search(rf'\{{ from = "{a}", to = "{b}", protocol = "udp", port = {pt},', core_sg) is not None
-              for a, b, pt in (("lab_mgmt", "telegraf_nlb", log_port), ("lab", "telegraf_nlb", log_port), ("telegraf_nlb", "telegraf", log_port),
-                               ("lab_mgmt", "telegraf_nlb", 162), ("lab", "telegraf_nlb", 162), ("telegraf_nlb", "telegraf", 1162)))
+              for a, b, pt in (("lab_mgmt", "telegraf_dialout_nlb", log_port), ("lab", "telegraf_dialout_nlb", log_port), ("telegraf_dialout_nlb", "telegraf_dialout", log_port),
+                               ("lab_mgmt", "telegraf_dialout_nlb", 162), ("lab", "telegraf_dialout_nlb", 162), ("telegraf_dialout_nlb", "telegraf_dialout", 1162)))
       and "log_port" not in lab_locals
       and re.search(rf'syslog = \{{ listener = {log_port}, container = {log_port}, protocol = "UDP" \}}', stream_tg) is not None
       and re.search(r'trap\s+= \{ listener = 162, container = 1162, protocol = "UDP" \}', stream_tg) is not None)
@@ -114,7 +114,7 @@ check("MDT は tcp 57000 で受ける（inputs.cisco_telemetry_mdt・telegraf.sh
       and "protocol    = each.value.protocol" in stream_tg and "protocol          = each.value.protocol" in stream_tg
       and 'preserve_client_ip = each.value.protocol == "UDP"' in stream_tg
       and '{ containerPort = 57000, protocol = "tcp" }' in stream_tg
-      and re.search(r'\{ from = "telegraf_nlb", to = "telegraf", protocol = "tcp", port = 57000,', core_sg) is not None
+      and re.search(r'\{ from = "telegraf_dialout_nlb", to = "telegraf_dialout", protocol = "tcp", port = 57000,', core_sg) is not None
       and "57000" not in lab_locals and "57000" not in labsh)
 # 管理ネットワークは 4 か所で同じ（containerlab の mgmt / lab.sh / lab の locals の VPC ルート / 土台の SG の lab_mgmt）
 mgmt = re.search(r"^MGMT=(\S+)$", labsh, re.M).group(1)
@@ -133,12 +133,12 @@ check("Telegraf のポーリング先は lab の監視対象（enabled）の管�
       and all(ipaddress.ip_address(a) in ipaddress.ip_network(mgmt) for a in _agents))
 check("telegraf.conf.in の agents は __SNMP_AGENTS__ を telegraf.sh render がタスクの SNMP_AGENTS で埋める（形を確かめてから）",
       re.search(r"^\s*agents = \[__SNMP_AGENTS__\]$", tele, re.M) is not None and 's#__SNMP_AGENTS__#$agents#' in tgsh
-      and 'agents="${SNMP_AGENTS:-}"' in tgsh and '{ name = "SNMP_AGENTS", value = var.snmp_agents }' in stream_tg
+      and 'agents="${SNMP_AGENTS:-}"' in tgsh and '{ name = "SNMP_AGENTS", valueFrom = "${local.ssm_parameter_arn}${local.dialin_target_names["snmp-agents"]}" }' in stream_tg and '"snmp-agents" = var.snmp_agents' in stream_tg
       and re.fullmatch(r'"udp://[0-9.]+:[0-9]+"(, *"udp://[0-9.]+:[0-9]+")*', _agents_line) is not None)
 _gnmi_line = lt.gnmi_targets(_lab_devices)
 check("gNMI の購読先は同じ 6 台の管理 IP:57400 で、telegraf.conf.in の __GNMI_TARGETS__ を telegraf.sh render がタスクの GNMI_TARGETS で埋める",
       re.findall(r"([\d.]+):57400", _gnmi_line) == _agents and re.search(r"^\s*addresses = \[__GNMI_TARGETS__\]$", tele, re.M) is not None
-      and 's#__GNMI_TARGETS__#$gnmi#' in tgsh and 'gnmi="${GNMI_TARGETS:-}"' in tgsh and '{ name = "GNMI_TARGETS", value = var.gnmi_targets }' in stream_tg
+      and 's#__GNMI_TARGETS__#$gnmi#' in tgsh and 'gnmi="${GNMI_TARGETS:-}"' in tgsh and '{ name = "GNMI_TARGETS", valueFrom = "${local.ssm_parameter_arn}${local.dialin_target_names["gnmi-targets"]}" }' in stream_tg and '"gnmi-targets" = var.gnmi_targets' in stream_tg
       and re.fullmatch(r'"[0-9.]+:[0-9]+"(, *"[0-9.]+:[0-9]+")*', _gnmi_line) is not None)
 gnmi_blk = tele.split("[[inputs.gnmi]]", 1)[1].split("# ----", 1)[0]
 check("inputs.gnmi は TLS（自己署名）で bgp_neighbor / isis_interface（IS-IS の IF の oper-state。隣接そのものは消えるので取らない）を on_change、evpn_es / mac_table を 1 分の sample で購読する",
@@ -170,7 +170,7 @@ _lab_subs = dict(re.findall(r'name = "(lab_\w+)"\s*\n\s*path = "([^"]+)"\s*\n\s*
 check("性能メトリクスは 2 つめの inputs.gnmi（知らないパスで BGP / IS-IS の購読を巻き込まない）で、lab_* の 11 本を 1 分の sample。宛先・認証・TLS は 1 つめと同じ",
       len(_gnmi_blocks) == 2 and _lab_subs == LAB_SUBS and lab_blk.count("[[inputs.gnmi.subscription]]") == len(LAB_SUBS)
       and "name = \"lab_" not in gnmi_blk
-      and all(l in lab_blk for l in ("addresses = [__GNMI_TARGETS__]", 'encoding = "json_ietf"', "tls_enable = true", "insecure_skip_verify = true", 'username = "admin"')))
+      and all(l in lab_blk for l in ("addresses = [__GNMI_TARGETS__]", 'encoding = "json_ietf"', "tls_enable = true", "insecure_skip_verify = true", 'username = "${GNMI_USERNAME}"', 'password = "${GNMI_PASSWORD}"')))
 _star_proc = re.search(r'\[\[processors\.starlark\]\]\s*\n\s*namepass = \[([^\]]*)\]\s*\n\s*script = "/etc/telegraf/lab_gnmi\.star"', tele)
 _star_aggr = re.search(r'\[\[aggregators\.starlark\]\]\s*\n\s*namepass = \[([^\]]*)\]\s*\n\s*period = "60s"\s*\n\s*grace = "\d+s"\s*\n\s*drop_original = true\s*\n\s*script = "/etc/telegraf/lab_circuits\.star"', tele)
 _dockerfile = _read("telegraf", "Dockerfile")
@@ -233,24 +233,37 @@ check("Telegraf は stream の ECS で、MSK への書き込みはタスクロ�
 check("lab と stream は SG も SG のルールも作らない（ポーリング・trap・syslog のルールは土台の通信の表。2026-09-29）",
       all('resource "aws_security_group"' not in t and "aws_vpc_security_group_" not in t
           for t in (_lab_tg, lab_locals, stream_tg, _access, _read("terraform", "pipeline", "stream", "msk.tf"), _read("terraform", "pipeline", "lab", "instance.tf")))
-      and 'security_groups = [local.telegraf_nlb_sg_id]' in stream_tg and 'security_groups  = [local.telegraf_sg_id]' in stream_tg)
-_td = {k: m.group(0) for k in ("telegraf", "telegraf_poll") if (m := re.search(r'resource "aws_ecs_task_definition" "' + k + r'" \{[\s\S]*?^\}', stream_tg, re.M))}
-_svc = {k: m.group(0) for k in ("telegraf", "telegraf_poll") if (m := re.search(r'resource "aws_ecs_service" "' + k + r'" \{[\s\S]*?^\}', stream_tg, re.M))}
-check("Telegraf は受ける側（dial_out。NLB の後ろ、SG telegraf）と取りにいく側（dial_in。1 タスク固定、NLB なし、SG telegraf_poll）の 2 サービス（2026-10-04 ユーザー決定）",
+      and 'security_groups = [local.telegraf_dialout_nlb_sg_id]' in stream_tg and 'security_groups  = [local.telegraf_dialout_sg_id]' in stream_tg)
+_td = {k: m.group(0) for k in ("telegraf_dialout", "telegraf_dialin") if (m := re.search(r'resource "aws_ecs_task_definition" "' + k + r'" \{[\s\S]*?^\}', stream_tg, re.M))}
+_svc = {k: m.group(0) for k in ("telegraf_dialout", "telegraf_dialin") if (m := re.search(r'resource "aws_ecs_service" "' + k + r'" \{[\s\S]*?^\}', stream_tg, re.M))}
+check("Telegraf は受ける側（dialout。NLB の後ろ、SG telegraf_dialout）と取りにいく側（dialin。1 タスク固定、NLB なし、SG telegraf_dialin）の 2 サービス（2026-10-04 ユーザー決定）",
       len(_td) == 2 and len(_svc) == 2
-      and '{ name = "TELEGRAF_ROLE", value = "dial_out" }' in _td["telegraf"] and '{ name = "TELEGRAF_ROLE", value = "dial_in" }' in _td["telegraf_poll"]
-      and "portMappings = [" in _td["telegraf"] and "portMappings = [" not in _td["telegraf_poll"]
-      and all(v not in _td["telegraf"] for v in ("SNMP_AGENTS", "GNMI_TARGETS", "SNMP_POLL"))
-      and all(v in _td["telegraf_poll"] for v in ("SNMP_AGENTS", "GNMI_TARGETS", "SNMP_POLL")) and "SYSLOG_STANDARD" not in _td["telegraf_poll"]
-      and 'awslogs-stream-prefix = "dial-out"' in _td["telegraf"] and 'awslogs-stream-prefix = "dial-in"' in _td["telegraf_poll"]
-      and "load_balancer" in _svc["telegraf"] and "load_balancer" not in _svc["telegraf_poll"]
-      and "security_groups  = [local.telegraf_poll_sg_id]" in _svc["telegraf_poll"]
+      and '{ name = "TELEGRAF_ROLE", value = "dialout" }' in _td["telegraf_dialout"] and '{ name = "TELEGRAF_ROLE", value = "dialin" }' in _td["telegraf_dialin"]
+      and "portMappings = [" in _td["telegraf_dialout"] and "portMappings = [" not in _td["telegraf_dialin"]
+      and all(v not in _td["telegraf_dialout"] for v in ("SNMP_AGENTS", "GNMI_TARGETS", "SNMP_POLL"))
+      and all(v in _td["telegraf_dialin"] for v in ("SNMP_AGENTS", "GNMI_TARGETS", "SNMP_POLL")) and "SYSLOG_STANDARD" not in _td["telegraf_dialin"]
+      and 'awslogs-stream-prefix = "dialout"' in _td["telegraf_dialout"] and 'awslogs-stream-prefix = "dialin"' in _td["telegraf_dialin"]
+      and "load_balancer" in _svc["telegraf_dialout"] and "load_balancer" not in _svc["telegraf_dialin"]
+      and "security_groups  = [local.telegraf_dialin_sg_id]" in _svc["telegraf_dialin"]
       # 購読を二重にしない: 入れ替えでも 1 タスクを超えない
-      and re.search(r"desired_count\s+= 1\b", _svc["telegraf_poll"]) is not None
-      and "deployment_minimum_healthy_percent = 0" in _svc["telegraf_poll"] and "deployment_maximum_percent         = 100" in _svc["telegraf_poll"]
-      and "enable_execute_command = true" in _svc["telegraf_poll"]
-      and re.search(r'telegraf_poll_sg_id\s*=\s*try\(data\.terraform_remote_state\.main\.outputs\.security_group_ids\["telegraf_poll"\], ""\)', _read("terraform", "pipeline", "stream", "locals.tf")) is not None
-      and '"$TG_SERVICE" "$TG_POLL_SERVICE"' in _up and "telegraf_poll_list_tasks_command" in _up)
+      and re.search(r"desired_count\s+= 1\b", _svc["telegraf_dialin"]) is not None
+      and "deployment_minimum_healthy_percent = 0" in _svc["telegraf_dialin"] and "deployment_maximum_percent         = 100" in _svc["telegraf_dialin"]
+      and "enable_execute_command = true" in _svc["telegraf_dialin"]
+      and re.search(r'telegraf_dialin_sg_id\s*=\s*try\(data\.terraform_remote_state\.main\.outputs\.security_group_ids\["telegraf_dialin"\], ""\)', _read("terraform", "pipeline", "stream", "locals.tf")) is not None
+      and '"$TG_DIALOUT_SERVICE" "$TG_DIALIN_SERVICE"' in _up and "telegraf_dialin_list_tasks_command" in _up)
+_exec_pol = re.search(r'resource "aws_iam_role_policy" "telegraf_execution" \{[\s\S]*?^\}', stream_tg, re.M)
+check("取りにいく側は機器の一覧と認証情報を SSM から ECS の secrets で受ける（environment に載せない）。認証情報の SecureString は up.sh が stream の apply の前に作り、実行ロールが読めるのは telegraf-dialin の下だけ",
+      "secrets" not in _td["telegraf_dialout"] and "secrets = concat(" in _td["telegraf_dialin"]
+      and not re.search(r'name = "(SNMP_AGENTS|GNMI_TARGETS|GNMI_USERNAME|GNMI_PASSWORD|SNMP_COMMUNITY)", value =', stream_tg)
+      and 'dialin_credentials = { GNMI_USERNAME = "gnmi-username", GNMI_PASSWORD = "gnmi-password", SNMP_COMMUNITY = "snmp-community" }' in stream_tg
+      and 'dialin_parameter_prefix = "/${local.name_prefix}/telegraf-dialin"' in stream_tg
+      and all(f'ensure_fixed_secret "/$PREFIX/telegraf-dialin/{leaf}" "$LAB_{var}"' in _up and _up.index(f'ensure_fixed_secret "/$PREFIX/telegraf-dialin/{leaf}"') < _up.index("tf_apply pipeline/stream ")
+              for leaf, var in (("gnmi-username", "GNMI_USERNAME"), ("gnmi-password", "GNMI_PASSWORD"), ("snmp-community", "SNMP_COMMUNITY")))
+      and _exec_pol is not None and "ssm:GetParameters" in _exec_pol.group(0) and "${local.dialin_parameter_prefix}/*" in _exec_pol.group(0)
+      and "var.gnmi" not in _exec_pol.group(0))
+check("up.sh は base/core の state に古い Telegraf の SG（telegraf）があり stream が残っていれば、ECR より前に止める（SG のキーを変えると作り直しで、付けたままでは消せない）",
+      """grep -qxF 'aws_security_group.workload["telegraf"]'""" in _up and "[ -s terraform/pipeline/stream/terraform.tfstate ]" in _up
+      and _up.index("""'aws_security_group.workload["telegraf"]'""") < _up.index('log "1. ECR リポジトリ'))
 _down = _read("ops", "down.sh")
 check("down.sh は stream の必須変数（snmp_agents / gnmi_targets）に形だけ合う値を渡して destroy する（telegraf.sh の形の検査と同じ）",
       re.search(r"destroy_root pipeline/stream -var 'snmp_agents=\"udp://[0-9.]+:161\"' -var 'gnmi_targets=\"[0-9.]+:57400\"'", _down) is not None)

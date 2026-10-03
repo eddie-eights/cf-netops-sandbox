@@ -591,9 +591,10 @@ check("up.sh は base/core の state に 2026-09-29 より前の SG（aws_securi
 _sg_roots = ("agent", "pipeline/analytics", "pipeline/graph", "pipeline/lab", "pipeline/stream", "workflow")
 _sg_locals = {r: read("terraform", *r.split("/"), "locals.tf") for r in _sg_roots}
 check("SG の ID を読む 6 ルートは try で読み（古い state のまま down.sh の destroy が通る）、base/core の state に security_group_ids が無ければ apply の前に止める",
-      all(re.search(r'data "terraform_remote_state" "main" \{[\s\S]*?lifecycle \{\s*postcondition \{\s*condition\s*=\s*can\(self\.outputs\.security_group_ids\)', s) is not None
+      all(re.search(r'data "terraform_remote_state" "main" \{[\s\S]*?lifecycle \{\s*postcondition \{\s*condition\s*=\s*can\(self\.outputs\.security_group_ids(\["\w+"\])?\)', s) is not None
           and re.findall(r'security_group_ids\[', s)
-          and len(re.findall(r'security_group_ids\[', s)) == len(re.findall(r'= try\(data\.terraform_remote_state\.main\.outputs\.security_group_ids\["\w+"\], ""\)', s))
+          # stream の postcondition はキーまで見る（Telegraf の SG のキーを 2026-10-04 に変えた）。can の中の 1 つは try の数に入れない
+          and len(re.findall(r'(?<!can\(self\.outputs\.)security_group_ids\[', s)) == len(re.findall(r'= try\(data\.terraform_remote_state\.main\.outputs\.security_group_ids\["\w+"\], ""\)', s))
           for s in _sg_locals.values())
       and not any("security_group_ids[" in read("terraform", *r.split("/"), f) for r in _sg_roots
                   for f in os.listdir(os.path.join(ROOT, "terraform", *r.split("/"))) if f.endswith(".tf") and f != "locals.tf"))

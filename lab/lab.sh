@@ -26,6 +26,11 @@ LOG_PORT=5140
 # SR Linux の syslog の形式。デバッグ用の EC2 の Telegraf に SYSLOG_STANDARD で渡す（telegraf/telegraf.sh の既定は本番の Cisco に合わせた RFC3164。
 # ops/lab-common.sh の LAB_SYSLOG_STANDARD と同じ）
 LOG_STANDARD=RFC5424
+# containerlab が SR Linux 全台に入れる既定の認証情報（lab だけの公開既定値。ops/lab-common.sh の LAB_GNMI_USERNAME / LAB_GNMI_PASSWORD / LAB_SNMP_COMMUNITY と同じ）。
+# デバッグ用の EC2 の Telegraf に渡す（stream の ECS は SSM の SecureString から受ける）
+GNMI_USERNAME=admin
+GNMI_PASSWORD='NokiaSrl1!'
+SNMP_COMMUNITY=public
 # gNMI（containerlab が SR Linux 全台で開ける。Telegraf の inputs.gnmi が BGP / IS-IS / EVPN の状態を購読する）
 GNMI_PORT=57400
 # SR Linux がコンテナの中に書くログ（lab.sh logs が読む。Telegraf へは syslog で別に送る）
@@ -233,7 +238,8 @@ case "${1:-}" in
         docker rm -f "$TG" >/dev/null 2>&1 || true
         # host ネットワーク: 管理ネットワーク（$MGMT）の機器へそのまま届き、機器からの $MGMT_GW:$LOG_PORT / $TRAP_PORT もそのまま受ける
         docker run -d --name "$TG" --restart unless-stopped --network host --log-opt max-size=50m --log-opt max-file=3 \
-          -e SINK=stdout -e SYSLOG_STANDARD="$LOG_STANDARD" -e SNMP_POLL="${SNMP_POLL:-0}" -e AWS_REGION -e SNMP_AGENTS="$agents" -e GNMI_TARGETS="$gnmi" "$TELEGRAF_IMAGE" run >/dev/null
+          -e SINK=stdout -e SYSLOG_STANDARD="$LOG_STANDARD" -e SNMP_POLL="${SNMP_POLL:-0}" -e AWS_REGION -e SNMP_AGENTS="$agents" -e GNMI_TARGETS="$gnmi" \
+          -e GNMI_USERNAME="$GNMI_USERNAME" -e GNMI_PASSWORD="$GNMI_PASSWORD" -e SNMP_COMMUNITY="$SNMP_COMMUNITY" "$TELEGRAF_IMAGE" run >/dev/null
         echo "Telegraf を起こした（$TELEGRAF_IMAGE。出力は 'sudo lab telegraf logs -f'）"
         ;;
       stop)   docker rm -f "$TG" >/dev/null 2>&1 || true ;;

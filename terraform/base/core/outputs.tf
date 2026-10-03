@@ -40,7 +40,7 @@ output "vpc_cidr" {
 }
 
 output "security_group_ids" {
-  description = "SG of each workload (security_groups.tf), keyed web / lab / telegraf / telegraf_nlb / msk / spark / grafana / splunk / neptune / lambda / workflow / runtime / endpoints. Read by terraform/agent (runtime, lambda), terraform/pipeline/lab (lab), terraform/pipeline/stream (telegraf, telegraf_nlb, msk), terraform/pipeline/graph (neptune, lambda), terraform/pipeline/analytics (spark, grafana, splunk) and terraform/workflow (workflow, lambda)"
+  description = "SG of each workload (security_groups.tf), keyed web / lab / telegraf_dialout / telegraf_dialin / telegraf_dialout_nlb / msk / spark / grafana / splunk / neptune / nautobot / nautobot_db / lambda / workflow / runtime / endpoints. Read by terraform/agent (runtime, lambda), terraform/pipeline/lab (lab), terraform/pipeline/stream (telegraf_dialout, telegraf_dialin, telegraf_dialout_nlb, msk), terraform/pipeline/nautobot (nautobot, nautobot_db), terraform/pipeline/graph (neptune, lambda), terraform/pipeline/analytics (spark, grafana, splunk) and terraform/workflow (workflow, lambda)"
   value       = local.sg_ids
 }
 
